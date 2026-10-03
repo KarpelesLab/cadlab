@@ -115,11 +115,16 @@ at the needed quantity, most stock. A failing provider is reported as a warning;
 - **Catalog files** (offline): JSON lists of candidates (format in `src/supplier/catalog.rs`): a stock list, a
   parts drawer, or data exported from a distributor. Loaded from `~/.config/cadlab/catalogs/*.json` and the
   paths in `CADLAB_CATALOGS`.
+- **DigiKey** (Product Information API v4, client-credentials OAuth): enabled when `DIGIKEY_CLIENT_ID` and
+  `DIGIKEY_CLIENT_SECRET` are set; optional `DIGIKEY_SITE` (US), `DIGIKEY_LANGUAGE` (en), `DIGIKEY_CURRENCY`
+  (USD), `DIGIKEY_SANDBOX=1`. One candidate per packaging (cut tape, tape & reel; Digi-Reel skipped), with
+  parameters normalized to cadlab keys (`src/supplier/normalize.rs`). `cargo test --test digikey_live` checks
+  the integration against the real API when credentials are set.
 
-**Network providers (next):** candidates are Nexar/Octopart, DigiKey, Mouser, Farnell, LCSC/JLCPCB and PCBWay;
-they need API credentials (environment variables or `~/.config/cadlab/config.toml`, never in projects), and
-their terms must be checked before each is added. Responses go through `supplier::cache` (user cache dir, 24 h
-TTL, `CADLAB_OFFLINE=1` answers from the cache only).
+Network providers sit behind the default `net` feature (`ureq`, rustls). Credentials come from the environment,
+never from projects. Responses go through `supplier::cache` (user cache dir, 24 h TTL; `CADLAB_OFFLINE=1`
+answers from the cache only). Next candidates: Nexar/Octopart, Mouser, Farnell, LCSC/JLCPCB, PCBWay (terms and
+API access to check for each).
 
 **Commands:**
 

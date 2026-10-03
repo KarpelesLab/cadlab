@@ -6,7 +6,10 @@
 
 pub mod cache;
 pub mod catalog;
+#[cfg(feature = "net")]
+pub mod digikey;
 mod money;
+pub mod normalize;
 pub mod query;
 
 use std::sync::Arc;
@@ -193,8 +196,9 @@ impl Suppliers {
     }
 
     /// Providers from the environment: catalog files listed in `CADLAB_CATALOGS`
-    /// (path-separated), plus `*.json` in the user catalog directory
-    /// (`$XDG_CONFIG_HOME/cadlab/catalogs` or `~/.config/cadlab/catalogs`).
+    /// (path-separated), `*.json` in the user catalog directory
+    /// (`$XDG_CONFIG_HOME/cadlab/catalogs` or `~/.config/cadlab/catalogs`), and DigiKey when
+    /// `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET` are set.
     pub fn from_env() -> Self {
         let mut s = Suppliers::new();
         let mut paths = Vec::new();
@@ -214,6 +218,10 @@ impl Suppliers {
         }
         for p in paths {
             s = s.with(Arc::new(catalog::Catalog::lazy(p)));
+        }
+        #[cfg(feature = "net")]
+        if let Some(dk) = digikey::DigiKey::from_env() {
+            s = s.with(Arc::new(dk));
         }
         s
     }

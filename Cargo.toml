@@ -10,9 +10,11 @@ keywords = ["eda", "pcb", "cad", "electronics", "mcp"]
 categories = ["science", "command-line-utilities"]
 
 [features]
-default = ["cli"]
+default = ["cli", "net"]
 # The `cadlab` binary (CLI + MCP server). Library users can disable it to avoid the CLI dependencies.
 cli = ["dep:clap"]
+# Network part research providers (DigiKey, ...).
+net = ["dep:ureq"]
 
 [[bin]]
 name = "cadlab"
@@ -33,6 +35,7 @@ thiserror = "2"
 toml = "1.1"
 
 clap = { version = "4.6", features = ["derive", "string"], optional = true }
+ureq = { version = "3.4", optional = true }
 
 [dev-dependencies]
 insta = { version = "1.49", features = ["json"] }

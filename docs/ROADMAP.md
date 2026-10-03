@@ -44,7 +44,8 @@ Details in [PARTS.md](PARTS.md).
 - [ ] More footprint families: SOT-223/DPAK, SOD/MELF, SMA/SMB, BGA, DIP
 - [x] BOM commands: list (grouped), replace, DNP, approved alternates, notes; components via `circuit.add/remove`
 - [x] Supplier research provider trait, offline catalog provider, response cache with TTL and offline mode
-- [ ] Network providers (need API credentials; see PARTS.md)
+- [x] DigiKey provider (API v4)
+- [ ] More network providers: LCSC/JLCPCB, PCBWay, Mouser, Nexar/Octopart (see PARTS.md)
 - [x] Search and filter by parameters, stock, price, lifecycle (`part.search`); `bom.resolve` for generic lines
 - [x] BOM CSV export (generic, JLCPCB, PCBWay layouts)
 - [x] BOM cost rollup at build quantity (`bom.cost`), availability check (`bom.check`)

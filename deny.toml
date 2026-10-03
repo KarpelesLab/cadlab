@@ -15,6 +15,8 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
+    # Permissive data license of webpki-roots (Mozilla's CA root list), used for HTTPS.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 # The allow list covers licenses common in the Rust ecosystem, not only those used today.
