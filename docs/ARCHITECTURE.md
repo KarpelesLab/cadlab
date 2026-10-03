@@ -22,9 +22,10 @@ cadlab/
 └── docs/
 ```
 
-Modules to come, by milestone: `parts` and `suppliers` (M1), `erc` (M2), `schematic` and `render` (M3), `board`,
-`drc`, `io` and `fab` (M4), `router` (M5). Spin-off candidates later: the router, Gerber/Excellon I/O, the
-footprint generator.
+M1 added `value` (exact electrical quantities), `landpattern` (IPC-7351B footprints), `symbolgen`, `partspec`
+(generic part specs), `bom`, `supplier` (providers, catalogs, cache) and `sourcing`. Modules to come: `erc` (M2),
+`schematic` and `render` (M3), `board`, `drc`, `io` and `fab` (M4), `router` (M5). Spin-off candidates: the
+router, Gerber/Excellon I/O, the footprint generator (`landpattern`).
 
 Dependency direction between modules is strictly downward, and enforced by review:
 

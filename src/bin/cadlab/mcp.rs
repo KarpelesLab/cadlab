@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use cadlab::Diagnostic;
 use cadlab::command::{CancelToken, Failure, Outcome, Progress, Registry, RunOptions, Session, Step};
+use cadlab::supplier::Suppliers;
 use serde_json::{Value, json};
 
 /// Protocol revisions this server speaks, newest first.
@@ -91,6 +92,7 @@ pub fn serve(registry: &'static Registry, autosave: bool) -> u8 {
         sessions: Vec::new(),
         current: None,
         out: out.clone(),
+        suppliers: Suppliers::from_env(),
     };
     for Incoming { msg, cancel } in rx {
         let id = msg.get("id").cloned();
@@ -112,6 +114,7 @@ struct Server {
     sessions: Vec<(PathBuf, Session)>,
     current: Option<PathBuf>,
     out: Writer,
+    suppliers: Suppliers,
 }
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {
@@ -144,6 +147,12 @@ impl Progress for McpProgress {
 }
 
 impl Server {
+    fn new_session(&self) -> Session {
+        let mut s = Session::new();
+        s.suppliers = self.suppliers.clone();
+        s
+    }
+
     fn handle(&mut self, msg: &Value, cancel: &CancelToken) -> Option<Value> {
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(Value::as_str);
@@ -327,7 +336,7 @@ impl Server {
                 Some(c) => c.clone(),
                 None => {
                     // No project yet: an empty session, so the command reports `project.none`.
-                    self.sessions.push((PathBuf::new(), Session::new()));
+                    self.sessions.push((PathBuf::new(), self.new_session()));
                     return Ok(self.sessions.len() - 1);
                 }
             },
@@ -335,12 +344,13 @@ impl Server {
         if let Some(i) = self.sessions.iter().position(|(p, _)| *p == path) {
             return Ok(i);
         }
-        let (s, _) = Session::open(&path).map_err(|error| Failure {
+        let (mut s, _) = Session::open(&path).map_err(|error| Failure {
             command: "project.open".into(),
             step: None,
             error,
             diagnostics: vec![],
         })?;
+        s.suppliers = self.suppliers.clone();
         self.sessions.push((path, s));
         Ok(self.sessions.len() - 1)
     }
@@ -370,7 +380,7 @@ impl Server {
                     return self.run("project.info", json!({}), Some(&abs), opts, progress, cancel);
                 }
             }
-            let mut s = Session::new();
+            let mut s = self.new_session();
             let r = self.registry.execute_with(&mut s, cmd, args, opts, progress, cancel);
             return match r {
                 Ok(o) => {

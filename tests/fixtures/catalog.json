@@ -1,0 +1,30 @@
+{
+  "provider": "testcat",
+  "parts": [
+    {"sku": "T-0001", "manufacturer": "Diodes", "mpn": "AP2112K-3.3TRG1", "description": "LDO regulator 3.3V 600mA", "category": "ldo", "package": "SOT-23-5",
+     "params": {"voltage_out": "3.3V", "current_out": "600mA", "voltage_in": "2.5V..6V", "dropout": "250mV"},
+     "stock": 12000, "prices": [{"qty": 1, "price": "0.20 USD"}, {"qty": 100, "price": "0.12 USD"}], "lifecycle": "active",
+     "datasheet": "https://example.com/ap2112.pdf"},
+    {"sku": "T-0002", "manufacturer": "Microne", "mpn": "ME6211C33M5G-N", "description": "LDO regulator 3.3V 500mA", "category": "ldo", "package": "SOT-23-5",
+     "params": {"voltage_out": "3.3V", "current_out": "500mA", "voltage_in": "2V..6V"},
+     "stock": 50000, "prices": [{"qty": 1, "price": "0.05 USD"}], "lifecycle": "active"},
+    {"sku": "T-0003", "manufacturer": "Torex", "mpn": "XC6206P332MR", "description": "LDO regulator 3.3V 200mA", "category": "ldo", "package": "SOT-23",
+     "params": {"voltage_out": "3.3V", "current_out": "200mA"}, "stock": 90000, "prices": [{"qty": 1, "price": "0.02 USD"}], "lifecycle": "active"},
+    {"sku": "T-0004", "manufacturer": "Old Semi", "mpn": "OLD3300", "description": "LDO regulator 3.3V 800mA", "category": "ldo", "package": "SOT-23-5",
+     "params": {"voltage_out": "3.3V", "current_out": "800mA"}, "stock": 100, "prices": [{"qty": 1, "price": "0.01 USD"}], "lifecycle": "obsolete"},
+    {"sku": "T-0005", "manufacturer": "Diodes", "mpn": "AP2112K-3.3TRG1-OUT", "description": "LDO regulator 3.3V 600mA", "category": "ldo", "package": "SOT-23-5",
+     "params": {"voltage_out": "3.3V", "current_out": "600mA"}, "stock": 0, "prices": [{"qty": 1, "price": "0.03 USD"}], "lifecycle": "active"},
+    {"sku": "T-0010", "manufacturer": "Yageo", "mpn": "RC0402FR-0710KL", "description": "Resistor 10k 1% 0402", "category": "resistor", "package": "0402",
+     "params": {"resistance": "10k", "tolerance": "1%", "power_rating": "62.5mW"}, "stock": 1000000, "prices": [{"qty": 1, "price": "0.002 USD"}, {"qty": 1000, "price": "0.0008 USD"}], "lifecycle": "active"},
+    {"sku": "T-0011", "manufacturer": "Uniroyal", "mpn": "0402WGF1002TCE", "description": "Resistor 10k 1% 0402", "category": "resistor", "package": "0402",
+     "params": {"resistance": "10k", "tolerance": "1%"}, "stock": 500000, "prices": [{"qty": 1, "price": "0.001 USD"}], "lifecycle": "active"},
+    {"sku": "T-0012", "manufacturer": "Yageo", "mpn": "RC0402JR-0710KL", "description": "Resistor 10k 5% 0402", "category": "resistor", "package": "0402",
+     "params": {"resistance": "10k", "tolerance": "5%"}, "stock": 1000000, "prices": [{"qty": 1, "price": "0.0005 USD"}], "lifecycle": "active"},
+    {"sku": "T-0020", "manufacturer": "Samsung", "mpn": "CL05B104KO5NNNC", "description": "Capacitor 100nF 16V X7R 0402", "category": "capacitor", "package": "0402",
+     "params": {"capacitance": "100nF", "voltage_rating": "16V", "dielectric": "X7R", "tolerance": "10%"}, "stock": 2000000, "prices": [{"qty": 1, "price": "0.003 USD"}], "lifecycle": "active"},
+    {"sku": "T-0021", "manufacturer": "Murata", "mpn": "GRM155R71A104KA01D", "description": "Capacitor 100nF 10V X7R 0402", "category": "capacitor", "package": "0402",
+     "params": {"capacitance": "100nF", "voltage_rating": "10V", "dielectric": "X7R"}, "stock": 2000000, "prices": [{"qty": 1, "price": "0.001 USD"}], "lifecycle": "active"},
+    {"sku": "T-0022", "manufacturer": "Murata", "mpn": "GRM155R71C104KA88D", "description": "Capacitor 100nF 16V X7R 0402", "category": "capacitor", "package": "0402",
+     "params": {"capacitance": "100nF", "voltage_rating": "16V", "dielectric": "X7R"}, "stock": 40, "prices": [{"qty": 1, "price": "0.002 USD"}], "lifecycle": "active"}
+  ]
+}

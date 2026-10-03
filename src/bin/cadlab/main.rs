@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 use cadlab::command::{Failure, Outcome, Registry, RunOptions, Session, Step};
 use cadlab::model::find_project_root;
+use cadlab::supplier::Suppliers;
 use cadlab::{Diagnostic, Severity};
 use clap::ArgMatches;
 use serde_json::{Value, json};
@@ -97,6 +98,12 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
 /// Opens the session a command runs in: the project from `-p` or found upward from the current
 /// directory. Commands that create or open projects start from an empty session.
 fn open_session(g: &Globals, command: &str) -> Result<(Session, Vec<Diagnostic>), Failure> {
+    let (mut s, d) = open_session_inner(g, command)?;
+    s.suppliers = Suppliers::from_env();
+    Ok((s, d))
+}
+
+fn open_session_inner(g: &Globals, command: &str) -> Result<(Session, Vec<Diagnostic>), Failure> {
     if matches!(command, "project.new" | "project.open") {
         return Ok((Session::new(), vec![]));
     }

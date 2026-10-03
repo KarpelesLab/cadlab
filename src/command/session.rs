@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Diagnostic;
 use crate::model::{Project, SaveReport};
+use crate::supplier::Suppliers;
 
 use super::history::History;
 use super::{CommandError, Step};
@@ -25,6 +26,8 @@ pub struct Session {
     dirty: bool,
     changes: u64,
     pending_log: Vec<Step>,
+    /// Part research providers. Empty by default; frontends set them (e.g. from the environment).
+    pub suppliers: Suppliers,
 }
 
 impl Session {
@@ -57,6 +60,7 @@ impl Session {
                 dirty: false,
                 changes: 0,
                 pending_log: Vec::new(),
+                suppliers: Suppliers::default(),
             },
             warnings,
         ))

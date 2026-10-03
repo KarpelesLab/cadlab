@@ -14,6 +14,7 @@ expression: names
   "part.show",
   "part.set",
   "part.remove",
+  "part.search",
   "footprint.generate",
   "footprint.list",
   "footprint.show",
@@ -27,6 +28,9 @@ expression: names
   "bom.note",
   "bom.replace",
   "bom.export",
+  "bom.resolve",
+  "bom.check",
+  "bom.cost",
   "history.undo",
   "history.redo",
   "history.list"

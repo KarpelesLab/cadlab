@@ -90,34 +90,46 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `bom.replace <from> <to>` | switch components to another part, warning about missing pins |
 | `bom.export <path> --format generic|jlcpcb|pcbway` | CSV; fab layouts omit DNP and warn about lines without MPN |
 
-Planned with supplier research (rest of M1): `part.search`, `bom.resolve`, `bom.check`, `bom.cost`. Fab
-column layouts move to fab profiles in M4 (they follow the fabs' current templates; verify before ordering).
+Fab column layouts move to fab profiles in M4 (they follow the fabs' current templates; verify before
+ordering). Research commands are below.
 
 ## Research providers
 
-Research is behind a trait so providers can be added independently and tested with recorded responses:
+Research lives in `src/supplier/`. Providers are synchronous (network ones do blocking I/O, D14):
 
 ```rust
-#[async_trait]
-pub trait PartProvider {
-    fn id(&self) -> &'static str;
-    async fn search(&self, q: &SearchQuery) -> Result<Vec<PartCandidate>>;
-    async fn details(&self, key: &ProviderKey) -> Result<PartDetails>;   // params, offers, datasheet
+pub trait Provider: Send + Sync {
+    fn id(&self) -> &str;
+    fn search(&self, q: &SearchQuery) -> Result<Vec<Candidate>, ProviderError>;  // keywords + filters
+    fn lookup(&self, mpn: &str) -> Result<Vec<Candidate>, ProviderError>;        // exact MPN
 }
 ```
 
-Candidates to implement (verify API terms and access requirements before each):
+A `Candidate` is an orderable offer: provider and SKU (e.g. an LCSC `C` number), manufacturer and MPN,
+package, parameters normalized to cadlab keys, stock, MOQ, price breaks (exact `Money`), lifecycle, datasheet.
+`Suppliers` queries every configured provider, filters with the query, and ranks: in stock, active, cheapest
+at the needed quantity, most stock. A failing provider is reported as a warning; the others still answer.
 
-- Nexar / Octopart (aggregator, broad coverage)
-- DigiKey API, Mouser API, Farnell/element14 API
-- LCSC / JLCPCB parts catalog (JLCPCB assembly; basic vs extended part classes)
-- PCBWay assembly parts sourcing
-- Local/offline catalog: user CSV or a stocked-parts list (e.g. "what I have in my drawers")
+**Configured today:**
 
-Cross-cutting:
+- **Catalog files** (offline): JSON lists of candidates (format in `src/supplier/catalog.rs`): a stock list, a
+  parts drawer, or data exported from a distributor. Loaded from `~/.config/cadlab/catalogs/*.json` and the
+  paths in `CADLAB_CATALOGS`.
 
-- API keys from env vars or `~/.config/cadlab/config.toml`. Never stored in projects.
-- Responses cached in `.cadlab/cache/` with TTL. Offline mode uses cache only.
-- Results normalized to the part model (units parsed, packages mapped to footprint generator names).
-- The library does not judge or summarize datasheets. It fetches and exposes them (URL, cached PDF path). The agent
-  reads them.
+**Network providers (next):** candidates are Nexar/Octopart, DigiKey, Mouser, Farnell, LCSC/JLCPCB and PCBWay;
+they need API credentials (environment variables or `~/.config/cadlab/config.toml`, never in projects), and
+their terms must be checked before each is added. Responses go through `supplier::cache` (user cache dir, 24 h
+TTL, `CADLAB_OFFLINE=1` answers from the cache only).
+
+**Commands:**
+
+| Command | Purpose |
+|---|---|
+| `part.search <keywords>` | filters: `category`, `package`, `params` (`{"current_out": ">=500mA"}`, `>= <= > <`, ranges match by containment), `in_stock`, `quantity`, `max_price`, `include_obsolete` |
+| `part.create ... --fill-from-suppliers` | fills manufacturer, description, parameters, package and datasheet from the best listing of the MPN; pins still come from the datasheet |
+| `bom.resolve [--boards N] [--apply]` | candidates for generic lines: same category, package and value, tolerance at most and ratings at least the requirement, enough stock; `apply` approves the best |
+| `bom.check [--boards N]` | per line: ok, low stock, end of life, not found, no MPN; problems are error diagnostics (CLI exit code 3) |
+| `bom.cost [--boards N]` | cheapest in-stock offer per line (MOQ and price breaks applied), totals per currency |
+
+Offers are never written into the project (D12). The library never judges or summarizes datasheets: it exposes
+URLs and lets the agent read them.

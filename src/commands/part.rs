@@ -24,7 +24,8 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<List>()
         .register::<Show>()
         .register::<Set>()
-        .register::<Remove>();
+        .register::<Remove>()
+        .register::<Search>();
 }
 
 /// Short description of a part.
@@ -247,6 +248,45 @@ pub struct Create {
     /// IPC density level for the generated footprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub density: Option<Density>,
+    /// Look the MPN up at the configured suppliers and fill in what is missing: manufacturer,
+    /// description, parameters, package, datasheet. Pins still come from `pins`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fill_from_suppliers: bool,
+}
+
+/// Fills `create` from the best supplier listing of its MPN.
+fn fill_from_suppliers(ctx: &mut Context<'_>, create: &mut Create) -> Result<(), CommandError> {
+    require_suppliers(ctx)?;
+    let mpn = create.mpn.clone().ok_or_else(|| {
+        CommandError::invalid_args("part.missing_mpn", "`fill_from_suppliers` needs an `mpn` to look up")
+    })?;
+    let mut r = ctx.session.suppliers.lookup(&mpn, &[]);
+    report_provider_errors(ctx, &r.errors);
+    crate::supplier::SearchQuery::default().rank(&mut r.candidates);
+    let Some(c) = r.candidates.into_iter().next() else {
+        return Err(
+            CommandError::not_found("supplier.mpn_not_found", format!("no supplier lists `{mpn}`"))
+                .with_hint("check the MPN, or create the part without `fill_from_suppliers`"),
+        );
+    };
+    create.manufacturer = create.manufacturer.take().or(c.manufacturer);
+    if create.description.is_none() && !c.description.is_empty() {
+        create.description = Some(c.description);
+    }
+    create.datasheet = create.datasheet.take().or(c.datasheet);
+    for (k, v) in c.params.0 {
+        create.params.entry(k).or_insert_with(|| v.to_string());
+    }
+    if create.package.is_none() && create.package_spec.is_none() && create.footprint.is_none() {
+        // Use the supplier's package name if the generator knows it.
+        if let Some(p) = c
+            .package
+            .filter(|p| landpattern::packages::parse(p, chip_kind(create.category)).is_ok())
+        {
+            create.package = Some(p);
+        }
+    }
+    Ok(())
 }
 
 fn chip_kind(c: Category) -> ChipKind {
@@ -266,7 +306,10 @@ impl Command for Create {
     const KIND: CommandKind = CommandKind::Mutation;
     type Output = PartSummary;
 
-    fn run(self, ctx: &mut Context<'_>) -> Result<PartSummary, CommandError> {
+    fn run(mut self, ctx: &mut Context<'_>) -> Result<PartSummary, CommandError> {
+        if self.fill_from_suppliers {
+            fill_from_suppliers(ctx, &mut self)?;
+        }
         let id = match (&self.id, &self.mpn) {
             (Some(id), _) => id.clone(),
             (None, Some(mpn)) => slugify(mpn),
@@ -731,5 +774,146 @@ impl Command for Remove {
 
     fn summarize(o: &Removed) -> String {
         format!("removed part {}", o.id)
+    }
+}
+
+/// Search suppliers and catalogs for orderable parts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Search {
+    /// Keywords, all required: "LDO 3.3V", "AP2112", "USB-C receptacle".
+    #[serde(default)]
+    pub query: String,
+    /// Category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<Category>,
+    /// Package ("SOT-23-5", "0402").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// Parameter filters, value optionally prefixed by >=, <=, >, <:
+    /// {"voltage_out": "3.3V", "current_out": ">=500mA", "voltage_in": "5V"}.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+    /// Quantity needed (stock check and price break).
+    #[serde(default = "one_u64")]
+    pub quantity: u64,
+    /// Only parts with at least `quantity` in stock.
+    #[serde(default)]
+    pub in_stock: bool,
+    /// Maximum unit price ("0.50 USD").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<String>,
+    /// Include obsolete and last-time-buy parts.
+    #[serde(default)]
+    pub include_obsolete: bool,
+    /// Maximum results.
+    #[serde(default = "ten")]
+    pub limit: usize,
+    /// Only these providers (default: all configured).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+}
+
+fn one_u64() -> u64 {
+    1
+}
+
+fn ten() -> usize {
+    10
+}
+
+pub(crate) fn require_suppliers(ctx: &Context<'_>) -> Result<(), CommandError> {
+    if ctx.session.suppliers.is_empty() {
+        return Err(CommandError::new(
+            crate::command::ErrorKind::NotFound,
+            "supplier.none",
+            "no part suppliers or catalogs are configured",
+        )
+        .with_hint("add catalog files to ~/.config/cadlab/catalogs/ or list them in CADLAB_CATALOGS (docs/PARTS.md)"));
+    }
+    Ok(())
+}
+
+pub(crate) fn report_provider_errors(ctx: &mut Context<'_>, errors: &[String]) {
+    for e in errors {
+        ctx.report(
+            Diagnostic::warning("supplier.error", e.clone()).with_hint("results from other providers are still shown"),
+        );
+    }
+}
+
+/// Search results.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SearchResults {
+    /// Quantity the prices are for.
+    pub quantity: u64,
+    /// Candidates, best first (in stock, active, cheapest, most stock).
+    pub candidates: Vec<crate::supplier::Candidate>,
+}
+
+impl Command for Search {
+    const NAME: &'static str = "part.search";
+    const SUMMARY: &'static str = "Search suppliers for orderable parts by keywords and parameter filters";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["query"];
+    type Output = SearchResults;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<SearchResults, CommandError> {
+        require_suppliers(ctx)?;
+        let mut filters = Vec::new();
+        for (k, v) in &self.params {
+            filters.push(
+                crate::supplier::ParamFilter::parse(k, v)
+                    .map_err(|e| CommandError::invalid_args("part.invalid_filter", format!("filter `{k}`: {e}")))?,
+            );
+        }
+        let max_price = self
+            .max_price
+            .as_deref()
+            .map(crate::supplier::Money::parse)
+            .transpose()
+            .map_err(|e| CommandError::invalid_args("part.invalid_price", e))?;
+        let q = crate::supplier::SearchQuery {
+            text: self.query.clone(),
+            category: self.category,
+            package: self.package.clone(),
+            filters,
+            quantity: self.quantity.max(1),
+            in_stock: self.in_stock,
+            max_price,
+            include_obsolete: self.include_obsolete,
+            limit: self.limit.clamp(1, 100),
+        };
+        let r = ctx.session.suppliers.search(&q, &self.providers);
+        report_provider_errors(ctx, &r.errors);
+        Ok(SearchResults {
+            quantity: q.quantity,
+            candidates: r.candidates,
+        })
+    }
+
+    fn summarize(o: &SearchResults) -> String {
+        if o.candidates.is_empty() {
+            return "no matching parts (relax filters, or check `in_stock`/`max_price`)".into();
+        }
+        o.candidates
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}:{}  {} {}  {}  stock {}  {}  {}",
+                    c.provider,
+                    c.sku,
+                    c.manufacturer.as_deref().unwrap_or("?"),
+                    c.mpn,
+                    c.package.as_deref().unwrap_or("-"),
+                    c.stock,
+                    c.unit_price(o.quantity)
+                        .map(|p| format!("{p}/u @{}", o.quantity))
+                        .unwrap_or_else(|| "no price".into()),
+                    c.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

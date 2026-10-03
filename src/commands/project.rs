@@ -204,7 +204,8 @@ impl Command for Open {
     type Output = ProjectInfo;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<ProjectInfo, CommandError> {
-        let (session, warnings) = Session::open(&self.path)?;
+        let (mut session, warnings) = Session::open(&self.path)?;
+        session.suppliers = std::mem::take(&mut ctx.session.suppliers);
         *ctx.session = session;
         for w in warnings {
             ctx.report(w);

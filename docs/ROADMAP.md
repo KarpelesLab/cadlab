@@ -43,10 +43,11 @@ Details in [PARTS.md](PARTS.md).
       headers) and symbol generator from pin tables (no KiCad library content, see D7)
 - [ ] More footprint families: SOT-223/DPAK, SOD/MELF, SMA/SMB, BGA, DIP
 - [x] BOM commands: list (grouped), replace, DNP, approved alternates, notes; components via `circuit.add/remove`
-- [ ] Supplier research provider trait + first providers (see PARTS.md for candidates), response cache with TTL
-- [ ] Search and filter by parameters, stock, price, lifecycle
+- [x] Supplier research provider trait, offline catalog provider, response cache with TTL and offline mode
+- [ ] Network providers (need API credentials; see PARTS.md)
+- [x] Search and filter by parameters, stock, price, lifecycle (`part.search`); `bom.resolve` for generic lines
 - [x] BOM CSV export (generic, JLCPCB, PCBWay layouts)
-- [ ] BOM cost rollup at build quantity, availability check
+- [x] BOM cost rollup at build quantity (`bom.cost`), availability check (`bom.check`)
 
 **Exit:** an agent can go from "I need a 3.3 V LDO, 500 mA, SOT-23-5, in stock" to a concrete part in the BOM with
 symbol and footprint attached.

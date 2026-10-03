@@ -9,8 +9,17 @@ use common::golden::assert_golden_dir;
 use serde_json::{Value, json};
 
 fn cadlab(cwd: &Path, args: &[&str]) -> Output {
+    cadlab_env(cwd, args, &[])
+}
+
+/// Runs the binary isolated from the user's configuration (no catalogs unless given).
+fn cadlab_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_cadlab"))
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", cwd.join(".no-config"))
+        .env("XDG_CACHE_HOME", cwd.join(".no-cache"))
+        .env_remove("CADLAB_CATALOGS")
+        .envs(env.iter().copied())
         .args(args)
         .output()
         .unwrap()
@@ -161,4 +170,27 @@ fn describe_lists_commands() {
     insta::assert_json_snapshot!("commands", names);
     let v = json_of(&cadlab(dir.path(), &["describe", "project.new", "--json"]));
     insta::assert_json_snapshot!("project_new_schema", v);
+}
+
+#[test]
+fn catalogs_from_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    cadlab(dir.path(), &["project", "new", "p"]);
+    let p = dir.path().join("p");
+    let catalog = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/catalog.json");
+    let env = [("CADLAB_CATALOGS", catalog.to_str().unwrap())];
+    let o = cadlab_env(&p, &["part", "search", "LDO", "--package", "SOT-23-5", "--params", "current_out=>=500mA", "--in-stock", "--json"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    let v = json_of(&o);
+    let mpns: Vec<&str> = v["output"]["candidates"].as_array().unwrap().iter().map(|c| c["mpn"].as_str().unwrap()).collect();
+    assert_eq!(mpns, ["ME6211C33M5G-N", "AP2112K-3.3TRG1"]);
+
+    // Without catalogs: a clear error.
+    let o = cadlab(&p, &["part", "search", "LDO", "--json"]);
+    assert_eq!(json_of(&o)["error"]["code"], "supplier.none");
+
+    // bom check exits with 3 when checks fail (generic line without MPN).
+    cadlab_env(&p, &["circuit", "add", "LED red 0603"], &env);
+    let o = cadlab_env(&p, &["bom", "check"], &env);
+    assert_eq!(o.status.code(), Some(3), "{}", String::from_utf8_lossy(&o.stderr));
 }

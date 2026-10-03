@@ -18,7 +18,10 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Dnp>()
         .register::<Note>()
         .register::<Replace>()
-        .register::<Export>();
+        .register::<Export>()
+        .register::<Resolve>()
+        .register::<Check>()
+        .register::<Cost>();
 }
 
 /// Show the BOM: one line per part, with quantities and designators.
@@ -424,4 +427,331 @@ fn io(path: &std::path::Path, e: std::io::Error) -> CommandError {
         source: e,
     }
     .into()
+}
+
+fn boards_default() -> u64 {
+    1
+}
+
+/// Find orderable candidates for generic BOM lines (those without an MPN or approved parts).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Resolve {
+    /// Number of boards to build (sets the stock needed).
+    #[serde(default = "boards_default")]
+    pub boards: u64,
+    /// Add the best candidate of each line as an approved MPN.
+    #[serde(default)]
+    pub apply: bool,
+    /// Candidates to propose per line.
+    #[serde(default = "three")]
+    pub candidates: usize,
+    /// Also re-resolve lines that already have approved MPNs.
+    #[serde(default)]
+    pub all: bool,
+    /// Only these providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+}
+
+fn three() -> usize {
+    3
+}
+
+/// Proposals for one line.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Proposal {
+    /// Part ID.
+    pub part: String,
+    /// Candidates, best first.
+    pub candidates: Vec<crate::supplier::Candidate>,
+    /// Whether the first candidate was added as approved.
+    pub applied: bool,
+}
+
+/// Result of `bom.resolve`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Resolution {
+    /// Per-line proposals.
+    pub lines: Vec<Proposal>,
+    /// Lines with no candidate at all.
+    pub unresolved: Vec<String>,
+}
+
+impl Command for Resolve {
+    const NAME: &'static str = "bom.resolve";
+    const SUMMARY: &'static str = "Find in-stock MPNs for generic BOM lines; with `apply`, approve the best";
+    const KIND: CommandKind = CommandKind::Mutation;
+    type Output = Resolution;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Resolution, CommandError> {
+        part::require_suppliers(ctx)?;
+        let p = ctx.project()?;
+        let rows: Vec<BomRow> = bom::rows(p)
+            .into_iter()
+            .filter(|r| r.mpn.is_none() && (self.all || r.approved.is_empty()))
+            .collect();
+        let mut lines = Vec::new();
+        let mut errors = Vec::new();
+        for row in rows {
+            let part = &ctx.project()?.library().parts[&row.part];
+            let mut q = crate::sourcing::query_for(part, row.quantity.max(1) as u64 * self.boards);
+            q.limit = self.candidates.clamp(1, 20);
+            let r = ctx.session.suppliers.search(&q, &self.providers);
+            errors.extend(r.errors);
+            lines.push(Proposal {
+                part: row.part,
+                candidates: r.candidates,
+                applied: false,
+            });
+        }
+        errors.sort();
+        errors.dedup();
+        part::report_provider_errors(ctx, &errors);
+        if self.apply {
+            for l in &mut lines {
+                if let Some(c) = l.candidates.first() {
+                    let line = ctx.project_mut()?.bom_mut().lines.entry(l.part.clone()).or_default();
+                    if !line.approved.iter().any(|a| a.mpn.eq_ignore_ascii_case(&c.mpn)) {
+                        line.approved.insert(
+                            0,
+                            ApprovedPart {
+                                manufacturer: c.manufacturer.clone(),
+                                mpn: c.mpn.clone(),
+                            },
+                        );
+                    }
+                    l.applied = true;
+                }
+            }
+        }
+        let unresolved = lines
+            .iter()
+            .filter(|l| l.candidates.is_empty())
+            .map(|l| l.part.clone())
+            .collect::<Vec<_>>();
+        for u in &unresolved {
+            ctx.report(
+                Diagnostic::warning("bom.unresolved", format!("no in-stock candidate for `{u}`"))
+                    .with_subject(ObjectRef::Part {
+                        scheme: "local".into(),
+                        id: u.clone(),
+                    })
+                    .with_hint("relax the part's requirements (`part.set`), or search manually with `part.search`"),
+            );
+        }
+        Ok(Resolution { lines, unresolved })
+    }
+
+    fn summarize(o: &Resolution) -> String {
+        if o.lines.is_empty() {
+            return "nothing to resolve: every line has an MPN".into();
+        }
+        o.lines
+            .iter()
+            .map(|l| match l.candidates.first() {
+                Some(c) => format!(
+                    "{}: {}{} {}{}",
+                    l.part,
+                    if l.applied { "approved " } else { "" },
+                    c.manufacturer.as_deref().unwrap_or("?"),
+                    c.mpn,
+                    if l.candidates.len() > 1 {
+                        format!(" (+{} more)", l.candidates.len() - 1)
+                    } else {
+                        String::new()
+                    }
+                ),
+                None => format!("{}: no candidate", l.part),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Check stock and lifecycle of every BOM line for a build.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Check {
+    /// Number of boards to build.
+    #[serde(default = "boards_default")]
+    pub boards: u64,
+    /// Only these providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+}
+
+/// Sourcing per line.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Sourcing {
+    /// Boards.
+    pub boards: u64,
+    /// Per line.
+    pub lines: Vec<crate::sourcing::LineSourcing>,
+    /// Total per currency (lines with an offer).
+    pub totals: Vec<crate::supplier::Money>,
+}
+
+fn source_all(ctx: &mut Context<'_>, boards: u64, providers: &[String]) -> Result<Sourcing, CommandError> {
+    part::require_suppliers(ctx)?;
+    let rows: Vec<BomRow> = bom::rows(ctx.project()?)
+        .into_iter()
+        .filter(|r| r.quantity > 0)
+        .collect();
+    let mut errors = Vec::new();
+    let lines: Vec<_> = rows
+        .iter()
+        .map(|r| crate::sourcing::source_line(r, boards.max(1), &ctx.session.suppliers, providers, &mut errors))
+        .collect();
+    part::report_provider_errors(ctx, &errors);
+    let totals = crate::sourcing::totals(&lines);
+    Ok(Sourcing {
+        boards: boards.max(1),
+        lines,
+        totals,
+    })
+}
+
+impl Command for Check {
+    const NAME: &'static str = "bom.check";
+    const SUMMARY: &'static str = "Check stock and lifecycle of every BOM line for a number of boards";
+    const KIND: CommandKind = CommandKind::Query;
+    type Output = Sourcing;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Sourcing, CommandError> {
+        use crate::sourcing::Availability as A;
+        let s = source_all(ctx, self.boards, &self.providers)?;
+        for l in &s.lines {
+            let subject = ObjectRef::Part {
+                scheme: "local".into(),
+                id: l.part.clone(),
+            };
+            let d = match l.status {
+                A::Ok => continue,
+                A::LowStock => Diagnostic::error(
+                    "bom.low_stock",
+                    format!(
+                        "`{}`: need {}, best offer has {}",
+                        l.part,
+                        l.needed,
+                        l.offer.as_ref().map_or(0, |o| o.stock)
+                    ),
+                )
+                .with_hint("approve an alternate (`bom.approve`) or reduce the build"),
+                A::EndOfLife => {
+                    Diagnostic::warning("bom.end_of_life", format!("`{}`: only end-of-life offers", l.part))
+                        .with_hint("find a replacement with `part.search` and `bom.replace`")
+                }
+                A::NotFound => {
+                    Diagnostic::error("bom.not_found", format!("`{}`: no provider lists its MPN(s)", l.part))
+                        .with_hint("check the MPN, or approve an alternate")
+                }
+                A::NoMpn => Diagnostic::error("bom.no_mpn", format!("`{}` has no MPN to order", l.part))
+                    .with_hint("run `bom.resolve` or `bom.approve`"),
+            };
+            ctx.report(d.with_subject(subject));
+        }
+        Ok(s)
+    }
+
+    fn summarize(o: &Sourcing) -> String {
+        let bad = o
+            .lines
+            .iter()
+            .filter(|l| l.status != crate::sourcing::Availability::Ok)
+            .count();
+        let mut s: String = o
+            .lines
+            .iter()
+            .map(|l| {
+                format!(
+                    "{:<28} need {:>6}  {:?}{}",
+                    l.part,
+                    l.needed,
+                    l.status,
+                    l.offer
+                        .as_ref()
+                        .map(|c| format!("  {}:{} stock {}", c.provider, c.sku, c.stock))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        s += &format!(
+            "\n{} line(s) checked for {} board(s), {} problem(s)",
+            o.lines.len(),
+            o.boards,
+            bad
+        );
+        s
+    }
+}
+
+/// Cost the BOM for a number of boards, from the cheapest in-stock offer of each line.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Cost {
+    /// Number of boards to build.
+    #[serde(default = "boards_default")]
+    pub boards: u64,
+    /// Only these providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+}
+
+impl Command for Cost {
+    const NAME: &'static str = "bom.cost";
+    const SUMMARY: &'static str = "Cost the BOM for a number of boards (cheapest in-stock offer per line)";
+    const KIND: CommandKind = CommandKind::Query;
+    type Output = Sourcing;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Sourcing, CommandError> {
+        let s = source_all(ctx, self.boards, &self.providers)?;
+        let missing: Vec<&str> = s
+            .lines
+            .iter()
+            .filter(|l| l.extended.is_none())
+            .map(|l| l.part.as_str())
+            .collect();
+        if !missing.is_empty() {
+            ctx.report(
+                Diagnostic::warning("bom.incomplete_cost", format!("no price for: {}", missing.join(", ")))
+                    .with_hint("totals exclude these lines; see `bom.check`"),
+            );
+        }
+        Ok(s)
+    }
+
+    fn summarize(o: &Sourcing) -> String {
+        let mut s: String = o
+            .lines
+            .iter()
+            .map(|l| match (&l.offer, &l.unit_price, &l.extended) {
+                (Some(c), Some(u), Some(e)) => {
+                    format!(
+                        "{:<28} {:>6} x {:>12} = {:>12}  {}:{}",
+                        l.part,
+                        l.order_qty.unwrap_or(0),
+                        u.to_string(),
+                        e.to_string(),
+                        c.provider,
+                        c.sku
+                    )
+                }
+                _ => format!("{:<28} no price ({:?})", l.part, l.status),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let totals: Vec<String> = o.totals.iter().map(ToString::to_string).collect();
+        s += &format!(
+            "\ntotal for {} board(s): {}",
+            o.boards,
+            if totals.is_empty() {
+                "-".into()
+            } else {
+                totals.join(" + ")
+            }
+        );
+        s
+    }
 }
