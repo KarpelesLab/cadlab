@@ -118,6 +118,19 @@ on their own). Self-contained block files cannot break when a referenced part is
 library, at the cost of duplicated part data. Conflicts are reported, never merged silently. Library data,
 unlike credentials, is not secret, so it lives in the data directory rather than the config directory.
 
+### D20. Mounting holes are board items that behave as pads; placement is heuristic and deterministic (2026-10-04)
+Mounting holes are stored on the board (`board.holes`: name, center, drill, optional plated pad diameter and
+net), not as components: they have no part, no BOM line and no schematic symbol. The shared geometry turns each
+into a pad of "designator" = hole name (`placed_pads`), so DRC, zone fill, connectivity, rendering, Gerber,
+drill, IPC-D-356 and KiCad export need no special case beyond small additions (drill function `MechanicalDrill`,
+a one-pad `MountingHole` footprint in `.kicad_pcb`). Outline cutouts stay inner contours of `board.outline`.
+Automatic placement (`place.auto`, strategy `groups`) is a constructive heuristic followed by greedy local moves,
+on a 50 µm grid with fixed candidate orders, so the same project always gives the same placement; no
+randomized annealing.
+*Why:* a mounting hole is a mechanical board feature that agents add while designing the board, and making it a
+pad reuses every consumer of pads. A deterministic heuristic is reviewable and stable across runs, which matters
+more for an agent-driven flow than squeezing the last millimeters of ratsnest.
+
 ## Open questions
 
 None currently.

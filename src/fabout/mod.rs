@@ -196,7 +196,12 @@ pub fn holes(p: &Project) -> Vec<Hole> {
             diameter: d,
             plated,
             span: (1, n),
-            kind: if plated { HoleKind::Component } else { HoleKind::Mechanical },
+            // Board holes (mounting holes) are mechanical even when plated.
+            kind: if plated && !board::holes::is_hole(p, &pp.refdes) {
+                HoleKind::Component
+            } else {
+                HoleKind::Mechanical
+            },
             net: pp.net.clone(),
             pad: Some((pp.refdes.clone(), pp.number.clone())),
         });

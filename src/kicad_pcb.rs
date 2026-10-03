@@ -199,6 +199,7 @@ fn net_numbers(p: &Project) -> BTreeMap<String, usize> {
     names.extend(b.tracks.iter().filter_map(|t| t.net.as_deref()));
     names.extend(b.vias.iter().filter_map(|v| v.net.as_deref()));
     names.extend(b.zones.iter().filter_map(|z| z.net.as_deref()));
+    names.extend(b.holes.iter().filter_map(|h| h.net.as_deref()));
     names.into_iter().enumerate().map(|(i, n)| (n.to_string(), i + 1)).collect()
 }
 
@@ -324,6 +325,10 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
         };
         write_footprint(&mut w, refdes, pf, fp);
         footprints += 1;
+    }
+
+    for h in &board.holes {
+        write_hole(&mut w, h);
     }
 
     write_graphics(&mut w);
@@ -499,6 +504,50 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
     for (pi, pad) in fp.pads.iter().enumerate() {
         write_pad(w, &f, &format!("{key}/pad{pi}"), pad, &nets, &pins);
     }
+    w.line(1, ")");
+}
+
+/// A board hole as a one-pad mounting hole footprint (no courtyard, excluded from BOM and
+/// position files).
+fn write_hole(w: &mut Writer<'_>, h: &crate::model::board::Hole) {
+    let pf = PlacedFootprint { at: h.at, rotation: Angle::ZERO, side: BoardSide::Top, locked: false, footprint: None };
+    let f = FpFrame::new(&pf);
+    let key = format!("hole/{}", h.id.0);
+    let at = w.xy(h.at);
+    w.line(1, &format!("(footprint {} (layer \"F.Cu\")", q(&format!("{LIB}:MountingHole"))));
+    w.line(2, &format!("(uuid {})", q(&uuid(&key))));
+    w.line(2, &format!("(at {at} 0)"));
+    let size = Nm::from_um(1000);
+    let top = Point::new(Nm::ZERO, Nm(h.diameter().0 / 2) + size);
+    let value = match h.pad {
+        Some(d) => format!("MountingHole {} pad {}", mm(h.drill), mm(d)),
+        None => format!("MountingHole {}", mm(h.drill)),
+    };
+    let props = [
+        ("Reference", h.name.clone(), top, "F.SilkS", false),
+        ("Value", value, Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true),
+        ("Footprint", format!("{LIB}:MountingHole"), Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true),
+    ];
+    for (k, v, pos, layer, hide) in props {
+        w.line(
+            2,
+            &format!(
+                "(property {} {} (at {} 0) (layer {}){} (uuid {})",
+                q(k),
+                q(&v),
+                f.local(pos),
+                q(layer),
+                if hide { " (hide yes)" } else { "" },
+                q(&uuid(&format!("{key}/prop/{k}")))
+            ),
+        );
+        w.line(3, &format!("{})", text_effects(size, false)));
+    }
+    w.line(2, "(attr exclude_from_pos_files exclude_from_bom)");
+    let pad = geo::holes::hole_pad(h);
+    let nets: BTreeMap<String, String> =
+        h.net.iter().filter(|_| h.pad.is_some()).map(|n| (pad.number.clone(), n.clone())).collect();
+    write_pad(w, &f, &format!("{key}/pad"), &pad, &nets, &BTreeMap::new());
     w.line(1, ")");
 }
 

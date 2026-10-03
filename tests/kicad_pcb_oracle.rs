@@ -457,7 +457,7 @@ fn kicad_exports_gerbers() {
 
 /// A 4-layer board using every exported feature: QFN with paste windows (exposed pad), a
 /// through-hole header on the bottom, an arc track, a blind via, locked items, zones with each
-/// pad connection style, a keep-out, board text, a DNP part.
+/// pad connection style, a keep-out, board text, a DNP part, mounting holes and a cutout.
 fn feature_board() -> (tempfile::TempDir, Registry, Session) {
     use cadlab::model::board::{BoardGraphic, GraphicKind, Keepout, Track};
     let (d, r, mut s) = ldo();
@@ -482,6 +482,9 @@ fn feature_board() -> (tempfile::TempDir, Registry, Session) {
     exec(&r, &mut s, "place.lock", json!({"refdes": ["J1"]}));
     exec(&r, &mut s, "bom.dnp", json!({"refdes": ["C2"]}));
     exec(&r, &mut s, "via.add", json!({"at": mm(12.0, 3.0), "net": "GND", "from": "F.Cu", "to": "In1.Cu"}));
+    exec(&r, &mut s, "board.hole", json!({"at": mm(2.0, 8.5), "drill": "1mm", "pad": "1.8mm", "net": "GND"}));
+    exec(&r, &mut s, "board.hole", json!({"at": mm(19.0, 1.5), "drill": "1mm"}));
+    exec(&r, &mut s, "board.cutout", json!({"circle": {"center": mm(12.5, 1.5), "diameter": "1.2mm"}}));
     let p = s.project.as_mut().unwrap();
     let n = |v: f64| Nm((v * 1e6) as i64);
     let pt = |x: f64, y: f64| Point::new(n(x), n(y));
@@ -583,6 +586,8 @@ fn kicad_loads_every_feature() {
         "(min_thickness 0.25)",
         "(attr smd exclude_from_pos_files exclude_from_bom dnp)",
         "(attr through_hole)",
+        "np_thru_hole",
+        "(footprint \"cadlab:MountingHole\"",
         "\"F.Paste\")",
     ] {
         let (a, b) = (ours.matches(token).count(), theirs.matches(token).count());

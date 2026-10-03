@@ -313,6 +313,33 @@ pub struct Keepout {
     pub no_footprints: bool,
 }
 
+/// A board-level drilled hole (mounting hole): non-plated, or plated with a round copper pad.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Hole {
+    /// ID.
+    pub id: ObjectId,
+    /// Name, unique on the board and distinct from component designators (`H1`).
+    pub name: String,
+    /// Center.
+    pub at: Point,
+    /// Finished hole diameter.
+    pub drill: Nm,
+    /// Diameter of the plated copper pad; absent for a non-plated hole (NPTH).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pad: Option<Nm>,
+    /// Net of the plated pad (usually ground).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<String>,
+}
+
+impl Hole {
+    /// Outer diameter: the pad when plated, else the drill.
+    pub fn diameter(&self) -> Nm {
+        self.pad.unwrap_or(self.drill).max(self.drill)
+    }
+}
+
 /// A drawing on a non-copper layer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BoardGraphic {
@@ -378,6 +405,9 @@ pub struct Board {
     /// Keep-out areas.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keepouts: Vec<Keepout>,
+    /// Board-level holes (mounting holes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Hole>,
     /// Graphics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graphics: Vec<BoardGraphic>,

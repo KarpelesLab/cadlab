@@ -49,6 +49,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     }
     let courtyards = courtyards(p);
     courtyard_rules(&courtyards, outline.as_ref(), &mut out);
+    board_holes(p, &courtyards, outline.as_ref(), &mut out);
     silk_to_pads(&ctx, &pads, &mut out);
     keepouts(&ctx, &courtyards, &mut out);
     unrouted(p, &mut out);
@@ -522,6 +523,49 @@ fn courtyards(p: &Project) -> BTreeMap<String, (Ring, BoardSide)> {
         .iter()
         .filter_map(|(r, pf)| geo::placed_courtyard(p, r).map(|c| (r.clone(), (c, pf.side))))
         .collect()
+}
+
+/// Board holes (mounting holes): non-plated holes outside the board or in a cutout (plated
+/// ones are copper and checked with it), and any hole over a footprint courtyard (either side:
+/// the hole goes through the board).
+fn board_holes(
+    p: &Project,
+    cy: &BTreeMap<String, (Ring, BoardSide)>,
+    outline: Option<&BoardShape>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for h in &p.board().holes {
+        let Ok(ring) = (Circle { center: pt(h.at), radius: h.diameter().0 / 2 }).to_ring(COPPER_TOL) else { continue };
+        let subject = || ObjectRef::Named { kind: "hole".into(), name: h.name.clone() };
+        if h.pad.is_none()
+            && let Some(o) = outline
+            && o.outside(&ring)
+        {
+            out.push(
+                Diagnostic::error(
+                    "drc.outside_board",
+                    format!("hole {} is outside the board outline or in a cutout", h.name),
+                )
+                .with_subject(subject())
+                .at(h.at)
+                .with_hint("move it inside the board outline (board.hole_remove, then board.hole)"),
+            );
+        }
+        for (r, (c, _)) in cy {
+            if let Some(at) = overlap(&ring, c) {
+                out.push(
+                    Diagnostic::error(
+                        "drc.courtyard_overlap",
+                        format!("hole {} is inside the courtyard of {r}", h.name),
+                    )
+                    .with_subject(subject())
+                    .with_subject(ObjectRef::Name(r.clone()))
+                    .at(at)
+                    .with_hint(format!("move {r} away from the hole (place.move), or move the hole")),
+                );
+            }
+        }
+    }
 }
 
 /// Courtyard overlaps on the same side, and footprints partly outside the board.

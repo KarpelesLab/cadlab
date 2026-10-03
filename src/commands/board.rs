@@ -61,15 +61,25 @@ pub struct BoardInfo {
     pub vias: usize,
     /// Unrouted connections.
     pub unrouted: usize,
+    /// Board holes (mounting holes).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub holes: usize,
+    /// Outline cutouts.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cutouts: usize,
 }
 
-fn outline_bbox(p: &Project) -> Option<BBox> {
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+pub(super) fn outline_bbox(p: &Project) -> Option<BBox> {
     let c = p.board().outline.contours.first()?;
     let ring = geo::contour_ring(c, geo::COPPER_TOL);
     BBox::of_points(ring.into_iter().map(Point::from))
 }
 
-fn info(p: &Project) -> BoardInfo {
+pub(super) fn info(p: &Project) -> BoardInfo {
     let b = p.board();
     let mut unplaced: Vec<String> =
         p.circuit().components.keys().filter(|r| !b.footprints.contains_key(*r)).cloned().collect();
@@ -86,10 +96,12 @@ fn info(p: &Project) -> BoardInfo {
         tracks: b.tracks.len(),
         vias: b.vias.len(),
         unrouted: geo::ratsnest(p).len(),
+        holes: b.holes.len(),
+        cutouts: b.outline.contours.len().saturating_sub(1),
     }
 }
 
-fn info_text(o: &BoardInfo) -> String {
+pub(super) fn info_text(o: &BoardInfo) -> String {
     let size = o.size.map(|(w, h)| format!("{w} x {h}")).unwrap_or_else(|| "no outline".into());
     let mut s = format!(
         "board: {} layers ({}), {}, {} thick\n  placed {}, unplaced {}, tracks {}, vias {}, unrouted {}",
@@ -103,6 +115,9 @@ fn info_text(o: &BoardInfo) -> String {
         o.vias,
         o.unrouted
     );
+    if o.holes + o.cutouts > 0 {
+        s += &format!("\n  holes {}, cutouts {}", o.holes, o.cutouts);
+    }
     if !o.unplaced.is_empty() {
         s += &format!("\n  not placed: {}", o.unplaced.join(", "));
     }
@@ -470,9 +485,13 @@ pub struct Placed {
     /// Components not placed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unplaced: Vec<String>,
+    /// Total ratsnest length after the change (minimum spanning tree per net over pad
+    /// centers), for automatic placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratsnest_length: Option<Nm>,
 }
 
-fn placed_text(o: &Placed) -> String {
+pub(super) fn placed_text(o: &Placed) -> String {
     let mut lines: Vec<String> = o
         .placements
         .iter()
@@ -491,10 +510,13 @@ fn placed_text(o: &Placed) -> String {
     if !o.unplaced.is_empty() {
         lines.push(format!("not placed: {}", o.unplaced.join(", ")));
     }
+    if let Some(l) = o.ratsnest_length {
+        lines.push(format!("ratsnest length: {l}"));
+    }
     lines.join("\n")
 }
 
-fn check_placeable(p: &Project, refdes: &str) -> Result<String, CommandError> {
+pub(super) fn check_placeable(p: &Project, refdes: &str) -> Result<String, CommandError> {
     let r = util::refdes_key(p, refdes)?;
     if geo::footprint_for(p, &r).is_none() {
         return Err(CommandError::invalid_args("place.no_footprint", format!("{r} has no footprint"))
@@ -503,7 +525,7 @@ fn check_placeable(p: &Project, refdes: &str) -> Result<String, CommandError> {
     Ok(r)
 }
 
-fn unlocked<'a>(p: &'a mut Project, r: &str) -> Result<&'a mut PlacedFootprint, CommandError> {
+pub(super) fn unlocked<'a>(p: &'a mut Project, r: &str) -> Result<&'a mut PlacedFootprint, CommandError> {
     let fp = p.board_mut().footprints.get_mut(r).ok_or_else(|| {
         CommandError::conflict("place.not_placed", format!("{r} is not placed"))
             .with_hint(format!("place it first: `place.set {r} --at ...`"))
@@ -560,7 +582,7 @@ impl Command for PlaceSet {
             fp.side = s;
         }
         p.board_mut().footprints.insert(r.clone(), fp.clone());
-        Ok(Placed { placements: [(r, fp)].into(), unplaced: vec![] })
+        Ok(Placed { placements: [(r, fp)].into(), unplaced: vec![], ratsnest_length: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -593,7 +615,7 @@ impl Command for PlaceMove {
             fp.at = fp.at + self.by;
             out.insert(r, fp.clone());
         }
-        Ok(Placed { placements: out, unplaced: vec![] })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -631,7 +653,7 @@ impl Command for PlaceRotate {
             fp.rotation = (fp.rotation + self.by).normalized();
             out.insert(r, fp.clone());
         }
-        Ok(Placed { placements: out, unplaced: vec![] })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -662,7 +684,7 @@ impl Command for PlaceFlip {
             fp.side = if fp.side == BoardSide::Top { BoardSide::Bottom } else { BoardSide::Top };
             out.insert(r, fp.clone());
         }
-        Ok(Placed { placements: out, unplaced: vec![] })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -705,7 +727,7 @@ impl Command for PlaceLock {
             fp.locked = self.locked;
             out.insert(r, fp.clone());
         }
-        Ok(Placed { placements: out, unplaced: vec![] })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -738,7 +760,7 @@ impl Command for PlaceRemove {
             ctx.project_mut()?.board_mut().footprints.remove(&k);
         }
         let p = ctx.project()?;
-        Ok(Placed { placements: BTreeMap::new(), unplaced: info(p).unplaced })
+        Ok(Placed { placements: BTreeMap::new(), unplaced: info(p).unplaced, ratsnest_length: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -759,7 +781,7 @@ impl Command for PlaceList {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Placed, CommandError> {
         let p = ctx.project()?;
-        Ok(Placed { placements: p.board().footprints.clone(), unplaced: info(p).unplaced })
+        Ok(Placed { placements: p.board().footprints.clone(), unplaced: info(p).unplaced, ratsnest_length: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -767,65 +789,83 @@ impl Command for PlaceList {
     }
 }
 
-/// Place every unplaced footprint in rows inside the board outline (a starting point to refine).
+/// Auto-placement strategy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Strategy {
+    /// By schematic-like groups: ICs and connectors spread over the board (connectors at the
+    /// edges), their passives next to the pins they connect to, then local improvement of the
+    /// ratsnest length.
+    #[default]
+    Groups,
+    /// Rows inside the outline, largest first (a plain packing).
+    Rows,
+}
+
+/// Place footprints automatically inside the board outline (a starting point to refine).
+/// Locked footprints, and placed ones unless `replace`, stay put and are obstacles; cutouts,
+/// footprint keep-outs and holes are avoided.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceAuto {
-    /// Gap between courtyards (default 0.5mm).
+    /// "groups" (default) or "rows".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<Strategy>,
+    /// Gap between courtyards (default 0.25mm for groups, 0.5mm for rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spacing: Option<Nm>,
+    /// Also re-place footprints already on the board (except locked ones).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
 }
 
 impl Command for PlaceAuto {
     const NAME: &'static str = "place.auto";
-    const SUMMARY: &'static str = "Place unplaced footprints in rows inside the outline (largest first)";
+    const SUMMARY: &'static str =
+        "Place footprints automatically: by schematic groups (default) or in rows; locked ones stay";
     const KIND: CommandKind = CommandKind::Mutation;
     type Output = Placed;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Placed, CommandError> {
         let p = ctx.project()?;
-        let gap = self.spacing.unwrap_or(Nm::from_um(500)).0;
-        let area = outline_bbox(p).ok_or_else(|| {
-            CommandError::conflict("board.no_outline", "the board has no outline")
-                .with_hint("set one with `board.outline`")
-        })?;
-        // Footprints to place with their courtyard boxes (local).
-        let mut todo: Vec<(String, BBox)> = Vec::new();
-        for r in info(p).unplaced {
-            if let Some(fp) = geo::footprint_for(p, &r)
-                && let Some(b) = BBox::of_points(fp.courtyard.iter().copied())
-            {
-                todo.push((r, b));
-            }
+        if outline_bbox(p).is_none() {
+            return Err(CommandError::conflict("board.no_outline", "the board has no outline")
+                .with_hint("set one with `board.outline`"));
         }
-        todo.sort_by(|a, b| {
-            let area = |x: &BBox| (x.width().0 as i128) * (x.height().0 as i128);
-            area(&b.1).cmp(&area(&a.1)).then_with(|| natural_cmp(&a.0, &b.0))
-        });
-        let margin = p.board().rules.copper_to_edge.0 + gap;
-        let (mut x, mut y, mut row_h) = (area.min.x.0 + margin, area.max.y.0 - margin, 0i64);
-        let snap = |v: i64| v.div_euclid(50_000) * 50_000;
-        let mut out = BTreeMap::new();
-        let mut outside = Vec::new();
-        for (r, b) in todo {
-            let (w, h) = (b.width().0, b.height().0);
-            if x + w > area.max.x.0 - margin && x > area.min.x.0 + margin {
-                x = area.min.x.0 + margin;
-                y -= row_h + gap;
-                row_h = 0;
+        let mut moving: Vec<String> = info(p).unplaced;
+        if self.replace {
+            moving.extend(
+                p.board()
+                    .footprints
+                    .iter()
+                    .filter(|(r, f)| !f.locked && p.circuit().components.contains_key(*r))
+                    .map(|(r, _)| r.clone()),
+            );
+            moving.sort_by(|a, b| natural_cmp(a, b));
+        }
+        let old: BTreeMap<String, PlacedFootprint> =
+            moving.iter().filter_map(|r| p.board().footprints.get(r).map(|f| (r.clone(), f.clone()))).collect();
+        let (mut out, outside) = match self.strategy.unwrap_or_default() {
+            Strategy::Groups => {
+                let gap = self.spacing.unwrap_or(geo::place::DEFAULT_GAP);
+                let r = geo::place::auto_place(p, &moving, gap)
+                    .map_err(|e| CommandError::conflict(e.code, e.message).with_hint(e.hint))?;
+                (r.placements, r.unplaced)
             }
-            if y - h < area.min.y.0 + margin {
-                outside.push(r);
-                continue;
+            Strategy::Rows => {
+                let pm = ctx.project_mut()?;
+                for r in old.keys() {
+                    pm.board_mut().footprints.remove(r);
+                }
+                rows(ctx.project()?, &moving, self.spacing.unwrap_or(Nm::from_um(500)).0)
             }
-            // Origin so that the courtyard's top-left lands at (x, y).
-            let at = Point::new(Nm(snap(x - b.min.x.0)), Nm(snap(y - b.max.y.0)));
-            let fp =
-                PlacedFootprint { at, rotation: Angle::ZERO, side: BoardSide::Top, locked: false, footprint: None };
-            out.insert(r.clone(), fp.clone());
-            ctx.project_mut()?.board_mut().footprints.insert(r, fp);
-            x += w + gap;
-            row_h = row_h.max(h);
+        };
+        let pm = ctx.project_mut()?;
+        for (r, fp) in out.iter_mut() {
+            if let Some(o) = old.get(r) {
+                fp.footprint = o.footprint.clone();
+            }
+            pm.board_mut().footprints.insert(r.clone(), fp.clone());
         }
         if !outside.is_empty() {
             ctx.report(
@@ -836,12 +876,55 @@ impl Command for PlaceAuto {
                 .with_hint("enlarge the outline or place them by hand"),
             );
         }
-        Ok(Placed { placements: out, unplaced: outside })
+        let length = geo::place::ratsnest_length(ctx.project()?);
+        Ok(Placed { placements: out, unplaced: outside, ratsnest_length: Some(length) })
     }
 
     fn summarize(o: &Placed) -> String {
         placed_text(o)
     }
+}
+
+/// Rows inside the outline's bounding box, largest courtyard first.
+fn rows(p: &Project, moving: &[String], gap: i64) -> (BTreeMap<String, PlacedFootprint>, Vec<String>) {
+    let Some(area) = outline_bbox(p) else { return (BTreeMap::new(), moving.to_vec()) };
+    // Footprints to place with their courtyard boxes (local).
+    let mut todo: Vec<(String, BBox)> = Vec::new();
+    for r in moving {
+        if let Some(fp) = geo::footprint_for(p, r)
+            && let Some(b) = BBox::of_points(fp.courtyard.iter().copied())
+        {
+            todo.push((r.clone(), b));
+        }
+    }
+    todo.sort_by(|a, b| {
+        let area = |x: &BBox| (x.width().0 as i128) * (x.height().0 as i128);
+        area(&b.1).cmp(&area(&a.1)).then_with(|| natural_cmp(&a.0, &b.0))
+    });
+    let margin = p.board().rules.copper_to_edge.0 + gap;
+    let (mut x, mut y, mut row_h) = (area.min.x.0 + margin, area.max.y.0 - margin, 0i64);
+    let snap = |v: i64| v.div_euclid(50_000) * 50_000;
+    let mut out = BTreeMap::new();
+    let mut outside = Vec::new();
+    for (r, b) in todo {
+        let (w, h) = (b.width().0, b.height().0);
+        if x + w > area.max.x.0 - margin && x > area.min.x.0 + margin {
+            x = area.min.x.0 + margin;
+            y -= row_h + gap;
+            row_h = 0;
+        }
+        if y - h < area.min.y.0 + margin {
+            outside.push(r);
+            continue;
+        }
+        // Origin so that the courtyard's top-left lands at (x, y).
+        let at = Point::new(Nm(snap(x - b.min.x.0)), Nm(snap(y - b.max.y.0)));
+        let fp = PlacedFootprint { at, rotation: Angle::ZERO, side: BoardSide::Top, locked: false, footprint: None };
+        out.insert(r, fp);
+        x += w + gap;
+        row_h = row_h.max(h);
+    }
+    (out, outside)
 }
 
 // ---- tracks and vias ----
@@ -986,7 +1069,7 @@ impl Command for TrackAdd {
     }
 }
 
-fn parse_item(s: &str, kind: &str) -> Result<ObjectId, CommandError> {
+pub(super) fn parse_item(s: &str, kind: &str) -> Result<ObjectId, CommandError> {
     let n = s.strip_prefix(&format!("{kind}#")).unwrap_or(s);
     n.parse::<u64>().map(ObjectId).map_err(|_| {
         CommandError::invalid_args("board.invalid_ref", format!("`{s}` is not a {kind} reference ({kind}#12)"))

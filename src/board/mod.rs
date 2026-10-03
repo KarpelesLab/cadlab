@@ -3,6 +3,8 @@
 
 use std::collections::BTreeMap;
 
+pub mod holes;
+pub mod place;
 pub mod zones;
 
 use polyclip::{ArcTol, Circle, Curve, EndCap, Join, Path, Polygon, PolygonSet, Shape, Side};
@@ -126,7 +128,8 @@ pub fn pad_nets(p: &Project, refdes: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// Every pad of every placed footprint.
+/// Every pad of every placed footprint, then board holes (mounting holes) as pads of
+/// designator = hole name ([`holes::hole_pads`]).
 pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
     let board = p.board();
     let copper = board.stackup.copper_names();
@@ -163,6 +166,7 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
             });
         }
     }
+    out.extend(holes::hole_pads(p));
     out
 }
 

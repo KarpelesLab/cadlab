@@ -30,6 +30,7 @@ Board
 ├── vias          position, drill, diameter, net, layer span (through by default)
 ├── zones         polygon, layer(s), net, priority, clearance, min width, thermal relief settings
 ├── keepouts      polygon, layers, what is forbidden (tracks, vias, pours, footprints)
+├── holes         mounting holes: name (H1), center, drill, plated pad diameter and net (none = NPTH)
 └── graphics      silkscreen/fab/user drawings and texts
 ```
 
@@ -39,6 +40,8 @@ One module turns the board into geometry that every consumer uses, so DRC, rende
 router agree on what copper exists:
 
 - `pads(board, project)`: every placed pad with its absolute shape (polyclip polygon), layers, net, drill.
+  Board holes are included as pads of designator = hole name (`H1.1` when plated, an unnumbered NPTH pad
+  otherwise), so every consumer sees them (`src/board/holes.rs`).
 - `copper(board, project, layer)`: pads, tracks (stadium shapes), vias, zone fills on a layer, each with its net.
 - `ratsnest(board, project)`: unrouted connections per net (minimum spanning tree over pads, minus what copper
   already connects), from the circuit's nets.
@@ -82,8 +85,8 @@ or batch session cost ~1.5 ms.
 
 | Group | Commands |
 |---|---|
-| `board` | `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules`, `info`, `ratsnest`, `sync` (add footprints for new components, drop removed ones) |
-| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `list`, `auto` (initial grid by schematic groups), `near` (place a part next to another's pin) |
+| `board` | `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules`, `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
+| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set`, `remove`, `list`, `fill` (report area/islands, warn empty or split) |
@@ -91,6 +94,40 @@ or batch session cost ~1.5 ms.
 | `drc` | `run` (M4 DRC workstream) |
 | `render` | `board` (layers, realistic) (M4 rendering workstream) |
 | `export` | `gerber`, `drill`, `pnp`, `ipc356`, `fab` (M4 outputs and fab workstreams) |
+
+## Placement (`src/board/place.rs`)
+
+Courtyards are handled as their boxes at quarter-turn rotations. The allowed area of a side is the outer contour
+shrunk by max(`copper_to_edge`, spacing), minus cutouts grown by that margin, `no_footprints` keep-outs, holes and
+the courtyards of footprints that stay (locked ones, and placed ones unless `replace`), grown by the spacing.
+
+`place.auto` with strategy `groups` (default):
+
+1. Grouping, as in the schematic layout: anchors are ICs (more than two pins) and connectors (part category);
+   a decoupling capacitor (one pad on ground, one on a power net) goes to a power pin of an anchor on its rail
+   (inputs first, then regulator outputs, spreading capacitors over pins); other passives go to the anchor
+   sharing a signal net (ICs before connectors), then chain through signal nets (R then LED), then to an anchor
+   sharing a power net.
+2. Anchors, most connected to what is already placed first, on a coarse grid (about 4000 positions, at least
+   0.5 mm) with all rotations: the first IC near the center, other ICs pulled to their connections, connectors
+   to the nearest edge with their long side along it. Each anchor keeps a margin around it sized from its
+   group's area, so its passives fit.
+3. Passives, group by group (decoupling capacitors first, then chains), on a 0.25 mm grid within 3 mm, then
+   8 mm, of their target pin, all rotations: the score is the distance from their connecting pad to the
+   target pin (weighted 4 for decoupling, 2 otherwise) plus the distance of their other pads to the nearest
+   placed pin of the same net (ground weighted 0.3). Candidates are tried best first; the first valid one wins.
+4. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
+   and swaps of identical footprints, accepting the best valid move that lowers the ratsnest (MST per net over
+   pad centers) plus tethers keeping passives at their target pins; connectors never move away from the edge.
+
+On the ATtiny85 test board (10 parts, 40 × 30 mm) this gives a ratsnest of about 97 mm against 175 mm for
+`rows`, the 3V3 decoupling capacitor pad 1.6 mm from the MCU's VCC pad (C1 1.75 mm from the LDO input), no DRC
+placement errors.
+
+`place.near` puts the part just outside the target's courtyard (on `side`, default the side the pin faces),
+`distance` between courtyards (default 0.25 mm), with its pad of the target's net aligned with the pin; each
+rotation is tried and the part slides along the side, then away from it, until it fits; the rotation with the
+shortest link wins.
 
 ## DRC (`src/drc.rs`, `drc.run`)
 
@@ -110,9 +147,9 @@ to 1 µm, distance rules accept a 2 µm deficit.
 | `drc.via_drill`, `drc.pad_drill` | error | via or pad hole below `min_drill` |
 | `drc.via_annular_ring`, `drc.pad_annular_ring` | error | (pad size − drill) / 2 below `min_annular_ring` (vias, plated pads) |
 | `drc.hole_to_hole` | error | holes (vias, plated and non-plated pads) closer than `hole_to_hole`, edge to edge |
-| `drc.outside_board` | error | copper not inside the outer contour, or overlapping a cutout |
+| `drc.outside_board` | error | copper or a non-plated board hole not inside the outer contour, or overlapping a cutout |
 | `drc.copper_to_edge` | error | copper closer than `copper_to_edge` to any contour |
-| `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine) |
+| `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine), or a board hole is inside a courtyard (either side) |
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout |
 | `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad on that side |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |

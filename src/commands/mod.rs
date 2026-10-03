@@ -12,6 +12,7 @@ pub mod kicad_pcb;
 pub mod lib;
 pub mod net;
 pub mod part;
+pub mod placement;
 pub mod project;
 pub mod render;
 mod util;
@@ -29,6 +30,7 @@ pub fn register_all(r: &mut Registry) {
     block::register(r);
     bom::register(r);
     board::register(r);
+    placement::register(r);
     lib::register(r);
     drc::register(r);
     zone::register(r);
