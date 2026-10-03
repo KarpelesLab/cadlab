@@ -1,0 +1,14 @@
+---
+source: tests/cli.rs
+expression: names
+---
+[
+  "project.new",
+  "project.open",
+  "project.save",
+  "project.info",
+  "project.set",
+  "history.undo",
+  "history.redo",
+  "history.list"
+]

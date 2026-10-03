@@ -1,0 +1,158 @@
+# Roadmap
+
+Milestones are ordered by dependency. Each one ends with something usable end to end, even if limited.
+Rough sizes: **S** ≈ days, **M** ≈ 1–3 weeks, **L** ≈ 1–2 months, **XL** = open-ended research.
+
+The first useful target is **M4**: a simple two-layer board (MCU + USB-C + LDO + LEDs) designed entirely through
+the CLI/MCP, hand- or simple-auto-routed, passing DRC and producing Gerbers that a fab (e.g. JLCPCB) accepts.
+
+---
+
+## M0 — Foundations (M)
+
+Workspace skeleton and the pieces every later milestone depends on.
+
+- [x] Crate and module layout per [ARCHITECTURE.md](ARCHITECTURE.md) (single crate, D16)
+- [x] Core types: units (`Nm` = i64 nanometers, `Angle`), points/vectors, transforms, bounding boxes
+- [x] Geometry: `cadlab::geom` adapter over polyclip ([POLYGON_LIB.md](POLYGON_LIB.md)), pinned as a git
+      dependency until it is published (switch to the crates.io release then)
+- [ ] Spatial index (R-tree) for shapes (moved to M4, where DRC first needs it)
+- [x] ID scheme: stable internal IDs (`ObjectId`, persisted allocator), `ObjectRef` name syntax, "did you mean"
+      suggestions (model-aware resolution comes with the circuit in M2)
+- [x] Command system: `Command` trait, registry, transactions, undo/redo, dry-run, diagnostics type
+- [x] Project load/save, deterministic serialization, schema versioning and migrations
+- [x] `cadlab` binary: clap CLI generated from the registry, `--json` output, `call`, `batch`, `describe`
+- [x] Settle async boundaries and MCP implementation: own minimal MCP layer, no async runtime (DECISIONS D14)
+- [x] `cadlab mcp`: MCP server over stdio exposing the registry, `describe` tool
+- [x] CI: fmt, clippy, tests, docs, MSRV; golden-file and snapshot tests; oracle discovery helpers in
+      `tests/common` ([TESTING.md](TESTING.md)); the oracle CI job is added with the first oracle test (M2)
+- [x] License check in CI (`cargo-deny`): MIT-compatible dependencies only
+
+**Exit:** `cadlab project new demo && cadlab -p demo project info --json` works via CLI and MCP; round-trip tests
+pass. **Done 2026-10-04** (spatial index deferred to M4).
+
+## M1 — Parts, libraries, BOM (L)
+
+Details in [PARTS.md](PARTS.md).
+
+- [ ] Part model: MPN, manufacturer, typed parameters, symbol (pins + electrical types), footprint(s), pin↔pad map
+- [ ] Generic parts (`R 10k 1% 0402`) vs concrete parts (MPN), resolution between them
+- [ ] Project-local library + shared user libraries
+- [ ] Own base library: footprint generator (IPC-7351B) and symbol generator from pin tables, covering common
+      passives, discretes, regulators, connectors and IC packages (no KiCad library content, see D7)
+- [ ] BOM commands: add, remove, replace, set quantity/DNP, alternates, grouping, notes
+- [ ] Supplier research provider trait + first providers (see PARTS.md for candidates), response cache with TTL
+- [ ] Search and filter by parameters, stock, price, lifecycle
+- [ ] BOM cost rollup at build quantity, availability check, CSV export (generic, JLCPCB, PCBWay layouts)
+
+**Exit:** an agent can go from "I need a 3.3 V LDO, 500 mA, SOT-23-5, in stock" to a concrete part in the BOM with
+symbol and footprint attached.
+
+## M2 — Circuit and ERC (M)
+
+- [ ] Components (instances of parts, refdes auto-assignment), nets, pins, net labels, power nets
+- [ ] Connect/disconnect commands; bus and multi-pin helpers (`connect U1.PA0..PA7 to bus DATA[0..7]`)
+- [ ] Hierarchy: reusable blocks/subcircuits (e.g. "USB-C power input"), instantiated with prefixes
+- [ ] Net classes (width, clearance, via size, diff pair) attached at circuit level
+- [ ] ERC: unconnected pins, conflicting drivers, undriven power inputs, single-pin nets, pin-type matrix
+- [ ] Netlist export (KiCad netlist, used for oracle comparison)
+- [ ] Text summaries designed for LLM context (`cadlab circuit summary`)
+
+**Exit:** a full MCU board circuit described via commands, ERC clean, netlist exported.
+
+## M3 — Schematic view and rendering (M)
+
+Details in [RENDERING.md](RENDERING.md).
+
+- [ ] Renderer core: scene → SVG; SVG → PNG (resvg/tiny-skia)
+- [ ] Symbol rendering from part definitions
+- [ ] Schematic auto-layout: group by block, place symbols, route wires orthogonally, use net labels for long or
+      global nets
+- [ ] Optional manual hints (place symbol here, group these) persisted in schematic layer
+- [ ] KiCad `.kicad_sch` export: lets `kicad-cli` run ERC as an oracle, and lets humans open it if they want
+
+**Exit:** `cadlab render schematic -o sch.png` produces a readable schematic of the M2 board.
+
+## M4 — Board setup, placement, DRC, fab outputs (L)
+
+- [ ] Stackup (layer count, copper weights, dielectric), board outline (polygon/arcs), mounting holes
+- [ ] Design rules: clearances, widths, via/drill limits, per net class, IPC class 2/3 presets
+- [ ] Fab profiles ([MANUFACTURING.md](MANUFACTURING.md)): JLCPCB and PCBWay, verified from their published
+      capabilities
+- [ ] Provider-agnostic flow: compatibility targets, `fab check`, `fab compare`, `export fab --fab`, per-fab part
+      resolution with substitution report, `fab-lock.json`
+- [ ] Footprint placement commands: place, move, rotate, flip, align, distribute, lock
+- [ ] Placement helpers: ratsnest computation, "place near", decoupling caps next to pins, initial auto-placement
+- [ ] Manual routing commands: tracks, arcs, vias, by coordinates or "route from pad to pad along path"
+- [ ] Copper zones with fill (thermal reliefs, clearances, islands removal)
+- [ ] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
+      silk over pads, zone min width
+- [ ] Board rendering (per layer, composite, realistic top/bottom)
+- [ ] Outputs: Gerber X2 (+ X3 component data), Excellon/XNC drill, pick-and-place CSV, BOM CSV, IPC-D-356A,
+      archive per fab profile
+- [ ] KiCad `.kicad_pcb` export for oracle tests: KiCad DRC vs cadlab DRC, KiCad Gerbers vs ours (raster XOR)
+- [ ] gerbv oracle: our Gerbers parse and render as expected
+
+**Exit:** the target demo board passes cadlab DRC and the KiCad DRC oracle, and the *same unmodified project*
+exports bundles that pass both JLCPCB's and PCBWay's online checks.
+
+## M5 — Autorouter v1 (L)
+
+Details in [ROUTER.md](ROUTER.md).
+
+- [ ] Specctra DSN import / SES export, implemented from the published Specctra spec (freerouting as benchmark
+      oracle only)
+- [ ] Obstacle model, connection planning (per-net MST), ordering heuristics
+- [ ] Grid-based multi-layer A* maze router with vias, 45° moves
+- [ ] Negotiated-congestion rip-up and reroute
+- [ ] Post-processing: pull-tight, corner smoothing, via reduction
+- [ ] DRC-verified output, progress reporting, cancellation, time budget
+- [ ] `route` commands: whole board, net, net class, between two pads; keep or rip existing tracks
+
+**Exit:** routes typical 2- and 4-layer hobby boards (≤ 200 nets) to 100% with zero DRC errors.
+
+## M6 — Autorouter v2: freerouting parity (XL)
+
+- [ ] Gridless, shape-based router (free-space decomposition, expansion rooms)
+- [ ] Any-angle / 45° optimized output, arc support
+- [ ] Push-and-shove for incremental and interactive (API-driven) routing
+- [ ] BGA/fine-pitch fanout, escape routing
+- [ ] Parallel routing (independent regions/nets) with deterministic merge
+- [ ] Benchmark suite: completion rate, vias, wirelength, runtime vs freerouting
+
+**Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
+
+## M7 — KiCad import and more fabs (M)
+
+KiCad writers and oracle checks already exist from M2–M4. This milestone adds import for migrating user projects.
+
+- [ ] `.kicad_pcb` import, `.kicad_pro` rules import, user `.kicad_sym` / `.kicad_mod` import
+- [ ] KiCad netlist import (circuits come in as netlists; no `.kicad_sch` parser, see DECISIONS D13)
+- [ ] Round-trip and oracle tests on open-source projects fetched in CI
+- [ ] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow
+
+## M8 — Advanced electrical (L)
+
+- [ ] Differential pairs (routing + rules), length/skew matching with meanders
+- [ ] Impedance calculator from stackup (microstrip/stripline) → width per net class
+- [ ] SPICE netlist export (ngspice), simulation hooks
+- [ ] Current/thermal checks (IPC-2152 trace width)
+- [ ] Design lint beyond ERC: missing decoupling, missing pull-ups on I²C, unterminated high-speed nets
+
+## M9 — 3D and advanced rendering (M)
+
+- [ ] Isometric 3D PNG render: board, layers, extruded package bodies generated from package dimensions
+- [ ] STEP/VRML model import for accurate bodies
+- [ ] STEP export of the assembled board
+- [ ] IPC-2581 rev C output; ODB++ if spec terms allow
+- [ ] IDF 3.0 / IDX export for MCAD
+
+---
+
+## Cross-cutting, always on
+
+- **Docs:** every command documented from its schema; examples doubled as tests.
+- **Performance:** benchmarks tracked in CI from M4 on (load, DRC, zone fill, route).
+- **Determinism:** golden files for every exporter and renderer.
+- **Agent ergonomics:** after each milestone, run a scripted agent session that designs a board from a prompt,
+  and fix whatever the agent got stuck on.

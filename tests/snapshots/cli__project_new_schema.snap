@@ -1,0 +1,157 @@
+---
+source: tests/cli.rs
+expression: v
+---
+{
+  "name": "project.new",
+  "summary": "Create a new project directory (written immediately)",
+  "kind": "session",
+  "positional": [
+    "path"
+  ],
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Directory to create the project in (created if missing)."
+      },
+      "name": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Project name. Defaults to the directory name."
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Description."
+      },
+      "targets": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Fab profiles to stay compatible with (adds checks only), e.g. [\"jlcpcb\", \"pcbway\"]."
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "description": "Create a new project directory."
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Project name."
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Description."
+      },
+      "display_units": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "nm",
+            "description": "Nanometer."
+          },
+          {
+            "type": "string",
+            "const": "um",
+            "description": "Micrometer."
+          },
+          {
+            "type": "string",
+            "const": "mm",
+            "description": "Millimeter."
+          },
+          {
+            "type": "string",
+            "const": "cm",
+            "description": "Centimeter."
+          },
+          {
+            "type": "string",
+            "const": "m",
+            "description": "Meter."
+          },
+          {
+            "type": "string",
+            "const": "mil",
+            "description": "Thousandth of an inch."
+          },
+          {
+            "type": "string",
+            "const": "in",
+            "description": "Inch."
+          }
+        ],
+        "description": "Display unit for lengths."
+      },
+      "targets": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Fab compatibility targets."
+      },
+      "metadata": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Metadata."
+      },
+      "path": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Project directory."
+      },
+      "schema_version": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0,
+        "description": "File format version."
+      },
+      "unsaved_changes": {
+        "type": "boolean",
+        "description": "Whether there are unsaved changes."
+      },
+      "undo_depth": {
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0,
+        "description": "Available undo steps."
+      },
+      "redo_depth": {
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0,
+        "description": "Available redo steps."
+      }
+    },
+    "required": [
+      "name",
+      "display_units",
+      "targets",
+      "metadata",
+      "schema_version",
+      "unsaved_changes",
+      "undo_depth",
+      "redo_depth"
+    ],
+    "description": "Project overview: settings plus location and session state."
+  }
+}

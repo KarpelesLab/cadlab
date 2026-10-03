@@ -1,0 +1,48 @@
+[package]
+name = "cadlab"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.89"
+description = "Headless electronics CAD for programs and AI agents: parts, circuits, boards, routing, fab outputs."
+license = "MIT"
+repository = "https://github.com/KarpelesLab/cadlab"
+keywords = ["eda", "pcb", "cad", "electronics", "mcp"]
+categories = ["science", "command-line-utilities"]
+
+[features]
+default = ["cli"]
+# The `cadlab` binary (CLI + MCP server). Library users can disable it to avoid the CLI dependencies.
+cli = ["dep:clap"]
+
+[[bin]]
+name = "cadlab"
+path = "src/bin/cadlab/main.rs"
+required-features = ["cli"]
+# The library has the same name; only document the library.
+doc = false
+
+[dependencies]
+# Until polyclip 0.1 is on crates.io, pin the git repository (exact rev is in Cargo.lock).
+polyclip = { git = "https://github.com/KarpelesLab/polyclip", features = ["serde"] }
+
+indexmap = { version = "2.14", features = ["serde"] }
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+strsim = "0.11"
+thiserror = "2"
+toml = "1.1"
+
+clap = { version = "4.6", features = ["derive", "string"], optional = true }
+
+[dev-dependencies]
+insta = { version = "1.49", features = ["json"] }
+proptest = "1"
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"

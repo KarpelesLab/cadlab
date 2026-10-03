@@ -1,0 +1,5 @@
+schema_version = 1
+name = "demo"
+description = "Golden test project"
+display_units = "mm"
+next_id = 1

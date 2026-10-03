@@ -1,0 +1,35 @@
+# cargo-deny configuration: cadlab is MIT, so every dependency must be under a permissive,
+# MIT-compatible license. No GPL/LGPL/AGPL (DECISIONS D7).
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Until polyclip is released on crates.io.
+allow-git = ["https://github.com/KarpelesLab/polyclip"]
+
+[advisories]
+yanked = "deny"
