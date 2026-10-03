@@ -261,6 +261,39 @@ pub fn outline_origin(p: &Project) -> Option<Point> {
     Some(Point::new(Nm(x), Nm(y)))
 }
 
+/// Refdes text height on the legend.
+const REFDES_SIZE: Nm = Nm(1_000_000);
+/// Gap between the courtyard and the refdes text.
+const REFDES_GAP: Nm = Nm(300_000);
+
+/// A reference designator as printed on the legend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefdesText {
+    /// Text center.
+    pub at: Point,
+    /// Cap height.
+    pub size: Nm,
+    /// Stroke width.
+    pub width: Nm,
+}
+
+/// Where the legend prints a footprint's reference designator: upright (mirrored on the
+/// bottom side), centered above the placed courtyard's bounding box, or on the footprint
+/// origin without a courtyard. `None` when the footprint is not placed or unknown. The KiCad
+/// export places its Reference field the same way, so both show the same legend.
+pub fn refdes_text(p: &Project, refdes: &str) -> Option<RefdesText> {
+    let pf = p.board().footprints.get(refdes)?;
+    let fp = footprint_for(p, refdes)?;
+    let tf = board::transform(pf);
+    let cy: Vec<Point> = fp.courtyard.iter().map(|&q| tf(q)).collect();
+    let at = match (cy.iter().map(|q| q.x).min(), cy.iter().map(|q| q.x).max(), cy.iter().map(|q| q.y).max()) {
+        (Some(x0), Some(x1), Some(top)) => Point::new(Nm((x0.0 + x1.0) / 2), top + REFDES_GAP + Nm(REFDES_SIZE.0 / 2)),
+        _ => pf.at,
+    };
+    let width = p.board().rules.min_silk_width.max(Nm(150_000));
+    Some(RefdesText { at, size: REFDES_SIZE, width })
+}
+
 /// Whether `pad` is a heat-sink (exposed) pad: an SMD pad with its own paste windows.
 pub(crate) fn is_heatsink(pad: &Pad) -> bool {
     matches!(pad.paste, Some(crate::model::footprint::Paste::Windows { .. }))

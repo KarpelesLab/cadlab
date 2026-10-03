@@ -109,7 +109,7 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Outputs per fab profile: file naming/layout, CPL columns and rotation offsets, archive (`fab.export`)
 - [x] KiCad `.kicad_pcb` export for oracle tests (`board.export_kicad`, with `.kicad_pro`/`.kicad_dru`; KiCad DRC,
       IPC-D-356 and Gerber oracle in `tests/kicad_pcb_oracle.rs`)
-- [ ] Cross-checks: KiCad DRC vs cadlab DRC on the same boards, KiCad Gerbers vs ours (raster XOR)
+- [x] Cross-checks: KiCad DRC vs cadlab DRC on the same boards, KiCad Gerbers vs ours (raster XOR)
 - [x] gerbv oracle: our Gerbers parse and render as expected (`tests/gerber_oracle.rs`, pixel probes)
 
 **Exit:** the target demo board passes cadlab DRC and the KiCad DRC oracle, and the *same unmodified project*

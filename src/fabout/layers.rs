@@ -441,11 +441,6 @@ fn graphics(ctx: &Ctx<'_>, g: &mut Gerber, layer: &str, function: &str, openings
     emit_clipped(g, &strokes, openings, function);
 }
 
-/// Refdes text height on the legend.
-const REFDES_SIZE: Nm = Nm(1_000_000);
-/// Gap between the courtyard and the refdes text.
-const REFDES_GAP: i64 = 300_000;
-
 fn legend(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
     let function = format!("Legend,{}", side_name(side));
     let mut g = ctx.gerber(&function, Polarity::Positive);
@@ -462,7 +457,6 @@ fn legend(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
             Some((poly, ((bb.min.x, bb.min.y), (bb.max.x, bb.max.y))))
         })
         .collect();
-    let width = ctx.p.board().rules.min_silk_width.0.max(150_000);
     for (refdes, pf) in &ctx.p.board().footprints {
         if pf.side != side {
             continue;
@@ -488,15 +482,9 @@ fn legend(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
             }
         }
         // Reference designator above the courtyard.
-        let cy: Vec<Xy> = fp.courtyard.iter().map(|&q| xy(tf(q))).collect();
-        let anchor = if cy.is_empty() {
-            pf.at
-        } else {
-            let (x0, x1) = (cy.iter().map(|p| p.0).min().unwrap_or(0), cy.iter().map(|p| p.0).max().unwrap_or(0));
-            let top = cy.iter().map(|p| p.1).max().unwrap_or(0);
-            Point::new(Nm((x0 + x1) / 2), Nm(top + REFDES_GAP + REFDES_SIZE.0 / 2))
-        };
-        strokes.extend(text_strokes(refdes, anchor, REFDES_SIZE, Angle::ZERO, side == BoardSide::Bottom, width));
+        if let Some(t) = super::refdes_text(ctx.p, refdes) {
+            strokes.extend(text_strokes(refdes, t.at, t.size, Angle::ZERO, side == BoardSide::Bottom, t.width.0));
+        }
         g.attrs(&[(".C", field(refdes))]);
         emit_clipped(&mut g, &strokes, &openings, "Material");
     }

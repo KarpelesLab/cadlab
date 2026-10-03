@@ -45,6 +45,43 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  oracles:
+    name: Oracle tests (KiCad 10, gerbv)
+    runs-on: ubuntu-24.04
+    # Informative for now: KiCad comes from a Launchpad PPA (not pinned to a patch release, and a
+    # few minutes to install). Make it blocking once it has proven stable (docs/TESTING.md).
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: oracles
+      - name: Install KiCad 10 and gerbv
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
+          sudo apt-get update
+          # No recommends: the symbol/footprint/3D libraries are not needed (and are large).
+          sudo apt-get install --yes --no-install-recommends kicad gerbv xvfb xauth
+          kicad-cli version
+          gerbv --version
+      - name: Oracle tests
+        env:
+          CADLAB_ORACLES: "1"
+        # xvfb: gerbv (GTK) may want a display even when exporting.
+        run: >-
+          xvfb-run -a cargo test --all-features
+          --test oracle --test kicad_oracle --test kicad_pcb_oracle --test gerber_oracle
+          --test drc_crosscheck --test gerber_crosscheck -- --nocapture
+      - name: Keep reports and renders
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-outputs
+          path: target/tmp/
+          if-no-files-found: ignore
+
   msrv:
     name: MSRV (1.89)
     runs-on: ubuntu-latest
