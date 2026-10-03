@@ -144,11 +144,10 @@ fn clean_board_passes_both_fabs() {
         let o = exec(&r, &mut s, "fab.check", json!({"fab": fab}));
         assert_eq!(o["output"]["errors"], 0, "{fab}: {:#}", o["diagnostics"]);
         assert!(o["output"]["process"].is_string());
-        // No suppliers in a fresh session; generated footprints draw 0.12 mm silk lines, below
-        // the fabs' 0.15 mm minimum.
-        let mut w = codes(&o, "warning");
-        w.sort();
-        assert_eq!(w, ["fab.no_suppliers", "fab.silk_width"], "{fab}: {:#}", o["diagnostics"]);
+        // No suppliers in a fresh session. Generated footprints use 0.15 mm silk lines, which
+        // every profile accepts.
+        let w = codes(&o, "warning");
+        assert_eq!(w, ["fab.no_suppliers"], "{fab}: {:#}", o["diagnostics"]);
     }
     let o = exec(&r, &mut s, "fab.check", json!({"fab": "jlcpcb", "parts": false}));
     assert_eq!(o["output"]["process"], "two-layer");
