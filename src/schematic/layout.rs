@@ -446,7 +446,7 @@ pub fn layout(p: &Project, hints: &Hints) -> SheetLayout {
 
     // Choose the paper and place the content at its top-left, keeping KiCad's grid (Y down from
     // the top edge) aligned.
-    let margin = 4 * G;
+    let margin = 5 * G;
     let title_h = nm(16.0);
     let (cw, ch) = if bounds.0 == i64::MAX { (0, 0) } else { (bounds.2 - bounds.0, bounds.3 - bounds.1) };
     let papers =
@@ -466,7 +466,10 @@ pub fn layout(p: &Project, hints: &Hints) -> SheetLayout {
     out.wires = out.wires.into_iter().map(|(a, b)| (shift(a, o), shift(b, o))).collect();
     out.labels = out.labels.into_iter().map(|l| Label { at: shift(l.at, o), ..l }).collect();
     out.no_connects = out.no_connects.into_iter().map(|p| shift(p, o)).collect();
-    for (r, pl) in hinted_at {
+    for (r, mut pl) in hinted_at {
+        // Keep pins on the 1.27 mm grid measured from the top edge (KiCad's origin).
+        let half = G / 2;
+        pl.at.y = Nm(h - ((h - pl.at.y.0) as f64 / half as f64).round() as i64 * half);
         out.placements.insert(r.clone(), pl);
         for (num, end, d) in pin_ends(&comps[&r].sym, &pl) {
             let pin = PinRef::new(r.clone(), num);
