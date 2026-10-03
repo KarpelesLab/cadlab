@@ -17,6 +17,8 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
+# The allow list covers licenses common in the Rust ecosystem, not only those used today.
+unused-allowed-license = "allow"
 
 [licenses.private]
 ignore = true

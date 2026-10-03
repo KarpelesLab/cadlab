@@ -1,0 +1,2 @@
+# cadlab writes LF everywhere; golden files and snapshots must compare byte-for-byte on every OS.
+* text=auto eol=lf
