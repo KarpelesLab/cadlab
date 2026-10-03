@@ -304,3 +304,61 @@ fn project_fill_edges_priorities_keepouts() {
     assert_eq!(zi.len(), 3);
     assert_eq!(zi[0].item.to_string(), "zone#10@F.Cu/0");
 }
+
+/// Later zones of a layer reuse earlier fills grown by their keep-away distance; the reuse is
+/// keyed by fill and distance, so zones with different clearances get their own.
+#[test]
+fn grown_fills_match_fresh_offsets() {
+    let mut p = Project::new("t");
+    let b = p.board_mut();
+    let pt = |x: i64, y: i64| Point::new(Nm(x * MM), Nm(y * MM));
+    let line = |x, y| Segment::Line { to: pt(x, y) };
+    b.outline.contours =
+        vec![Contour { start: pt(0, 0), segments: vec![line(30, 0), line(30, 20), line(0, 20), line(0, 0)] }];
+    let all = vec![pt(-5, -5), pt(35, -5), pt(35, 25), pt(-5, 25)];
+    b.zones.push(zone(10, "A", &["F.Cu"], vec![pt(2, 2), pt(12, 2), pt(12, 18), pt(2, 18)], 3, None));
+    let right = vec![pt(14, 2), pt(28, 2), pt(28, 18), pt(14, 18)];
+    b.zones.push(zone(11, "B", &["F.Cu"], right, 2, Some(Nm::from_um(400))));
+    b.zones.push(zone(12, "C", &["F.Cu"], all.clone(), 1, Some(Nm::from_um(300))));
+    b.zones.push(zone(13, "D", &["F.Cu"], all, 0, None));
+    for (i, (net, x, y)) in [("A", 5, 5), ("B", 20, 5), ("C", 13, 10), ("D", 13, 1)].into_iter().enumerate() {
+        b.vias.push(Via {
+            id: ObjectId(20 + i as u64),
+            at: pt(x, y),
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some(net.into()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        });
+    }
+    let base = crate::board::base_copper_items(&p);
+    let fills = fill_zones_uncached(&p, &base);
+    assert_eq!(fills.len(), 4);
+    assert!(fills.iter().all(|f| f.error.is_none() && !f.fill.is_empty()), "{fills:?}");
+    // Reference: each lower zone filled with freshly grown higher-priority fills.
+    let area = board_area(&p, p.board().rules.copper_to_edge).unwrap();
+    let items_on: Vec<(&CopperItem, Nm)> =
+        base.iter().filter(|it| it.layers.iter().any(|l| l == "F.Cu")).map(|it| (it, Nm::ZERO)).collect();
+    for k in 1..fills.len() {
+        let z = &p.board().zones[k];
+        let prm = zone_params(&p, z);
+        let mut keepaway = Vec::new();
+        for f in &fills[..k] {
+            let c = prm.clearance.max(f.clearance).0 + SAFETY;
+            keepaway.extend(poly::offset(&f.fill, c, Join::Round, OBSTACLE_TOL).unwrap());
+        }
+        let outline: Vec<poly::Point> = z.outline.iter().map(|&q| q.into()).collect();
+        let want = fill_layer(&LayerInput {
+            net: z.net.as_deref(),
+            outline: &outline,
+            board: area.as_ref(),
+            items: items_on.clone(),
+            keepaway,
+            params: prm,
+        })
+        .unwrap();
+        assert_eq!(fills[k].fill, want, "zone {}", z.name);
+    }
+}

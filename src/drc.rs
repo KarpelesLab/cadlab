@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use polyclip::{Circle, EndCap, FillRule, Geometry, Join, Op, Path, Polygon, PolygonSet, Rect, Ring};
 
+use crate::board::prepared::{self, Prepared};
 use crate::board::{self as geo, COPPER_TOL, CopperItem};
 use crate::diag::Diagnostic;
 use crate::geom::Point;
@@ -51,7 +52,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     courtyard_rules(&courtyards, outline.as_ref(), &mut out);
     silk_to_pads(&ctx, &pads, &mut out);
     keepouts(&ctx, &courtyards, &mut out);
-    unrouted(p, &mut out);
+    unrouted(&items, &mut out);
     out.sort_by(|a, b| {
         let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
         (a.code.as_ref(), loc(a), &a.message).cmp(&(b.code.as_ref(), loc(b), &b.message))
@@ -219,6 +220,23 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
     let clear: Vec<i64> = items.iter().map(|it| ctx.clearance(it.net.as_deref()).0).collect();
     let max_clear = clear.iter().copied().max().unwrap_or(0);
     let labels: Vec<String> = items.iter().map(|it| it.item.to_string()).collect();
+    // Large shapes (zone fills) are indexed once; queries against them give the same answers.
+    let prep: Vec<Option<Prepared>> = items
+        .iter()
+        .map(|it| {
+            (prepared::segment_count(&it.shape) >= prepared::PREPARE_MIN_SEGMENTS).then(|| Prepared::new(&it.shape))
+        })
+        .collect();
+    let close = |i: usize, j: usize, d: i64| match (&prep[i], &prep[j]) {
+        (_, Some(pj)) => pj.distance_less_than(&items[i].shape, d),
+        (Some(pi), None) => pi.distance_less_than(&items[j].shape, d),
+        (None, None) => polyclip::distance_less_than(&items[i].shape, &items[j].shape, d),
+    };
+    let touch = |i: usize, j: usize| match (&prep[i], &prep[j]) {
+        (_, Some(pj)) => pj.intersects(&items[i].shape),
+        (Some(pi), None) => pi.intersects(&items[j].shape),
+        (None, None) => polyclip::intersects(&items[i].shape, &items[j].shape),
+    };
     for (i, j) in near_pairs(&boxes, max_clear) {
         let (a, b) = (&items[i], &items[j]);
         let shared = masks[i] & masks[j];
@@ -231,12 +249,12 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
             continue;
         }
         let limit = (required - TOLERANCE.0).max(1);
-        if !polyclip::distance_less_than(&a.shape, &b.shape, limit) {
+        if !close(i, j, limit) {
             continue;
         }
         let layer = ctx.layer_name(shared);
         let (la, lb) = (&labels[i], &labels[j]);
-        let mut d = if polyclip::intersects(&a.shape, &b.shape) {
+        let mut d = if touch(i, j) {
             let at = gap(&a.shape, &b.shape).map(|g| g.1).unwrap_or(a.anchor);
             let msg = match (&a.net, &b.net) {
                 (Some(na), Some(nb)) => format!("short between net {na} ({la}) and net {nb} ({lb}) on {layer}"),
@@ -454,6 +472,8 @@ struct BoardShape {
     cutouts: Vec<Ring>,
     /// Every contour as a closed path (the board edges).
     edges: Vec<Path>,
+    /// The outer contour, counter-clockwise, when it is a simple convex polygon.
+    convex: Option<Ring>,
 }
 
 impl BoardShape {
@@ -468,13 +488,44 @@ impl BoardShape {
         let outer = rings.next()?;
         let cutouts: Vec<Ring> = rings.collect();
         let edges = std::iter::once(&outer).chain(&cutouts).map(|r| Path::from(r.clone())).collect();
-        Some(BoardShape { outer, cutouts, edges })
+        let convex = convex_ccw(&outer);
+        Some(BoardShape { outer, cutouts, edges, convex })
     }
 
     /// Whether a region lies outside the board or overlaps a cutout.
     fn outside<G: Geometry + polyclip::RingSource + ?Sized>(&self, g: &G) -> bool {
-        !polyclip::contains(&self.outer, g) || self.cutouts.iter().any(|c| overlap(c, g).is_some())
+        // A region lies in the convex hull of its vertices: when they are all in a convex outer
+        // contour, so is the region (what `contains` would find, without building an
+        // arrangement of a possibly huge zone fill). Otherwise ask `contains`.
+        let inside = self.convex.as_ref().is_some_and(|c| {
+            let mut all = true;
+            g.visit_segments(&mut |p, _| {
+                all = all && in_convex(c, p);
+            });
+            all
+        });
+        !(inside || polyclip::contains(&self.outer, g)) || self.cutouts.iter().any(|c| overlap(c, g).is_some())
     }
+}
+
+/// `r` oriented counter-clockwise, if it is a valid (simple) convex polygon ring.
+fn convex_ccw(r: &Ring) -> Option<Ring> {
+    let mut r = r.clone();
+    if !r.is_ccw() {
+        r.reverse_orientation();
+    }
+    let n = r.0.len();
+    if n < 3 || polyclip::validate_set(&[Polygon::new(r.clone(), vec![])]).is_err() {
+        return None;
+    }
+    let v = &r.0;
+    (0..n).all(|i| polyclip::predicates::orient(v[i], v[(i + 1) % n], v[(i + 2) % n]) >= 0).then_some(r)
+}
+
+/// Whether `p` lies in the closed convex polygon `c` (counter-clockwise), exactly.
+fn in_convex(c: &Ring, p: polyclip::Point) -> bool {
+    let v = &c.0;
+    (0..v.len()).all(|i| polyclip::predicates::orient(v[i], v[(i + 1) % v.len()], p) >= 0)
 }
 
 /// Copper outside the board, in cutouts or too close to an edge.
@@ -707,8 +758,8 @@ fn keepouts(ctx: &Ctx, cy: &BTreeMap<String, (Ring, BoardSide)>, out: &mut Vec<D
     }
 }
 
-fn unrouted(p: &Project, out: &mut Vec<Diagnostic>) {
-    for l in geo::ratsnest(p) {
+fn unrouted(items: &[CopperItem], out: &mut Vec<Diagnostic>) {
+    for l in geo::ratsnest_items(items) {
         out.push(
             Diagnostic::error(
                 "drc.unrouted",

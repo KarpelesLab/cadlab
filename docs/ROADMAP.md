@@ -169,7 +169,9 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 ## Cross-cutting, always on
 
 - **Docs:** every command documented from its schema; examples doubled as tests.
-- **Performance:** benchmarks tracked in CI from M4 on (load, DRC, zone fill, route).
+- **Performance:** benchmarks tracked in CI from M4 on (load, DRC, zone fill, route). A synthetic 500-component,
+  four-layer board and timings of every heavy operation exist (`cargo run --release --example bigboard`,
+  `tests/perf.rs`; numbers in docs/BOARD.md "Performance"); tracking them in CI is still to do.
 - **Determinism:** golden files for every exporter and renderer.
 - **Agent ergonomics:** after each milestone, run a scripted agent session that designs a board from a prompt,
   and fix whatever the agent got stuck on.
