@@ -340,7 +340,7 @@ impl Command for ExportDsn {
             protect_all: self.protect_existing,
         };
         let out = crate::specctra::export::export(p, &name, &opts);
-        let mut path = resolve(ctx, self.path.as_deref(), Path::new("out/route").join(format!("{name}.dsn")));
+        let mut path = resolve(ctx, self.path.as_deref(), Path::new("out").join("route").join(format!("{name}.dsn")));
         if path.extension().is_none_or(|e| e != "dsn") {
             let mut s = path.into_os_string();
             s.push(".dsn");

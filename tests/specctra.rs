@@ -98,8 +98,8 @@ fn dsn_golden_and_round_trip() {
     let dir = new_project(&r, &mut s, "tiny");
     attiny_board(&r, &mut s);
     let o = exec(&r, &mut s, "export.dsn", json!({}));
-    let path = dir.path().join("tiny/out/route/tiny.dsn");
-    assert_eq!(o["output"]["path"], path.display().to_string());
+    let path = dir.path().join("tiny").join("out").join("route").join("tiny.dsn");
+    assert_eq!(std::path::Path::new(o["output"]["path"].as_str().unwrap()), path);
     assert_eq!(o["output"]["components"], 12, "10 parts and 2 holes");
     assert_eq!(o["output"]["protected"], 1);
     let text = std::fs::read_to_string(&path).unwrap();
