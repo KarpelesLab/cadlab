@@ -75,7 +75,7 @@ fn render(gerbv: &Path, file: &Path, out: &Path) -> Image {
         .expect("running gerbv");
     let stderr = String::from_utf8_lossy(&o.stderr);
     assert!(o.status.success(), "gerbv failed on {}: {stderr}", file.display());
-    assert!(stderr.trim().is_empty(), "gerbv diagnostics for {}:\n{stderr}", file.display());
+    assert!(stderr.lines().all(common::oracle::gerbv_noise), "gerbv diagnostics for {}:\n{stderr}", file.display());
     decode(out)
 }
 

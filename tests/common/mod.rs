@@ -71,6 +71,18 @@ pub mod oracle {
         std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file())
     }
 
+    /// Whether a gerbv stderr line is noise rather than a problem. gerbv releases before 2.11
+    /// (Ubuntu's) log every Gerber X2 attribute command (`%TF`, `%TA`, `%TO`, `%TD`) as an unknown
+    /// extension; attributes are metadata a reader may ignore, so those lines are not diagnostics.
+    #[allow(dead_code)]
+    pub fn gerbv_noise(line: &str) -> bool {
+        let l = line.trim();
+        l.is_empty()
+            || ["%TF%", "%TA%", "%TO%", "%TD%"]
+                .iter()
+                .any(|t| l.contains(&format!("Unknown RS-274X extension found {t}")))
+    }
+
     /// Runs an oracle and returns stdout, panicking with stderr on failure.
     pub fn run(program: &std::path::Path, args: &[&str]) -> String {
         let out =

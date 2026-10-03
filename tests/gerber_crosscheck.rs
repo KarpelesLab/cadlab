@@ -137,7 +137,7 @@ fn render(gerbv: &Path, win: &Window, file: &Path, out: &Path) -> Image {
     // gerbv guesses that a Gerber file without any aperture is RS-274D; both tools write empty
     // layers that way (header, no objects, M02).
     let empty = !std::fs::read_to_string(file).unwrap().contains("%ADD");
-    let noise = |l: &str| l.trim().is_empty() || (empty && l.contains("Most likely found a RS-274D file"));
+    let noise = |l: &str| oracle::gerbv_noise(l) || (empty && l.contains("Most likely found a RS-274D file"));
     assert!(stderr.lines().all(noise), "gerbv diagnostics for {}:\n{stderr}", file.display());
     Image::load(out)
 }
