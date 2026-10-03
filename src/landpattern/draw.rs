@@ -91,7 +91,15 @@ pub(super) fn finish(
 
     // Silkscreen: the body outline (inner stroke edge on the body edge), minus keep-outs around pads.
     let half = Nm(opts.silk_width.0 / 2);
-    let sb = grow(bb, half);
+    let mut sb = grow(bb, half);
+    // Every pad under the body (BGA): move the outline out to clear the pads rather than clipping
+    // it into slivers between them.
+    let inside = |b: BBox| b.min.x >= bb.min.x && b.min.y >= bb.min.y && b.max.x <= bb.max.x && b.max.y <= bb.max.y;
+    if !pads.is_empty() && pads.iter().all(|p| inside(pad_box(p, Nm::ZERO))) {
+        for p in &pads {
+            sb = union(sb, pad_box(p, opts.silk_clearance + half * 2));
+        }
+    }
     let outline: Vec<Point> = {
         let mut r = rect(sb.min, sb.max);
         r.push(r[0]);
@@ -121,7 +129,7 @@ pub(super) fn finish(
     }
 
     // Pin-1 dot, left of pad 1 and clear of all pads.
-    if pin1_marker && let Some(p1) = pads.iter().find(|p| p.number == "1") {
+    if pin1_marker && let Some(p1) = pads.iter().find(|p| p.number == "1" || p.number == "A1") {
         let b = pad_box(p1, Nm::ZERO);
         let r = opts.silk_width;
         let mut center = Point::new(b.min.x - opts.silk_clearance - r * 2, p1.at.y);

@@ -91,7 +91,11 @@ dimensions, cadlab produces a correct land pattern (`src/landpattern/`).
   P = 0.025 mm, 0.01 mm rounding; all configurable), at Most/Nominal/Least density.
 - Families today: chip (0201–2512, resistor/capacitor/inductor/LED/diode/fuse), gull-wing two-row (SOIC, SOP,
   TSSOP, MSOP, SOT-23-3/5/6 with unpopulated slots), QFP, DFN/SON, QFN (exposed pad with paste windows), THT pin
-  headers. Planned: SOT-223/DPAK (tab), SOD/MELF, molded bodies (SMA/SMB), BGA, DIP, terminal blocks.
+  headers, leads + tab (SOT-223 with tab = pad 4; DPAK/TO-252 and D2PAK/TO-263 with leads 1, 3 and tab = pad 2,
+  the cut middle lead), SOD (SOD-123/323 gull-wing, SOD-123F/523 flat lead `SODFL`), MELF/MiniMELF, molded
+  bodies (SMA/SMB/SMC, molded tantalum `CAPMP`), DIP (300/600 mil, pin 1 square, counter-clockwise), BGA
+  (collapsing balls, JEDEC row letters, depopulated list or center void). Diodes: pad 1 = cathode, on the left.
+  Planned: terminal blocks.
 - Outputs: pads, paste windows, courtyard, silkscreen clipped around pads (via polyclip), fab outline with pin-1
   chamfer, pin-1 dot, body dimensions for 3D.
 - Names follow IPC-7351 (`RESC1005X40N`, `SOIC127P600X175-8N`, `QFN50P500X500X90-33N`). Common names (`0402`,
@@ -99,7 +103,12 @@ dimensions, cadlab produces a correct land pattern (`src/landpattern/`).
   JEDEC/EIA dimensions (`landpattern::packages`); for anything else, pass the datasheet dimensions as a
   `PackageSpec` (`"0.15..0.35mm"`, `"1.0±0.05mm"`).
 - **To verify:** the fillet goal table (`src/landpattern/ipc.rs`) follows IPC-7351B as best known; review it
-  against the standard. A SOIC-8 computed with it matches widely used IPC-derived footprints to 0.01 mm.
+  against the standard. A SOIC-8 computed with it matches widely used IPC-derived footprints to 0.01 mm. Newer
+  rows to review: flat lead, molded body (outer/inner goals mapped from IPC's heel/toe at the bend), MELF, the
+  BGA land reduction (25/20/15 % by ball size, same land at all densities) and BGA courtyard; also the typical
+  dimensions for SOD-123F, SOD-523, DPAK/D2PAK tab solderable length and DIP body sizes in `packages.rs`.
+- Parametric BGA names: `BGA-64 8x8 P0.8mm 6x6mm` (pins, columns x rows, pitch, body), optional `B0.45mm` ball,
+  `H1.2mm` height, `VOID2x2` empty center block; the pin count must match the populated balls.
 
 ## Symbol generation
 

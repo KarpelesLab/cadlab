@@ -3,10 +3,12 @@
 //! A [`PackageSpec`] describes a package from its datasheet dimensions (with tolerances); the
 //! generator computes pads, courtyard, silkscreen and fabrication outline, and names the result
 //! with the IPC-7351 naming convention (`RESC1005X40N`, `SOIC127P600X175-8N`,
-//! `QFN50P500X500X90-33N`). [`packages::parse`] turns common package names (`0402`, `SOT-23-5`,
-//! `SOIC-8`, `QFN-32 5x5mm P0.5mm EP3.1mm`) into specs.
+//! `QFN50P500X500X90-33N`, `SOT230P700X180-4N`, `DIOM5226X230N`, `BGA64C80P8X8_600X600X120N`).
+//! [`packages::parse`] turns common package names (`0402`, `SOT-23-5`, `SOIC-8`, `SOT-223`,
+//! `SMA`, `DIP-8`, `QFN-32 5x5mm P0.5mm EP3.1mm`, `BGA-64 8x8 P0.8mm 6x6mm`) into specs.
 //!
-//! Coordinates are IPC zero orientation, origin at the package center, Y up.
+//! Coordinates are IPC zero orientation, origin at the package (molded body) center, Y up.
+//! Two-terminal polarized parts (diodes) have pad 1 = cathode on the left (−X).
 
 mod draw;
 mod ipc;
@@ -21,7 +23,9 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::geom::Point;
-use crate::model::footprint::{Body, Footprint, Mount, Pad, PadKind, PadShape, Paste};
+use crate::model::footprint::{
+    Body, Footprint, Graphic, GraphicGeometry, GraphicLayer, Mount, Pad, PadKind, PadShape, Paste,
+};
 use crate::units::{Nm, UnitError};
 
 /// IPC-7351 density level.
@@ -179,6 +183,30 @@ impl ChipKind {
     fn polarized(self) -> bool {
         matches!(self, ChipKind::Led | ChipKind::Diode)
     }
+
+    /// Three-letter body type: `RES`, `CAP`, `DIO`, ...
+    fn base(self) -> &'static str {
+        &self.prefix()[..3]
+    }
+
+    /// Molded-body prefix; molded capacitors are polarized tantalums (`CAPMP`).
+    fn molded_prefix(self) -> String {
+        match self {
+            ChipKind::Capacitor => "CAPMP".into(),
+            k => format!("{}M", k.base()),
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            ChipKind::Resistor => "Resistor",
+            ChipKind::Capacitor => "Capacitor",
+            ChipKind::Inductor => "Inductor",
+            ChipKind::Led => "LED",
+            ChipKind::Diode => "Diode",
+            ChipKind::Fuse => "Fuse",
+        }
+    }
 }
 
 /// Exposed (thermal) pad under the package.
@@ -192,6 +220,17 @@ pub struct ExposedPad {
     /// Pad number (default: one more than the last pin).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number: Option<u32>,
+}
+
+/// Lead form of a small-outline diode (SOD).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SodLead {
+    /// Leads bent down like gull wings (SOD-123, SOD-323); IPC prefix `SOD`.
+    #[default]
+    GullWing,
+    /// Flat leads leaving the body bottom without a bend (SOD-123F, SOD-523); IPC prefix `SODFL`.
+    Flat,
 }
 
 /// Package description, from datasheet dimensions.
@@ -311,6 +350,145 @@ pub enum PackageSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exposed_pad: Option<ExposedPad>,
     },
+    /// Gull-wing leads on one side and a wide tab on the other: SOT-223, DPAK (TO-252),
+    /// D2PAK (TO-263).
+    ///
+    /// Leads are on the left (−X) numbered top to bottom by position, so a missing middle lead
+    /// keeps the numbers of the others (DPAK: leads 1 and 3); the tab is on the right. The origin
+    /// is the center of the molded body.
+    Tab {
+        /// IPC family name: `SOT` (SOT-223) or `TO` (DPAK, D2PAK).
+        #[serde(default = "default_sot")]
+        name: String,
+        /// Lead positions on the lead side, including missing ones.
+        leads: u32,
+        /// Lead pitch.
+        pitch: Nm,
+        /// Overall span, lead toe to tab end (H / HE).
+        span: Dim,
+        /// Molded body size along the lead axis (X).
+        body_width: Dim,
+        /// Molded body size across the leads (Y).
+        body_length: Dim,
+        /// Lead foot length (L).
+        terminal: Dim,
+        /// Lead width (b).
+        lead_width: Dim,
+        /// Solderable tab width, across the lead axis (Y).
+        tab_width: Dim,
+        /// Solderable tab length along the lead axis, measured inward from the tab end.
+        tab_terminal: Dim,
+        /// How far the tab end protrudes beyond the molded body (DPAK L3). Absent: the span is
+        /// centered on the body and the tab is formed like the leads (SOT-223).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_protrusion: Option<Dim>,
+        /// Maximum height.
+        height: Nm,
+        /// Lead positions (1-based, top to bottom) without a lead; their number is not reused.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        missing: Vec<u32>,
+        /// Tab pad number (default: one more than the lead positions, SOT-223 tab = 4). DPAK and
+        /// D2PAK use the number of the cut middle lead (2), which the tab is connected to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_number: Option<u32>,
+    },
+    /// Small-outline two-terminal diode: SOD-123, SOD-323, SOD-523, SOD-123F. Pad 1 = cathode.
+    Sod {
+        /// Lead form; selects the IPC fillet goals and the `SOD`/`SODFL` prefix.
+        #[serde(default)]
+        lead: SodLead,
+        /// Lead span, toe to toe (along X).
+        span: Dim,
+        /// Body size along the lead axis (X).
+        body_length: Dim,
+        /// Body size across the lead axis (Y); used in the IPC name.
+        body_width: Dim,
+        /// Lead foot length (L).
+        terminal: Dim,
+        /// Lead width (b).
+        lead_width: Dim,
+        /// Maximum height.
+        height: Nm,
+    },
+    /// Molded body with leads folded under it: SMA, SMB, SMC (DO-214AC/AA/AB), molded tantalum.
+    /// Pad 1 = cathode (or + for capacitors).
+    Molded {
+        /// Body type (default diode; `DIOM`, `CAPMP`, `INDM`, ...).
+        #[serde(default = "default_diode")]
+        kind: ChipKind,
+        /// Overall length, terminal end to terminal end (along X).
+        length: Dim,
+        /// Molded body length along X (for the outline).
+        body_length: Dim,
+        /// Body width (Y).
+        width: Dim,
+        /// Terminal length under the body (L).
+        terminal: Dim,
+        /// Terminal width (b).
+        lead_width: Dim,
+        /// Maximum height.
+        height: Nm,
+    },
+    /// Cylindrical body with end caps: MELF (DO-213AB), MiniMELF (DO-213AA / SOD-80).
+    Melf {
+        /// Body type (default diode, pad 1 = cathode; `DIOMELF`, `RESMELF`, ...).
+        #[serde(default = "default_diode")]
+        kind: ChipKind,
+        /// Body length, end cap to end cap.
+        length: Dim,
+        /// Body diameter.
+        diameter: Dim,
+        /// End cap length.
+        terminal: Dim,
+    },
+    /// Through-hole dual in-line package: DIP/PDIP, 300 or 600 mil rows.
+    Dip {
+        /// Number of pins (even).
+        pins: u32,
+        /// Pin pitch along the rows.
+        #[serde(default = "default_header_pitch")]
+        pitch: Nm,
+        /// Distance between the two rows, center to center (7.62 or 15.24 mm).
+        #[serde(default = "default_dip_rows")]
+        row_spacing: Nm,
+        /// Body width across the rows (E1).
+        body_width: Dim,
+        /// Body length along the rows (D).
+        body_length: Dim,
+        /// Maximum height above the board (A).
+        height: Nm,
+        /// Finished hole diameter.
+        #[serde(default = "default_dip_drill")]
+        drill: Nm,
+        /// Pad diameter (pin 1 square).
+        #[serde(default = "default_dip_pad")]
+        pad: Nm,
+    },
+    /// Ball grid array with collapsing balls. Balls are named by JEDEC row letter (A, B, ... Y,
+    /// AA, ...; I, O, Q, S, X, Z skipped) from the top and column number from the left: A1 is
+    /// the top-left ball.
+    Bga {
+        /// Ball rows (along Y).
+        rows: u32,
+        /// Ball columns (along X).
+        cols: u32,
+        /// Ball pitch.
+        pitch: Nm,
+        /// Ball diameter.
+        ball: Dim,
+        /// Body size along X.
+        body_x: Dim,
+        /// Body size along Y.
+        body_y: Dim,
+        /// Maximum height.
+        height: Nm,
+        /// Depopulated balls by name (`"A1"`, `"E5"`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        missing: Vec<String>,
+        /// Depopulated block at the center, `[cols, rows]`; each must have the parity of the grid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        missing_center: Option<[u32; 2]>,
+    },
     /// Through-hole pin header or socket.
     PinHeader {
         /// Rows (1 or 2).
@@ -334,6 +512,21 @@ pub enum PackageSpec {
 
 fn default_sop() -> String {
     "SOP".into()
+}
+fn default_sot() -> String {
+    "SOT".into()
+}
+fn default_diode() -> ChipKind {
+    ChipKind::Diode
+}
+fn default_dip_rows() -> Nm {
+    Nm::from_um(7620)
+}
+fn default_dip_drill() -> Nm {
+    Nm::from_um(800)
+}
+fn default_dip_pad() -> Nm {
+    Nm::from_um(1600)
 }
 fn default_header_pitch() -> Nm {
     Nm::from_um(2540)
@@ -467,6 +660,36 @@ impl PackageSpec {
                     pins + ep
                 )
             }
+            PackageSpec::Tab { name, pitch, span, height, .. } => {
+                format!("{name}{}P{}X{}-{}{d}", hmm(*pitch), hmm(span.nominal()), hmm(*height), self.pad_count())
+            }
+            PackageSpec::Sod { lead, span, body_width, height, .. } => {
+                let prefix = if *lead == SodLead::Flat { "SODFL" } else { "SOD" };
+                format!("{prefix}{:02}{:02}X{}{d}", tmm(span.nominal()), tmm(body_width.nominal()), hmm(*height))
+            }
+            PackageSpec::Molded { kind, length, width, height, .. } => {
+                format!(
+                    "{}{:02}{:02}X{}{d}",
+                    kind.molded_prefix(),
+                    tmm(length.nominal()),
+                    tmm(width.nominal()),
+                    hmm(*height)
+                )
+            }
+            PackageSpec::Melf { kind, length, diameter, .. } => {
+                format!("{}MELF{:02}{:02}{d}", kind.base(), tmm(length.nominal()), tmm(diameter.nominal()))
+            }
+            PackageSpec::Dip { pins, pitch, row_spacing, height, .. } => {
+                format!("DIP{}P{}X{}-{pins}", hmm(*pitch), hmm(*row_spacing), hmm(*height))
+            }
+            PackageSpec::Bga { rows, cols, pitch, body_x, body_y, height, .. } => format!(
+                "BGA{}C{}P{cols}X{rows}_{}X{}X{}{d}",
+                self.pad_count(),
+                hmm(*pitch),
+                hmm(body_x.nominal()),
+                hmm(body_y.nominal()),
+                hmm(*height)
+            ),
             PackageSpec::PinHeader { rows, pins_per_row, pitch, .. } => {
                 format!(
                     "PinHeader_{rows}x{pins_per_row:02}_P{}mm",
@@ -484,6 +707,14 @@ impl PackageSpec {
             | PackageSpec::Qfp { pins, exposed_pad, .. }
             | PackageSpec::Dfn { pins, exposed_pad, .. }
             | PackageSpec::Qfn { pins, exposed_pad, .. } => pins + u32::from(exposed_pad.is_some()),
+            PackageSpec::Tab { leads, missing, .. } => {
+                leads - missing.iter().filter(|m| (1..=*leads).contains(*m)).count() as u32 + 1
+            }
+            PackageSpec::Sod { .. } | PackageSpec::Molded { .. } | PackageSpec::Melf { .. } => 2,
+            PackageSpec::Dip { pins, .. } => *pins,
+            PackageSpec::Bga { rows, cols, pitch, missing, missing_center, .. } => {
+                bga_balls(*rows, *cols, *pitch, missing, *missing_center).map_or(rows * cols, |b| b.len() as u32)
+            }
             PackageSpec::PinHeader { rows, pins_per_row, .. } => rows * pins_per_row,
         }
     }
@@ -588,6 +819,161 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
+        PackageSpec::Tab {
+            leads,
+            pitch,
+            span,
+            body_width,
+            body_length,
+            terminal,
+            lead_width,
+            tab_width,
+            tab_terminal,
+            tab_protrusion,
+            height,
+            missing,
+            tab_number,
+            ..
+        } => {
+            check_dims(&[
+                ("span", span),
+                ("body_width", body_width),
+                ("terminal", terminal),
+                ("lead_width", lead_width),
+                ("tab_width", tab_width),
+                ("tab_terminal", tab_terminal),
+            ])?;
+            if *leads == 0 || missing.iter().any(|m| !(1..=*leads).contains(m)) || missing.len() >= *leads as usize {
+                return Err(invalid("`missing` lead positions must be within 1..=leads and leave at least one lead"));
+            }
+            let f = &ipc::GULLWING;
+            let half = |d: &Dim| Dim { min: Nm(d.min.0 / 2), max: Nm(d.max.0 / 2) };
+            // Toe positions from the body center; an asymmetric span puts its tolerance on the leads.
+            let (lead_toe, tab_end) = match tab_protrusion {
+                None => (half(span), half(span)),
+                Some(p) => {
+                    let bh = Nm(body_width.nominal().0 / 2);
+                    let end = Dim { min: bh + p.min, max: bh + p.max };
+                    (Dim { min: span.min - end.nominal(), max: span.max - end.nominal() }, end)
+                }
+            };
+            let lead = ipc::side_pad(lead_toe, *terminal, *lead_width, f, opts);
+            let mut tab = ipc::side_pad(tab_end, *tab_terminal, *tab_width, f, opts);
+            if lead.inner + tab.inner < opts.min_pad_gap {
+                tab.inner = opts.min_pad_gap - lead.inner;
+            }
+            if lead.outer <= lead.inner || tab.outer <= tab.inner {
+                return Err(invalid("the leads or the tab have no room for a pad; check `span` and terminal lengths"));
+            }
+            let lw = ipc::clamp_to_pitch(lead.width, *pitch, opts.min_pad_gap);
+            let y0 = Nm(pitch.0 * (*leads as i64 - 1) / 2);
+            let lx = -Nm((lead.outer.0 + lead.inner.0) / 2);
+            let mut pads: Vec<Pad> = (1..=*leads)
+                .filter(|n| !missing.contains(n))
+                .map(|n| {
+                    let at = Point::new(lx, y0 - *pitch * (n as i64 - 1));
+                    smd_pad(&n.to_string(), at, lead.outer - lead.inner, lw, opts)
+                })
+                .collect();
+            let tab_at = Point::new(Nm((tab.outer.0 + tab.inner.0) / 2), Nm::ZERO);
+            let number = tab_number.unwrap_or(leads + 1).to_string();
+            pads.push(smd_pad(&number, tab_at, tab.outer - tab.inner, tab.width, opts));
+            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
+            let mut fp = draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)?;
+            if tab_protrusion.is_some() {
+                // Fab: the part of the tab outside the molded body.
+                let (x0, x1) = (Nm(body_width.nominal().0 / 2), tab_end.nominal());
+                let hy = Nm(tab_width.nominal().0 / 2);
+                let points = vec![Point::new(x0, -hy), Point::new(x1, -hy), Point::new(x1, hy), Point::new(x0, hy)];
+                fp.graphics.push(Graphic {
+                    layer: GraphicLayer::Fab,
+                    width: opts.fab_width,
+                    geometry: GraphicGeometry::Polygon { points },
+                });
+            }
+            Ok(fp)
+        }
+        PackageSpec::Sod { lead, span, body_length, body_width, terminal, lead_width, height } => {
+            check_dims(&[("span", span), ("terminal", terminal), ("lead_width", lead_width)])?;
+            let f = if *lead == SodLead::Flat { &ipc::FLAT } else { &ipc::GULLWING };
+            let row = ipc::row_pads(*span, *terminal, *lead_width, f, opts);
+            let body = Body { width: body_length.nominal(), length: body_width.nominal(), height: *height };
+            draw::finish(name, Mount::Smd, two_pads(row, opts), body, f.courtyard(opts.density), true, opts)
+        }
+        PackageSpec::Molded { kind, length, body_length, width, terminal, lead_width, height } => {
+            check_dims(&[("length", length), ("terminal", terminal), ("lead_width", lead_width)])?;
+            let f = &ipc::MOLDED;
+            let row = ipc::row_pads(*length, *terminal, *lead_width, f, opts);
+            let body = Body { width: body_length.nominal(), length: width.nominal(), height: *height };
+            let polarized = kind.polarized() || *kind == ChipKind::Capacitor;
+            draw::finish(name, Mount::Smd, two_pads(row, opts), body, f.courtyard(opts.density), polarized, opts)
+        }
+        PackageSpec::Melf { kind, length, diameter, terminal } => {
+            check_dims(&[("length", length), ("diameter", diameter), ("terminal", terminal)])?;
+            let f = &ipc::MELF;
+            let row = ipc::row_pads(*length, *terminal, *diameter, f, opts);
+            let body = Body { width: length.nominal(), length: diameter.nominal(), height: diameter.max };
+            draw::finish(name, Mount::Smd, two_pads(row, opts), body, f.courtyard(opts.density), kind.polarized(), opts)
+        }
+        PackageSpec::Dip { pins, pitch, row_spacing, body_width, body_length, height, drill, pad } => {
+            if *pins < 2 || !pins.is_multiple_of(2) {
+                return Err(invalid("a DIP needs an even pin count"));
+            }
+            if *drill >= *pad {
+                return Err(invalid("the pad must be larger than the drill"));
+            }
+            if *pad + opts.min_pad_gap > *pitch || *pad + opts.min_pad_gap > *row_spacing {
+                return Err(invalid("pads do not fit the pitch; reduce `pad`"));
+            }
+            let per = pins / 2;
+            let x = Nm(row_spacing.0 / 2);
+            let y0 = Nm(pitch.0 * (per as i64 - 1) / 2);
+            let pads = (0..*pins)
+                .map(|i| {
+                    // Counter-clockwise: left row top to bottom, right row bottom to top.
+                    let at = if i < per {
+                        Point::new(-x, y0 - *pitch * i as i64)
+                    } else {
+                        Point::new(x, -y0 + *pitch * (i - per) as i64)
+                    };
+                    let shape = if i == 0 { PadShape::Rect { w: *pad, h: *pad } } else { PadShape::Circle { d: *pad } };
+                    Pad {
+                        number: (i + 1).to_string(),
+                        at,
+                        rotation: Default::default(),
+                        shape,
+                        kind: PadKind::Tht { drill: *drill },
+                        paste: Some(Paste::None),
+                    }
+                })
+                .collect();
+            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
+            draw::finish(name, Mount::Tht, pads, body, Nm::from_um(250), true, opts)
+        }
+        PackageSpec::Bga { rows, cols, pitch, ball, body_x, body_y, height, missing, missing_center } => {
+            check_dims(&[("ball", ball), ("body_x", body_x), ("body_y", body_y)])?;
+            let land = ipc::bga_land(ball.nominal(), opts.rounding);
+            if land + opts.min_pad_gap > *pitch {
+                return Err(invalid(format!("{land} lands do not fit a {pitch} pitch; check `ball`")));
+            }
+            if *pitch * (*cols as i64 - 1) >= body_x.min || *pitch * (*rows as i64 - 1) >= body_y.min {
+                return Err(invalid("the ball grid does not fit inside the body"));
+            }
+            let pads = bga_balls(*rows, *cols, *pitch, missing, *missing_center)?
+                .into_iter()
+                .map(|(n, at)| Pad {
+                    number: n,
+                    at,
+                    rotation: Default::default(),
+                    shape: PadShape::Circle { d: land },
+                    kind: PadKind::Smd,
+                    paste: None,
+                })
+                .collect();
+            let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
+            let courtyard = Nm::from_um(ipc::BGA_COURTYARD[opts.density as usize]);
+            draw::finish(name, Mount::Smd, pads, body, courtyard, true, opts)
+        }
         PackageSpec::PinHeader { rows, pins_per_row, pitch, drill, pad, height } => {
             if !(1..=2).contains(rows) || *pins_per_row == 0 {
                 return Err(invalid("pin headers have 1 or 2 rows and at least one pin per row"));
@@ -630,15 +1016,26 @@ fn describe(spec: &PackageSpec, density: Density) -> String {
     };
     let what = match spec {
         PackageSpec::Chip { kind, length, width, .. } => {
-            let k = match kind {
-                ChipKind::Resistor => "Resistor",
-                ChipKind::Capacitor => "Capacitor",
-                ChipKind::Inductor => "Inductor",
-                ChipKind::Led => "LED",
-                ChipKind::Diode => "Diode",
-                ChipKind::Fuse => "Fuse",
-            };
-            format!("{k} chip {} x {}", length.nominal(), width.nominal())
+            format!("{} chip {} x {}", kind.noun(), length.nominal(), width.nominal())
+        }
+        PackageSpec::Tab { name, leads, missing, pitch, tab_number, .. } => format!(
+            "{name} {} leads + tab (pad {}), pitch {pitch}",
+            leads - missing.len() as u32,
+            tab_number.unwrap_or(leads + 1)
+        ),
+        PackageSpec::Sod { lead, span, .. } => {
+            let l = if *lead == SodLead::Flat { "flat" } else { "gull-wing" };
+            format!("SOD diode, {l} leads, span {}; pad 1 = cathode", span.nominal())
+        }
+        PackageSpec::Molded { kind, length, width, .. } => {
+            format!("{} molded body {} x {}; pad 1 = cathode/+", kind.noun(), length.nominal(), width.nominal())
+        }
+        PackageSpec::Melf { kind, length, diameter, .. } => {
+            format!("{} MELF {} x {}", kind.noun(), length.nominal(), diameter.nominal())
+        }
+        PackageSpec::Dip { pins, row_spacing, .. } => format!("DIP {pins} pins, rows {row_spacing} apart"),
+        PackageSpec::Bga { rows, cols, pitch, .. } => {
+            format!("BGA {} balls, {cols} x {rows} grid, pitch {pitch}", spec.pad_count())
         }
         PackageSpec::GullWing { name, pins, pitch, .. } => format!("{name} {pins} pins, pitch {pitch}"),
         PackageSpec::Qfp { pins, pitch, .. } => format!("QFP {pins} pins, pitch {pitch}"),
@@ -673,6 +1070,83 @@ fn smd_pad(number: &str, at: Point, len: Nm, width: Nm, opts: &GenOptions) -> Pa
         PadShape::RoundRect { w: len, h: width, r: corner(len, width, opts) }
     };
     Pad { number: number.to_string(), at, rotation: Default::default(), shape, kind: PadKind::Smd, paste: None }
+}
+
+/// Two-terminal pads: 1 (cathode) on the left, 2 on the right.
+fn two_pads(row: ipc::RowPads, opts: &GenOptions) -> Vec<Pad> {
+    vec![
+        smd_pad("1", Point::new(-row.center, Nm::ZERO), row.length, row.width, opts),
+        smd_pad("2", Point::new(row.center, Nm::ZERO), row.length, row.width, opts),
+    ]
+}
+
+/// JEDEC BGA row letters: I, O, Q, S, X and Z are not used.
+const BGA_LETTERS: &[u8] = b"ABCDEFGHJKLMNPRTUVWY";
+
+/// JEDEC name of BGA row `i` (0-based): A..Y, then AA..AY, BA, ...
+pub fn bga_row_name(i: u32) -> String {
+    let base = BGA_LETTERS.len() as u32;
+    let mut n = i + 1;
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(BGA_LETTERS[(n % base) as usize]);
+        n /= base;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("ascii")
+}
+
+/// Populated ball names and positions, row by row from A1 (top-left).
+fn bga_balls(
+    rows: u32,
+    cols: u32,
+    pitch: Nm,
+    missing: &[String],
+    center: Option<[u32; 2]>,
+) -> Result<Vec<(String, Point)>, GenError> {
+    if rows == 0 || cols == 0 {
+        return Err(invalid("a BGA needs at least one row and one column"));
+    }
+    let names: Vec<String> = (0..rows).map(bga_row_name).collect();
+    let missing: Vec<String> = missing.iter().map(|m| m.trim().to_ascii_uppercase()).collect();
+    for m in &missing {
+        let split = m.find(|c: char| c.is_ascii_digit()).unwrap_or(m.len());
+        let (row, col) = m.split_at(split);
+        let col_ok = !col.starts_with('0') && col.parse::<u32>().is_ok_and(|c| (1..=cols).contains(&c));
+        if !col_ok || !names.iter().any(|r| r == row) {
+            return Err(invalid(format!("unknown ball `{m}` in `missing`")));
+        }
+    }
+    let void = match center {
+        None => None,
+        Some([vc, vr]) => {
+            if vc > cols || vr > rows || !(cols - vc).is_multiple_of(2) || !(rows - vr).is_multiple_of(2) {
+                return Err(invalid(format!("a {vc}x{vr} center void is not centered on a {cols}x{rows} grid")));
+            }
+            Some(((cols - vc) / 2, (rows - vr) / 2, vc, vr))
+        }
+    };
+    let x0 = Nm(-(pitch.0 * (cols as i64 - 1)) / 2);
+    let y0 = Nm(pitch.0 * (rows as i64 - 1) / 2);
+    let mut out = Vec::new();
+    for (r, rn) in names.iter().enumerate() {
+        let r = r as u32;
+        for c in 0..cols {
+            if void.is_some_and(|(c0, r0, vc, vr)| (c0..c0 + vc).contains(&c) && (r0..r0 + vr).contains(&r)) {
+                continue;
+            }
+            let name = format!("{rn}{}", c + 1);
+            if missing.contains(&name) {
+                continue;
+            }
+            out.push((name, Point::new(x0 + pitch * c as i64, y0 - pitch * r as i64)));
+        }
+    }
+    if out.is_empty() {
+        return Err(invalid("every ball is depopulated"));
+    }
+    Ok(out)
 }
 
 /// Two rows: pins along Y, left row top to bottom then right row bottom to top.
