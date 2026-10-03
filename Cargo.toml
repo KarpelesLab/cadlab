@@ -40,6 +40,7 @@ clap = { version = "4.6", features = ["derive", "string"], optional = true }
 rpassword = { version = "7.5", optional = true }
 tiny-skia = { version = "0.12", optional = true }
 ureq = { version = "3.4", optional = true }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 insta = { version = "1.49", features = ["json"] }

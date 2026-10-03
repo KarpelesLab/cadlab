@@ -1,0 +1,207 @@
+# JLCPCB fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`; `cite` names the page per field, and `unverified` lists values kept although they
+# could not be confirmed there. Override any of it with ~/.config/cadlab/fab-profiles/jlcpcb.toml
+# (tables merge key by key, other values replace).
+#
+# Copper weights are given as thicknesses: 1 oz = 35 um. Track/space minimums are the 1 oz values;
+# the capabilities page lists larger ones for heavier copper (2 oz: 0.16 mm on 1-2 layers,
+# 0.15 mm multilayer; 2.5 oz: 0.2; 3.5 oz: 0.25; 4.5 oz: 0.3 mm).
+
+id = "jlcpcb"
+name = "JLCPCB"
+website = "https://jlcpcb.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://jlcpcb.com/capabilities/pcb-capabilities",
+    "https://jlcpcb.com/capabilities/pcb-assembly-capabilities",
+    "https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly",
+    "https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly",
+    "https://jlcpcb.com/help/article/How-to-generate-the-BOM-and-Centroid-file-from-KiCAD",
+    "https://jlcpcb.com/help/article/suggested-naming-patterns",
+    "https://jlcpcb.com/help/article/how-to-generate-gerber-and-drill-files-in-kicad-9",
+]
+notes = """Rigid FR-4. Hole tolerance +0.13/-0.08 mm. Via 0.1 mm hole / 0.2 mm pad only on boards up to \
+1 mm thick with ENIG or OSP (not modelled). Castellated holes: hole >= 0.5 mm, hole to edge >= 1 mm, \
+board >= 10x10 mm and >= 0.6 mm thick. Slots: plated 0.5 mm (2 layers) / 0.35 mm (multilayer), \
+non-plated 1.0 mm. Copper to V-cut edge >= 0.4 mm. Mask dam 0.13 mm for black and white mask, \
+0.2 mm with 2 oz copper. Via to track 0.2 mm, PTH to track 0.28 mm, NPTH to track 0.2 mm."""
+
+[[process]]
+id = "two-layer"
+name = "Rigid FR-4, 2 layers"
+layers = [2]
+thickness = ["0.4mm", "0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm"]
+outer_copper = ["35um", "70um", "87.5um", "122.5um", "157.5um"]  # 1, 2, 2.5, 3.5, 4.5 oz
+min_track = "0.10mm"
+min_space = "0.10mm"
+min_drill = "0.15mm"
+max_drill = "6.3mm"           # larger holes are routed
+min_npth = "0.50mm"
+min_via_ring = "0.05mm"       # via 0.15 mm hole / 0.25 mm diameter
+min_pth_ring = "0.20mm"       # 0.25 mm recommended
+hole_to_hole = "0.20mm"       # via to via
+pad_hole_to_hole = "0.45mm"   # pad hole to pad hole
+copper_to_edge = "0.20mm"     # routed edge
+min_silk_width = "0.15mm"
+min_silk_height = "1.0mm"
+silk_to_pad = "0.15mm"
+mask_dam = "0.10mm"           # green/red/yellow/blue/purple, 1 oz
+via_in_pad = true
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP"]
+mask_colors = ["Green", "Purple", "Red", "Yellow", "Blue", "White", "Black"]
+max_size = ["1020mm", "600mm"]
+min_size = ["3mm", "3mm"]
+
+[[process]]
+id = "one-layer"
+name = "Rigid FR-4, 1 layer"
+layers = [1]
+thickness = ["0.4mm", "0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm"]
+outer_copper = ["35um", "70um"]
+min_track = "0.10mm"
+min_space = "0.10mm"
+min_drill = "0.30mm"
+max_drill = "6.3mm"
+min_npth = "0.50mm"
+min_via_ring = "0.10mm"       # via 0.3 mm hole / 0.5 mm diameter
+min_pth_ring = "0.20mm"
+hole_to_hole = "0.20mm"
+pad_hole_to_hole = "0.45mm"
+copper_to_edge = "0.20mm"
+min_silk_width = "0.15mm"
+min_silk_height = "1.0mm"
+silk_to_pad = "0.15mm"
+mask_dam = "0.10mm"
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG"]  # no OSP on single-sided FR-4
+mask_colors = ["Green", "Purple", "Red", "Yellow", "Blue", "White", "Black"]
+max_size = ["606mm", "510mm"]
+min_size = ["3mm", "3mm"]
+# The page lists copper weights for 2 layers and for multilayer boards, not for 1 layer.
+unverified = ["outer_copper"]
+
+[[process]]
+id = "four-layer"
+name = "Rigid FR-4, 4 layers"
+layers = [4]
+thickness = ["0.4mm", "0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm"]
+outer_copper = ["35um", "70um"]
+inner_copper = ["17.5um", "35um", "70um"]  # 0.5 (default), 1, 2 oz
+min_track = "0.09mm"
+min_space = "0.09mm"
+min_drill = "0.15mm"
+max_drill = "6.3mm"
+min_npth = "0.50mm"
+min_via_ring = "0.05mm"
+min_pth_ring = "0.20mm"
+hole_to_hole = "0.20mm"
+pad_hole_to_hole = "0.45mm"
+copper_to_edge = "0.20mm"
+min_silk_width = "0.15mm"
+min_silk_height = "1.0mm"
+silk_to_pad = "0.15mm"
+mask_dam = "0.10mm"
+via_in_pad = true
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP"]
+mask_colors = ["Green", "Purple", "Red", "Yellow", "Blue", "White", "Black"]
+max_size = ["1016mm", "596mm"]
+min_size = ["3mm", "3mm"]
+# The page lists FR-4 thicknesses without a per-layer-count split.
+unverified = ["thickness"]
+
+[[process]]
+id = "multilayer"
+name = "Rigid FR-4, 6 to 32 layers"
+layers = [6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
+thickness = ["0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm"]
+outer_copper = ["35um", "70um"]
+inner_copper = ["17.5um", "35um", "70um"]
+min_track = "0.09mm"
+min_space = "0.09mm"
+min_drill = "0.15mm"
+max_drill = "6.3mm"
+min_npth = "0.50mm"
+min_via_ring = "0.05mm"
+min_pth_ring = "0.20mm"
+hole_to_hole = "0.20mm"
+pad_hole_to_hole = "0.45mm"
+copper_to_edge = "0.20mm"
+min_silk_width = "0.15mm"
+min_silk_height = "1.0mm"
+silk_to_pad = "0.15mm"
+mask_dam = "0.10mm"
+via_in_pad = true             # default from 6 layers
+castellated = true
+finishes = ["ENIG", "OSP"]    # no HASL from 6 layers
+mask_colors = ["Green", "Purple", "Red", "Yellow", "Blue", "White", "Black"]
+max_size = ["656mm", "586mm"]
+min_size = ["3mm", "3mm"]
+# 0.4 mm left out; the page lists FR-4 thicknesses without a per-layer-count split.
+unverified = ["thickness"]
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-jlcpcb.zip"
+drill_format = "excellon"
+# Paste extensions (.GTP/.GBP) are not in the naming article; whether the archive must be flat
+# was not stated.
+unverified = ["archive", "names"]
+[output.cite]
+names = "https://jlcpcb.com/help/article/suggested-naming-patterns"
+drill_format = "https://jlcpcb.com/help/article/how-to-generate-gerber-and-drill-files-in-kicad-9"
+archive = "https://jlcpcb.com/help/article/how-to-generate-gerber-and-drill-files-in-kicad-9"
+# Protel extensions from the naming article; inner layers are .G2L, .G3L, ... by copper layer
+# number. Drills: separate PTH and NPTH Excellon files in mm.
+[output.names]
+copper_top = "{project}.GTL"
+copper_inner = "{project}.G{layer}L"
+copper_bottom = "{project}.GBL"
+mask_top = "{project}.GTS"
+mask_bottom = "{project}.GBS"
+paste_top = "{project}.GTP"
+paste_bottom = "{project}.GBP"
+silk_top = "{project}.GTO"
+silk_bottom = "{project}.GBO"
+profile = "{project}.GKO"
+drill_pth = "{project}-PTH.drl"
+drill_npth = "{project}-NPTH.drl"
+
+[assembly]
+sides = ["top", "bottom"]     # Standard PCBA; Economic PCBA is single-sided
+min_package = "0201"          # Standard PCBA (Economic: 0402)
+part_classes = ["basic", "extended"]
+catalog = ["lcsc"]
+# Part classes were only seen in a search summary of the pricing page; the CPL origin is not
+# documented (cadlab writes Gerber coordinates).
+unverified = ["part_classes", "cpl.origin"]
+[assembly.cite]
+sides = "https://jlcpcb.com/capabilities/pcb-assembly-capabilities"
+min_package = "https://jlcpcb.com/capabilities/pcb-assembly-capabilities"
+bom = "https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly"
+cpl = "https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly"
+
+# Columns of JLCPCB's sample BOM; only Comment, Designator and Footprint are required.
+[assembly.bom]
+file = "{project}-BOM-jlcpcb.csv"
+columns = [
+    { header = "Comment", field = "value" },
+    { header = "Designator", field = "designators" },
+    { header = "Footprint", field = "package" },
+    { header = "JLCPCB Part #", field = "sku" },
+]
+
+# Columns of JLCPCB's sample CPL; millimeters, rotation in degrees counter-clockwise.
+[assembly.cpl]
+file = "{project}-CPL-jlcpcb.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "Mid X", field = "x" },
+    { header = "Mid Y", field = "y" },
+    { header = "Layer", field = "side" },
+    { header = "Rotation", field = "rotation" },
+]
+side_names = ["Top", "Bottom"]
+coordinate_suffix = "mm"      # as in the sample file
+origin = "board"              # same coordinates as the Gerber files

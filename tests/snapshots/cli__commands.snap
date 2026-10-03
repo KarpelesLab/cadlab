@@ -96,6 +96,11 @@ expression: names
   "export.pnp",
   "export.ipc356",
   "export.all",
+  "fab.list",
+  "fab.show",
+  "fab.check",
+  "fab.compare",
+  "fab.export",
   "history.undo",
   "history.redo",
   "history.list"

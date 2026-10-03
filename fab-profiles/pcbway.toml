@@ -1,0 +1,136 @@
+# PCBWay fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`. Where PCBWay's capabilities page and its tolerances page disagree, the stricter
+# value is used and the field is listed in `unverified`. Override with
+# ~/.config/cadlab/fab-profiles/pcbway.toml (tables merge key by key, other values replace).
+#
+# Copper weights are thicknesses: 1 oz = 35 um. Track/space: 0.1 mm (4 mil) is the standard
+# minimum, 6 mil is "strongly suggested"; heavier outer copper needs more (70 um: 7/8 mil,
+# 105 um: 10/12 mil).
+
+id = "pcbway"
+name = "PCBWay"
+website = "https://www.pcbway.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://www.pcbway.com/capabilities.html",
+    "https://www.pcbway.com/pcb_prototype/PCB_Manufacturing_tolerances.html",
+    "https://www.pcbway.com/assembly-capabilities.html",
+    "https://www.pcbway.com/helpcenter/pcb_assembly_ordering/What_files_are_requested_for_assembly_production_.html",
+    "https://www.pcbway.com/assembly-file-requirements.html",
+    "https://www.pcbway.com/helpcenter/pcb_assembly_ordering/What_file_format_should_BOM_be_.html",
+    "https://www.pcbway.com/helpcenter/generate_gerber/Gerber_File_Extension_from_Different_Software.html",
+    "https://www.pcbway.com/blog/help_center/Generate_Gerber_file_from_Kicad_5_1_6.html",
+]
+notes = """Rigid FR-4. Hole tolerance PTH +/-0.08 mm, NPTH +/-0.05 mm. Inner-layer hole-to-copper isolation: \
+4 layers 7 mil, 6 layers 8 mil, 8 layers 9 mil, 10+ layers 10 mil. Slots: plated >= 0.5 mm, \
+non-plated >= 0.8 mm. Mask opening >= 2 mil (green). 16 to 24 layers are an advanced process \
+(not modelled). Assembly boards: 10x10 to 250x500 mm, smaller ones panelized."""
+
+[[process]]
+id = "standard"
+name = "Rigid FR-4, 1-2 layers"
+layers = [1, 2]
+thickness = ["0.2mm", "0.4mm", "0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.4mm", "2.6mm", "2.8mm", "3.0mm", "3.2mm"]
+outer_copper = ["35um", "70um", "105um"]  # 1, 2, 3 oz (capabilities page: up to 8 oz)
+min_track = "0.10mm"
+min_space = "0.10mm"
+min_drill = "0.20mm"          # tolerances page; capabilities page says 0.15 mm
+max_drill = "6.0mm"           # capabilities page; tolerances page says 6.3 mm
+min_via_ring = "0.15mm"
+min_pth_ring = "0.15mm"
+hole_to_hole = "0.2794mm"     # 11 mil, vias on different nets
+pad_hole_to_hole = "0.4064mm" # 16 mil, component holes
+copper_to_edge = "0.25mm"     # CNC routed edge
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+mask_dam = "0.1016mm"         # 4 mil, green, below 2 oz
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP", "Hard gold", "Immersion silver", "Immersion tin", "ENEPIG"]
+mask_colors = ["Green", "Red", "Yellow", "Blue", "White", "Black", "Matte green", "Matte black", "Purple", "None"]
+silk_colors = ["White", "Black", "Yellow", "None"]
+max_size = ["1200mm", "600mm"]
+min_size = ["3mm", "3mm"]
+unverified = ["outer_copper", "min_drill", "max_drill"]
+[process.cite]
+outer_copper = "https://www.pcbway.com/pcb_prototype/PCB_Manufacturing_tolerances.html"
+min_drill = "https://www.pcbway.com/pcb_prototype/PCB_Manufacturing_tolerances.html"
+
+[[process]]
+id = "multilayer"
+name = "Rigid FR-4, 4-14 layers"
+layers = [4, 6, 8, 10, 12, 14]
+thickness = ["0.4mm", "0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.4mm", "2.6mm", "2.8mm", "3.0mm", "3.2mm"]
+outer_copper = ["35um", "70um", "105um"]
+inner_copper = ["35um", "52.5um"]  # 1, 1.5 oz (capabilities page: also 2, 3, 4 oz)
+min_track = "0.10mm"
+min_space = "0.10mm"
+min_drill = "0.20mm"
+max_drill = "6.0mm"
+min_via_ring = "0.15mm"
+min_pth_ring = "0.15mm"
+hole_to_hole = "0.2794mm"
+pad_hole_to_hole = "0.4064mm"
+copper_to_edge = "0.25mm"
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+mask_dam = "0.1016mm"
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP", "Hard gold", "Immersion silver", "Immersion tin", "ENEPIG"]
+mask_colors = ["Green", "Red", "Yellow", "Blue", "White", "Black", "Matte green", "Matte black", "Purple", "None"]
+silk_colors = ["White", "Black", "Yellow", "None"]
+max_size = ["1150mm", "560mm"]
+min_size = ["3mm", "3mm"]
+# 0.2 mm is left out for multilayer boards (thickness options are not given per layer count).
+unverified = ["thickness", "outer_copper", "inner_copper", "min_drill", "max_drill"]
+[process.cite]
+inner_copper = "https://www.pcbway.com/pcb_prototype/PCB_Manufacturing_tolerances.html"
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-pcbway.zip"
+drill_format = "excellon"
+# No `names`: the extension guide lists KiCad's own .gbr names (which cadlab's generic names
+# follow) and PTH.drl / NPTH.drl drill files as accepted.
+[output.cite]
+names = "https://www.pcbway.com/helpcenter/generate_gerber/Gerber_File_Extension_from_Different_Software.html"
+archive = "https://www.pcbway.com/blog/help_center/Generate_Gerber_file_from_Kicad_5_1_6.html"
+
+[assembly]
+sides = ["top", "bottom"]
+min_package = "01005"
+# PCBWay publishes the placement file content, not its column names or origin.
+unverified = ["cpl.columns", "cpl.origin"]
+[assembly.cite]
+sides = "https://www.pcbway.com/assembly-capabilities.html"
+min_package = "https://www.pcbway.com/assembly-capabilities.html"
+bom = "https://www.pcbway.com/helpcenter/pcb_assembly_ordering/What_file_format_should_BOM_be_.html"
+cpl = "https://www.pcbway.com/helpcenter/pcb_assembly_ordering/What_files_are_requested_for_assembly_production_.html"
+
+# Columns of PCBWay's sample BOM (required there: Designator, Qty, Mfg Part #, Package/Footprint).
+[assembly.bom]
+file = "{project}-BOM-pcbway.csv"
+mount_names = ["SMD", "thru-hole"]
+columns = [
+    { header = "Item #", field = "line" },
+    { header = "Designator", field = "designators" },
+    { header = "Qty", field = "quantity" },
+    { header = "Manufacturer", field = "manufacturer" },
+    { header = "Mfg Part #", field = "mpn" },
+    { header = "Description / Value", field = "value_description" },
+    { header = "Package/Footprint", field = "package" },
+    { header = "Type", field = "mount" },
+    { header = "Your Instructions / Notes", field = "notes" },
+]
+
+# Content required by PCBWay: designator, X, Y, angle, side (Top/Bottom), in millimeters.
+[assembly.cpl]
+file = "{project}-CPL-pcbway.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "Mid X", field = "x" },
+    { header = "Mid Y", field = "y" },
+    { header = "Layer", field = "side" },
+    { header = "Rotation", field = "rotation" },
+]
+side_names = ["Top", "Bottom"]
+origin = "board"
