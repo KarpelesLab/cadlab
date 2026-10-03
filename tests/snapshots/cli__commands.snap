@@ -36,6 +36,7 @@ expression: names
   "net.show",
   "netclass.set",
   "netclass.list",
+  "netclass.show",
   "netclass.remove",
   "block.create",
   "block.instantiate",
@@ -51,6 +52,7 @@ expression: names
   "bom.resolve",
   "bom.check",
   "bom.cost",
+  "bom.substitutes",
   "board.setup",
   "board.outline",
   "board.rules",
@@ -113,6 +115,7 @@ expression: names
   "fab.check",
   "fab.compare",
   "fab.export",
+  "fab.substitute",
   "history.undo",
   "history.redo",
   "history.list"

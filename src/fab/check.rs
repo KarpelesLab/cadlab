@@ -9,6 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::export::Substitution;
 use super::{FabProfile, Process, Side, chip_size};
 use crate::board::{self as geo, COPPER_TOL};
 use crate::bom::BomRow;
@@ -20,6 +21,7 @@ use crate::model::footprint::{GraphicGeometry, GraphicLayer, Mount, PadKind};
 use crate::model::sections::natural_cmp;
 use crate::refs::ObjectRef;
 use crate::sourcing::{self, Availability};
+use crate::substitute::LineSubstitutes;
 use crate::supplier::Suppliers;
 use crate::units::Nm;
 
@@ -522,7 +524,8 @@ pub struct LinePick {
     /// Manufacturer of the chosen MPN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manufacturer: Option<String>,
-    /// Chosen MPN (the part's own, else the first approved one, or the best offer's).
+    /// Chosen MPN (the part's own, else the first approved one, or the best offer's; a
+    /// substitution from `fab-lock.json` when one applies).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mpn: Option<String>,
     /// Fab catalog SKU, from one of the profile's `catalog` providers.
@@ -534,21 +537,50 @@ pub struct LinePick {
     /// Availability, when suppliers were queried.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Availability>,
+    /// MPN replaced by a substitution (`"generic"` for a line without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
 }
 
-/// Picks parts for populated BOM lines and checks their availability for `boards` boards.
-/// With no suppliers configured, picks come from the BOM alone and a `fab.no_suppliers`
-/// warning is returned. Provider errors come back as `supplier.error` warnings.
+/// Parts of a fab check: the pick per populated line, findings, and substitute candidates for
+/// lines the fab cannot source as designed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PartsReport {
+    /// One pick per populated BOM line.
+    pub picks: Vec<LinePick>,
+    /// Findings (`fab.*`, `supplier.error`).
+    pub diagnostics: Vec<Diagnostic>,
+    /// Substitutions applied (from `fab-lock.json`), to keep in the next lock.
+    pub applied: Vec<Substitution>,
+    /// Substitute candidates per line that needs them, in BOM order.
+    pub substitutes: Vec<LineSubstitutes>,
+}
+
+/// Providers whose SKUs fill the fab's BOM (configured ones among the profile's `catalog`).
+pub fn catalog_providers(profile: &FabProfile, suppliers: &Suppliers) -> Vec<String> {
+    let ids = suppliers.ids();
+    profile.assembly.iter().flat_map(|a| a.catalog.iter()).filter(|c| ids.contains(c)).cloned().collect()
+}
+
+/// Picks parts for populated BOM lines and checks their availability for `boards` boards,
+/// applying `applied` substitutions (from `fab-lock.json`), and finds up to `limit`
+/// substitute candidates for every line that is not available (see [`crate::substitute`]).
+/// With no suppliers configured, picks come from the BOM (and substitutions) alone and a
+/// `fab.no_suppliers` warning is returned. Provider errors come back as `supplier.error`
+/// warnings.
 pub fn parts(
+    p: &Project,
     rows: &[BomRow],
     profile: &FabProfile,
     suppliers: &Suppliers,
     boards: u64,
-) -> (Vec<LinePick>, Vec<Diagnostic>) {
+    applied: &[Substitution],
+    limit: usize,
+) -> PartsReport {
     let mut diags = Vec::new();
     let catalog: Vec<String> = profile.assembly.as_ref().map(|a| a.catalog.clone()).unwrap_or_default();
     let ids = suppliers.ids();
-    let only: Vec<String> = catalog.iter().filter(|c| ids.contains(c)).cloned().collect();
+    let only = catalog_providers(profile, suppliers);
     if suppliers.is_empty() {
         diags.push(
             Diagnostic::warning(
@@ -573,29 +605,66 @@ pub fn parts(
     }
     let mut errors = Vec::new();
     let mut picks = Vec::new();
+    let mut substitutes = Vec::new();
     for r in rows.iter().filter(|r| r.quantity > 0) {
-        let own = r.order_mpn();
+        let what = format!("{} ({})", r.part, r.refdes.join(", "));
+        let subject = ObjectRef::Part { scheme: "local".into(), id: r.part.clone() };
+        let sub = applied.iter().find(|s| s.part == r.part);
+        // A substituted line is sourced as its substitute.
+        let row = match sub {
+            Some(s) => {
+                let replaces = r.order_mpn().map_or("generic".to_string(), |(_, m)| m.to_string());
+                diags.push(
+                    Diagnostic::info(
+                        "fab.substituted",
+                        format!("{what}: ordered as {} in place of {replaces} (fab-lock.json)", s.mpn),
+                    )
+                    .with_subject(subject.clone())
+                    .with_hint(format!("undo with fab.substitute {} {} with remove", profile.id, r.part)),
+                );
+                BomRow {
+                    manufacturer: s.manufacturer.clone(),
+                    mpn: Some(s.mpn.clone()),
+                    approved: Vec::new(),
+                    ..r.clone()
+                }
+            }
+            None => r.clone(),
+        };
+        let own = row.order_mpn();
         let mut pick = LinePick {
             part: r.part.clone(),
             manufacturer: own.and_then(|(m, _)| m.map(String::from)),
             mpn: own.map(|(_, m)| m.to_string()),
-            sku: None,
-            provider: None,
+            sku: sub.filter(|s| s.provider.as_ref().is_some_and(|p| catalog.contains(p))).and_then(|s| s.sku.clone()),
+            provider: sub.and_then(|s| s.provider.clone()),
             status: None,
+            replaces: sub.map(|_| r.order_mpn().map_or("generic".to_string(), |(_, m)| m.to_string())),
         };
         if !suppliers.is_empty() {
-            let s = sourcing::source_line(r, boards.max(1), suppliers, &only, &mut errors);
+            let s = sourcing::source_line(&row, boards.max(1), suppliers, &only, &mut errors);
             pick.status = Some(s.status);
             if let Some(o) = &s.offer {
                 pick.manufacturer = o.manufacturer.clone().or(pick.manufacturer);
                 pick.mpn = Some(o.mpn.clone());
                 pick.provider = Some(o.provider.clone());
-                if catalog.contains(&o.provider) {
-                    pick.sku = Some(o.sku.clone());
-                }
+                pick.sku = catalog.contains(&o.provider).then(|| o.sku.clone());
             }
-            let what = format!("{} ({})", r.part, r.refdes.join(", "));
-            let subject = ObjectRef::Part { scheme: "local".into(), id: r.part.clone() };
+            let mut found = None;
+            if s.status != Availability::Ok && sub.is_none() {
+                let part = p.library().parts.get(&r.part);
+                found = Some(crate::substitute::for_line(
+                    r,
+                    part,
+                    s.status,
+                    s.needed,
+                    suppliers,
+                    &only,
+                    limit,
+                    &mut errors,
+                ));
+            }
+            let at = if only.is_empty() { String::new() } else { format!(" at {}", only.join("/")) };
             let d = match s.status {
                 Availability::Ok => None,
                 Availability::NoMpn => Some(
@@ -603,26 +672,50 @@ pub fn parts(
                         .with_hint("approve one with bom.approve or find candidates with bom.resolve"),
                 ),
                 Availability::NotFound => Some(
-                    Diagnostic::warning("fab.part_not_found", format!("no supplier has {what}"))
-                        .with_hint("approve an alternate MPN with bom.approve, or find substitutes with bom.resolve"),
+                    Diagnostic::warning("fab.part_not_found", format!("no supplier{at} has {what}"))
+                        .with_hint("approve an alternate MPN with bom.approve, or see bom.substitutes"),
                 ),
                 Availability::LowStock => Some(
-                    Diagnostic::warning("fab.low_stock", format!("not enough stock of {what} for {boards} board(s)"))
-                        .with_hint("approve an alternate MPN with bom.approve"),
+                    Diagnostic::warning(
+                        "fab.low_stock",
+                        format!("not enough stock{at} of {what} for {boards} board(s)"),
+                    )
+                    .with_hint("approve an alternate MPN with bom.approve"),
                 ),
                 Availability::EndOfLife => Some(
                     Diagnostic::warning("fab.end_of_life", format!("{what} is only offered as NRND/obsolete"))
                         .with_hint("approve an active alternate with bom.approve"),
                 ),
             };
-            diags.extend(d.map(|d| d.with_subject(subject)));
+            if let Some(mut d) = d {
+                if let Some(f) = &found {
+                    d.hint = Some(match f.candidates.first() {
+                        Some(best) => format!(
+                            "{} substitute candidate(s) for {}, best {}; apply one for this fab with fab.substitute \
+                             (recorded in fab-lock.json, not in the design), or approve it for every fab with bom.approve",
+                            f.candidates.len(),
+                            profile.name,
+                            crate::substitute::describe(best)
+                        ),
+                        None => format!(
+                            "no substitute found ({}); {}",
+                            f.note.as_deref().unwrap_or("no candidate"),
+                            d.hint.as_deref().unwrap_or_default()
+                        ),
+                    });
+                }
+                diags.push(d.with_subject(subject));
+            }
+            substitutes.extend(found);
         }
         picks.push(pick);
     }
+    errors.sort();
+    errors.dedup();
     for e in errors {
         diags.push(Diagnostic::warning("supplier.error", e).with_hint("results from other providers are still used"));
     }
-    (picks, diags)
+    PartsReport { picks, diagnostics: diags, applied: applied.to_vec(), substitutes }
 }
 
 #[cfg(test)]

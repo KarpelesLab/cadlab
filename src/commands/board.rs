@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 use super::util;
 use crate::board::{self as geo, RatLine};
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
+use crate::diag::Diagnostic;
+use crate::fab::rules::{DerivedRule, Margin};
 use crate::geom::{BBox, Point};
 use crate::id::ObjectId;
 use crate::model::Project;
-use crate::model::board::{BoardSide, Contour, PlacedFootprint, Rules, Segment, Track, Via};
+use crate::model::board::{BoardSide, Contour, PlacedFootprint, RULE_FIELDS, RulePreset, Rules, Segment, Track, Via};
 use crate::model::sections::natural_cmp;
 use crate::units::{Angle, Nm};
 
@@ -315,10 +317,28 @@ impl Command for Outline {
     }
 }
 
-/// Change design rules. Only given values change.
+/// Change design rules: from a preset (`ipc2`, `ipc3`), from a fab profile's limits (`fab`,
+/// `margin`), and/or field by field (given fields win). With no argument, shows the rules. Only
+/// the resulting numbers are stored: nothing refers back to a preset or fab (D12). Net classes
+/// whose values fall below the new minimums are reported (`drc.netclass_rule`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetRules {
+    /// Start from a preset: `ipc2` (cadlab's conservative class 2 defaults) or `ipc3` (class 3
+    /// annular rings and vias). Sources in docs/BOARD.md, "Rule presets".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<RulePreset>,
+    /// Derive the manufacturing minimums (and default track/via) from this fab profile
+    /// (`jlcpcb`, `pcbway`, `generic`); applied after `preset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fab: Option<String>,
+    /// Process of the fab profile (default: the first offering the board's layer count).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    /// With `fab`: `comfortable` (default; minimums 25 % above the fab's limits, default track
+    /// and via never below 0.25 mm and 0.3/0.6 mm) or `tightest` (everything at the fab's limits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<Margin>,
     /// Copper clearance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clearance: Option<Nm>,
@@ -355,39 +375,107 @@ pub struct SetRules {
     /// Minimum zone width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone_min_width: Option<Nm>,
-    /// IPC class (2 or 3).
+    /// IPC class (1, 2 or 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipc_class: Option<u8>,
 }
 
+/// A rule value that changed.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RuleChange {
+    /// Rule field.
+    pub field: String,
+    /// Previous value.
+    pub from: Nm,
+    /// New value.
+    pub to: Nm,
+}
+
+/// The board's rules after `board.rules`, with what changed and where values came from.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RulesResult {
+    /// The rules.
+    #[serde(flatten)]
+    pub rules: Rules,
+    /// Values that changed, in field order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<RuleChange>,
+    /// Values taken from the fab profile (before explicit fields).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived: Vec<DerivedRule>,
+    /// `<fab> <process>` the values were derived from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
+}
+
 impl Command for SetRules {
     const NAME: &'static str = "board.rules";
-    const SUMMARY: &'static str = "Change design rules (clearance, widths, vias, drills, edges, silk)";
+    const SUMMARY: &'static str =
+        "Show or change design rules: IPC class 2/3 presets, limits derived from a fab profile, or field by field";
     const KIND: CommandKind = CommandKind::Mutation;
-    type Output = Rules;
+    type Output = RulesResult;
 
-    fn run(self, ctx: &mut Context<'_>) -> Result<Rules, CommandError> {
-        let r = &mut ctx.project_mut()?.board_mut().rules;
-        let fields: [(&mut Nm, Option<Nm>); 12] = [
-            (&mut r.clearance, self.clearance),
-            (&mut r.track_width, self.track_width),
-            (&mut r.min_track_width, self.min_track_width),
-            (&mut r.via_drill, self.via_drill),
-            (&mut r.via_diameter, self.via_diameter),
-            (&mut r.min_annular_ring, self.min_annular_ring),
-            (&mut r.min_drill, self.min_drill),
-            (&mut r.hole_to_hole, self.hole_to_hole),
-            (&mut r.copper_to_edge, self.copper_to_edge),
-            (&mut r.silk_to_pad, self.silk_to_pad),
-            (&mut r.min_silk_width, self.min_silk_width),
-            (&mut r.zone_min_width, self.zone_min_width),
+    fn run(self, ctx: &mut Context<'_>) -> Result<RulesResult, CommandError> {
+        let before = ctx.project()?.board().rules.clone();
+        let mut r = match self.preset {
+            Some(p) => Rules::preset(p),
+            None => before.clone(),
+        };
+        let mut derived = Vec::new();
+        let mut derived_from = None;
+        if let Some(fab) = &self.fab {
+            let ps = super::fab::profiles(ctx);
+            let (profile, _) = super::fab::profile(&ps, fab)?;
+            let process =
+                crate::fab::check::select_process(profile, ctx.project()?, self.process.as_deref()).map_err(|d| {
+                    let code = if d.code == "fab.layers" { "fab.layers" } else { "fab.unknown_process" };
+                    let mut e = CommandError::invalid_args(code, d.message.clone());
+                    if let Some(h) = &d.hint {
+                        e = e.with_hint(h.clone());
+                    }
+                    e
+                })?;
+            let (nr, d) = crate::fab::rules::derive(process, self.margin.unwrap_or_default(), &r);
+            r = nr;
+            derived = d;
+            derived_from = Some(format!("{} {}", profile.id, process.id));
+            let unverified: Vec<&str> = derived.iter().filter(|d| d.unverified).map(|d| d.field.as_str()).collect();
+            if !unverified.is_empty() {
+                ctx.report(
+                    Diagnostic::warning(
+                        "board.rules_unverified",
+                        format!("{} marks the source of {} unverified", profile.name, unverified.join(", ")),
+                    )
+                    .with_hint(format!("check them against the fab's pages ({})", profile.sources.join(" "))),
+                );
+            }
+        } else if self.process.is_some() || self.margin.is_some() {
+            return Err(CommandError::invalid_args("board.invalid_rule", "`process` and `margin` need `fab`")
+                .with_hint("pass fab (jlcpcb, pcbway, generic; see fab.list)"));
+        }
+        let explicit: [Option<Nm>; 12] = [
+            self.clearance,
+            self.track_width,
+            self.min_track_width,
+            self.via_drill,
+            self.via_diameter,
+            self.min_annular_ring,
+            self.min_drill,
+            self.hole_to_hole,
+            self.copper_to_edge,
+            self.silk_to_pad,
+            self.min_silk_width,
+            self.zone_min_width,
         ];
-        for (f, v) in fields {
+        for (field, v) in RULE_FIELDS.iter().zip(explicit) {
             if let Some(v) = v {
                 if v < Nm::ZERO {
-                    return Err(CommandError::invalid_args("board.invalid_rule", "rule values cannot be negative"));
+                    return Err(CommandError::invalid_args(
+                        "board.invalid_rule",
+                        format!("`{field}` cannot be negative"),
+                    ));
                 }
-                *f = v;
+                *r.length_mut(field).expect("rule field") = v;
             }
         }
         if let Some(c) = self.ipc_class {
@@ -399,14 +487,41 @@ impl Command for SetRules {
         if r.via_drill >= r.via_diameter {
             return Err(CommandError::invalid_args("board.invalid_rule", "via diameter must exceed via drill"));
         }
-        Ok(r.clone())
+        let changed = before
+            .lengths()
+            .iter()
+            .zip(r.lengths())
+            .filter(|(a, b)| a.1 != b.1)
+            .map(|(a, b)| RuleChange { field: a.0.into(), from: a.1, to: b.1 })
+            .collect();
+        ctx.project_mut()?.board_mut().rules = r.clone();
+        for d in crate::drc::netclass_conflicts(ctx.project()?) {
+            ctx.report(d);
+        }
+        Ok(RulesResult { rules: r, changed, derived, derived_from })
     }
 
-    fn summarize(r: &Rules) -> String {
-        format!(
-            "rules: clearance {}, track {}, via {}/{}, annular ring {}, edge {}",
-            r.clearance, r.track_width, r.via_diameter, r.via_drill, r.min_annular_ring, r.copper_to_edge
-        )
+    fn summarize(o: &RulesResult) -> String {
+        let r = &o.rules;
+        let mut s = format!(
+            "rules (IPC class {}): clearance {}, track {} (min {}), via {}/{}, annular ring {}, drill {}, edge {}",
+            r.ipc_class,
+            r.clearance,
+            r.track_width,
+            r.min_track_width,
+            r.via_diameter,
+            r.via_drill,
+            r.min_annular_ring,
+            r.min_drill,
+            r.copper_to_edge
+        );
+        if let Some(f) = &o.derived_from {
+            s += &format!("\nderived from {f}: {} value(s)", o.derived.len());
+        }
+        for c in &o.changed {
+            s += &format!("\n  {}: {} -> {}", c.field, c.from, c.to);
+        }
+        s
     }
 }
 

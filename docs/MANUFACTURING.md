@@ -49,7 +49,8 @@ implementation):
 
 - **IPC-7351B**: land patterns and naming convention (`QFN50P500X500X80-33N`) for generated footprints.
 - **IPC-2221B / IPC-2152**: spacing and current-capacity guidance (width/clearance calculators, M8).
-- **IPC-6012** classes as rule presets (class 2 / class 3 annular ring etc.).
+- **IPC-6012** classes as rule presets (`board.rules --preset ipc2|ipc3`; values, sources and their unverified
+  status in [BOARD.md](BOARD.md), "Rule presets").
 
 ### KiCad formats
 
@@ -120,15 +121,22 @@ neither fab publishes a table, so they are user data (see D21).
 |---|---|
 | `fab.list` | profiles with their processes, origin (builtin, user, merged) and verification date |
 | `fab.show {fab}` | a profile in full, with its unverified values and sources |
-| `fab.check {fab, process?, parts?, boards?}` | can the fab make and assemble the board: layer count, thickness, copper, finish/color preferences (first offered one is chosen), board size; track width, clearance, hole-to-hole, copper-to-edge and silk-to-pad through cadlab's DRC with a temporary rule set holding the profile's minimums (net class values ignored, the project's rules untouched); drills, annular rings, pad hole-to-hole; silk line width and text height; assembly sides, package size, through-hole; parts availability through the configured suppliers (`fab.no_suppliers` when none). Codes `fab.*`, each with a hint |
+| `fab.check {fab, process?, parts?, boards?}` | can the fab make and assemble the board: layer count, thickness, copper, finish/color preferences (first offered one is chosen), board size; track width, clearance, hole-to-hole, copper-to-edge and silk-to-pad through cadlab's DRC with a temporary rule set holding the profile's minimums (net class values ignored, the project's rules untouched); drills, annular rings, pad hole-to-hole; silk line width and text height; assembly sides, package size, through-hole; parts availability through the configured suppliers (`fab.no_suppliers` when none), at the profile's `catalog` providers when configured, with the substitutions of the fab's `fab-lock.json` (`dir`, default `out/fab/<fab>`) applied (`fab.substituted` info) and ranked substitute candidates (`candidates`, default 3) for every unavailable line in the output's `substitutes` and in the finding's hint. Codes `fab.*`, each with a hint |
 | `fab.compare {fabs?, parts?}` | one row per fab: feasible, error/warning counts, failing constraint codes |
-| `fab.export {fab, dir?, process?, boards?, force?}` | runs the check (refuses on errors unless `force`), then writes to `out/fab/<fab>/`: the fabrication files named by the profile, the zip archive of them (flat, deflated, fixed timestamps: byte-identical across runs), BOM and CPL in the fab's layouts with rotation offsets applied, and `fab-lock.json` |
+| `fab.export {fab, dir?, process?, boards?, force?}` | runs the check (refuses on errors unless `force`), then writes to `out/fab/<fab>/`: the fabrication files named by the profile, the zip archive of them (flat, deflated, fixed timestamps: byte-identical across runs), BOM and CPL in the fab's layouts with rotation offsets applied, and `fab-lock.json`; substitutions in the previous lock are used and kept, substitute candidates are reported as in `fab.check` |
+| `fab.substitute {fab, part, mpn?, remove?, force?, boards?, dir?}` | applies a substitute for one BOM line at one fab: `mpn` (default the best candidate) must be one of the line's candidates (`bom.substitutes`) unless `force` (basis `manual`). Writes it to the fab's `fab-lock.json` (creating a lock without files if there was no export yet), never to the project; `remove` undoes it. The next `fab.check` / `fab.export` for that fab order the substitute; other fabs are not affected |
 
 `fab-lock.json` records: lock version, generator, project, profile (`id`, `name`, `verified_at`, `source`),
 process (`id`, layers, thickness, copper, chosen finish/colors), every file written with its SHA-256 and size
 (the archive included, the lock excluded), each populated BOM line with the chosen manufacturer/MPN, the fab SKU
-and provider when one of the profile's `catalog` providers offers it and its availability status, and the
-rotation offsets applied per designator.
+and provider when one of the profile's `catalog` providers offers it, its availability status and, for a
+substituted line, the MPN it `replaces`, the rotation offsets applied per designator, and the `substitutions`
+chosen for this fab (`part`, `replaces`, `manufacturer`, `mpn`, `provider`, `sku`, `basis`: `drop_in`,
+`parametric` or `manual`), sorted by part. A lock written by `fab.substitute` before any export has only the
+header and the substitutions.
+
+Design rules can be derived from a profile with `board.rules --fab <id> --margin tightest|comfortable`
+([BOARD.md](BOARD.md), "Design rules"): only the resulting numbers are stored in the project.
 
 Manifest `targets`: `drc.run` also runs the board and assembly part of `fab.check` for each target and reports
 its findings as warnings prefixed `[<fab>]` (never errors), plus `fab.unknown_target` for unknown IDs.
@@ -162,8 +170,12 @@ project ──► fab check  (capabilities vs design, parts availability vs that
 ```
 
 - `fab.check <id>`: can fab X make this board and assemble this BOM *today*? Reports rule violations,
-  unavailable or unsupported parts (substitute candidates drawn from the approved alternates first, then from
-  matching generics, are still to come; today the hints point to `bom.approve` / `bom.resolve`).
+  unavailable or unsupported parts. Approved alternates are tried first (they are part of the line); for a
+  line still unavailable at the fab's catalog, it reports ranked substitute candidates: drop-ins from
+  providers' cross-reference data, and for passives parts matching the requirement (same package and value,
+  tolerance at most and ratings at least the part's). See [PARTS.md](PARTS.md), "Substitutes".
+- `fab.substitute <id> <part> [mpn]`: the substitution report becomes a choice for that fab only, recorded in
+  its `fab-lock.json`; `bom.approve` instead adds an alternate for every fab (a design change).
 - `fab.compare jlcpcb,pcbway,...`: side-by-side feasibility (part coverage with `parts`; estimated cost and lead
   time later, where the provider exposes them).
 - `fab.export <id>`: writes the fab's files plus a **`fab-lock.json`** recording exactly what was produced: profile

@@ -50,7 +50,9 @@ pub struct AppliedOffset {
     pub offset: Angle,
 }
 
-/// `fab-lock.json`: exactly what an export produced.
+/// `fab-lock.json`: exactly what an export produced, plus the part substitutions chosen for
+/// this fab (`fab.substitute`). A lock written by `fab.substitute` before any export has no
+/// process, files or BOM yet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FabLock {
     /// Lock format version.
@@ -61,15 +63,63 @@ pub struct FabLock {
     pub project: String,
     /// Profile used.
     pub profile: LockProfile,
-    /// Process options.
-    pub process: LockProcess,
+    /// Process options (none until the first export).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<LockProcess>,
     /// Files written (archive included), in output order.
+    #[serde(default)]
     pub files: Vec<LockFile>,
     /// Chosen part per populated BOM line.
+    #[serde(default)]
     pub bom: Vec<LockLine>,
     /// Rotation offsets applied in the placement file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rotation_offsets: Vec<AppliedOffset>,
+    /// Substitutions applied for this fab, by part ID; kept across exports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substitutions: Vec<Substitution>,
+}
+
+/// A part substitution for one fab: the BOM line `part` is ordered as `mpn` at this fab. Stored
+/// in `fab-lock.json` only, never in the design (D12, D26).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Substitution {
+    /// Part ID of the BOM line.
+    pub part: String,
+    /// MPN it replaces (none for a generic line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
+    /// Manufacturer of the substitute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    /// Substitute MPN.
+    pub mpn: String,
+    /// Provider of the offer chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// SKU at that provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sku: Option<String>,
+    /// How it was found.
+    pub basis: crate::substitute::Basis,
+}
+
+impl FabLock {
+    /// Reads a lock file; `Ok(None)` when it does not exist.
+    pub fn read(path: &std::path::Path) -> Result<Option<FabLock>, String> {
+        match std::fs::read(path) {
+            Ok(b) => serde_json::from_slice(&b).map(Some).map_err(|e| format!("{}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// The lock as written: pretty JSON with a final newline.
+    pub fn to_text(&self) -> std::io::Result<String> {
+        let mut text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        text.push('\n');
+        Ok(text)
+    }
 }
 
 /// Profile identity in the lock.
@@ -366,6 +416,8 @@ pub struct BundleInput<'a> {
     pub picks: Vec<LinePick>,
     /// Output options.
     pub options: Options,
+    /// Substitutions to keep in the lock (from the previous lock).
+    pub substitutions: Vec<Substitution>,
 }
 
 /// The complete bundle: fabrication files, BOM and placement files (when the profile has
@@ -412,14 +464,14 @@ pub fn bundle(p: &Project, input: &BundleInput<'_>) -> std::io::Result<(Vec<Bund
             verified_at: profile.verified_at.clone(),
             source: input.source,
         },
-        process: LockProcess {
+        process: Some(LockProcess {
             id: input.process.id.clone(),
             layers: s.copper_layers,
             thickness: s.thickness,
             outer_copper: s.outer_copper,
             inner_copper: (s.copper_layers > 2).then_some(s.inner_copper),
             choices: input.choices.clone(),
-        },
+        }),
         files: fab
             .iter()
             .map(|f| LockFile { name: f.name.clone(), sha256: sha256_hex(&f.content), bytes: f.content.len() as u64 })
@@ -439,14 +491,15 @@ pub fn bundle(p: &Project, input: &BundleInput<'_>) -> std::io::Result<(Vec<Bund
                         sku: None,
                         provider: None,
                         status: None,
+                        replaces: None,
                     }
                 }),
             })
             .collect(),
         rotation_offsets: offsets,
+        substitutions: input.substitutions.clone(),
     };
-    let mut text = serde_json::to_string_pretty(&lock).map_err(std::io::Error::other)?;
-    text.push('\n');
+    let text = lock.to_text()?;
     fab.push(BundleFile { name: LOCK_FILE.into(), function: "FabLock".into(), content: text.into_bytes() });
     Ok((fab, lock))
 }

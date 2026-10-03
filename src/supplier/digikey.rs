@@ -366,6 +366,7 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
         datasheet: str_at(p, &["DatasheetUrl"])
             .map(|u| if u.starts_with("//") { format!("https:{u}") } else { u.to_string() }),
         url: str_at(p, &["ProductUrl"]).map(String::from),
+        drop_in: Vec::new(),
     };
     let variations = p["ProductVariations"].as_array().cloned().unwrap_or_default();
     if variations.is_empty() {

@@ -23,7 +23,7 @@ cadlab/
 ```
 
 M1 added `value` (exact electrical quantities), `landpattern` (IPC-7351B footprints), `symbolgen`, `partspec`
-(generic part specs), `bom`, `supplier` (providers, catalogs, cache), `sourcing`, `config` (user settings) and
+(generic part specs), `bom`, `supplier` (providers, catalogs, cache), `sourcing` (with `substitute`, added in M4), `config` (user settings) and
 `userlib` (shared libraries outside projects, D19). Modules to come: `erc` (M2),
 `schematic` and `render` (M3), `board`, `drc`, `io` and `fab` (M4), `router` (M5). Spin-off candidates: the
 router, Gerber/Excellon I/O, the footprint generator (`landpattern`).

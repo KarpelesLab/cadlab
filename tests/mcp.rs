@@ -170,6 +170,19 @@ fn mcp_session() {
     assert_eq!(r["structuredContent"]["commands"][0]["name"], "project.set");
     assert!(r["content"][0]["text"].as_str().unwrap().contains("display_units"));
 
+    // Design rule presets, net class view, substitutes (no suppliers here: a clear error).
+    let r = c.tool("board", json!({"action": "rules", "args": {"preset": "ipc3"}}));
+    assert_eq!(r["structuredContent"]["output"]["ipc_class"], 3, "{r}");
+    assert_eq!(r["structuredContent"]["output"]["min_annular_ring"], "0.25mm");
+    c.tool("netclass", json!({"action": "set", "args": {"name": "pwr", "track_width": "0.5mm"}}));
+    let r = c.tool("netclass", json!({"action": "show", "args": {"name": "pwr"}}));
+    assert_eq!(r["structuredContent"]["output"]["effective"]["clearance"], "0.2mm", "{r}");
+    let r = c.tool("bom", json!({"action": "substitutes", "args": {}}));
+    assert_eq!(r["isError"], true);
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("supplier"), "{r}");
+    let r = c.tool("fab", json!({"action": "substitute", "args": {"fab": "jlcpcb", "part": "x"}}));
+    assert_eq!(r["isError"], true, "{r}");
+
     // Invalid arguments are tool errors (visible to the model), with a hint.
     let r = c.tool("project", json!({"action": "set", "args": {"nmae": "x"}}));
     assert_eq!(r["isError"], true);

@@ -14,6 +14,7 @@
 
 pub mod check;
 pub mod export;
+pub mod rules;
 mod sha256;
 
 use std::collections::BTreeMap;

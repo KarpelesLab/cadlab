@@ -21,7 +21,8 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Export>()
         .register::<Resolve>()
         .register::<Check>()
-        .register::<Cost>();
+        .register::<Cost>()
+        .register::<Substitutes>();
 }
 
 /// Show the BOM: one line per part, with quantities and designators.
@@ -687,6 +688,146 @@ impl Command for Cost {
             o.boards,
             if totals.is_empty() { "-".into() } else { totals.join(" + ") }
         );
+        s
+    }
+}
+
+/// Substitute candidates for BOM lines that are not available (not found, short of stock, end
+/// of life, or without an MPN): drop-in replacements from providers' cross-reference data, and
+/// for passives parts with the same package and value, equal or better tolerance and equal or
+/// higher ratings; ranked deterministically (docs/PARTS.md, "Substitutes"). With `fab`, lines are
+/// sourced at that fab's catalog providers and substitutions recorded in its `fab-lock.json` are
+/// applied. Suggestions only: approve one for every fab with `bom.approve`, or for one fab with
+/// `fab.substitute`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Substitutes {
+    /// Fab profile whose parts catalog and lock apply (`jlcpcb`, `pcbway`, `generic`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fab: Option<String>,
+    /// Number of boards to build (sets the stock needed).
+    #[serde(default = "boards_default")]
+    pub boards: u64,
+    /// Candidates per line.
+    #[serde(default = "three")]
+    pub candidates: usize,
+    /// Only these providers (without `fab`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+    /// Only this line (part ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    /// With `fab`: directory of its `fab-lock.json` (default `out/fab/<fab>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+}
+
+/// Result of `bom.substitutes`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SubstituteReport {
+    /// Fab profile, if one was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fab: Option<String>,
+    /// Boards.
+    pub boards: u64,
+    /// Lines that need a substitute, in BOM order.
+    pub lines: Vec<crate::substitute::LineSubstitutes>,
+}
+
+impl Command for Substitutes {
+    const NAME: &'static str = "bom.substitutes";
+    const SUMMARY: &'static str = "Ranked substitute candidates for unavailable BOM lines (optionally at a fab)";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["fab"];
+    type Output = SubstituteReport;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<SubstituteReport, CommandError> {
+        part::require_suppliers(ctx)?;
+        let limit = self.candidates.clamp(1, 20);
+        let boards = self.boards.max(1);
+        let mut rows: Vec<BomRow> = bom::rows(ctx.project()?).into_iter().filter(|r| r.quantity > 0).collect();
+        if let Some(only) = &self.part {
+            if !rows.iter().any(|r| &r.part == only) {
+                let near = crate::suggest::did_you_mean(only, rows.iter().map(|r| r.part.as_str()), 3);
+                return Err(CommandError::not_found("bom.line_not_found", format!("no BOM line for part `{only}`"))
+                    .with_suggestions(&near)
+                    .with_hint_if_none("bom.list lists the lines by part ID"));
+            }
+            rows.retain(|r| &r.part == only);
+        }
+        let lines = match &self.fab {
+            Some(fab) => {
+                let ps = super::fab::profiles(ctx);
+                let (p, _) = super::fab::profile(&ps, fab)?;
+                let dir = super::fab::out_dir(ctx, &p.id, self.dir.as_deref());
+                let applied = super::fab::applied_substitutions(ctx, p, &dir);
+                let project = ctx.project()?;
+                let r = crate::fab::check::parts(project, &rows, p, &ctx.session.suppliers, boards, &applied, limit);
+                let errors: Vec<String> =
+                    r.diagnostics.iter().filter(|d| d.code == "supplier.error").map(|d| d.message.clone()).collect();
+                part::report_provider_errors(ctx, &errors);
+                r.substitutes
+            }
+            None => {
+                let mut errors = Vec::new();
+                let mut lines = Vec::new();
+                for r in &rows {
+                    let s =
+                        crate::sourcing::source_line(r, boards, &ctx.session.suppliers, &self.providers, &mut errors);
+                    if s.status == crate::sourcing::Availability::Ok {
+                        continue;
+                    }
+                    let p = ctx.project()?;
+                    let part = p.library().parts.get(&r.part);
+                    lines.push(crate::substitute::for_line(
+                        r,
+                        part,
+                        s.status,
+                        s.needed,
+                        &ctx.session.suppliers,
+                        &self.providers,
+                        limit,
+                        &mut errors,
+                    ));
+                }
+                errors.sort();
+                errors.dedup();
+                part::report_provider_errors(ctx, &errors);
+                lines
+            }
+        };
+        for l in &lines {
+            if l.candidates.is_empty() {
+                ctx.report(
+                    Diagnostic::warning(
+                        "bom.no_substitute",
+                        format!("no substitute for `{}` ({:?})", l.part, l.status),
+                    )
+                    .with_subject(ObjectRef::Part { scheme: "local".into(), id: l.part.clone() })
+                    .with_hint(l.note.clone().unwrap_or_else(|| "relax the part's requirements (part.set)".into())),
+                );
+            }
+        }
+        Ok(SubstituteReport { fab: self.fab.clone(), boards, lines })
+    }
+
+    fn summarize(o: &SubstituteReport) -> String {
+        if o.lines.is_empty() {
+            return format!("every line is available for {} board(s): no substitute needed", o.boards);
+        }
+        let mut s = String::new();
+        for l in &o.lines {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s += &format!("{} ({}, {:?}, need {}):", l.part, l.designators.join(","), l.status, l.needed);
+            if l.candidates.is_empty() {
+                s += &format!(" none: {}", l.note.as_deref().unwrap_or("-"));
+            }
+            for (i, c) in l.candidates.iter().enumerate() {
+                s += &format!("\n  {}. {} [{:?}]", i + 1, crate::substitute::describe(c), c.basis);
+            }
+        }
         s
     }
 }

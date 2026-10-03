@@ -9,17 +9,24 @@ use serde::{Deserialize, Serialize};
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::{Diagnostic, Severity};
 use crate::fab::check::{self, Choices};
-use crate::fab::export::{BundleInput, LOCK_FILE};
+use crate::fab::export::{BundleInput, FabLock, LOCK_FILE, Substitution};
 use crate::fab::{FabProfile, ProfileSource, Profiles};
 use crate::fabout::Options;
 use crate::refs::ObjectRef;
+use crate::substitute::{Basis, LineSubstitutes};
+use crate::supplier::SearchQuery;
 
 pub(crate) fn register(r: &mut Registry) {
-    r.register::<List>().register::<Show>().register::<Check>().register::<Compare>().register::<Export>();
+    r.register::<List>()
+        .register::<Show>()
+        .register::<Check>()
+        .register::<Compare>()
+        .register::<Export>()
+        .register::<Substitute>();
 }
 
 /// Loads the profiles, reporting unreadable user files.
-fn profiles(ctx: &mut Context<'_>) -> Profiles {
+pub(crate) fn profiles(ctx: &mut Context<'_>) -> Profiles {
     let ps = Profiles::load();
     for w in &ps.warnings {
         ctx.report(
@@ -30,7 +37,7 @@ fn profiles(ctx: &mut Context<'_>) -> Profiles {
     ps
 }
 
-fn profile<'a>(ps: &'a Profiles, id: &str) -> Result<(&'a FabProfile, ProfileSource), CommandError> {
+pub(crate) fn profile<'a>(ps: &'a Profiles, id: &str) -> Result<(&'a FabProfile, ProfileSource), CommandError> {
     let key = id.to_ascii_lowercase();
     ps.profiles.get(&key).map(|(p, s)| (p, *s)).ok_or_else(|| {
         let ids = ps.ids();
@@ -205,16 +212,43 @@ pub struct CheckReport {
     /// Profile values marked unverified.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified: Vec<String>,
+    /// Substitute candidates for lines the fab cannot source as designed (suggestions only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substitutes: Vec<LineSubstitutes>,
+    /// Lines ordered as a substitute recorded in `fab-lock.json`: part → MPN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substituted: Vec<(String, String)>,
 }
 
-/// Runs the board check and, when asked, parts availability.
+fn substituted(picks: &[check::LinePick]) -> Vec<(String, String)> {
+    picks.iter().filter(|k| k.replaces.is_some()).map(|k| (k.part.clone(), k.mpn.clone().unwrap_or_default())).collect()
+}
+
+fn substitutes_text(lines: &[LineSubstitutes]) -> String {
+    let mut s = String::new();
+    for l in lines {
+        s += &format!("\n  {} ({:?}):", l.part, l.status);
+        if l.candidates.is_empty() {
+            s += &format!(" no substitute: {}", l.note.as_deref().unwrap_or("-"));
+        }
+        for (i, c) in l.candidates.iter().enumerate() {
+            s += &format!("\n    {}. {} [{:?}]", i + 1, crate::substitute::describe(c), c.basis);
+        }
+    }
+    s
+}
+
+/// Runs the board check and, when asked, parts availability (with the substitutions applied in
+/// the lock at `out`, and substitute candidates for unavailable lines).
 fn run_check(
-    ctx: &Context<'_>,
+    ctx: &mut Context<'_>,
     p: &FabProfile,
     process: Option<&str>,
     parts: bool,
     boards: u64,
-) -> Result<(check::Report, Vec<check::LinePick>), CommandError> {
+    out: &Path,
+    candidates: usize,
+) -> Result<(check::Report, check::PartsReport), CommandError> {
     let project = ctx.project()?;
     let mut report = check::check(project, p, process);
     if let Some(d) = report.diagnostics.iter().find(|d| d.code == "fab.unknown_process") {
@@ -224,14 +258,60 @@ fn run_check(
         }
         return Err(e);
     }
-    let mut picks = Vec::new();
+    let mut pr = check::PartsReport::default();
     if parts && p.assembly.is_some() {
+        let applied = applied_substitutions(ctx, p, out);
+        let project = ctx.project()?;
         let rows = crate::bom::rows(project);
-        let (pk, diags) = check::parts(&rows, p, &ctx.session.suppliers, boards);
-        picks = pk;
-        report.diagnostics.extend(diags);
+        pr = check::parts(project, &rows, p, &ctx.session.suppliers, boards, &applied, candidates.clamp(1, 20));
+        report.diagnostics.append(&mut pr.diagnostics);
     }
-    Ok((report, picks))
+    Ok((report, pr))
+}
+
+/// Output directory of a fab: `dir` (relative to the project), default `out/fab/<fab>`.
+pub(crate) fn out_dir(ctx: &Context<'_>, fab: &str, dir: Option<&Path>) -> PathBuf {
+    let rel = dir.map(Path::to_path_buf).unwrap_or_else(|| Path::new("out/fab").join(fab));
+    match ctx.session.root() {
+        Some(root) if rel.is_relative() => root.join(rel),
+        _ => rel,
+    }
+}
+
+/// Substitutions recorded in `<out>/fab-lock.json` for this fab (none when there is no lock;
+/// an unreadable lock or one of another fab is reported and ignored).
+pub(crate) fn applied_substitutions(ctx: &mut Context<'_>, p: &FabProfile, out: &Path) -> Vec<Substitution> {
+    let path = out.join(LOCK_FILE);
+    match FabLock::read(&path) {
+        Ok(None) => Vec::new(),
+        Ok(Some(l)) if l.profile.id == p.id => l.substitutions,
+        Ok(Some(l)) => {
+            ctx.report(
+                Diagnostic::warning(
+                    "fab.lock_mismatch",
+                    format!(
+                        "{} is a {} lock; its substitutions are ignored for {}",
+                        path.display(),
+                        l.profile.id,
+                        p.id
+                    ),
+                )
+                .with_hint("use a separate output directory per fab (the default out/fab/<fab>)"),
+            );
+            Vec::new()
+        }
+        Err(e) => {
+            ctx.report(
+                Diagnostic::warning("fab.lock_invalid", format!("cannot read the lock, substitutions ignored: {e}"))
+                    .with_hint("fix the file or delete it (fab.export writes a new one)"),
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn three() -> usize {
+    3
 }
 
 /// Check whether a fab can make (and assemble) the board: layer count, thickness, copper, finish
@@ -253,6 +333,13 @@ pub struct Check {
     /// Number of boards to build (sets the stock needed).
     #[serde(default = "default_boards")]
     pub boards: u64,
+    /// Substitute candidates to list per unavailable line.
+    #[serde(default = "three")]
+    pub candidates: usize,
+    /// Directory of the fab's `fab-lock.json`, whose substitutions apply (default
+    /// `out/fab/<fab>`, relative to the project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
 }
 
 impl Command for Check {
@@ -265,7 +352,9 @@ impl Command for Check {
     fn run(self, ctx: &mut Context<'_>) -> Result<CheckReport, CommandError> {
         let ps = profiles(ctx);
         let (p, _) = profile(&ps, &self.fab)?;
-        let (report, _) = run_check(ctx, p, self.process.as_deref(), self.parts, self.boards)?;
+        let out = out_dir(ctx, &p.id, self.dir.as_deref());
+        let (report, parts) =
+            run_check(ctx, p, self.process.as_deref(), self.parts, self.boards, &out, self.candidates)?;
         let out = CheckReport {
             fab: p.id.clone(),
             process: report.process.clone(),
@@ -273,6 +362,8 @@ impl Command for Check {
             errors: report.count(Severity::Error),
             warnings: report.count(Severity::Warning),
             unverified: p.unverified(),
+            substituted: substituted(&parts.picks),
+            substitutes: parts.substitutes,
         };
         for d in report.diagnostics {
             ctx.report(d);
@@ -282,11 +373,19 @@ impl Command for Check {
 
     fn summarize(o: &CheckReport) -> String {
         let process = o.process.as_deref().unwrap_or("no process");
-        if o.errors == 0 && o.warnings == 0 {
+        let mut s = if o.errors == 0 && o.warnings == 0 {
             format!("{} ({process}): OK", o.fab)
         } else {
             format!("{} ({process}): {} error(s), {} warning(s)", o.fab, o.errors, o.warnings)
+        };
+        for (part, mpn) in &o.substituted {
+            s += &format!("\n  {part}: substituted by {mpn} (fab-lock.json)");
         }
+        if !o.substitutes.is_empty() {
+            s += "\nsubstitute candidates (apply with fab.substitute):";
+            s += &substitutes_text(&o.substitutes);
+        }
+        s
     }
 }
 
@@ -345,7 +444,8 @@ impl Command for Compare {
         let mut rows = Vec::new();
         for id in ids {
             let (p, _) = profile(&ps, &id)?;
-            let (report, _) = run_check(ctx, p, None, self.parts, self.boards.max(1))?;
+            let out = out_dir(ctx, &p.id, None);
+            let (report, _) = run_check(ctx, p, None, self.parts, self.boards.max(1), &out, 1)?;
             let codes = |s: Severity| {
                 let mut v: Vec<String> =
                     report.diagnostics.iter().filter(|d| d.severity == s).map(|d| d.code.to_string()).collect();
@@ -403,12 +503,20 @@ pub struct FabExported {
     pub process: String,
     /// Files written, the lock last.
     pub files: Vec<WrittenFile>,
+    /// Substitute candidates for lines the fab cannot source as designed (suggestions only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substitutes: Vec<LineSubstitutes>,
+    /// Lines ordered as a substitute recorded in `fab-lock.json`: part → MPN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substituted: Vec<(String, String)>,
 }
 
 /// Write a fab's complete file set: Gerber and drill files named its way, its zip archive, BOM
 /// and placement files in its column layouts (rotation offsets applied here, never stored in the
 /// project), and `fab-lock.json` recording the profile, process options, file hashes and the part
-/// chosen for each BOM line. Refuses when `fab.check` finds errors, unless `force`.
+/// chosen for each BOM line. Substitutions recorded in the existing lock (`fab.substitute`) are
+/// used and kept; substitute candidates for unavailable lines are reported. Refuses when
+/// `fab.check` finds errors, unless `force`.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Export {
@@ -442,7 +550,8 @@ impl Command for Export {
     fn run(self, ctx: &mut Context<'_>) -> Result<FabExported, CommandError> {
         let ps = profiles(ctx);
         let (p, source) = profile(&ps, &self.fab)?;
-        let (report, picks) = run_check(ctx, p, self.process.as_deref(), true, self.boards)?;
+        let dir = out_dir(ctx, &p.id, self.dir.as_deref());
+        let (report, parts) = run_check(ctx, p, self.process.as_deref(), true, self.boards, &dir, 3)?;
         let errors = report.count(Severity::Error);
         let process_id = report.process.clone();
         let choices = report.choices.clone();
@@ -477,7 +586,16 @@ impl Command for Export {
             .cloned()
             .collect();
         let process = p.process(&process_id).expect("process chosen by the check");
-        let input = BundleInput { profile: p, source, process, choices, picks, options: Options::default() };
+        let substituted = substituted(&parts.picks);
+        let input = BundleInput {
+            profile: p,
+            source,
+            process,
+            choices,
+            picks: parts.picks,
+            options: Options::default(),
+            substitutions: parts.applied,
+        };
         let (files, _lock) = crate::fab::export::bundle(project, &input).map_err(|e| io(Path::new(LOCK_FILE), e))?;
         for r in unplaced {
             ctx.report(
@@ -489,11 +607,6 @@ impl Command for Export {
                 .with_hint("place it with `place.set` or `place.auto`, or mark it DNP with `bom.dnp`"),
             );
         }
-        let rel = self.dir.clone().unwrap_or_else(|| Path::new("out/fab").join(&p.id));
-        let dir = match ctx.session.root() {
-            Some(root) if rel.is_relative() => root.join(rel),
-            _ => rel,
-        };
         std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
         let mut written = Vec::new();
         for f in files {
@@ -505,7 +618,13 @@ impl Command for Export {
                 sha256: crate::fab::sha256_hex(&f.content),
             });
         }
-        Ok(FabExported { fab: p.id.clone(), process: process_id, files: written })
+        Ok(FabExported {
+            fab: p.id.clone(),
+            process: process_id,
+            files: written,
+            substitutes: parts.substitutes,
+            substituted,
+        })
     }
 
     fn summarize(o: &FabExported) -> String {
@@ -513,6 +632,245 @@ impl Command for Export {
         for f in &o.files {
             s.push_str(&format!("\n  {} ({})", f.path, f.function));
         }
+        for (part, mpn) in &o.substituted {
+            s += &format!("\n  {part}: substituted by {mpn} (fab-lock.json)");
+        }
+        if !o.substitutes.is_empty() {
+            s += "\nsubstitute candidates (apply with fab.substitute, then export again):";
+            s += &substitutes_text(&o.substitutes);
+        }
         s
+    }
+}
+
+/// Apply (or with `remove`, undo) a part substitution for one fab: the BOM line `part` is
+/// ordered as `mpn` (default: the best candidate of `bom.substitutes`) at this fab. The choice
+/// is recorded in the fab's `fab-lock.json` (created if needed), never in the design (D12):
+/// `fab.check` and the next `fab.export` for this fab use it, other fabs do not. The MPN must be
+/// one of the line's substitute candidates unless `force`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Substitute {
+    /// Profile ID (`jlcpcb`, `pcbway`, `generic`).
+    pub fab: String,
+    /// Part ID of the BOM line (as in `bom.list`).
+    pub part: String,
+    /// Substitute MPN (default: the best candidate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpn: Option<String>,
+    /// Remove the line's substitution instead.
+    #[serde(default)]
+    pub remove: bool,
+    /// Accept an MPN that is not among the candidates (recorded with basis `manual`).
+    #[serde(default)]
+    pub force: bool,
+    /// Number of boards to build (sets the stock needed).
+    #[serde(default = "default_boards")]
+    pub boards: u64,
+    /// Directory of the fab's `fab-lock.json` (default `out/fab/<fab>`, relative to the project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+}
+
+/// Result of `fab.substitute`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Substituted {
+    /// Profile ID.
+    pub fab: String,
+    /// Part ID of the line.
+    pub part: String,
+    /// The substitution recorded (none when removed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub substitution: Option<Substitution>,
+    /// Lock file written.
+    pub lock: String,
+    /// Whether a substitution was removed.
+    pub removed: bool,
+    /// Nothing was written (dry run).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+}
+
+impl Command for Substitute {
+    const NAME: &'static str = "fab.substitute";
+    const SUMMARY: &'static str = "Apply a substitute part for one fab (recorded in its fab-lock.json, not the design)";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["fab", "part", "mpn"];
+    type Output = Substituted;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Substituted, CommandError> {
+        let ps = profiles(ctx);
+        let (p, source) = profile(&ps, &self.fab)?;
+        let dir = out_dir(ctx, &p.id, self.dir.as_deref());
+        let path = dir.join(LOCK_FILE);
+        let mut lock = match FabLock::read(&path) {
+            Ok(l) => l,
+            Err(e) => {
+                return Err(CommandError::invalid_args("fab.lock_invalid", format!("cannot read the lock: {e}"))
+                    .with_hint("fix the file or delete it (fab.export writes a new one)"));
+            }
+        };
+        if let Some(l) = &lock
+            && l.profile.id != p.id
+        {
+            return Err(CommandError::conflict(
+                "fab.lock_mismatch",
+                format!("{} is a {} lock, not {}", path.display(), l.profile.id, p.id),
+            )
+            .with_hint("use the fab's own directory (the default out/fab/<fab>)"));
+        }
+        let project = ctx.project()?;
+        let rows = crate::bom::rows(project);
+        let Some(row) = rows.iter().find(|r| r.part == self.part).cloned() else {
+            let near = crate::suggest::did_you_mean(&self.part, rows.iter().map(|r| r.part.as_str()), 3);
+            return Err(CommandError::not_found("bom.line_not_found", format!("no BOM line for part `{}`", self.part))
+                .with_suggestions(&near)
+                .with_hint_if_none("bom.list lists the lines by part ID"));
+        };
+        let mut substitution = None;
+        let removed = self.remove;
+        if self.remove {
+            let had = lock.as_ref().is_some_and(|l| l.substitutions.iter().any(|s| s.part == self.part));
+            if !had {
+                return Err(CommandError::not_found(
+                    "fab.not_substituted",
+                    format!("`{}` has no substitution for {}", self.part, p.name),
+                )
+                .with_hint("fab.check lists the substitutions in effect"));
+            }
+        } else {
+            super::part::require_suppliers(ctx)?;
+            let suppliers = &ctx.session.suppliers;
+            let only = check::catalog_providers(p, suppliers);
+            let mut errors = Vec::new();
+            let s = crate::sourcing::source_line(&row, self.boards.max(1), suppliers, &only, &mut errors);
+            let part = project.library().parts.get(&row.part);
+            let found = crate::substitute::for_line(&row, part, s.status, s.needed, suppliers, &only, 20, &mut errors);
+            let pick = match &self.mpn {
+                None => found.candidates.first().cloned(),
+                Some(m) => found.candidates.iter().find(|c| c.offer.mpn.eq_ignore_ascii_case(m)).cloned(),
+            };
+            let chosen = match (pick, &self.mpn) {
+                (Some(c), _) => Some((c.basis, c.offer)),
+                (None, None) => {
+                    return Err(CommandError::not_found(
+                        "fab.no_substitute",
+                        format!("no substitute candidate for `{}` at {}", self.part, p.name),
+                    )
+                    .with_hint(found.note.unwrap_or_else(|| "pass an MPN with force to choose one yourself".into())));
+                }
+                (None, Some(m)) if !self.force => {
+                    let list: Vec<String> = found.candidates.iter().map(|c| c.offer.mpn.clone()).collect();
+                    return Err(CommandError::invalid_args(
+                        "fab.not_a_candidate",
+                        format!("{m} is not a substitute candidate for `{}`", self.part),
+                    )
+                    .with_hint(if list.is_empty() {
+                        "there are no candidates; pass force to record it anyway (check pinout and ratings yourself)"
+                            .to_string()
+                    } else {
+                        format!("candidates: {}; or pass force to record it anyway", list.join(", "))
+                    }));
+                }
+                (None, Some(m)) => {
+                    let r = suppliers.lookup(m, &only);
+                    errors.extend(r.errors);
+                    let mut offers = r.candidates;
+                    SearchQuery { quantity: s.needed.max(1), include_obsolete: true, ..Default::default() }
+                        .rank(&mut offers);
+                    match offers.into_iter().next() {
+                        Some(o) => Some((Basis::Manual, o)),
+                        None => {
+                            substitution = Some(Substitution {
+                                part: row.part.clone(),
+                                replaces: row.order_mpn().map(|(_, m)| m.to_string()),
+                                manufacturer: None,
+                                mpn: m.clone(),
+                                provider: None,
+                                sku: None,
+                                basis: Basis::Manual,
+                            });
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some((basis, o)) = chosen {
+                substitution = Some(Substitution {
+                    part: row.part.clone(),
+                    replaces: row.order_mpn().map(|(_, m)| m.to_string()),
+                    manufacturer: o.manufacturer,
+                    mpn: o.mpn,
+                    provider: Some(o.provider),
+                    sku: Some(o.sku),
+                    basis,
+                });
+            }
+            errors.sort();
+            errors.dedup();
+            super::part::report_provider_errors(ctx, &errors);
+        }
+        let project = ctx.project()?;
+        let mut l = lock.take().unwrap_or_else(|| FabLock {
+            lock_version: crate::fab::export::LOCK_VERSION,
+            generator: format!("cadlab {}", Options::default().version),
+            project: project.manifest().name.clone(),
+            profile: crate::fab::export::LockProfile {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                verified_at: p.verified_at.clone(),
+                source,
+            },
+            process: None,
+            files: Vec::new(),
+            bom: Vec::new(),
+            rotation_offsets: Vec::new(),
+            substitutions: Vec::new(),
+        });
+        l.substitutions.retain(|s| s.part != self.part);
+        l.substitutions.extend(substitution.clone());
+        l.substitutions.sort_by(|a, b| a.part.cmp(&b.part));
+        let dry_run = ctx.is_dry_run();
+        if !dry_run {
+            std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
+            let text = l.to_text().map_err(|e| io(&path, e))?;
+            std::fs::write(&path, text).map_err(|e| io(&path, e))?;
+        }
+        ctx.report(
+            Diagnostic::info(
+                "fab.export_needed",
+                format!("{} records the choice; the exported BOM changes with the next fab.export", LOCK_FILE),
+            )
+            .with_hint(format!("run fab.export {}", p.id)),
+        );
+        Ok(Substituted {
+            fab: p.id.clone(),
+            part: self.part,
+            substitution,
+            lock: path.display().to_string(),
+            removed,
+            dry_run,
+        })
+    }
+
+    fn summarize(o: &Substituted) -> String {
+        match &o.substitution {
+            Some(s) => format!(
+                "{}: {} ordered as {}{}{} ({:?}){}",
+                o.fab,
+                o.part,
+                s.manufacturer.as_deref().map(|m| format!("{m} ")).unwrap_or_default(),
+                s.mpn,
+                match (&s.provider, &s.sku) {
+                    (Some(p), Some(k)) => format!(" [{p} {k}]"),
+                    _ => String::new(),
+                },
+                s.basis,
+                if o.dry_run { " [dry run]" } else { "" }
+            ),
+            None => {
+                format!("{}: substitution of {} removed{}", o.fab, o.part, if o.dry_run { " [dry run]" } else { "" })
+            }
+        }
     }
 }

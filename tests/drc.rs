@@ -357,3 +357,144 @@ fn many_tracks_performance() {
     #[cfg(not(debug_assertions))]
     assert!(dt < std::time::Duration::from_secs(1), "DRC took {dt:?}");
 }
+
+fn diag_codes(o: &Value) -> Vec<String> {
+    o["diagnostics"].as_array().unwrap().iter().map(|d| d["code"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn rule_presets_change_what_drc_accepts() {
+    let (_d, r, mut s) = routed();
+    // IPC class 3: 0.25 mm annular ring; the three 0.6/0.3 mm vias (0.15 mm ring) now fail.
+    let o = exec(&r, &mut s, "board.rules", json!({"preset": "ipc3"}));
+    assert_eq!(o["output"]["ipc_class"], 3);
+    assert_eq!(o["output"]["min_annular_ring"], "0.25mm");
+    assert_eq!(o["output"]["via_diameter"], "0.8mm");
+    let changed: Vec<&str> =
+        o["output"]["changed"].as_array().unwrap().iter().map(|c| c["field"].as_str().unwrap()).collect();
+    assert_eq!(changed, ["via_diameter", "min_annular_ring"]);
+    let d = drc(&s);
+    let rings: Vec<&Diagnostic> = d.iter().filter(|x| x.code == "drc.via_annular_ring").collect();
+    assert_eq!(rings.len(), 3, "{}", text(&d));
+    assert!(rings.iter().all(|x| x.severity == Severity::Error && x.message.contains("minimum 0.25mm")));
+    // A new via takes the class 3 default size and passes.
+    exec(&r, &mut s, "via.add", json!({"at": ["2mm", "13mm"], "net": "GND"}));
+    let d = drc(&s);
+    assert_eq!(d.iter().filter(|x| x.code == "drc.via_annular_ring").count(), 3, "{}", text(&d));
+    exec(&r, &mut s, "history.undo", json!({}));
+    // Back to class 2: clean again.
+    exec(&r, &mut s, "board.rules", json!({"preset": "ipc2"}));
+    assert!(drc(&s).is_empty(), "{}", text(&drc(&s)));
+    // A preset and explicit values: the explicit ones win.
+    let o = exec(&r, &mut s, "board.rules", json!({"preset": "ipc3", "min_annular_ring": "0.15mm"}));
+    assert_eq!(o["output"]["min_annular_ring"], "0.15mm");
+    assert!(drc(&s).is_empty(), "{}", text(&drc(&s)));
+}
+
+#[test]
+fn rules_derived_from_a_fab_profile() {
+    let (_d, r, mut s) = routed();
+    // Preview with dry run: nothing changes.
+    let before = project(&mut s).board().rules.clone();
+    let o = r
+        .execute(&mut s, "board.rules", json!({"fab": "jlcpcb", "margin": "tightest"}), RunOptions { dry_run: true })
+        .unwrap();
+    let v = serde_json::to_value(&o).unwrap();
+    assert_eq!(v["output"]["min_track_width"], "0.1mm");
+    assert_eq!(project(&mut s).board().rules, before);
+
+    let o = exec(&r, &mut s, "board.rules", json!({"fab": "jlcpcb", "margin": "tightest"}));
+    let out = &o["output"];
+    assert_eq!(out["derived_from"], "jlcpcb two-layer");
+    for (k, v) in [
+        ("min_track_width", "0.1mm"),
+        ("clearance", "0.1mm"),
+        ("track_width", "0.1mm"),
+        ("min_drill", "0.15mm"),
+        ("min_annular_ring", "0.05mm"),
+        ("via_drill", "0.15mm"),
+        ("via_diameter", "0.25mm"),
+        ("hole_to_hole", "0.2mm"),
+        ("copper_to_edge", "0.2mm"),
+    ] {
+        assert_eq!(out[k], v, "{k}");
+    }
+    let track = out["derived"].as_array().unwrap().iter().find(|d| d["field"] == "min_track_width").unwrap().clone();
+    assert_eq!(track, json!({"field": "min_track_width", "value": "0.1mm", "from": "min_track", "limit": "0.1mm"}));
+    assert!(drc(&s).is_empty(), "the board is wider than the limits: {}", text(&drc(&s)));
+
+    // Comfortable (default): minimums +25 % rounded up to 10 um, default track/via not below class 2.
+    let o = exec(&r, &mut s, "board.rules", json!({"fab": "jlcpcb"}));
+    let out = &o["output"];
+    for (k, v) in [
+        ("min_track_width", "0.13mm"),
+        ("clearance", "0.13mm"),
+        ("track_width", "0.25mm"),
+        ("min_drill", "0.19mm"),
+        ("min_annular_ring", "0.07mm"),
+        ("via_drill", "0.3mm"),
+        ("via_diameter", "0.6mm"),
+        ("hole_to_hole", "0.25mm"),
+    ] {
+        assert_eq!(out[k], v, "{k}");
+    }
+    // Explicit values win over derived ones.
+    let o = exec(&r, &mut s, "board.rules", json!({"fab": "pcbway", "clearance": "0.2mm"}));
+    assert_eq!(o["output"]["clearance"], "0.2mm");
+    assert_eq!(o["output"]["derived_from"].as_str().unwrap().split(' ').next(), Some("pcbway"));
+
+    // Only numbers are stored: the rules have no reference to the fab.
+    let rules = serde_json::to_value(&project(&mut s).board().rules).unwrap();
+    let keys: Vec<&str> = rules.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut want: Vec<&str> = cadlab::model::board::RULE_FIELDS.to_vec();
+    want.push("ipc_class");
+    want.sort();
+    let mut keys = keys;
+    keys.sort();
+    assert_eq!(keys, want);
+
+    let f = r.execute(&mut s, "board.rules", json!({"margin": "tightest"}), RunOptions::default()).unwrap_err();
+    assert_eq!(f.error.diagnostic.code, "board.invalid_rule");
+    let f = r.execute(&mut s, "board.rules", json!({"fab": "nofab"}), RunOptions::default()).unwrap_err();
+    assert_eq!(f.error.diagnostic.code, "fab.unknown");
+    let f = r
+        .execute(&mut s, "board.rules", json!({"fab": "jlcpcb", "process": "nope"}), RunOptions::default())
+        .unwrap_err();
+    assert_eq!(f.error.diagnostic.code, "fab.unknown_process");
+}
+
+#[test]
+fn net_class_view_and_per_class_via_rules() {
+    let (_d, r, mut s) = routed();
+    exec(&r, &mut s, "netclass.set", json!({"name": "gnd", "via_drill": "0.4mm", "via_diameter": "0.8mm"}));
+    exec(&r, &mut s, "net.set", json!({"nets": ["GND"], "class": "gnd"}));
+    let o = exec(&r, &mut s, "netclass.show", json!({"name": "gnd"}));
+    let e = &o["output"]["effective"];
+    assert_eq!(e["via_diameter"], "0.8mm");
+    assert_eq!(e["track_width"], "0.25mm");
+    assert_eq!(e["inherited"], json!(["track_width", "clearance"]));
+    assert_eq!(o["output"]["nets"], json!(["GND"]));
+    // The existing 0.6/0.3 mm GND vias are smaller than the class asks: warnings, not errors.
+    let d = drc(&s);
+    let w: Vec<&Diagnostic> = d.iter().filter(|x| x.code == "drc.via_size_class").collect();
+    assert_eq!(w.len(), 3, "{}", text(&d));
+    assert!(w.iter().all(|x| x.severity == Severity::Warning && x.message.contains("asks for 0.8mm/0.4mm")));
+    // Board rules changes show through inherited values.
+    exec(&r, &mut s, "board.rules", json!({"track_width": "0.3mm"}));
+    let o = exec(&r, &mut s, "netclass.list", json!({}));
+    assert_eq!(o["output"]["classes"][0]["effective"]["track_width"], "0.3mm");
+
+    // A class below the board minimums is reported when set, and by the DRC.
+    let o = exec(&r, &mut s, "netclass.set", json!({"name": "thin", "track_width": "0.1mm", "via_diameter": "0.5mm"}));
+    assert_eq!(diag_codes(&o), ["drc.netclass_rule", "drc.netclass_rule"]);
+    let d = drc(&s);
+    let n: Vec<&Diagnostic> = d.iter().filter(|x| x.code == "drc.netclass_rule").collect();
+    assert_eq!(n.len(), 2, "{}", text(&d));
+    assert!(n[0].subjects.contains(&ObjectRef::Name("thin".into())) && n[0].hint.is_some());
+    // Lowering the board minimums (as a fab derivation would) clears them.
+    let o = exec(&r, &mut s, "board.rules", json!({"fab": "jlcpcb", "margin": "tightest"}));
+    assert!(diag_codes(&o).is_empty(), "{o}");
+    assert!(!codes(&drc(&s)).contains("drc.netclass_rule"));
+    let f = r.execute(&mut s, "netclass.show", json!({"name": "gn"}), RunOptions::default()).unwrap_err();
+    assert_eq!(f.error.diagnostic.code, "netclass.not_found");
+}

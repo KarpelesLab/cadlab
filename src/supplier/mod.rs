@@ -93,6 +93,11 @@ pub struct Candidate {
     /// Product page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// MPNs the provider's cross-reference data lists as drop-in replacements (same pinout,
+    /// package and function). Substitutes for ICs and other non-passive parts come only from
+    /// here (`bom.substitutes`); cadlab never guesses pin compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drop_in: Vec<String>,
 }
 
 fn one() -> u64 {

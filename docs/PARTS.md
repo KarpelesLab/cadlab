@@ -157,7 +157,7 @@ pub trait Provider: Send + Sync {
 ```
 
 A `Candidate` is an orderable offer: provider and SKU (e.g. an LCSC `C` number), manufacturer and MPN,
-package, parameters normalized to cadlab keys, stock, MOQ, price breaks (exact `Money`), lifecycle, datasheet.
+package, parameters normalized to cadlab keys, stock, MOQ, price breaks (exact `Money`), lifecycle, datasheet, and `drop_in`: MPNs the provider's cross-reference data lists as drop-in replacements.
 `Suppliers` queries every configured provider, filters with the query, and ranks: in stock, active, cheapest
 at the needed quantity, most stock. A failing provider is reported as a warning; the others still answer.
 
@@ -188,6 +188,38 @@ API access to check for each).
 | `bom.resolve [--boards N] [--apply]` | candidates for generic lines: same category, package and value, tolerance at most and ratings at least the requirement, enough stock; `apply` approves the best |
 | `bom.check [--boards N]` | per line: ok, low stock, end of life, not found, no MPN; problems are error diagnostics (CLI exit code 3) |
 | `bom.cost [--boards N]` | cheapest in-stock offer per line (MOQ and price breaks applied), totals per currency |
+| `bom.substitutes [fab] [--boards N] [--part P] [--candidates K]` | ranked substitute candidates for lines that are not found, short of stock, end of life or without an MPN (with `fab`: at its catalog providers, with its lock's substitutions applied); see "Substitutes" |
 
 Offers are never written into the project (D12). The library never judges or summarizes datasheets: it exposes
 URLs and lets the agent read them.
+
+## Substitutes (`src/substitute.rs`, DECISIONS D26)
+
+When a line cannot be ordered as designed (its MPNs are not found at the providers asked, are short of stock
+or end of life, or it has no MPN), `fab.check`, `fab.export` and `bom.substitutes` propose substitutes. For a
+fab, "the providers asked" are its `catalog` providers when configured (LCSC for JLCPCB), so a part stocked by
+DigiKey but not by LCSC needs a substitute at JLCPCB. The line's approved alternates are always tried first;
+they are part of the line, so a substitute is only proposed when none of them works.
+
+Candidates come from two sources, and nowhere else:
+
+| Basis | Categories | Rule |
+|---|---|---|
+| `drop_in` | any | an MPN listed in a provider's cross-reference data (`Candidate::drop_in`) for one of the line's MPNs (looked up at every provider), offered by the providers asked, same package (normalized) and category when both are known |
+| `parametric` | resistor, capacitor, inductor, ferrite bead, LED, fuse | same category and package, same value and other parameters (`dielectric`, color, ...), tolerance at most and voltage/current/power ratings at least the part's: the `bom.resolve` query; parts without package or value parameters get none |
+
+ICs, regulators, transistors, diodes, crystals, connectors and anything else get drop-ins only. cadlab never
+infers pin compatibility from MPN prefixes, descriptions or parameters; when no provider supplies
+cross-reference data, the line gets no candidate and a note saying so (approve a replacement chosen from its
+datasheet with `bom.approve`).
+
+Every candidate is in stock for the build quantity and not obsolete or last-time-buy. Ranking is deterministic:
+drop-ins before parametric matches, then in stock, active, cheapest for the quantity (MOQ applied), most stock,
+MPN, provider; duplicates (same provider and SKU) are dropped. Each candidate lists the criteria it meets
+(`package 0402`, `voltage_rating >= 16V`, `drop-in for X`).
+
+Substitutes are suggestions: nothing changes the project. To use one:
+
+- for every fab, as a design decision: `bom.approve <part> <mpn>` (an approved alternate);
+- for one fab only: `fab.substitute <fab> <part> [mpn]`, recorded in that fab's `fab-lock.json`
+  ([MANUFACTURING.md](MANUFACTURING.md)) and used by its next check and export.

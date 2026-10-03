@@ -374,3 +374,188 @@ fn bom_export_uses_profile_layouts() {
     let rows = cadlab::bom::rows(s.project.as_ref().unwrap());
     assert_eq!(cadlab::bom::to_csv(&rows, cadlab::bom::CsvFormat::Jlcpcb), csv);
 }
+
+/// Test catalogs (made-up parts, stock and prices): `lcsc` (JLCPCB's catalog) where the LDO is
+/// out of stock, and `xref`, a provider whose cross-reference data lists a drop-in for it.
+fn substitution_suppliers() -> Suppliers {
+    let c = |v: Value| -> Candidate { serde_json::from_value(v).unwrap() };
+    let lcsc = vec![
+        c(json!({"sku": "C51118", "manufacturer": "Diodes", "mpn": "AP2112K-3.3TRG1", "category": "ldo",
+            "package": "SOT-23-5", "stock": 0, "prices": [{"qty": 1, "price": "0.12 USD"}], "lifecycle": "active"})),
+        c(json!({"sku": "C9001", "manufacturer": "Acme", "mpn": "ACME-LDO33-B", "category": "ldo",
+            "package": "SOT-23-5", "stock": 5000, "prices": [{"qty": 1, "price": "0.08 USD"}], "lifecycle": "active"})),
+        // Same function, other package: never a drop-in, even when listed.
+        c(json!({"sku": "C9002", "manufacturer": "Acme", "mpn": "ACME-LDO33-T", "category": "ldo",
+            "package": "SOT-223", "stock": 5000, "prices": [{"qty": 1, "price": "0.05 USD"}], "lifecycle": "active"})),
+        // Looks like the LDO, but no cross-reference: never proposed.
+        c(json!({"sku": "C9003", "manufacturer": "Other", "mpn": "OTHER-LDO33", "category": "ldo",
+            "package": "SOT-23-5", "stock": 9000, "prices": [{"qty": 1, "price": "0.01 USD"}], "lifecycle": "active",
+            "params": {"voltage_out": "3.3V"}})),
+        // Capacitors for the generic 1 uF 16 V X5R 0402 line.
+        c(json!({"sku": "C2001", "manufacturer": "Samsung", "mpn": "CAP-1U-25V-X5R-0402", "category": "capacitor",
+            "package": "0402", "params": {"capacitance": "1uF", "voltage_rating": "25V", "dielectric": "X5R"},
+            "stock": 100000, "prices": [{"qty": 1, "price": "0.004 USD"}], "lifecycle": "active"})),
+        c(json!({"sku": "C2002", "manufacturer": "Murata", "mpn": "CAP-1U-16V-X5R-0402", "category": "capacitor",
+            "package": "0402", "params": {"capacitance": "1uF", "voltage_rating": "16V", "dielectric": "X5R"},
+            "stock": 100000, "prices": [{"qty": 1, "price": "0.002 USD"}], "lifecycle": "active"})),
+        c(json!({"sku": "C2003", "manufacturer": "Cheap", "mpn": "CAP-1U-10V-X5R-0402", "category": "capacitor",
+            "package": "0402", "params": {"capacitance": "1uF", "voltage_rating": "10V", "dielectric": "X5R"},
+            "stock": 100000, "prices": [{"qty": 1, "price": "0.001 USD"}], "lifecycle": "active"})),
+        c(json!({"sku": "C2004", "manufacturer": "Big", "mpn": "CAP-1U-16V-X5R-0603", "category": "capacitor",
+            "package": "0603", "params": {"capacitance": "1uF", "voltage_rating": "16V", "dielectric": "X5R"},
+            "stock": 100000, "prices": [{"qty": 1, "price": "0.001 USD"}], "lifecycle": "active"})),
+        c(json!({"sku": "C2005", "manufacturer": "Gone", "mpn": "CAP-1U-50V-X5R-0402", "category": "capacitor",
+            "package": "0402", "params": {"capacitance": "1uF", "voltage_rating": "50V", "dielectric": "X5R"},
+            "stock": 100000, "prices": [{"qty": 1, "price": "0.001 USD"}], "lifecycle": "obsolete"})),
+    ];
+    let xref = vec![c(json!({"sku": "X-1", "manufacturer": "Diodes", "mpn": "AP2112K-3.3TRG1", "category": "ldo",
+        "package": "SOT-23-5", "stock": 0, "lifecycle": "active",
+        "drop_in": ["ACME-LDO33-B", "ACME-LDO33-T"]}))];
+    Suppliers::new().with(Arc::new(Catalog::from_parts("lcsc", lcsc))).with(Arc::new(Catalog::from_parts("xref", xref)))
+}
+
+fn line<'a>(lines: &'a Value, part: &str) -> &'a Value {
+    lines.as_array().unwrap().iter().find(|l| l["part"] == part).unwrap_or_else(|| panic!("no {part} in {lines}"))
+}
+
+fn cand_mpns(l: &Value) -> Vec<String> {
+    l["candidates"].as_array().unwrap().iter().map(|c| c["offer"]["mpn"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn substitutes_are_suggested_ranked_and_deterministic() {
+    let (_d, r, mut s) = routed();
+    s.suppliers = substitution_suppliers();
+    let before = s.project.clone();
+    let undo = s.history.undo_len();
+
+    // fab.check: the LDO is out of stock at LCSC; the generic caps have no MPN. Both get ranked
+    // candidates in the output and a hint naming the best one.
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "jlcpcb"}));
+    let subs = &o["output"]["substitutes"];
+    let ldo = line(subs, "AP2112K-3.3TRG1");
+    assert_eq!(ldo["status"], "low_stock");
+    assert_eq!(cand_mpns(ldo), ["ACME-LDO33-B"], "drop-ins in the same package only, from cross-reference data");
+    assert_eq!(ldo["candidates"][0]["basis"], "drop_in");
+    assert_eq!(ldo["candidates"][0]["offer"]["sku"], "C9001");
+    let caps = line(subs, "C_1uF_16V_X5R_0402");
+    assert_eq!(caps["status"], "no_mpn");
+    // Same package and value, voltage at least 16 V, in stock, not obsolete; cheapest first.
+    assert_eq!(cand_mpns(caps), ["CAP-1U-16V-X5R-0402", "CAP-1U-25V-X5R-0402"]);
+    assert_eq!(caps["candidates"][0]["basis"], "parametric");
+    let m: Vec<&str> =
+        caps["candidates"][0]["matches"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(m.contains(&"package 0402") && m.contains(&"voltage_rating >= 16V"), "{m:?}");
+    let low = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "fab.low_stock").unwrap();
+    let hint = low["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("1 substitute candidate(s)") && hint.contains("ACME-LDO33-B") && hint.contains("fab.substitute"),
+        "{hint}"
+    );
+
+    // The standalone command gives the same lines, for the fab or across all providers.
+    let a = exec(&r, &mut s, "bom.substitutes", json!({"fab": "jlcpcb"}));
+    assert_eq!(&a["output"]["lines"], subs);
+    let b = exec(&r, &mut s, "bom.substitutes", json!({"fab": "jlcpcb"}));
+    assert_eq!(a, b, "deterministic");
+    let one = exec(&r, &mut s, "bom.substitutes", json!({"part": "AP2112K-3.3TRG1", "candidates": 5}));
+    assert_eq!(one["output"]["lines"].as_array().unwrap().len(), 1);
+    assert_eq!(cand_mpns(&one["output"]["lines"][0]), ["ACME-LDO33-B"]);
+
+    // Suggestions only: the project is untouched.
+    assert_eq!(s.project, before);
+    assert_eq!(s.history.undo_len(), undo);
+}
+
+#[test]
+fn applying_a_substitution_records_it_for_one_fab_only() {
+    let (d, r, mut s) = routed();
+    s.suppliers = substitution_suppliers();
+    let before = s.project.clone();
+    let lock_path = d.path().join("p/out/fab/jlcpcb/fab-lock.json");
+
+    // Not a candidate: refused unless forced.
+    let f = r
+        .execute(
+            &mut s,
+            "fab.substitute",
+            json!({"fab": "jlcpcb", "part": "AP2112K-3.3TRG1", "mpn": "OTHER-LDO33"}),
+            RunOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(f.error.diagnostic.code, "fab.not_a_candidate");
+    assert!(f.error.diagnostic.hint.as_deref().unwrap().contains("ACME-LDO33-B"));
+    assert!(!lock_path.exists());
+
+    // The best candidate, before any export: a lock holding only the substitution.
+    let o = exec(&r, &mut s, "fab.substitute", json!({"fab": "jlcpcb", "part": "AP2112K-3.3TRG1"}));
+    assert_eq!(o["output"]["substitution"]["mpn"], "ACME-LDO33-B");
+    let lock: Value = serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(
+        lock["substitutions"],
+        json!([{"part": "AP2112K-3.3TRG1", "replaces": "AP2112K-3.3TRG1", "manufacturer": "Acme",
+                "mpn": "ACME-LDO33-B", "provider": "lcsc", "sku": "C9001", "basis": "drop_in"}])
+    );
+    assert!(lock.get("process").is_none());
+    assert_eq!(s.project, before, "the design does not change");
+
+    // fab.check now orders the substitute: no stock warning, an info naming it.
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "jlcpcb"}));
+    assert!(!codes(&o, "warning").contains(&"fab.low_stock".to_string()), "{o}");
+    assert!(codes(&o, "info").contains(&"fab.substituted".to_string()));
+    assert_eq!(o["output"]["substituted"], json!([["AP2112K-3.3TRG1", "ACME-LDO33-B"]]));
+    assert!(o["output"]["substitutes"].as_array().unwrap().iter().all(|l| l["part"] != "AP2112K-3.3TRG1"));
+
+    // The export uses it in the BOM and keeps it in the new lock.
+    exec(&r, &mut s, "fab.export", json!({"fab": "jlcpcb", "force": true}));
+    let files = read_dir(&d.path().join("p/out/fab/jlcpcb"));
+    let bom = String::from_utf8(files["p-BOM-jlcpcb.csv"].clone()).unwrap();
+    assert!(bom.contains("AP2112K-3.3TRG1,U1,SOT-23-5,C9001\r\n"), "{bom}");
+    let lock: Value = serde_json::from_slice(&files["fab-lock.json"]).unwrap();
+    assert_eq!(lock["substitutions"][0]["mpn"], "ACME-LDO33-B");
+    let u1 = lock["bom"].as_array().unwrap().iter().find(|l| l["designators"] == json!(["U1"])).unwrap();
+    assert_eq!(
+        (&u1["mpn"], &u1["sku"], &u1["replaces"]),
+        (&json!("ACME-LDO33-B"), &json!("C9001"), &json!("AP2112K-3.3TRG1"))
+    );
+    assert_eq!(u1["status"], "ok");
+    // Exporting again gives the same bytes (the substitution is stable).
+    exec(&r, &mut s, "fab.export", json!({"fab": "jlcpcb", "force": true}));
+    assert_eq!(read_dir(&d.path().join("p/out/fab/jlcpcb")), files);
+
+    // Another fab is not affected.
+    exec(&r, &mut s, "fab.export", json!({"fab": "pcbway", "force": true}));
+    let w = read_dir(&d.path().join("p/out/fab/pcbway"));
+    let lock: Value = serde_json::from_slice(&w["fab-lock.json"]).unwrap();
+    assert!(lock.get("substitutions").is_none());
+    let bom = String::from_utf8(w["p-BOM-pcbway.csv"].clone()).unwrap();
+    assert!(bom.contains(",U1,1,Diodes,AP2112K-3.3TRG1,"), "{bom}");
+
+    // Forced manual choice, then removal.
+    let o = exec(
+        &r,
+        &mut s,
+        "fab.substitute",
+        json!({"fab": "jlcpcb", "part": "AP2112K-3.3TRG1", "mpn": "OTHER-LDO33", "force": true}),
+    );
+    assert_eq!(o["output"]["substitution"]["basis"], "manual");
+    let o = exec(&r, &mut s, "fab.substitute", json!({"fab": "jlcpcb", "part": "AP2112K-3.3TRG1", "remove": true}));
+    assert_eq!(o["output"]["removed"], true);
+    let lock: Value = serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    assert!(lock.get("substitutions").is_none());
+    assert!(lock["files"].as_array().unwrap().len() > 5, "the export record is kept");
+    let f = r
+        .execute(
+            &mut s,
+            "fab.substitute",
+            json!({"fab": "jlcpcb", "part": "AP2112K-3.3TRG1", "remove": true}),
+            RunOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(f.error.diagnostic.code, "fab.not_substituted");
+    let f = r
+        .execute(&mut s, "fab.substitute", json!({"fab": "jlcpcb", "part": "AP2112"}), RunOptions::default())
+        .unwrap_err();
+    assert_eq!(f.error.diagnostic.code, "bom.line_not_found");
+    assert_eq!(s.project, before);
+}

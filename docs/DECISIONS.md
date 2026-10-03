@@ -175,6 +175,24 @@ interchange target here: a multi-sheet KiCad schematic needs a root sheet with s
 global labels for every net crossing sheets, and per-sheet instance paths, all of which the ERC and netlist
 oracles would then test instead of the layout. One flat sheet keeps local labels and the exported netlist
 exactly cadlab's; hierarchical export can come later if humans need it.
+### D26. Rule presets and fab-derived rules store numbers; substitutes are per-fab lock entries (2026-10-04)
+`board.rules` builds the rule set from a preset (`ipc2` = the defaults, `ipc3` = class 3 annular ring and
+vias), then from a fab profile (`fab`, `margin` `tightest` = the fab's limits, `comfortable` = limits + 25 %
+rounded up to 10 µm, default track/via never below the class 2 defaults), then from explicit fields; only the
+resulting numbers are stored, with no reference to the preset or fab. IPC values whose standard text could not
+be read are documented as unverified with their secondary sources (docs/BOARD.md). The DRC keeps reading net
+class values over the rules, and now also warns about vias smaller than their class and class values below
+the board minimums. Parts that a fab cannot source get substitute candidates from two sources only: drop-ins
+listed by a provider's cross-reference data (any category; the only source for non-passives) and parametric
+matches for passives (same package and value, tolerance at most, ratings at least). Ranking is fixed (drop-in
+before parametric, then the usual stock/lifecycle/price/stock order, then MPN and provider). Applying one is an
+explicit `fab.substitute`, which writes it to that fab's `fab-lock.json` (created before the first export if
+needed); `fab.check`/`fab.export` for that fab apply and keep it, other fabs and the design are untouched.
+*Why:* rules are engineering intent and must not change when a profile is edited (D12); a preset or profile is
+a starting point. Guessing pin compatibility from MPN families or parameters would put wrong parts on boards,
+so non-passives need explicit cross-reference data. A substitution made because one fab's catalog lacks a part
+is a fab-specific sourcing choice, which is what the lock already records; `bom.approve` stays the way to make
+it a design decision for every fab.
 
 ## Open questions
 

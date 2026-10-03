@@ -24,6 +24,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Show>()
         .register::<ClassSet>()
         .register::<ClassList>()
+        .register::<ClassShow>()
         .register::<ClassRemove>();
 }
 
@@ -589,12 +590,45 @@ pub struct ClassInfo {
     pub class: NetClass,
     /// Nets using it.
     pub nets: Vec<String>,
+    /// Values that apply to its nets: the class's own, else the board rules' (what the DRC,
+    /// `track.add` and `via.add` use).
+    pub effective: EffectiveClass,
+}
+
+/// Rule values in effect for a net class.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveClass {
+    /// Track width.
+    pub track_width: Nm,
+    /// Clearance to other nets.
+    pub clearance: Nm,
+    /// Via drill.
+    pub via_drill: Nm,
+    /// Via pad diameter.
+    pub via_diameter: Nm,
+    /// Fields inherited from the board rules (not set by the class).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited: Vec<String>,
 }
 
 fn class_info(p: &Project, name: &str) -> ClassInfo {
+    let class = p.circuit().netclasses[name].clone();
+    let r = &p.board().rules;
+    let mut inherited = Vec::new();
+    let mut pick = |field: &str, v: Option<Nm>, d: Nm| {
+        v.unwrap_or_else(|| {
+            inherited.push(field.to_string());
+            d
+        })
+    };
+    let track_width = pick("track_width", class.track_width, r.track_width);
+    let clearance = pick("clearance", class.clearance, r.clearance);
+    let via_drill = pick("via_drill", class.via_drill, r.via_drill);
+    let via_diameter = pick("via_diameter", class.via_diameter, r.via_diameter);
+    let effective = EffectiveClass { track_width, clearance, via_drill, via_diameter, inherited };
     ClassInfo {
         name: name.to_string(),
-        class: p.circuit().netclasses[name].clone(),
+        class,
         nets: p
             .circuit()
             .nets
@@ -602,20 +636,20 @@ fn class_info(p: &Project, name: &str) -> ClassInfo {
             .filter(|(_, n)| n.class.as_deref() == Some(name))
             .map(|(k, _)| k.clone())
             .collect(),
+        effective,
     }
 }
 
 fn class_line(c: &ClassInfo) -> String {
+    let e = &c.effective;
+    let mark = |f: &str| if e.inherited.iter().any(|i| i == f) { "*" } else { "" };
+    let mut parts = vec![
+        format!("track {}{}", e.track_width, mark("track_width")),
+        format!("clearance {}{}", e.clearance, mark("clearance")),
+        format!("via {}{}/{}{}", e.via_diameter, mark("via_diameter"), e.via_drill, mark("via_drill")),
+    ];
     let k = &c.class;
-    let mut parts = Vec::new();
-    for (label, v) in [
-        ("track", k.track_width),
-        ("clearance", k.clearance),
-        ("via", k.via_diameter),
-        ("drill", k.via_drill),
-        ("dp width", k.diff_pair_width),
-        ("dp gap", k.diff_pair_gap),
-    ] {
+    for (label, v) in [("dp width", k.diff_pair_width), ("dp gap", k.diff_pair_gap)] {
         if let Some(v) = v {
             parts.push(format!("{label} {v}"));
         }
@@ -626,6 +660,16 @@ fn class_line(c: &ClassInfo) -> String {
         parts.join(", "),
         if c.nets.is_empty() { String::new() } else { format!("  nets: {}", c.nets.join(", ")) }
     )
+}
+
+/// Reports the class's values that fall below the board minimums.
+fn report_conflicts(ctx: &mut Context<'_>, name: &str) -> Result<(), CommandError> {
+    for d in crate::drc::netclass_conflicts(ctx.project()?) {
+        if d.subjects.contains(&ObjectRef::Name(name.to_string())) {
+            ctx.report(d);
+        }
+    }
+    Ok(())
 }
 
 impl Command for ClassSet {
@@ -679,6 +723,7 @@ impl Command for ClassSet {
                 *field = v;
             }
         }
+        report_conflicts(ctx, &name)?;
         Ok(class_info(ctx.project()?, &name))
     }
 
@@ -716,6 +761,43 @@ impl Command for ClassList {
         } else {
             o.classes.iter().map(class_line).collect::<Vec<_>>().join("\n")
         }
+    }
+}
+
+/// Show one net class: its own values, the values in effect for its nets (inherited ones
+/// from `board.rules`), its nets, and values below the board minimums.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClassShow {
+    /// Class name.
+    pub name: String,
+}
+
+impl Command for ClassShow {
+    const NAME: &'static str = "netclass.show";
+    const SUMMARY: &'static str = "Show a net class: own and effective rules (inherited from board.rules), nets";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = ClassInfo;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<ClassInfo, CommandError> {
+        let p = ctx.project()?;
+        if !p.circuit().netclasses.contains_key(&self.name) {
+            let s = did_you_mean(&self.name, p.circuit().netclasses.keys().map(String::as_str), 3);
+            return Err(CommandError::not_found("netclass.not_found", format!("no net class `{}`", self.name))
+                .with_suggestions(&s)
+                .with_hint_if_none("create it with netclass.set; netclass.list lists them"));
+        }
+        report_conflicts(ctx, &self.name)?;
+        Ok(class_info(ctx.project()?, &self.name))
+    }
+
+    fn summarize(o: &ClassInfo) -> String {
+        let mut s = class_line(o);
+        if !o.effective.inherited.is_empty() {
+            s += "\n  (* from board.rules)";
+        }
+        s
     }
 }
 

@@ -54,6 +54,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     silk_to_pads(&ctx, &pads, &mut out);
     keepouts(&ctx, &courtyards, &mut out);
     unrouted(&items, &mut out);
+    out.extend(netclass_conflicts(p));
     out.sort_by(|a, b| {
         let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
         (a.code.as_ref(), loc(a), &a.message).cmp(&(b.code.as_ref(), loc(b), &b.message))
@@ -398,7 +399,80 @@ fn via_sizes(ctx: &Ctx, out: &mut Vec<Diagnostic>) {
             d.subjects.extend(subject());
             out.push(d);
         }
+        if let Some(c) = ctx.class(v.net.as_deref()) {
+            let small_drill = c.via_drill.filter(|d| v.drill < *d);
+            let small_pad = c.via_diameter.filter(|d| v.diameter < *d);
+            if small_drill.is_some() || small_pad.is_some() {
+                let net = v.net.as_deref().unwrap_or_default();
+                let want = |o: Option<Nm>, have: Nm| o.map_or(have.to_string(), |x| x.to_string());
+                let mut d = Diagnostic::warning(
+                    "drc.via_size_class",
+                    format!(
+                        "via#{} ({net}) is {}/{} (pad/drill), its net class asks for {}/{}",
+                        v.id.0,
+                        v.diameter,
+                        v.drill,
+                        want(c.via_diameter, v.diameter),
+                        want(c.via_drill, v.drill)
+                    ),
+                )
+                .at(v.at)
+                .with_hint("remove it and add it again without sizes to use the net class via (via.add)");
+                d.subjects.extend(subject());
+                out.push(d);
+            }
+        }
     }
+}
+
+/// Net class values below the board's manufacturing minimums (`drc.netclass_rule` warnings):
+/// a class track or diff-pair width under `min_track_width`, a via drill under `min_drill`, a
+/// via whose annular ring (class or default sizes) is under `min_annular_ring`. Tracks and vias
+/// made with such a class would fail the DRC.
+pub fn netclass_conflicts(p: &Project) -> Vec<Diagnostic> {
+    let r = &p.board().rules;
+    let mut out = Vec::new();
+    for (name, c) in &p.circuit().netclasses {
+        let mut push = |what: String, field: &str, rule: &str| {
+            out.push(
+                Diagnostic::warning("drc.netclass_rule", format!("net class {name}: {what}"))
+                    .with_subject(ObjectRef::Name(name.clone()))
+                    .with_hint(format!(
+                        "raise its {field} with netclass.set, or lower board.rules {rule} if the fab allows it"
+                    )),
+            );
+        };
+        for (label, field, v) in
+            [("track width", "track_width", c.track_width), ("diff pair width", "diff_pair_width", c.diff_pair_width)]
+        {
+            if let Some(v) = v.filter(|v| *v < r.min_track_width) {
+                push(
+                    format!("{label} {v} is below the minimum track width {}", r.min_track_width),
+                    field,
+                    "min_track_width",
+                );
+            }
+        }
+        if let Some(d) = c.via_drill.filter(|d| *d < r.min_drill) {
+            push(format!("via drill {d} is below the minimum drill {}", r.min_drill), "via_drill", "min_drill");
+        }
+        if c.via_drill.is_some() || c.via_diameter.is_some() {
+            let drill = c.via_drill.unwrap_or(r.via_drill);
+            let dia = c.via_diameter.unwrap_or(r.via_diameter);
+            let ring = Nm((dia.0 - drill.0) / 2);
+            if ring < r.min_annular_ring {
+                push(
+                    format!(
+                        "vias of {dia}/{drill} (pad/drill) leave a {ring} annular ring, the minimum is {}",
+                        r.min_annular_ring
+                    ),
+                    "via_diameter",
+                    "min_annular_ring",
+                );
+            }
+        }
+    }
+    out
 }
 
 fn pad_subjects(pp: &geo::PlacedPad) -> Vec<ObjectRef> {

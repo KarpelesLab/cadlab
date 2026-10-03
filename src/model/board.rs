@@ -169,6 +169,89 @@ impl Default for Rules {
     }
 }
 
+/// Names of the length fields of [`Rules`], in declaration order (as in [`Rules::lengths`]).
+pub const RULE_FIELDS: [&str; 12] = [
+    "clearance",
+    "track_width",
+    "min_track_width",
+    "via_drill",
+    "via_diameter",
+    "min_annular_ring",
+    "min_drill",
+    "hole_to_hole",
+    "copper_to_edge",
+    "silk_to_pad",
+    "min_silk_width",
+    "zone_min_width",
+];
+
+impl Rules {
+    /// The length fields with their names ([`RULE_FIELDS`] order).
+    pub fn lengths(&self) -> [(&'static str, Nm); 12] {
+        let v = [
+            self.clearance,
+            self.track_width,
+            self.min_track_width,
+            self.via_drill,
+            self.via_diameter,
+            self.min_annular_ring,
+            self.min_drill,
+            self.hole_to_hole,
+            self.copper_to_edge,
+            self.silk_to_pad,
+            self.min_silk_width,
+            self.zone_min_width,
+        ];
+        std::array::from_fn(|i| (RULE_FIELDS[i], v[i]))
+    }
+
+    /// Mutable access to a length field by name ([`RULE_FIELDS`]).
+    pub fn length_mut(&mut self, field: &str) -> Option<&mut Nm> {
+        Some(match field {
+            "clearance" => &mut self.clearance,
+            "track_width" => &mut self.track_width,
+            "min_track_width" => &mut self.min_track_width,
+            "via_drill" => &mut self.via_drill,
+            "via_diameter" => &mut self.via_diameter,
+            "min_annular_ring" => &mut self.min_annular_ring,
+            "min_drill" => &mut self.min_drill,
+            "hole_to_hole" => &mut self.hole_to_hole,
+            "copper_to_edge" => &mut self.copper_to_edge,
+            "silk_to_pad" => &mut self.silk_to_pad,
+            "min_silk_width" => &mut self.min_silk_width,
+            "zone_min_width" => &mut self.zone_min_width,
+            _ => return None,
+        })
+    }
+
+    /// The rule set of a preset (see [`RulePreset`]).
+    pub fn preset(preset: RulePreset) -> Rules {
+        match preset {
+            RulePreset::Ipc2 => Rules::default(),
+            // Class 3: annular ring = IPC-6012 class 3 external minimum (0.05 mm) plus half the
+            // IPC-2221 level C fabrication allowance (0.4 mm / 2); default vias sized to match.
+            // Sources and verification status: docs/BOARD.md, "Rule presets".
+            RulePreset::Ipc3 => Rules {
+                via_diameter: Nm::from_um(800),
+                min_annular_ring: Nm::from_um(250),
+                ipc_class: 3,
+                ..Rules::default()
+            },
+        }
+    }
+}
+
+/// Built-in design rule presets: engineering intent, not a fab's limits (sources in
+/// `docs/BOARD.md`, "Rule presets").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RulePreset {
+    /// cadlab's conservative IPC-6012 class 2 defaults (the rules of a new project).
+    Ipc2,
+    /// IPC-6012 class 3 (high reliability): annular rings and default vias sized for class 3.
+    Ipc3,
+}
+
 /// A footprint placed on the board, by component designator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -90,12 +90,14 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Board model ([BOARD.md](BOARD.md)): stackup, outline (rectangle, rounded, circle, polygon), rules with
       conservative IPC class 2 defaults, tracks, vias, zones, keep-outs, graphics
 - [x] Mounting holes, outline cutouts (`board.hole`, `board.cutout`; seen by DRC, zones, rendering, outputs)
-- [ ] Design rules: clearances, widths, via/drill limits, per net class, IPC class 2/3 presets
+- [x] Design rules: clearances, widths, via/drill limits, per net class, IPC class 2/3 presets
+      (`board.rules` presets `ipc2`/`ipc3` and rules derived from a fab profile, `netclass.show`, DRC class via
+      and class-vs-minimum checks; IPC numbers from secondary sources, marked unverified in BOARD.md, D26)
 - [x] Fab profiles ([MANUFACTURING.md](MANUFACTURING.md)): JLCPCB and PCBWay, verified from their published
       capabilities (2026-10-04), plus a generic IPC class 2 profile; user overrides (`fab-profiles/`, `src/fab/`)
-- [ ] Provider-agnostic flow: compatibility targets, `fab check`, `fab compare`, `export fab --fab`, per-fab part
-      resolution with substitution report, `fab-lock.json` (all done as `fab.*` and `drc.run` targets except the
-      substitution report: unavailable parts get hints, not substitute candidates)
+- [x] Provider-agnostic flow: compatibility targets, `fab check`, `fab compare`, `export fab --fab`, per-fab part
+      resolution with substitution report, `fab-lock.json` (as `fab.*` and `drc.run` targets; ranked substitute
+      candidates in `fab.check`/`fab.export` and `bom.substitutes`, applied per fab with `fab.substitute`, D26)
 - [x] Footprint placement commands: set, move, rotate, flip (bottom side mirrored), lock, remove, list
 - [x] Align, distribute (`place.align`, `place.distribute`)
 - [x] Ratsnest (MST between copper islands per net), initial auto-placement (rows inside the outline)

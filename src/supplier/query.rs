@@ -177,8 +177,14 @@ impl SearchQuery {
 
     /// Sorts best first: in stock, active, cheapest at the quantity, most stock.
     pub fn rank(&self, cands: &mut [Candidate]) {
+        self.rank_by(cands, |c| c);
+    }
+
+    /// [`SearchQuery::rank`] for items holding a candidate.
+    pub fn rank_by<T>(&self, items: &mut [T], f: impl Fn(&T) -> &Candidate) {
         let q = self.quantity.max(1);
-        cands.sort_by(|a, b| {
+        items.sort_by(|a, b| {
+            let (a, b) = (f(a), f(b));
             let key = |c: &Candidate| {
                 (
                     c.stock < q,

@@ -155,6 +155,42 @@ fn describe_lists_commands() {
 }
 
 #[test]
+fn rules_presets_and_substitutes_from_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    cadlab(dir.path(), &["project", "new", "p"]);
+    let p = dir.path().join("p");
+    let o = cadlab(&p, &["board", "rules", "--preset", "ipc3", "--json"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    assert_eq!(json_of(&o)["output"]["via_diameter"], "0.8mm");
+    let o = cadlab(&p, &["board", "rules", "--fab", "jlcpcb", "--margin", "tightest", "--json"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    let v = json_of(&o);
+    assert_eq!(v["output"]["min_track_width"], "0.1mm");
+    assert_eq!(v["output"]["derived_from"], "jlcpcb two-layer");
+    let o = cadlab(&p, &["board", "rules"]);
+    assert!(String::from_utf8_lossy(&o.stdout).contains("IPC class 3"), "{}", String::from_utf8_lossy(&o.stdout));
+
+    // Substitutes for a generic line from the test catalog: 1 % or better, cheapest first.
+    let catalog = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/catalog.json");
+    let env = [("CADLAB_CATALOGS", catalog.to_str().unwrap())];
+    cadlab_env(&p, &["circuit", "add", "R 10k 1% 0402"], &env);
+    let o = cadlab_env(&p, &["bom", "substitutes", "--json"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    let v = json_of(&o);
+    let mpns: Vec<&str> = v["output"]["lines"][0]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["offer"]["mpn"].as_str().unwrap())
+        .collect();
+    assert_eq!(mpns, ["0402WGF1002TCE", "RC0402FR-0710KL"]);
+    let o = cadlab_env(&p, &["fab", "substitute", "generic", "R_10k_1pct_0402", "--json"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    assert_eq!(json_of(&o)["output"]["substitution"]["mpn"], "0402WGF1002TCE");
+    assert!(p.join("out/fab/generic/fab-lock.json").exists());
+}
+
+#[test]
 fn catalogs_from_environment() {
     let dir = tempfile::tempdir().unwrap();
     cadlab(dir.path(), &["project", "new", "p"]);

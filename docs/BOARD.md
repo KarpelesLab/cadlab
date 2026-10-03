@@ -91,7 +91,7 @@ or batch session cost ~1.5 ms.
 
 | Group | Commands |
 |---|---|
-| `board` | `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules`, `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
+| `board` | `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field; see "Design rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
 | `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
@@ -100,7 +100,72 @@ or batch session cost ~1.5 ms.
 | `drc` | `run` (plus `fab.check` warnings for the manifest `targets`) |
 | `render` | `board` (layers, realistic) (M4 rendering workstream) |
 | `export` | `gerber`, `drill`, `pnp`, `ipc356`, `all` (generic outputs) |
-| `fab` | `list`, `show`, `check`, `compare`, `export` (fab profiles, [MANUFACTURING.md](MANUFACTURING.md)) |
+| `fab` | `list`, `show`, `check`, `compare`, `export`, `substitute` (fab profiles, [MANUFACTURING.md](MANUFACTURING.md)) |
+| `netclass` | `set`, `list`, `show` (own values, values in effect with those inherited from `board.rules`, nets), `remove` (circuit level, [DATA_MODEL.md](DATA_MODEL.md)) |
+
+## Design rules
+
+`board.rules` holds engineering intent: numbers only, never a reference to a preset or a fab (D12, D26). It
+is built in this order, each step overriding the previous one: the current rules or a `preset`, then values
+derived from a fab profile (`fab`, `process`, `margin`), then the fields given explicitly. The output lists
+what changed and, for derived values, the profile field and the fab's own limit each comes from; a value the
+profile marks unverified gives a `board.rules_unverified` warning. Net classes whose values fall below the new
+minimums are reported (`drc.netclass_rule`). `--dry-run` previews a change.
+
+Net classes (`netclass.*`) override per net: track width, clearance, via drill and diameter, diff pair width and
+gap. Unset values are inherited from `board.rules`; `netclass.show` / `netclass.list` give the values in
+effect (`effective`, inherited fields listed). The DRC uses the class clearance and width for the class's
+nets, warns about tracks and vias smaller than their class asks (`drc.track_width_class`,
+`drc.via_size_class`) and about class values below the board minimums (`drc.netclass_rule`).
+
+### Rule presets (`board.rules --preset`)
+
+| Field | `ipc2` (= a new project) | `ipc3` |
+|---|---|---|
+| clearance | 0.20 mm | 0.20 mm |
+| track width / minimum | 0.25 / 0.15 mm | 0.25 / 0.15 mm |
+| via drill / diameter | 0.30 / 0.60 mm | 0.30 / 0.80 mm |
+| minimum annular ring | 0.13 mm | 0.25 mm |
+| minimum drill | 0.30 mm | 0.30 mm |
+| hole to hole, copper to edge | 0.50, 0.30 mm | 0.50, 0.30 mm |
+| silk to pad, silk width, zone minimum width | 0.15, 0.15, 0.20 mm | 0.15, 0.15, 0.20 mm |
+| `ipc_class` | 2 | 3 |
+
+Sources and status. The IPC standards are paywalled and were **not read**; the numbers below come from
+secondary sources (fab and EDA vendor articles quoting the standards, checked 2026-10-04) and are marked
+**unverified** until checked against the documents themselves:
+
+- IPC-6012 minimum external annular ring of the finished board: class 2 allows 90° breakout; class 3 requires
+  0.050 mm (internal layers 0.025 mm), no breakout. *Unverified* (e.g.
+  <https://resources.altium.com/p/meeting-standards-ipc-6012-class-3-annular-ring>,
+  <https://www.protoexpress.com/kb/ipc-class-3-pcb-design-and-manufacturing-standards/>).
+- IPC-2221 land size: land = finished hole + 2 × (minimum annular ring) + fabrication allowance, the allowance
+  being 0.6 / 0.5 / 0.4 mm for producibility levels A / B / C. *Unverified*
+  (<https://resources.altium.com/p/pcb-size-and-pad-size-guidelines>, pcblibraries.com forum).
+- IPC-2221 Table 6-1 conductor spacing up to 15 V: 0.05 mm internal (B1), 0.1 mm external uncoated (B2),
+  0.13 mm external with permanent polymer coating (A6). *Unverified*.
+
+How the presets use them: `ipc3`'s annular ring is the class 3 external minimum plus half the level C
+allowance (0.05 + 0.4 / 2 = 0.25 mm), with default vias sized to give that ring (0.3 / 0.8 mm). Everything
+else in both presets is cadlab's own conservative choice, not an IPC number: the 0.20 mm clearance is above
+the Table 6-1 low-voltage values (higher voltages need more, M8 adds a calculator), and `ipc2`'s 0.13 mm ring
+leaves margin over the breakout allowance that mainstream fabs' published via capabilities (0.05 to 0.15 mm)
+show is enough. Fab-specific limits always come from fab profiles, not from these presets.
+
+### Rules from a fab profile (`board.rules --fab <id> [--process P] [--margin M]`)
+
+| Rule | Profile field | `tightest` | `comfortable` (default) |
+|---|---|---|---|
+| `min_track_width`, `clearance`, `min_drill`, `min_annular_ring` | `min_track`, `min_space`, `min_drill`, `min_via_ring` | the fab's limit | limit × 1.25, rounded up to 10 µm |
+| `hole_to_hole`, `copper_to_edge`, `silk_to_pad`, `min_silk_width` | same names | the fab's limit | limit × 1.25, rounded up to 10 µm |
+| `track_width`, `zone_min_width` | `min_track` | = `min_track_width` | max(`min_track_width`, 0.25 / 0.20 mm) |
+| `via_drill` | `min_drill` | = `min_drill` | max(`min_drill`, 0.30 mm) |
+| `via_diameter` | `min_via_ring` | drill + 2 × ring | max(drill + 2 × ring, 0.60 mm) |
+
+Fields the profile leaves out keep their value; `ipc_class` is kept. The pad annular ring (`min_pth_ring`) and
+the pad hole-to-hole distance stay `fab.check` checks: cadlab's rules have one annular ring for vias and pads.
+For JLCPCB's two-layer process, `tightest` gives 0.10 mm track/space and 0.15 / 0.25 mm vias, `comfortable`
+0.13 mm track/space minimums with 0.25 mm tracks and 0.3 / 0.6 mm vias.
 
 ## Placement (`src/board/place.rs`)
 
@@ -151,6 +216,8 @@ to 1 µm, distance rules accept a 2 µm deficit.
 | `drc.short` | error | copper of different nets touches on a shared layer (also no-net copper touching a net) |
 | `drc.clearance` | error | copper of different nets (or no net vs a net) closer than the larger of the two clearances; pads of one footprint are not checked against each other |
 | `drc.track_width` / `drc.track_width_class` | error / warning | track narrower than `min_track_width` / than its net class width |
+| `drc.via_size_class` | warning | via drill or diameter smaller than its net class asks |
+| `drc.netclass_rule` | warning | a net class value below the board minimums (track or diff pair width < `min_track_width`, via drill < `min_drill`, via ring < `min_annular_ring`) |
 | `drc.via_drill`, `drc.pad_drill` | error | via or pad hole below `min_drill` |
 | `drc.via_annular_ring`, `drc.pad_annular_ring` | error | (pad size − drill) / 2 below `min_annular_ring` (vias, plated pads) |
 | `drc.hole_to_hole` | error | holes (vias, plated and non-plated pads) closer than `hole_to_hole`, edge to edge |
