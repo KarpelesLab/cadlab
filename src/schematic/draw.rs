@@ -1,7 +1,8 @@
 //! Drawing a laid-out sheet.
 
+use super::shapes::{frame_title, power_text, wire_text};
 use super::symbol::{self, STYLE, symbol_of};
-use super::{Dir, LabelKind, SheetLayout};
+use super::{LabelKind, SheetLayout, junctions};
 use crate::model::Project;
 use crate::model::part::Part;
 use crate::render::{Color, HAlign, Scene, VAlign, font};
@@ -12,6 +13,7 @@ const LABEL: Color = Color::hex(0x0550ae);
 const POWER: Color = Color::hex(0xc4302b);
 const FRAME: Color = Color::hex(0x8c959f);
 const NC: Color = Color::hex(0x0550ae);
+const GROUP: Color = Color::hex(0x6e7781);
 
 fn mm(v: Nm) -> f64 {
     v.to_f64(LengthUnit::Mm)
@@ -30,8 +32,9 @@ pub fn draw(p: &Project, l: &SheetLayout) -> Scene {
     s.line(vec![(tx0, 5.0 + 7.0), (w - 5.0, 5.0 + 7.0)], 0.15, FRAME);
     s.text(&p.manifest().name, (tx0 + 2.0, ty1 - 2.0), 2.5, HAlign::Left, VAlign::Top, 0, STYLE.text);
     let rev = p.manifest().metadata.get("rev").map(|r| format!("rev {r}  ")).unwrap_or_default();
+    let sheet = if l.sheets > 1 { format!("sheet {}/{}  ", l.sheet, l.sheets) } else { String::new() };
     s.text(
-        &format!("{rev}{} / cadlab {}", l.paper, env!("CARGO_PKG_VERSION")),
+        &format!("{sheet}{rev}{} / cadlab {}", l.paper, env!("CARGO_PKG_VERSION")),
         (tx0 + 2.0, 5.0 + 5.0),
         ts,
         HAlign::Left,
@@ -40,9 +43,20 @@ pub fn draw(p: &Project, l: &SheetLayout) -> Scene {
         FRAME,
     );
 
-    // Wires.
+    // Block instance frames.
+    for f in &l.frames {
+        let (x0, y0, x1, y1) = (mm(f.min.x), mm(f.min.y), mm(f.max.x), mm(f.max.y));
+        s.outline(vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)], 0.2, GROUP);
+        let (at, size) = frame_title(f);
+        s.text(&f.title, at, size, HAlign::Left, VAlign::Top, 0, GROUP);
+    }
+
+    // Wires and junctions.
     for (a, b) in &l.wires {
         s.line(vec![(mm(a.x), mm(a.y)), (mm(b.x), mm(b.y))], 0.25, WIRE);
+    }
+    for j in junctions(p, l) {
+        s.circle((mm(j.x), mm(j.y)), 0.45, Some(WIRE), None);
     }
 
     // Symbols.
@@ -81,22 +95,8 @@ pub fn draw(p: &Project, l: &SheetLayout) -> Scene {
                 s.text(&lb.net, (x + dx * (len / 2.0 + 0.5), y + dy * (len / 2.0 + 0.5)), ts, h, v, q, LABEL);
             }
             LabelKind::Wire => {
-                // Text above (or left of) the wire, starting at the anchor point.
-                let (h, v) = match lb.dir {
-                    Dir::Right => (HAlign::Left, VAlign::Bottom),
-                    Dir::Left => (HAlign::Right, VAlign::Bottom),
-                    Dir::Up => (HAlign::Left, VAlign::Bottom),
-                    Dir::Down => (HAlign::Right, VAlign::Bottom),
-                };
-                s.text(
-                    &lb.net,
-                    (x, y + if q == 0 { 0.4 } else { 0.0 } - if q == 1 { 0.4 } else { 0.0 }),
-                    ts,
-                    h,
-                    v,
-                    q,
-                    LABEL,
-                );
+                let (at, h, q) = wire_text((x, y), lb.dir);
+                s.text(&lb.net, at, ts, h, VAlign::Bottom, q, LABEL);
             }
             LabelKind::Power => {
                 let stub = 2.0;
@@ -104,13 +104,7 @@ pub fn draw(p: &Project, l: &SheetLayout) -> Scene {
                 s.line(vec![(x, y), (ex, ey)], 0.25, POWER);
                 let (px, py) = (-dy, dx);
                 s.line(vec![(ex - px * 1.0, ey - py * 1.0), (ex + px * 1.0, ey + py * 1.0)], 0.35, POWER);
-                let at = (ex + dx * 0.6, ey + dy * 0.6);
-                let (h, v) = match lb.dir {
-                    Dir::Up => (HAlign::Center, VAlign::Bottom),
-                    Dir::Down => (HAlign::Center, VAlign::Top),
-                    Dir::Right => (HAlign::Left, VAlign::Middle),
-                    Dir::Left => (HAlign::Right, VAlign::Middle),
-                };
+                let (at, h, v) = power_text((x, y), lb.dir);
                 s.text(&lb.net, at, ts, h, v, 0, POWER);
             }
             LabelKind::Ground => {

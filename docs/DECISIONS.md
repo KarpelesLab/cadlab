@@ -118,6 +118,17 @@ on their own). Self-contained block files cannot break when a referenced part is
 library, at the cost of duplicated part data. Conflicts are reported, never merged silently. Library data,
 unlike credentials, is not secret, so it lives in the data directory rather than the config directory.
 
+### D20. Rendered schematics span several sheets; the KiCad export stays one sheet (2026-10-04)
+The schematic layout is built from groups (one per IC/connector with what attaches to it, leftover chains,
+and one titled frame per block instance), which are packed onto sheets and never split. `render.schematic`
+uses A4 or A3 and continues on more A3 sheets (`name-1.png`, `name-2.png`, ...). `schematic.export` packs the
+same groups onto one sheet of the smallest paper that holds them (A4 to A0, then a custom size).
+*Why:* sheets of at most A3 stay readable on screens and in images given to agents. KiCad is an oracle and an
+interchange target here: a multi-sheet KiCad schematic needs a root sheet with sheet symbols, hierarchical or
+global labels for every net crossing sheets, and per-sheet instance paths, all of which the ERC and netlist
+oracles would then test instead of the layout. One flat sheet keeps local labels and the exported netlist
+exactly cadlab's; hierarchical export can come later if humans need it.
+
 ## Open questions
 
 None currently.

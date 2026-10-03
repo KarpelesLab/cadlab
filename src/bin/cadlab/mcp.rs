@@ -465,11 +465,19 @@ fn outcome_result(o: &Outcome) -> Value {
         text_of(&o.summary, &o.diagnostics),
         json!({"ok": true, "command": o.command, "output": o.output, "diagnostics": o.diagnostics}),
     );
-    // Rendered images are sent as image content so multimodal clients can look at them.
-    if let Some(path) = o.output.get("png").and_then(Value::as_str)
-        && let Ok(bytes) = std::fs::read(path)
-        && bytes.len() <= MAX_IMAGE_BYTES
-    {
+    // Rendered images are sent as image content so multimodal clients can look at them (every
+    // sheet of a multi-sheet schematic).
+    let pages: Vec<&str> =
+        o.output.get("pages").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+    let paths: Vec<&str> =
+        if pages.is_empty() { o.output.get("png").and_then(Value::as_str).into_iter().collect() } else { pages };
+    let mut total = 0;
+    for path in paths.into_iter().filter(|p| p.ends_with(".png")) {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        total += bytes.len();
+        if total > MAX_IMAGE_BYTES {
+            break;
+        }
         v["content"].as_array_mut().expect("content array").push(json!({
             "type": "image",
             "data": base64(&bytes),

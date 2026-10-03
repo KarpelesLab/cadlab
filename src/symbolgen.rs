@@ -34,6 +34,7 @@ pub fn style_for(category: Category, pins: usize) -> SymbolStyle {
         Category::Led => SymbolStyle::Led,
         Category::Crystal => SymbolStyle::Crystal,
         Category::Fuse => SymbolStyle::Fuse,
+        Category::Switch => SymbolStyle::Switch,
         _ => SymbolStyle::Box,
     }
 }
@@ -105,7 +106,8 @@ pub fn generate(category: Category, mut pins: Vec<Pin>) -> Symbol {
     let tb_w = Nm(GRID.0 * (count(Side::Top).max(count(Side::Bottom)) + 1));
     let width = round_up_even(label_w.max(tb_w).max(GRID * 4));
     let rows = count(Side::Left).max(count(Side::Right)).max(1);
-    let label_h = Nm(CHAR_WIDTH.0 * (longest(Side::Top).max(longest(Side::Bottom))));
+    // Rows are centered: top and bottom pin names each need room on both ends.
+    let label_h = Nm(CHAR_WIDTH.0 * 2 * (longest(Side::Top).max(longest(Side::Bottom))));
     let height = round_up_even(
         Nm(GRID.0 * (rows + 1))
             + label_h
@@ -151,8 +153,18 @@ pub fn is_ground(name: &str) -> bool {
     n.starts_with("GND") || n.ends_with("GND") || n.starts_with("VSS") || n == "EP" || n == "PAD" || n == "V-"
 }
 
+/// Whether a pin name denotes a crystal/oscillator pin (`OSC_IN`, `XTAL1`, `XOUT`, ...). Such pins
+/// share one side so the crystal can sit between them.
+pub fn is_oscillator(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    n.starts_with("OSC") || n.starts_with("XTAL") || matches!(n.as_str(), "XIN" | "XOUT" | "XI" | "XO")
+}
+
 fn default_side(category: Category, p: &Pin) -> Side {
     if category == Category::Connector {
+        return Side::Left;
+    }
+    if is_oscillator(p.label()) && !matches!(p.kind, PinKind::PowerIn | PinKind::PowerOut) {
         return Side::Left;
     }
     match p.kind {
@@ -169,6 +181,9 @@ fn default_side(category: Category, p: &Pin) -> Side {
 
 /// Group key from a name: alphabetic prefix of port pins (`PA9` → `PA`), else the name itself.
 fn name_group(name: &str) -> String {
+    if is_oscillator(name) {
+        return "OSC".into();
+    }
     let prefix: String = name.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
     let rest = &name[prefix.len()..];
     if prefix.len() == 2 && prefix.starts_with('P') && rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
@@ -272,6 +287,23 @@ mod tests {
         // Order within a side: PA0 above PA1.
         let y = |n: &str| s.pin(n).unwrap().at.unwrap().y;
         assert!(y("PA0") > y("PA1"));
+    }
+
+    #[test]
+    fn oscillator_pins_together() {
+        let mut pins = vec![
+            pin("1", "VDD", PinKind::PowerIn),
+            pin("2", "OSC_IN", PinKind::Input),
+            pin("3", "OSC_OUT", PinKind::Output),
+            pin("4", "TX", PinKind::Output),
+        ];
+        pins.extend((0..4).map(|i| pin(&(5 + i).to_string(), &format!("PA{i}"), PinKind::Bidirectional)));
+        let s = generate(Category::Mcu, pins);
+        let side = |n: &str| s.pin(n).unwrap().side.unwrap();
+        assert_eq!(side("OSC_IN"), side("OSC_OUT"));
+        let y = |n: &str| s.pin(n).unwrap().at.unwrap().y;
+        assert_eq!((y("OSC_IN") - y("OSC_OUT")).0.abs(), GRID.0, "adjacent");
+        assert_eq!(generate(Category::Switch, two_terminal_pins(Category::Switch)).style, SymbolStyle::Switch);
     }
 
     #[test]

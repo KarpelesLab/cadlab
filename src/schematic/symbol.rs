@@ -179,29 +179,12 @@ pub fn draw(scene: &mut Scene, sym: &Symbol, pl: &Placement, refdes: &str, value
                     }
                 }
             }
-            // Designator and value outside the top-right corner, clear of top pins.
-            let (_, _, x1, y1) = sheet_box(&tl(&[(-hw, -hh), (hw, hh)]));
-            scene.text(value, (x1 + 0.6, y1 + 0.6), s.text_size, HAlign::Left, VAlign::Bottom, 0, s.text);
-            scene.text(
-                refdes,
-                (x1 + 0.6, y1 + 0.6 + s.text_size * 1.6),
-                s.text_size,
-                HAlign::Left,
-                VAlign::Bottom,
-                0,
-                s.text,
-            );
+            draw_fields(scene, sym, pl, refdes, value);
         }
         style => {
             // Two-terminal symbols: pins at ±1.5 grid on X.
             let e = 1.5 * g;
-            let body = match style {
-                SymbolStyle::Resistor | SymbolStyle::Fuse => 2.0,
-                SymbolStyle::Inductor | SymbolStyle::FerriteBead => 2.2,
-                SymbolStyle::Crystal => 1.2,
-                SymbolStyle::Capacitor | SymbolStyle::CapacitorPolarized => 0.5,
-                _ => 1.27,
-            };
+            let body = body_half(style);
             scene.line(tl(&[(-e, 0.0), (-body, 0.0)]), w, s.pin);
             scene.line(tl(&[(body, 0.0), (e, 0.0)]), w, s.pin);
             match style {
@@ -251,22 +234,114 @@ pub fn draw(scene: &mut Scene, sym: &Symbol, pl: &Placement, refdes: &str, value
                     scene.line(tl(&[(-1.2, -1.5), (-1.2, 1.5)]), w * 1.5, s.body);
                     scene.line(tl(&[(1.2, -1.5), (1.2, 1.5)]), w * 1.5, s.body);
                 }
+                SymbolStyle::Switch => {
+                    for cx in [-1.3, 1.3] {
+                        scene.circle(t(cx, 0.0), 0.35, None, Some((w, s.body)));
+                    }
+                    scene.line(tl(&[(-1.9, 1.0), (1.9, 1.0)]), w, s.body);
+                    scene.line(tl(&[(0.0, 1.0), (0.0, 2.0)]), w, s.body);
+                    scene.line(tl(&[(-0.7, 2.0), (0.7, 2.0)]), w, s.body);
+                }
                 _ => {
                     scene.circle(t(0.0, 0.0), 1.0, None, Some((w, s.body)));
                 }
             }
-            // Designator and value beside the body, horizontal on the sheet.
-            let vertical = pl.rot % 2 == 1;
-            let c = t(0.0, 0.0);
-            if vertical {
-                scene.text(refdes, (c.0 + 2.2, c.1 + 0.3), s.text_size, HAlign::Left, VAlign::Bottom, 0, s.text);
-                scene.text(value, (c.0 + 2.2, c.1 - 0.3), s.text_size, HAlign::Left, VAlign::Top, 0, s.text);
-            } else {
-                let up = if style == SymbolStyle::Led { 2.9 } else { 2.0 };
-                scene.text(refdes, (c.0, c.1 + up), s.text_size, HAlign::Center, VAlign::Bottom, 0, s.text);
-                scene.text(value, (c.0, c.1 - up), s.text_size, HAlign::Center, VAlign::Top, 0, s.text);
-            }
+            draw_fields(scene, sym, pl, refdes, value);
         }
+    }
+}
+
+fn draw_fields(scene: &mut Scene, sym: &Symbol, pl: &Placement, refdes: &str, value: &str) {
+    let [r, v] = field_positions(sym, pl);
+    let ts = STYLE.text_size;
+    scene.text(refdes, r.at, ts, r.h, r.v, 0, STYLE.text);
+    scene.text(value, v.at, ts, v.h, v.v, 0, STYLE.text);
+}
+
+/// Half-length of the body of a two-terminal drawing along its axis (mm); the pin lines run from
+/// there to the pin ends at ±1.5 grid.
+pub fn body_half(style: SymbolStyle) -> f64 {
+    match style {
+        SymbolStyle::Resistor | SymbolStyle::Fuse => 2.0,
+        SymbolStyle::Inductor | SymbolStyle::FerriteBead => 2.2,
+        SymbolStyle::Crystal => 1.2,
+        SymbolStyle::Capacitor | SymbolStyle::CapacitorPolarized => 0.5,
+        SymbolStyle::Switch => 1.65,
+        _ => 1.27,
+    }
+}
+
+/// Extent of a two-terminal drawing across its axis (mm): (below, above) in symbol coordinates.
+pub fn body_across(style: SymbolStyle) -> (f64, f64) {
+    match style {
+        SymbolStyle::Resistor => (0.75, 0.75),
+        SymbolStyle::Fuse => (0.6, 0.6),
+        SymbolStyle::Capacitor | SymbolStyle::CapacitorPolarized => (1.6, 1.6),
+        SymbolStyle::Inductor => (0.1, 0.6),
+        SymbolStyle::FerriteBead => (0.7, 0.7),
+        SymbolStyle::Diode => (1.1, 1.1),
+        SymbolStyle::Led => (1.1, 2.4),
+        SymbolStyle::Crystal => (1.5, 1.5),
+        SymbolStyle::Switch => (0.4, 2.0),
+        _ => (1.0, 1.0),
+    }
+}
+
+/// Where a symbol's designator or value is drawn: anchor on the sheet (mm, Y up) and alignment.
+/// Text is always horizontal on the sheet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldPos {
+    /// Anchor (mm).
+    pub at: (f64, f64),
+    /// Horizontal alignment.
+    pub h: HAlign,
+    /// Vertical alignment.
+    pub v: VAlign,
+}
+
+/// Positions of the designator and value of a placed symbol, in that order. Box symbols carry
+/// them outside the top-right corner (clear of top pins); two-terminal symbols above and below a
+/// horizontal body, or beside a vertical one on the side of the symbol's −Y.
+pub fn field_positions(sym: &Symbol, pl: &Placement) -> [FieldPos; 2] {
+    let ts = STYLE.text_size;
+    let t = |x: f64, y: f64| -> (f64, f64) {
+        let p = place(Point::new(Nm((x * 1e6).round() as i64), Nm((y * 1e6).round() as i64)), pl);
+        (mm(p.x), mm(p.y))
+    };
+    if sym.style == SymbolStyle::Box {
+        let g = mm(GRID);
+        let (bw, bh) = sym.body.map_or((4.0 * g, 4.0 * g), |(a, b)| (mm(a), mm(b)));
+        let (hw, hh) = (bw / 2.0, bh / 2.0);
+        let (_, _, x1, y1) = sheet_box(&[t(-hw, -hh), t(hw, hh)]);
+        return [
+            FieldPos { at: (x1 + 0.6, y1 + 0.6 + ts * 1.6), h: HAlign::Left, v: VAlign::Bottom },
+            FieldPos { at: (x1 + 0.6, y1 + 0.6), h: HAlign::Left, v: VAlign::Bottom },
+        ];
+    }
+    let c = t(0.0, 0.0);
+    let (below, above) = body_across(sym.style);
+    if pl.rot % 2 == 1 {
+        // Vertical: beside the body, on the sheet side of the symbol's −Y (away from LED arrows
+        // and switch plungers, which are drawn toward +Y).
+        let dx = below.max(1.6) + 0.6;
+        if rot((0, -1), pl.rot).0 > 0 {
+            [
+                FieldPos { at: (c.0 + dx, c.1 + 0.3), h: HAlign::Left, v: VAlign::Bottom },
+                FieldPos { at: (c.0 + dx, c.1 - 0.3), h: HAlign::Left, v: VAlign::Top },
+            ]
+        } else {
+            [
+                FieldPos { at: (c.0 - dx, c.1 + 0.3), h: HAlign::Right, v: VAlign::Bottom },
+                FieldPos { at: (c.0 - dx, c.1 - 0.3), h: HAlign::Right, v: VAlign::Top },
+            ]
+        }
+    } else {
+        let uy = rot((0, 1), pl.rot).1;
+        let (up, down) = if uy > 0 { (above, below) } else { (below, above) };
+        [
+            FieldPos { at: (c.0, c.1 + up.max(1.5) + 0.5), h: HAlign::Center, v: VAlign::Bottom },
+            FieldPos { at: (c.0, c.1 - down.max(1.5) - 0.5), h: HAlign::Center, v: VAlign::Top },
+        ]
     }
 }
 

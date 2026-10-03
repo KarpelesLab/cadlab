@@ -42,6 +42,9 @@ pub struct Rendered {
     /// For PNG output, the image path; MCP clients receive the image itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub png: Option<String>,
+    /// Every file written, when a schematic spans several sheets (`name-1.png`, `name-2.png`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<String>,
 }
 
 fn out_path(ctx: &Context<'_>, path: &Option<PathBuf>, default: &str) -> PathBuf {
@@ -68,6 +71,7 @@ fn write_scene(scene: &Scene, view: &View, path: &Path) -> Result<Rendered, Comm
                 width: x1 - x0,
                 height: y1 - y0,
                 png: None,
+                pages: Vec::new(),
             })
         }
         "png" => {
@@ -83,6 +87,7 @@ fn write_scene(scene: &Scene, view: &View, path: &Path) -> Result<Rendered, Comm
                     width: w as f64,
                     height: h as f64,
                     png: Some(path.display().to_string()),
+                    pages: Vec::new(),
                 })
             }
             #[cfg(not(feature = "png"))]
@@ -96,6 +101,9 @@ fn write_scene(scene: &Scene, view: &View, path: &Path) -> Result<Rendered, Comm
 }
 
 fn summary(o: &Rendered) -> String {
+    if o.pages.len() > 1 {
+        return format!("wrote {} sheets: {}", o.pages.len(), o.pages.join(", "));
+    }
     if o.format == "png" {
         format!("wrote {} ({} x {} px)", o.path, o.width, o.height)
     } else {
@@ -103,13 +111,18 @@ fn summary(o: &Rendered) -> String {
     }
 }
 
-/// Render the schematic (generated layout) to PNG or SVG.
+/// Render the schematic (generated layout) to PNG or SVG. Sheets are A4 or A3; a circuit that
+/// does not fit on one A3 sheet continues on more sheets, written as `name-1.png`, `name-2.png`,
+/// ... unless `sheet` selects one.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Schematic {
     /// Output file, .png or .svg (default out/schematic.png, relative to the project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// Render only this sheet (1-based), to `path` as given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<u32>,
     /// PNG resolution in pixels per millimeter (default 10, about 254 dpi).
     #[serde(default = "default_res")]
     pub px_per_mm: f64,
@@ -125,12 +138,40 @@ impl Command for Schematic {
     fn run(self, ctx: &mut Context<'_>) -> Result<Rendered, CommandError> {
         let p = ctx.project()?;
         let hints = p.schematic().map(|s| s.placements.clone()).unwrap_or_default();
-        let layout = schematic::layout(p, &hints);
-        let scene = schematic::draw(p, &layout);
-        let (w, h) = (layout.size.0.to_f64(LengthUnit::Mm), layout.size.1.to_f64(LengthUnit::Mm));
-        let view = View { area: (0.0, 0.0, w, h), px_per_mm: self.px_per_mm.clamp(1.0, 40.0) };
+        let sheets = schematic::layout_sheets(p, &hints);
         let path = out_path(ctx, &self.path, "schematic.png");
-        write_scene(&scene, &view, &path)
+        let px_per_mm = self.px_per_mm.clamp(1.0, 40.0);
+        let render = |layout: &schematic::SheetLayout, path: &Path| {
+            let scene = schematic::draw(p, layout);
+            let (w, h) = (layout.size.0.to_f64(LengthUnit::Mm), layout.size.1.to_f64(LengthUnit::Mm));
+            write_scene(&scene, &View { area: (0.0, 0.0, w, h), px_per_mm }, path)
+        };
+        if let Some(n) = self.sheet {
+            let layout = sheets.get((n as usize).wrapping_sub(1)).ok_or_else(|| {
+                CommandError::invalid_args(
+                    "render.no_sheet",
+                    format!("no sheet {n}: the schematic has {}", sheets.len()),
+                )
+                .with_hint(format!("sheets are numbered 1 to {}", sheets.len()))
+            })?;
+            return render(layout, &path);
+        }
+        if sheets.len() == 1 {
+            return render(&sheets[0], &path);
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("schematic").to_string();
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("png").to_string();
+        let mut first: Option<Rendered> = None;
+        let mut pages = Vec::new();
+        for layout in &sheets {
+            let page = path.with_file_name(format!("{stem}-{}.{ext}", layout.sheet));
+            let o = render(layout, &page)?;
+            pages.push(o.path.clone());
+            first.get_or_insert(o);
+        }
+        let mut o = first.expect("at least one sheet");
+        o.pages = pages;
+        Ok(o)
     }
 
     fn summarize(o: &Rendered) -> String {

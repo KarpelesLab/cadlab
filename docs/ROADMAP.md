@@ -76,7 +76,10 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Symbol rendering from part definitions; footprint rendering
 - [x] Schematic auto-layout: anchors (ICs/connectors), passives inline on their pin with chains, decoupling rows,
       net labels and power/ground symbols elsewhere; papers A4..A0
-- [ ] Layout improvements: group by block instance, denser packing, multi-sheet
+- [x] Layout improvements: block instances in titled frames, pull-ups/pull-downs as branches on their pin,
+      crystals with load capacitors between their pins, decoupling capacitors on shared rails, collision-checked
+      placement (no overlapping elements), skyline packing, multi-sheet rendering (A3 max; KiCad export one sheet,
+      DECISIONS D20)
 - [x] Optional manual hints (`schematic.place/unplace`) persisted in `schematic.json`
 - [x] KiCad `.kicad_sch` export (`schematic.export`): lets `kicad-cli` run ERC as an oracle, and lets humans open it if they want
 

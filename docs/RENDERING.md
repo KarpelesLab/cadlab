@@ -22,7 +22,7 @@ model ──► Scene (lines, polygons, circles; text as strokes) ──► SVG 
 
 | View | Contents |
 |---|---|
-| `schematic` | auto-laid-out symbols, wires, labels, power symbols, refdes/values (`render.schematic`) |
+| `schematic` | auto-laid-out symbols, wires, junctions, labels, power symbols, refdes/values, block frames; one or more sheets (`render.schematic`, see below) |
 | `symbol` | one part's symbol (`render.symbol`) |
 | `footprint` | pads, paste windows, courtyard, silkscreen, fab outline (`render.footprint`) |
 | `board` | selected layers (`--layers`, default all copper + silk + outline) in viewer colors on a dark background: copper semi-transparent and unioned per layer (front red, back blue, inner amber/green/purple/...), silk white (front) / yellow (back), fab grey, courtyard magenta, mask/paste openings, outline yellow, drill holes; bottom-side footprints mirrored on `B.*` layers; refdes at the footprint origin on its silk layer, sized to the courtyard (`render.board`, `src/render/board.rs`) |
@@ -34,6 +34,41 @@ model ──► Scene (lines, polygons, circles; text as strokes) ──► SVG 
 | `placement` | courtyards, refdes, orientation markers only: fast layout review |
 
 Annotations (dimensions, grid, scale bar, legend) are optional so agents can read real distances from images.
+
+## Schematic layout
+
+The schematic is derived from the circuit (`src/schematic/layout.rs`), on the 2.54 mm grid with pins also on
+KiCad's grid (Y measured from the top edge). It is built from groups, each laid out on its own:
+
+- **Anchor groups**: every box symbol (IC, connector) with what attaches to its pins:
+  - series parts inline on the pin, chains continuing outward through two-pin nets (`PB3 → R2 → D1 → GND`);
+  - parts between the pin and a supply (pull-ups, pull-downs, filter capacitors, buttons) as branches hanging off
+    the pin's wire (up to a supply, down to ground), or inline when that is more compact;
+  - a crystal between two pins of one side, next to them, with its load capacitors to ground (the symbol
+    generator keeps `OSC*`/`XTAL*` pins together on one side);
+  - decoupling capacitors (both pins on supplies) on shared supply and ground wires under their IC; bulk
+    capacitors (≥ 1 µF) go to the regulator driving their supply;
+  - consecutive pins of one supply net on a side share one power symbol on a short bus;
+  - a wired net that continues elsewhere is named on its wire; every other pin gets a net label or power symbol.
+- **Chains**: two-terminal parts left over, as vertical chains (supply or signal on top, ground at the bottom).
+- **Block instances**: the groups of a block instance's components (`Component.block`), packed together in a
+  frame titled `instance (block)`.
+
+Each element is placed only where it collides with nothing already drawn: boxes for symbol bodies and pin
+strips, designators and values (from the stroke font's text extents, with a small clearance), labels and power
+symbols; wires must not cross boxes or other wires, nor touch a connection point of another net. Attachments
+try several distances, crystal positions and option sets, keeping the one that places the most parts; a pin
+whose parts do not fit keeps its net label. `schematic::overlaps` checks a finished sheet with the same geometry
+(`tests/schematic_layout.rs` runs it on the ATtiny85, STM32 and multi-sheet boards).
+
+Groups are packed with a skyline bin packer (several orders, fewest sheets, then fewest split groups, then least
+height) around the title block, onto the smallest paper that holds them:
+
+- `render.schematic`: one A4 or A3 sheet when everything fits, otherwise as many A3 sheets as needed, written as
+  `name-1.png`, `name-2.png`, ... (`sheet: N` renders one); the title block shows `sheet N/M`; groups are never
+  split and the main circuit's groups stay together when possible;
+- `schematic.export` (KiCad): one sheet, A4 to A0 or a custom size (DECISIONS D20); frames become dashed
+  rectangles with their title.
 
 ## Isometric 3D (M9)
 

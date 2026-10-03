@@ -4,7 +4,7 @@
 //!   tests run only when `CADLAB_ORACLES=1`; they never link or vendor those tools
 //!   (docs/TESTING.md, DECISIONS D7).
 //! - [`golden`]: compare output with checked-in golden files.
-//! - [`boards`]: example boards built through the command registry.
+//! - [`boards`]: example boards built through the command registry ([`stm32`]: a larger one).
 
 // Each test binary uses a different subset of these helpers.
 #![allow(dead_code, missing_docs)]
@@ -142,9 +142,13 @@ pub mod golden {
     }
 }
 
+pub mod stm32;
+
 pub mod boards {
     //! Example boards built through the command registry.
 
+    #[allow(unused_imports)]
+    pub use super::stm32::build_stm32_board;
     use cadlab::command::{Registry, RunOptions, Session, Step};
     use serde_json::{Value, json};
 
