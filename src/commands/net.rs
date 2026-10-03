@@ -327,6 +327,16 @@ impl Command for Rename {
                 c.nets.insert(to.clone(), net);
             }
         }
+        // Board copper follows the rename.
+        let b = ctx.project_mut()?.board_mut();
+        let rename = |n: &mut Option<String>| {
+            if n.as_deref() == Some(from.as_str()) {
+                *n = Some(to.clone());
+            }
+        };
+        b.tracks.iter_mut().for_each(|t| rename(&mut t.net));
+        b.vias.iter_mut().for_each(|v| rename(&mut v.net));
+        b.zones.iter_mut().for_each(|z| rename(&mut z.net));
         Ok(info(ctx.project()?, to))
     }
 

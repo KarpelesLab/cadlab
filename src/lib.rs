@@ -31,6 +31,7 @@
 
 use std::sync::OnceLock;
 
+pub mod board;
 pub mod bom;
 pub mod command;
 pub mod commands;

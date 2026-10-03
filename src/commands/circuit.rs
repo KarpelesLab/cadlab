@@ -153,6 +153,7 @@ impl Command for Remove {
             p.circuit_mut().components.remove(k);
             p.circuit_mut().detach_component(k);
             p.bom_mut().dnp.remove(k);
+            p.board_mut().footprints.remove(k);
         }
         // Forget block instances with no components left.
         let c = p.circuit_mut();
@@ -290,6 +291,9 @@ impl Command for Rename {
         }
         let p = ctx.project_mut()?;
         p.circuit_mut().rename_component(&from, &to);
+        if let Some(fp) = p.board_mut().footprints.remove(&from) {
+            p.board_mut().footprints.insert(to.clone(), fp);
+        }
         if p.bom_mut().dnp.remove(&from) {
             p.bom_mut().dnp.insert(to.clone());
         }

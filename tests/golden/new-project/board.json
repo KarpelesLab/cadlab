@@ -1,1 +1,19 @@
-{}
+{
+  "stackup": {"copper_layers": 2, "thickness": "1.6mm", "outer_copper": "0.035mm", "inner_copper": "0.0175mm"},
+  "outline": {"contours": []},
+  "rules": {
+    "clearance": "0.2mm",
+    "track_width": "0.25mm",
+    "min_track_width": "0.15mm",
+    "via_drill": "0.3mm",
+    "via_diameter": "0.6mm",
+    "min_annular_ring": "0.13mm",
+    "min_drill": "0.3mm",
+    "hole_to_hole": "0.5mm",
+    "copper_to_edge": "0.3mm",
+    "silk_to_pad": "0.15mm",
+    "min_silk_width": "0.15mm",
+    "zone_min_width": "0.2mm",
+    "ipc_class": 2
+  }
+}

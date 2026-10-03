@@ -1,6 +1,7 @@
 //! The project data model: what a project contains, how it is stored on disk, and how older
 //! files are migrated. See `docs/DATA_MODEL.md`.
 
+pub mod board;
 pub mod circuit;
 mod error;
 pub mod footprint;

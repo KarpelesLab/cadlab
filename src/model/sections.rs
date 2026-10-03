@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::footprint::Footprint;
 use crate::model::part::Part;
 
+pub use crate::model::board::Board;
 pub use crate::model::circuit::{Block, BlockComponent, Circuit, Component, Net, NetClass, PinRef};
 
 /// Parts and footprints available to the project, stored one file each under `library/`.
@@ -89,11 +90,6 @@ pub struct Schematic {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub placements: std::collections::BTreeMap<String, SymbolPlacement>,
 }
-
-/// Physical board: stackup, outline, placement, copper (`board.json`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Board {}
 
 /// Natural ordering: digit runs compare numerically (`R2` < `R10`, `U1.PA9` < `U1.PA10`).
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {

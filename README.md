@@ -55,6 +55,7 @@ MCP client configuration (e.g. Claude Code): `claude mcp add cadlab -- /path/to/
 | [docs/INTERFACES.md](docs/INTERFACES.md) | Library API, CLI conventions, MCP server design |
 | [docs/PARTS.md](docs/PARTS.md) | Parts, libraries, BOM, supplier research, footprint generation |
 | [docs/ROUTER.md](docs/ROUTER.md) | Autorouter design (freerouting replacement) |
+| [docs/BOARD.md](docs/BOARD.md) | Board model, shared geometry, M4 commands |
 | [docs/RENDERING.md](docs/RENDERING.md) | PNG/SVG rendering, isometric 3D |
 | [docs/MANUFACTURING.md](docs/MANUFACTURING.md) | Industry file formats, fab profiles (JLCPCB, PCBWay, ...) |
 | [docs/TESTING.md](docs/TESTING.md) | Test layers, verification oracles (KiCad, freerouting, ...) |

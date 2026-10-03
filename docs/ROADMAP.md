@@ -83,15 +83,20 @@ Details in [RENDERING.md](RENDERING.md).
 
 ## M4 — Board setup, placement, DRC, fab outputs (L)
 
-- [ ] Stackup (layer count, copper weights, dielectric), board outline (polygon/arcs), mounting holes
+- [x] Board model ([BOARD.md](BOARD.md)): stackup, outline (rectangle, rounded, circle, polygon), rules with
+      conservative IPC class 2 defaults, tracks, vias, zones, keep-outs, graphics
+- [ ] Mounting holes, outline cutouts
 - [ ] Design rules: clearances, widths, via/drill limits, per net class, IPC class 2/3 presets
 - [ ] Fab profiles ([MANUFACTURING.md](MANUFACTURING.md)): JLCPCB and PCBWay, verified from their published
       capabilities
 - [ ] Provider-agnostic flow: compatibility targets, `fab check`, `fab compare`, `export fab --fab`, per-fab part
       resolution with substitution report, `fab-lock.json`
-- [ ] Footprint placement commands: place, move, rotate, flip, align, distribute, lock
-- [ ] Placement helpers: ratsnest computation, "place near", decoupling caps next to pins, initial auto-placement
-- [ ] Manual routing commands: tracks, arcs, vias, by coordinates or "route from pad to pad along path"
+- [x] Footprint placement commands: set, move, rotate, flip (bottom side mirrored), lock, remove, list
+- [ ] Align, distribute
+- [x] Ratsnest (MST between copper islands per net), initial auto-placement (rows inside the outline)
+- [ ] "Place near", decoupling caps next to pins, placement by schematic groups
+- [x] Manual routing commands: tracks through coordinates or pins (net inferred, shorts refused), vias; net
+      class widths and via sizes
 - [ ] Copper zones with fill (thermal reliefs, clearances, islands removal)
 - [ ] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, zone min width
