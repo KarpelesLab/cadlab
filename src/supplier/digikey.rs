@@ -33,11 +33,17 @@ pub struct DigiKey {
 }
 
 fn err(message: impl Into<String>) -> ProviderError {
-    ProviderError::Unavailable { provider: ID.into(), message: message.into() }
+    ProviderError::Unavailable {
+        provider: ID.into(),
+        message: message.into(),
+    }
 }
 
 fn bad_data(message: impl Into<String>) -> ProviderError {
-    ProviderError::InvalidData { provider: ID.into(), message: message.into() }
+    ProviderError::InvalidData {
+        provider: ID.into(),
+        message: message.into(),
+    }
 }
 
 impl DigiKey {
@@ -45,12 +51,21 @@ impl DigiKey {
     pub fn from_env() -> Option<Self> {
         let id = std::env::var("DIGIKEY_CLIENT_ID").ok().filter(|v| !v.is_empty())?;
         let secret = std::env::var("DIGIKEY_CLIENT_SECRET").ok().filter(|v| !v.is_empty())?;
-        let var = |k: &str, d: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| d.to_string());
+        let var = |k: &str, d: &str| {
+            std::env::var(k)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| d.to_string())
+        };
         let sandbox = std::env::var("DIGIKEY_SANDBOX").is_ok_and(|v| v == "1");
         Some(DigiKey::new(
             id,
             secret,
-            if sandbox { "https://sandbox-api.digikey.com" } else { "https://api.digikey.com" },
+            if sandbox {
+                "https://sandbox-api.digikey.com"
+            } else {
+                "https://api.digikey.com"
+            },
             &var("DIGIKEY_SITE", "US"),
             &var("DIGIKEY_LANGUAGE", "en"),
             &var("DIGIKEY_CURRENCY", "USD"),
@@ -88,7 +103,10 @@ impl DigiKey {
 
     fn token(&self, force: bool) -> Result<String, ProviderError> {
         let mut t = self.token.lock().unwrap_or_else(|e| e.into_inner());
-        if !force && let Some((tok, exp)) = &*t && Instant::now() + Duration::from_secs(30) < *exp {
+        if !force
+            && let Some((tok, exp)) = &*t
+            && Instant::now() + Duration::from_secs(30) < *exp
+        {
             return Ok(tok.clone());
         }
         let mut resp = self
@@ -109,7 +127,10 @@ impl DigiKey {
             });
         }
         let v: Value = serde_json::from_str(&body).map_err(|e| bad_data(e.to_string()))?;
-        let tok = v["access_token"].as_str().ok_or_else(|| bad_data("token response without access_token"))?.to_string();
+        let tok = v["access_token"]
+            .as_str()
+            .ok_or_else(|| bad_data("token response without access_token"))?
+            .to_string();
         let ttl = v["expires_in"].as_u64().unwrap_or(600);
         *t = Some((tok.clone(), Instant::now() + Duration::from_secs(ttl)));
         Ok(tok)
@@ -117,7 +138,10 @@ impl DigiKey {
 
     /// POSTs JSON to an API path, through the cache.
     fn post(&self, path: &str, body: &Value) -> Result<Value, ProviderError> {
-        let key = format!("{} {}|{}|{}|{} {}", self.base, path, self.site, self.language, self.currency, body);
+        let key = format!(
+            "{} {}|{}|{}|{} {}",
+            self.base, path, self.site, self.language, self.currency, body
+        );
         if let Some(c) = &self.cache
             && let Some(text) = c.get(ID, &key)
         {
@@ -158,7 +182,10 @@ impl DigiKey {
     }
 
     fn keyword(&self, keywords: &str, limit: u32) -> Result<Vec<Candidate>, ProviderError> {
-        let v = self.post("/products/v4/search/keyword", &json!({"Keywords": keywords, "Limit": limit, "Offset": 0}))?;
+        let v = self.post(
+            "/products/v4/search/keyword",
+            &json!({"Keywords": keywords, "Limit": limit, "Offset": 0}),
+        )?;
         Ok(parse_keyword_response(&v, &self.currency))
     }
 }
@@ -193,7 +220,11 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
 pub fn parse_keyword_response(v: &Value, currency: &str) -> Vec<Candidate> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let products = v["ExactMatches"].as_array().into_iter().flatten().chain(v["Products"].as_array().into_iter().flatten());
+    let products = v["ExactMatches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(v["Products"].as_array().into_iter().flatten());
     for p in products {
         for c in parse_product(p, currency) {
             if seen.insert(c.sku.clone()) {
@@ -206,7 +237,9 @@ pub fn parse_keyword_response(v: &Value, currency: &str) -> Vec<Candidate> {
 
 /// Candidates from one product.
 pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
-    let Some(mpn) = str_at(p, &["ManufacturerProductNumber"]) else { return vec![] };
+    let Some(mpn) = str_at(p, &["ManufacturerProductNumber"]) else {
+        return vec![];
+    };
     let params_list: Vec<(&str, &str)> = p["Parameters"]
         .as_array()
         .into_iter()
@@ -214,7 +247,12 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
         .filter_map(|x| Some((x["ParameterText"].as_str()?, x["ValueText"].as_str()?)))
         .collect();
     let mut params = normalize::params(params_list.iter().copied());
-    let find = |name: &str| params_list.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| *v);
+    let find = |name: &str| {
+        params_list
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| *v)
+    };
     // Chips: "0402 (1005 Metric)" from Package / Case; ICs: the supplier device package (SOT-23-5).
     let case = find("Package / Case").and_then(normalize::package);
     let device = find("Supplier Device Package").and_then(normalize::package);
@@ -235,7 +273,9 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
             None => break,
         };
     }
-    let mut lifecycle = str_at(p, &["ProductStatus", "Status"]).map(normalize::lifecycle).unwrap_or_default();
+    let mut lifecycle = str_at(p, &["ProductStatus", "Status"])
+        .map(normalize::lifecycle)
+        .unwrap_or_default();
     if p["Discontinued"].as_bool() == Some(true) || p["EndOfLife"].as_bool() == Some(true) {
         lifecycle = super::Lifecycle::Obsolete;
     }
@@ -255,23 +295,41 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
         moq: 1,
         prices: Vec::new(),
         lifecycle,
-        datasheet: str_at(p, &["DatasheetUrl"]).map(|u| if u.starts_with("//") { format!("https:{u}") } else { u.to_string() }),
+        datasheet: str_at(p, &["DatasheetUrl"]).map(|u| {
+            if u.starts_with("//") {
+                format!("https:{u}")
+            } else {
+                u.to_string()
+            }
+        }),
         url: str_at(p, &["ProductUrl"]).map(String::from),
     };
     let variations = p["ProductVariations"].as_array().cloned().unwrap_or_default();
     if variations.is_empty() {
-        return vec![Candidate { sku: mpn.to_string(), ..base }];
+        return vec![Candidate {
+            sku: mpn.to_string(),
+            ..base
+        }];
     }
     variations
         .iter()
-        .filter(|var| !str_at(var, &["PackageType", "Name"]).unwrap_or("").contains("Digi-Reel"))
+        .filter(|var| {
+            !str_at(var, &["PackageType", "Name"])
+                .unwrap_or("")
+                .contains("Digi-Reel")
+        })
         .filter_map(|var| {
             let sku = str_at(var, &["DigiKeyProductNumber"])?.to_string();
             let prices = var["StandardPricing"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|b| Some(PriceBreak { qty: b["BreakQuantity"].as_u64()?, price: money(&b["UnitPrice"], currency)? }))
+                .filter_map(|b| {
+                    Some(PriceBreak {
+                        qty: b["BreakQuantity"].as_u64()?,
+                        price: money(&b["UnitPrice"], currency)?,
+                    })
+                })
                 .collect();
             Some(Candidate {
                 sku,
@@ -314,7 +372,11 @@ impl Provider for DigiKey {
     }
 
     fn lookup(&self, mpn: &str) -> Result<Vec<Candidate>, ProviderError> {
-        Ok(self.keyword(mpn, 20)?.into_iter().filter(|c| c.mpn.eq_ignore_ascii_case(mpn)).collect())
+        Ok(self
+            .keyword(mpn, 20)?
+            .into_iter()
+            .filter(|c| c.mpn.eq_ignore_ascii_case(mpn))
+            .collect())
     }
 }
 
@@ -380,7 +442,10 @@ mod tests {
         assert_eq!(ct.params.get("temperature").unwrap().to_string(), "-40°C..85°C");
         assert_eq!(ct.stock, 20000);
         assert_eq!(ct.prices[1].price.to_string(), "0.276 USD");
-        assert_eq!(ct.datasheet.as_deref(), Some("https://www.diodes.com/assets/Datasheets/AP2112.pdf"));
+        assert_eq!(
+            ct.datasheet.as_deref(),
+            Some("https://www.diodes.com/assets/Datasheets/AP2112.pdf")
+        );
         assert_eq!(ct.lifecycle, super::super::Lifecycle::Active);
         let tr = &c[1];
         assert_eq!(tr.moq, 3000);
@@ -397,6 +462,9 @@ mod tests {
             in_stock: true,
             ..Default::default()
         };
-        assert!(c.iter().all(|c| q.matches(c)), "normalized DigiKey data passes cadlab filters");
+        assert!(
+            c.iter().all(|c| q.matches(c)),
+            "normalized DigiKey data passes cadlab filters"
+        );
     }
 }

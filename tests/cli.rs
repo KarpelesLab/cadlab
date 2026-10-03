@@ -181,10 +181,29 @@ fn catalogs_from_environment() {
     let p = dir.path().join("p");
     let catalog = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/catalog.json");
     let env = [("CADLAB_CATALOGS", catalog.to_str().unwrap())];
-    let o = cadlab_env(&p, &["part", "search", "LDO", "--package", "SOT-23-5", "--params", "current_out=>=500mA", "--in-stock", "--json"], &env);
+    let o = cadlab_env(
+        &p,
+        &[
+            "part",
+            "search",
+            "LDO",
+            "--package",
+            "SOT-23-5",
+            "--params",
+            "current_out=>=500mA",
+            "--in-stock",
+            "--json",
+        ],
+        &env,
+    );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
     let v = json_of(&o);
-    let mpns: Vec<&str> = v["output"]["candidates"].as_array().unwrap().iter().map(|c| c["mpn"].as_str().unwrap()).collect();
+    let mpns: Vec<&str> = v["output"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["mpn"].as_str().unwrap())
+        .collect();
     assert_eq!(mpns, ["ME6211C33M5G-N", "AP2112K-3.3TRG1"]);
 
     // Without catalogs: a clear error.
