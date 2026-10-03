@@ -70,6 +70,22 @@ In cadlab, connectivity is data: `connect U1.4 VBUS`. The schematic is a generat
 rendered report. Hints (keep these together, put this on the left) can be stored to improve it, but they never
 affect connectivity.
 
+### Circuit editing
+
+Connectivity is edited with commands, never by drawing:
+
+```sh
+cadlab net connect VBUS J1.VBUS U1.VIN C1.1      # pins by number or name; U1.GND = every GND pin
+cadlab net connect "DATA[0..7]" U1.PA0..PA7 J2.1..8   # bus: ranges spread over DATA0..DATA7
+cadlab net set VBUS --driven                      # powered from a connector (ERC)
+cadlab net no-connect U2.PB4                      # intentionally open
+cadlab circuit erc                                # exit code 3 on errors
+cadlab circuit export out/board.net               # KiCad netlist; --format json
+```
+
+`circuit.json` stores nets as sets of `REFDES.PIN` (pin *numbers*), one net per line. Connecting a pin that
+is already on another net merges the nets only with `merge: true`.
+
 ### Circuit ↔ board consistency
 
 The board references components and nets from the circuit. When the circuit changes:

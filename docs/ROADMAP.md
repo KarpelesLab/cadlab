@@ -55,13 +55,13 @@ symbol and footprint attached.
 
 ## M2 — Circuit and ERC (M)
 
-- [ ] Components (instances of parts, refdes auto-assignment), nets, pins, net labels, power nets
-- [ ] Connect/disconnect commands; bus and multi-pin helpers (`connect U1.PA0..PA7 to bus DATA[0..7]`)
+- [x] Components (instances of parts, refdes auto-assignment, rename), nets, pins, externally driven power nets
+- [x] Connect/disconnect/merge, no-connect marks; pin ranges and buses (`net.connect DATA[0..7] U1.PA0..PA7`)
 - [ ] Hierarchy: reusable blocks/subcircuits (e.g. "USB-C power input"), instantiated with prefixes
-- [ ] Net classes (width, clearance, via size, diff pair) attached at circuit level
-- [ ] ERC: unconnected pins, conflicting drivers, undriven power inputs, single-pin nets, pin-type matrix
-- [ ] Netlist export (KiCad netlist, used for oracle comparison)
-- [ ] Text summaries designed for LLM context (`cadlab circuit summary`)
+- [x] Net classes (width, clearance, via size, diff pair) attached at circuit level
+- [x] ERC: unconnected pins, conflicting drivers, undriven power inputs (ground exempt), single-pin nets, pin-type rules
+- [x] Netlist export (KiCad netlist, JSON); oracle comparison comes with KiCad schematic export (M3)
+- [x] Text summaries designed for LLM context (`cadlab circuit summary`)
 
 **Exit:** a full MCU board circuit described via commands, ERC clean, netlist exported.
 

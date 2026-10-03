@@ -98,6 +98,8 @@ fn mcp_session() {
             "part",
             "footprint",
             "circuit",
+            "net",
+            "netclass",
             "bom",
             "history",
             "describe",

@@ -1,0 +1,330 @@
+//! M2: nets, ERC and netlist export, driven through the command registry.
+
+mod common;
+
+use std::path::Path;
+
+use cadlab::command::{Registry, RunOptions, Session, Step};
+use common::golden::assert_golden;
+use serde_json::{Value, json};
+
+fn exec(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> Value {
+    match r.execute(s, cmd, args, RunOptions::default()) {
+        Ok(o) => serde_json::to_value(&o).unwrap(),
+        Err(f) => panic!("{cmd} failed: {}", f.error),
+    }
+}
+
+fn fail(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> cadlab::command::Failure {
+    r.execute(s, cmd, args, RunOptions::default()).expect_err(cmd)
+}
+
+fn codes(o: &Value) -> Vec<String> {
+    o["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["code"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn new_project(r: &Registry) -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::new();
+    exec(
+        r,
+        &mut s,
+        "project.new",
+        json!({"path": dir.path().join("p"), "name": "attiny-blinky"}),
+    );
+    (dir, s)
+}
+
+fn pins(list: &[(&str, &str, &str)]) -> Value {
+    Value::Array(
+        list.iter()
+            .map(|(n, name, kind)| json!({"number": n, "name": name, "kind": kind}))
+            .collect(),
+    )
+}
+
+/// Parts and components of a small ATtiny85 board.
+fn build_board(r: &Registry, s: &mut Session) {
+    let steps = vec![
+        json!({"cmd": "part.create", "args": {"id": "PWR_HDR", "category": "connector", "description": "2-pin power header",
+            "package": "PinHeader 1x02", "pins": pins(&[("1", "VBUS", "passive"), ("2", "GND", "passive")])}}),
+        json!({"cmd": "part.create", "args": {"category": "ldo", "manufacturer": "Diodes", "mpn": "AP2112K-3.3TRG1", "package": "SOT-23-5",
+            "pins": pins(&[("1", "VIN", "power_in"), ("2", "GND", "power_in"), ("3", "EN", "input"), ("4", "NC", "no_connect"), ("5", "VOUT", "power_out")])}}),
+        json!({"cmd": "part.create", "args": {"category": "mcu", "manufacturer": "Microchip", "mpn": "ATTINY85-20SU", "package": "SOIC-8",
+            "pins": pins(&[("1", "PB5", "bidirectional"), ("2", "PB3", "bidirectional"), ("3", "PB4", "bidirectional"), ("4", "GND", "power_in"),
+                           ("5", "PB0", "bidirectional"), ("6", "PB1", "bidirectional"), ("7", "PB2", "bidirectional"), ("8", "VCC", "power_in")])}}),
+        json!({"cmd": "part.create", "args": {"id": "ISP_HDR", "category": "connector", "description": "AVR ISP 2x3 header", "package": "PinHeader 2x03",
+            "pins": pins(&[("1", "MISO", "passive"), ("2", "VCC", "passive"), ("3", "SCK", "passive"), ("4", "MOSI", "passive"), ("5", "RESET", "passive"), ("6", "GND", "passive")])}}),
+        json!({"cmd": "circuit.add", "args": {"part": "PWR_HDR", "refdes": "J1"}}),
+        json!({"cmd": "circuit.add", "args": {"part": "AP2112K-3.3TRG1"}}),
+        json!({"cmd": "circuit.add", "args": {"part": "ATTINY85-20SU"}}),
+        json!({"cmd": "circuit.add", "args": {"part": "ISP_HDR", "refdes": "J2"}}),
+        json!({"cmd": "circuit.add", "args": {"part": "C 1uF 16V X5R 0402", "count": 2}}),
+        json!({"cmd": "circuit.add", "args": {"part": "C 100nF 16V X7R 0402"}}),
+        json!({"cmd": "circuit.add", "args": {"part": "R 10k 1% 0402"}}),
+        json!({"cmd": "circuit.add", "args": {"part": "R 1k 1% 0402"}}),
+        json!({"cmd": "circuit.add", "args": {"part": "LED red 0603"}}),
+        json!({"cmd": "net.connect", "args": {"net": "VBUS", "pins": ["J1.VBUS", "U1.VIN", "U1.EN", "C1.1"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "GND", "pins": ["J1.GND", "U1.GND", "C1.2", "C2.2", "C3.2", "U2.GND", "D1.K", "J2.GND"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "3V3", "pins": ["U1.VOUT", "C2.1", "C3.1", "U2.VCC", "R1.1", "J2.VCC"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "RESET", "pins": ["U2.PB5", "R1.2", "J2.RESET"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "MOSI", "pins": ["U2.PB0", "J2.MOSI"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "MISO", "pins": ["U2.PB1", "J2.MISO"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "SCK", "pins": ["U2.PB2", "J2.SCK"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "LED_DRIVE", "pins": ["U2.PB3", "R2.1"]}}),
+        json!({"cmd": "net.connect", "args": {"net": "LED_A", "pins": ["R2.2", "D1.A"]}}),
+    ];
+    let steps: Vec<Step> = serde_json::from_value(Value::Array(steps)).unwrap();
+    r.execute_batch(s, steps, RunOptions::default())
+        .unwrap_or_else(|f| panic!("step {:?}: {}", f.step, f.error));
+}
+
+/// M2 exit: a complete MCU board described with commands, ERC clean, netlist exported.
+#[test]
+fn attiny_board_erc_clean_and_netlist() {
+    let r = Registry::with_builtins();
+    let (dir, mut s) = new_project(&r);
+    build_board(&r, &mut s);
+
+    // First ERC: VBUS comes from a connector and is not marked driven; PB4 is floating.
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    let c = codes(&o);
+    assert!(c.contains(&"erc.power_not_driven".to_string()), "{c:?}");
+    assert!(c.contains(&"erc.unconnected".to_string()), "{c:?}");
+    let pnd = o["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "erc.power_not_driven")
+        .unwrap();
+    assert!(pnd["message"].as_str().unwrap().contains("VBUS"));
+    assert!(
+        pnd["hint"].as_str().unwrap().contains("--driven"),
+        "connector-aware hint"
+    );
+    // GND has only ground power pins: no error for it.
+    assert!(
+        !o["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["message"].as_str().unwrap().contains("`GND`"))
+    );
+
+    exec(&r, &mut s, "net.set", json!({"nets": ["VBUS"], "driven": true}));
+    exec(&r, &mut s, "net.no_connect", json!({"pins": ["U2.PB4"]}));
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert_eq!(
+        o["output"],
+        json!({"errors": 0, "warnings": 0}),
+        "{:?}",
+        o["diagnostics"]
+    );
+    assert_eq!(o["summary"], "ERC clean");
+
+    // Net classes.
+    exec(
+        &r,
+        &mut s,
+        "netclass.set",
+        json!({"name": "power", "track_width": "0.5mm", "clearance": "0.2mm"}),
+    );
+    exec(
+        &r,
+        &mut s,
+        "net.set",
+        json!({"nets": ["VBUS", "3V3", "GND"], "class": "power"}),
+    );
+
+    // Netlists.
+    exec(&r, &mut s, "circuit.export", json!({"path": "out/board.net"}));
+    exec(
+        &r,
+        &mut s,
+        "circuit.export",
+        json!({"path": "out/board.json", "format": "json"}),
+    );
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/attiny85");
+    assert_golden(
+        &golden.join("board.net"),
+        &std::fs::read_to_string(dir.path().join("p/out/board.net")).unwrap(),
+    );
+    let summary = exec(&r, &mut s, "circuit.summary", json!({}));
+    assert_golden(&golden.join("summary.txt"), summary["output"]["text"].as_str().unwrap());
+    let j: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("p/out/board.json")).unwrap()).unwrap();
+    assert_eq!(j["components"].as_array().unwrap().len(), 10);
+    assert_eq!(j["nets"].as_array().unwrap().len(), 9);
+
+    // Saved circuit file is stable and readable.
+    s.save().unwrap();
+    assert_golden(
+        &golden.join("circuit.json"),
+        &std::fs::read_to_string(dir.path().join("p/circuit.json")).unwrap(),
+    );
+    let (s2, _) = Session::open(&dir.path().join("p")).unwrap();
+    assert_eq!(s2.project, s.project);
+}
+
+fn mcu_with_port(r: &Registry, s: &mut Session) {
+    let mut pin_list: Vec<(String, String, &str)> = vec![
+        ("1".into(), "VDD".into(), "power_in"),
+        ("2".into(), "VSS".into(), "power_in"),
+    ];
+    for i in 0..8 {
+        pin_list.push(((3 + i).to_string(), format!("PA{i}"), "bidirectional"));
+    }
+    let p: Vec<(&str, &str, &str)> = pin_list.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)).collect();
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "MCU8", "category": "mcu", "package": "SOIC-16W", "pins": pins(&p)}),
+    );
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "HDR8", "category": "connector", "package": "PinHeader 1x08"}),
+    );
+    exec(r, s, "circuit.add", json!({"part": "MCU8"}));
+    exec(r, s, "circuit.add", json!({"part": "HDR8"}));
+}
+
+#[test]
+fn bus_connect_and_errors() {
+    let r = Registry::with_builtins();
+    let (_d, mut s) = new_project(&r);
+    mcu_with_port(&r, &mut s);
+    let o = exec(
+        &r,
+        &mut s,
+        "net.connect",
+        json!({"net": "DATA[0..7]", "pins": ["U1.PA0..PA7", "J1.1..8"]}),
+    );
+    assert_eq!(o["output"]["nets"].as_array().unwrap().len(), 8);
+    let o = exec(&r, &mut s, "net.show", json!({"net": "DATA3"}));
+    let p: Vec<&str> = o["output"]["pins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["pin"].as_str().unwrap())
+        .collect();
+    // Pins are stored by number: PA3 is pin 6.
+    assert_eq!(p, ["J1.4", "U1.6"]);
+
+    // Width mismatch.
+    let f = fail(
+        &r,
+        &mut s,
+        "net.connect",
+        json!({"net": "X[0..3]", "pins": ["U1.PA0..PA2"]}),
+    );
+    assert_eq!(f.error.diagnostic.code, "net.bus_width");
+    // Moving a pin to another net needs merge.
+    let f = fail(&r, &mut s, "net.connect", json!({"net": "DATA0", "pins": ["U1.PA1"]}));
+    assert_eq!(f.error.diagnostic.code, "net.would_merge");
+    let o = exec(
+        &r,
+        &mut s,
+        "net.connect",
+        json!({"net": "DATA0", "pins": ["U1.PA1"], "merge": true}),
+    );
+    assert_eq!(o["output"]["merged"], json!(["DATA1"]));
+    // Pin errors with suggestions.
+    let f = fail(&r, &mut s, "net.connect", json!({"net": "N", "pins": ["U1.PA9"]}));
+    assert_eq!(f.error.diagnostic.code, "pin.not_found");
+    let f = fail(&r, &mut s, "net.connect", json!({"net": "N", "pins": ["U9.1"]}));
+    assert_eq!(f.error.diagnostic.code, "component.not_found");
+    // By-name connects every pin with that name; ground-only power net is fine.
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["U1.VSS"]}));
+
+    // No-connect on a connected pin is refused; disconnect then mark.
+    let f = fail(&r, &mut s, "net.no_connect", json!({"pins": ["U1.PA2"]}));
+    assert_eq!(f.error.diagnostic.code, "net.pin_connected");
+    exec(&r, &mut s, "net.disconnect", json!({"pins": ["U1.PA2"]}));
+    exec(&r, &mut s, "net.no_connect", json!({"pins": ["U1.PA2"]}));
+
+    // Rename component: nets follow.
+    exec(&r, &mut s, "circuit.rename", json!({"from": "J1", "to": "J5"}));
+    let o = exec(&r, &mut s, "net.show", json!({"net": "DATA7"}));
+    assert!(
+        o["output"]["pins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["pin"] == "J5.8")
+    );
+    // Removing a component detaches it; nets left empty disappear.
+    exec(&r, &mut s, "circuit.remove", json!({"refdes": ["J5"]}));
+    let o = exec(&r, &mut s, "net.list", json!({}));
+    assert!(o["output"]["nets"].as_array().unwrap().iter().all(|n| {
+        !n["pins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap().starts_with("J5"))
+    }));
+    // Single-pin nets are warned about.
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert!(codes(&o).contains(&"erc.single_pin_net".to_string()));
+}
+
+#[test]
+fn erc_output_conflicts() {
+    let r = Registry::with_builtins();
+    let (_d, mut s) = new_project(&r);
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "BUF", "category": "ic", "package": "SOT-23-5",
+        "pins": pins(&[("1", "A", "input"), ("2", "GND", "power_in"), ("3", "B", "input"), ("4", "Y", "output"), ("5", "VCC", "power_in")])}),
+    );
+    exec(&r, &mut s, "circuit.add", json!({"part": "BUF", "count": 2}));
+    exec(&r, &mut s, "net.connect", json!({"net": "Y", "pins": ["U1.Y", "U2.Y"]}));
+    exec(
+        &r,
+        &mut s,
+        "net.connect",
+        json!({"net": "IN", "pins": ["U1.A", "U2.A"]}),
+    );
+    exec(
+        &r,
+        &mut s,
+        "net.connect",
+        json!({"net": "VCC", "pins": ["U1.VCC", "U2.VCC"]}),
+    );
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    let c = codes(&o);
+    assert!(c.contains(&"erc.output_conflict".to_string()), "{c:?}");
+    assert!(c.contains(&"erc.input_not_driven".to_string()), "{c:?}");
+    assert!(c.contains(&"erc.power_not_driven".to_string()), "{c:?}");
+    assert!(
+        c.contains(&"erc.power_unconnected".to_string()),
+        "GND pins unconnected: {c:?}"
+    );
+    // bom.replace with a part lacking pins drops those connections.
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "BUF4", "category": "ic", "package": "SOT-23-5",
+        "pins": pins(&[("1", "A", "input"), ("2", "GND", "power_in"), ("3", "B", "input"), ("5", "VCC", "power_in")]),
+        "pin_map": {}}),
+    );
+    let o = exec(
+        &r,
+        &mut s,
+        "bom.replace",
+        json!({"from": "BUF", "to": "BUF4", "refdes": ["U2"]}),
+    );
+    assert!(codes(&o).contains(&"bom.pins_differ".to_string()));
+    let o = exec(&r, &mut s, "net.show", json!({"net": "Y"}));
+    assert_eq!(o["output"]["pins"].as_array().unwrap().len(), 1);
+}

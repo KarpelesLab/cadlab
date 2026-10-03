@@ -166,7 +166,8 @@ fn snap(v: Nm) -> Nm {
     Nm((v.0 as f64 / GRID.0 as f64).round() as i64 * GRID.0)
 }
 
-fn is_ground(name: &str) -> bool {
+/// Whether a pin name denotes ground (`GND`, `AGND`, `VSS`, `EP`, ...).
+pub fn is_ground(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     n.starts_with("GND") || n.ends_with("GND") || n.starts_with("VSS") || n == "EP" || n == "PAD" || n == "V-"
 }

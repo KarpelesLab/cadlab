@@ -333,6 +333,7 @@ impl Command for Replace {
             .filter(|pin| new.symbol.pin(&pin.number).is_none())
             .map(|pin| format!("{} ({})", pin.number, pin.label()))
             .collect();
+        let new_pins: std::collections::BTreeSet<String> = new.symbol.pins.iter().map(|p| p.number.clone()).collect();
         if !missing.is_empty() {
             ctx.report(
                 Diagnostic::warning(
@@ -343,12 +344,25 @@ impl Command for Replace {
                     scheme: "local".into(),
                     id: to.clone(),
                 })
-                .with_hint("connections to those pins will be dropped when nets exist; check the pinouts"),
+                .with_hint("connections to those pins were dropped; check the pinouts and reconnect"),
             );
         }
         let p = ctx.project_mut()?;
         for r in &targets {
             p.circuit_mut().components.get_mut(r).expect("checked").part = to.clone();
+            // Connections to pins the new part does not have are dropped (warned above).
+            let gone: Vec<crate::model::circuit::PinRef> = p
+                .circuit()
+                .nets
+                .values()
+                .flat_map(|n| n.pins.iter())
+                .filter(|pin| pin.refdes == *r && !new_pins.contains(&pin.pin))
+                .cloned()
+                .collect();
+            crate::connect::disconnect(p.circuit_mut(), &gone);
+            p.circuit_mut()
+                .no_connect
+                .retain(|pin| pin.refdes != *r || new_pins.contains(&pin.pin));
         }
         let mut refdes = targets;
         refdes.sort_by(|a, b| crate::model::sections::natural_cmp(a, b));

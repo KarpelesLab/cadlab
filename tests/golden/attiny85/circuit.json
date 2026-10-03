@@ -1,0 +1,29 @@
+{
+  "components": {
+    "C1": {"id": 5, "part": "C_1uF_16V_X5R_0402"},
+    "C2": {"id": 6, "part": "C_1uF_16V_X5R_0402"},
+    "C3": {"id": 7, "part": "C_100nF_16V_X7R_0402"},
+    "D1": {"id": 10, "part": "LED_red_0603"},
+    "J1": {"id": 1, "part": "PWR_HDR"},
+    "J2": {"id": 4, "part": "ISP_HDR"},
+    "R1": {"id": 8, "part": "R_10k_1pct_0402"},
+    "R2": {"id": 9, "part": "R_1k_1pct_0402"},
+    "U1": {"id": 2, "part": "AP2112K-3.3TRG1"},
+    "U2": {"id": 3, "part": "ATTINY85-20SU"}
+  },
+  "nets": {
+    "3V3": {"id": 13, "pins": ["C2.1", "C3.1", "J2.2", "R1.1", "U1.5", "U2.8"], "class": "power"},
+    "GND": {"id": 12, "pins": ["C1.2", "C2.2", "C3.2", "D1.1", "J1.2", "J2.6", "U1.2", "U2.4"], "class": "power"},
+    "LED_A": {"id": 19, "pins": ["D1.2", "R2.2"]},
+    "LED_DRIVE": {"id": 18, "pins": ["R2.1", "U2.2"]},
+    "MISO": {"id": 16, "pins": ["J2.1", "U2.6"]},
+    "MOSI": {"id": 15, "pins": ["J2.4", "U2.5"]},
+    "RESET": {"id": 14, "pins": ["J2.5", "R1.2", "U2.1"]},
+    "SCK": {"id": 17, "pins": ["J2.3", "U2.7"]},
+    "VBUS": {"id": 11, "pins": ["C1.1", "J1.1", "U1.1", "U1.3"], "class": "power", "driven": true}
+  },
+  "no_connect": ["U2.3"],
+  "netclasses": {
+    "power": {"track_width": "0.5mm", "clearance": "0.2mm"}
+  }
+}

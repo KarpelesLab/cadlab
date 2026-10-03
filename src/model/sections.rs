@@ -5,9 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::id::ObjectId;
 use crate::model::footprint::Footprint;
 use crate::model::part::Part;
+
+pub use crate::model::circuit::{Block, BlockComponent, Circuit, Component, Net, NetClass, PinRef};
 
 /// Parts and footprints available to the project, stored one file each under `library/`.
 /// Every part a project uses is copied here, so a project never depends on external libraries.
@@ -72,54 +73,6 @@ pub struct Bom {
     /// Components not populated at assembly (they stay on the board).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub dnp: BTreeSet<String>,
-}
-
-/// A use of a part in the circuit.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Component {
-    /// Stable internal ID.
-    pub id: ObjectId,
-    /// Part ID in the library.
-    pub part: String,
-    /// Free-form properties (e.g. `"function": "status LED"`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub properties: BTreeMap<String, String>,
-}
-
-/// Connectivity, the source of truth (`circuit.json`). Nets arrive in M2.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Circuit {
-    /// Components by reference designator.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub components: BTreeMap<String, Component>,
-}
-
-impl Circuit {
-    /// Reference designators in natural order (`R2` before `R10`).
-    pub fn refdes_sorted(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.components.keys().map(String::as_str).collect();
-        v.sort_by(|a, b| natural_cmp(a, b));
-        v
-    }
-
-    /// Next free designator with `prefix`: `R1`, `R2`, ...
-    pub fn next_refdes(&self, prefix: &str) -> String {
-        let max = self
-            .components
-            .keys()
-            .filter_map(|k| k.strip_prefix(prefix))
-            .filter_map(|n| n.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
-        format!("{prefix}{}", max + 1)
-    }
-
-    /// Components using `part`.
-    pub fn using_part<'a>(&'a self, part: &'a str) -> impl Iterator<Item = (&'a String, &'a Component)> + 'a {
-        self.components.iter().filter(move |(_, c)| c.part == part)
-    }
 }
 
 /// Optional schematic presentation hints (`schematic.json`).
@@ -188,8 +141,9 @@ mod tests {
             c.components.insert(
                 r.into(),
                 Component {
-                    id: ObjectId(1),
+                    id: crate::id::ObjectId(1),
                     part: "x".into(),
+                    block: None,
                     properties: Default::default(),
                 },
             );

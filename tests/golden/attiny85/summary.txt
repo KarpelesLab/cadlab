@@ -1,0 +1,23 @@
+attiny-blinky: 10 components, 9 nets
+components:
+  C1: 1uF [CAPC1005X55N]
+  C2: 1uF [CAPC1005X55N]
+  C3: 100nF [CAPC1005X55N]
+  D1: red [LEDC1608X87N]
+  J1: PWR_HDR [PinHeader_1x02_P2.54mm]
+  J2: ISP_HDR [PinHeader_2x03_P2.54mm]
+  R1: 10k [RESC1005X40N]
+  R2: 1k [RESC1005X40N]
+  U1: AP2112K-3.3TRG1 [SOT95P280X145-5N]
+  U2: ATTINY85-20SU [SOIC127P600X175-8N]
+nets:
+  3V3 [power]: C2.1 C3.1 J2.2(VCC) R1.1 U1.5(VOUT) U2.8(VCC)
+  GND [power]: C1.2 C2.2 C3.2 D1.1(K) J1.2(GND) J2.6(GND) U1.2(GND) U2.4(GND)
+  LED_A: D1.2(A) R2.2
+  LED_DRIVE: R2.1 U2.2(PB3)
+  MISO: J2.1(MISO) U2.6(PB1)
+  MOSI: J2.4(MOSI) U2.5(PB0)
+  RESET: J2.5(RESET) R1.2 U2.1(PB5)
+  SCK: J2.3(SCK) U2.7(PB2)
+  VBUS [power] [driven]: C1.1 J1.1(VBUS) U1.1(VIN) U1.3(EN)
+no-connect: U2.3
