@@ -1,3 +1,0 @@
-[net]
-# Use the system git for git dependencies (polyclip), so url.insteadOf rewrites and SSH agents work.
-git-fetch-with-cli = true

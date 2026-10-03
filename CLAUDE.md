@@ -29,4 +29,3 @@ Development:
 - Golden files: `CADLAB_BLESS=1 cargo test` rewrites them; snapshots: `cargo insta review`.
 - Adding a command: a struct implementing `Command` in `src/commands/<group>.rs`, registered
   in that file's `register`. CLI flags and MCP tools are generated from it; doc comments become help text.
-- polyclip is a git dependency (`.cargo/config.toml` uses the system git so SSH `insteadOf` rewrites work).

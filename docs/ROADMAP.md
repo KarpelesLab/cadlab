@@ -14,8 +14,7 @@ Workspace skeleton and the pieces every later milestone depends on.
 
 - [x] Crate and module layout per [ARCHITECTURE.md](ARCHITECTURE.md) (single crate, D16)
 - [x] Core types: units (`Nm` = i64 nanometers, `Angle`), points/vectors, transforms, bounding boxes
-- [x] Geometry: `cadlab::geom` adapter over polyclip ([POLYGON_LIB.md](POLYGON_LIB.md)), pinned as a git
-      dependency until it is published (switch to the crates.io release then)
+- [x] Geometry: `cadlab::geom` adapter over polyclip ([POLYGON_LIB.md](POLYGON_LIB.md)), from crates.io
 - [ ] Spatial index (R-tree) for shapes (moved to M4, where DRC first needs it)
 - [x] ID scheme: stable internal IDs (`ObjectId`, persisted allocator), `ObjectRef` name syntax, "did you mean"
       suggestions (model-aware resolution comes with the circuit in M2)

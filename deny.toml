@@ -30,8 +30,6 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# Until polyclip is released on crates.io.
-allow-git = ["https://github.com/KarpelesLab/polyclip"]
 
 [advisories]
 yanked = "deny"
