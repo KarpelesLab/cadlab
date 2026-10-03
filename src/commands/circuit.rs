@@ -81,7 +81,7 @@ impl Command for Add {
                 if crate::partspec::parse(&self.part).is_ok() {
                     part::add_generic(ctx, &self.part)?
                 } else {
-                    return Err(not_found);
+                    return Err(util::with_library_hint(ctx, not_found, &self.part));
                 }
             }
         };

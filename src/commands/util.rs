@@ -1,12 +1,13 @@
 //! Lookups shared by commands, with "did you mean" errors.
 
-use crate::command::CommandError;
+use crate::command::{CommandError, Context};
 use crate::model::Project;
 use crate::model::footprint::Footprint;
 use crate::model::part::Part;
 use crate::model::sections::Component;
 use crate::refs::ObjectRef;
 use crate::suggest::did_you_mean;
+use crate::userlib::ItemKind;
 
 /// Finds a part by ID (exact, then case-insensitive), or by MPN.
 pub(crate) fn part<'a>(p: &'a Project, id: &str) -> Result<&'a Part, CommandError> {
@@ -27,6 +28,39 @@ pub(crate) fn part<'a>(p: &'a Project, id: &str) -> Result<&'a Part, CommandErro
         .with_subject(ObjectRef::Part { scheme: "local".into(), id: id.into() })
         .with_suggestions(&s)
         .with_hint_if_none("list parts with `part.list`, or add one with `part.generic` / `part.create`"))
+}
+
+/// Like [`part`] on the open project; when the part is missing there but exists in a shared
+/// library, the error's hint says how to import it. Projects never pull from libraries
+/// implicitly (DECISIONS D19).
+pub(crate) fn part_in<'a>(ctx: &'a Context<'_>, id: &str) -> Result<&'a Part, CommandError> {
+    part(ctx.project()?, id).map_err(|e| with_library_hint(ctx, e, id))
+}
+
+/// Adds an import hint to a `part.not_found` error when a shared library has the part (by ID
+/// or MPN). Library errors are ignored here: the hint is best effort.
+pub(crate) fn with_library_hint(ctx: &Context<'_>, e: CommandError, id: &str) -> CommandError {
+    if e.diagnostic.code != "part.not_found" {
+        return e;
+    }
+    let Ok(libs) = ctx.libraries() else { return e };
+    let id = id.strip_prefix("local:").or_else(|| id.strip_prefix("lib:")).unwrap_or(id);
+    let found = match libs.find(&[ItemKind::Part], id) {
+        Ok(v) if !v.is_empty() => Some((v[0].0.name.clone(), v[0].2.clone())),
+        _ => match libs.find_part_by_mpn(id.strip_prefix("mpn:").unwrap_or(id)) {
+            Ok(Some((l, p))) => Some((l.name, p.id)),
+            _ => None,
+        },
+    };
+    match found {
+        Some((lib, pid)) => {
+            let lib_arg = if lib == crate::userlib::USER_LIBRARY { String::new() } else { format!(" --library {lib}") };
+            e.with_hint(format!(
+                "part `{pid}` is in the shared library `{lib}`: import it with `lib.import {pid}{lib_arg}` (projects never use shared libraries implicitly)"
+            ))
+        }
+        None => e,
+    }
 }
 
 /// Finds a footprint by name (exact, then case-insensitive).

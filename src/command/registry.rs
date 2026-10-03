@@ -305,7 +305,7 @@ fn transact<T>(
 ) -> TransactResult<T> {
     match kind {
         CommandKind::Query => {
-            let mut ctx = Context::new(session, progress, cancel);
+            let mut ctx = Context::new(session, progress, cancel, opts.dry_run);
             let r = f(&mut ctx);
             let d = std::mem::take(&mut ctx.diagnostics);
             r.map(|(v, s)| (v, s, d.clone(), false)).map_err(|e| (e, d))
@@ -318,7 +318,7 @@ fn transact<T>(
                 ));
             }
             let changes_before = session.change_count();
-            let mut ctx = Context::new(session, progress, cancel);
+            let mut ctx = Context::new(session, progress, cancel, opts.dry_run);
             let r = f(&mut ctx);
             let d = std::mem::take(&mut ctx.diagnostics);
             match r {
@@ -340,11 +340,11 @@ fn transact<T>(
         }
         CommandKind::Mutation => {
             let Some(before) = session.project.clone() else {
-                let ctx = Context::new(session, progress, cancel);
+                let ctx = Context::new(session, progress, cancel, opts.dry_run);
                 let e = ctx.project().map(|_| ()).unwrap_err();
                 return Err((e, vec![]));
             };
-            let mut ctx = Context::new(session, progress, cancel);
+            let mut ctx = Context::new(session, progress, cancel, opts.dry_run);
             let r = f(&mut ctx);
             let d = std::mem::take(&mut ctx.diagnostics);
             match r {

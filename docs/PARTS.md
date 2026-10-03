@@ -34,11 +34,53 @@ therefore be built at JLCPCB one month and PCBWay the next. See
 
 - **Project library** (`library/` in the project): every part used by the project is copied here. A project never
   breaks because an external library changed.
-- **User libraries**: directories or git repos registered in user config, searched by `part search`.
+- **Shared user libraries** (`lib.*` commands, DECISIONS D19): parts, footprints and blocks kept outside any
+  project and copied in and out explicitly. Projects never read them implicitly; when a missing part exists in a
+  shared library, the `part.not_found` error hints `lib.import <id>`.
 - **Generated**: footprints and symbols created from parameters (below). This is the main source: cadlab ships
   its own base library built from generators, never from KiCad's libraries (DECISIONS D7).
 - **User imports**: a user's own KiCad `.kicad_sym` / `.kicad_mod` files can be imported (M7). The user is
   responsible for the license of what they import, which is recorded in provenance.
+
+### Shared user libraries
+
+Locations, in search order:
+
+1. The **user library**: `$XDG_DATA_HOME/cadlab/library`, default `~/.local/share/cadlab/library`
+   (`%APPDATA%\cadlab\library` on Windows when `XDG_DATA_HOME` is unset). Created on first publish.
+2. Directories listed in the user settings (`~/.config/cadlab/config.toml`), e.g. a team library kept in a git
+   checkout: `libraries = ["~/hw/team-library"]`. Each is named after its directory (`team-library`).
+   `cadlab config show` prints the list.
+
+The `library` argument of the commands takes a library name (`user`, `team-library`) or a directory path
+(`./lib`), which need not be configured.
+
+Layout: the same as a project's `library/`, plus blocks. Files use the canonical JSON writer.
+
+```
+<library>/
+├── library.toml              schema_version = 1
+├── parts/<id>.json           same format as a project part
+├── footprints/<name>.json    same format as a project footprint
+└── blocks/<name>.json        {"name", "block", "parts", "footprints"}
+```
+
+A block file is **self-contained**: it carries copies of every part its components use and of their footprints,
+so importing it into an empty project always works, whatever happens later to the library's `parts/`.
+
+| Command | Purpose |
+|---|---|
+| `lib.list [query] [--kind part\|footprint\|block] [--library L]` | items across libraries, with the library each comes from; no project needed |
+| `lib.show <name>` | one item in full |
+| `lib.publish --part ID \| --footprint NAME \| --block NAME [--library L] [--replace]` | copy from the project into a library: a part brings its footprints, a block its parts and footprints |
+| `lib.import <name> [--kind K] [--library L] [--replace]` | copy into the project (part + footprints; block + parts + footprints), reporting what was added |
+| `lib.remove <name> [--library L]` | delete from a library (default: the user library); a footprint still used by a library part is kept |
+
+Without `library`, `lib.import` and `lib.show` take the first library that has the name (an earlier library
+shadows a later one); parts are also found by MPN. Existing items with different content give a `lib.conflict`
+error listing them; `replace: true` overwrites them. Identical items are reported `unchanged`. Library writes
+(`publish`, `remove`) happen outside the project: `--dry-run` reports without writing, and undo does not revert
+them.
 
 ## Footprint generation (IPC-7351B)
 

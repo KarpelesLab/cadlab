@@ -53,6 +53,7 @@ pub mod suggest;
 pub mod supplier;
 pub mod symbolgen;
 pub mod units;
+pub mod userlib;
 pub mod value;
 
 pub use diag::{Diagnostic, Severity};
