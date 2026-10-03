@@ -5,6 +5,7 @@ pub mod board;
 pub mod bom;
 pub mod circuit;
 pub mod drc;
+pub mod export;
 pub mod footprint;
 pub mod history;
 pub mod kicad_pcb;
@@ -33,5 +34,6 @@ pub fn register_all(r: &mut Registry) {
     zone::register(r);
     render::register(r);
     kicad_pcb::register(r);
+    export::register(r);
     history::register(r);
 }

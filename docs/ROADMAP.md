@@ -100,15 +100,15 @@ Details in [RENDERING.md](RENDERING.md).
       class widths and via sizes
 - [x] Copper zones with fill (thermal reliefs, clearances, islands removal, priorities, keep-outs)
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
-      silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper once zone fill
-      lands; zone min width is left to the zone filler
+      silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
 - [x] Board rendering (per layer, composite, realistic top/bottom; highlight, ratsnest, markers, crop)
-- [ ] Outputs: Gerber X2 (+ X3 component data), Excellon/XNC drill, pick-and-place CSV, BOM CSV, IPC-D-356A,
-      archive per fab profile
-- [x] KiCad `.kicad_pcb` export for oracle tests: KiCad DRC vs cadlab DRC, KiCad Gerbers vs ours (raster XOR)
-      (`board.export_kicad`, with `.kicad_pro`/`.kicad_dru`; KiCad DRC, IPC-D-356 and Gerber oracle in
-      `tests/kicad_pcb_oracle.rs`. The DRC-vs-DRC and raster comparisons are wired up once cadlab DRC and Gerbers land)
-- [ ] gerbv oracle: our Gerbers parse and render as expected
+- [x] Outputs: Gerber X2 (+ X3 component data), Excellon/XNC drill (+ optional Gerber X2 drill), generic
+      pick-and-place CSV, IPC-D-356A (`export.*`, `src/fabout/`)
+- [ ] Outputs per fab profile: file naming/layout, CPL columns and rotation offsets, archive
+- [x] KiCad `.kicad_pcb` export for oracle tests (`board.export_kicad`, with `.kicad_pro`/`.kicad_dru`; KiCad DRC,
+      IPC-D-356 and Gerber oracle in `tests/kicad_pcb_oracle.rs`)
+- [ ] Cross-checks: KiCad DRC vs cadlab DRC on the same boards, KiCad Gerbers vs ours (raster XOR)
+- [x] gerbv oracle: our Gerbers parse and render as expected (`tests/gerber_oracle.rs`, pixel probes)
 
 **Exit:** the target demo board passes cadlab DRC and the KiCad DRC oracle, and the *same unmodified project*
 exports bundles that pass both JLCPCB's and PCBWay's online checks.

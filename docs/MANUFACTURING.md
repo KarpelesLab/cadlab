@@ -8,11 +8,11 @@ published specifications.
 
 | Purpose | Standard | Direction | Milestone |
 |---|---|---|---|
-| Copper, mask, silk, paste, outline | **Gerber X2** (Ucamco spec), RS-274X compatible | export | M4 |
-| Component data (assembly) | **Gerber X3** | export | M4 (with P&P) |
-| Drill / route | **Excellon** (XNC profile, Ucamco), optionally Gerber X2 drill files | export | M4 |
-| Bare-board electrical test netlist | **IPC-D-356A** | export | M4 |
-| Pick and place | CSV (generic + per-fab column layouts), Gerber X3 | export | M4 |
+| Copper, mask, silk, paste, outline | **Gerber X2** (Ucamco spec), RS-274X compatible | export | M4, done (`export.gerber`) |
+| Component data (assembly) | **Gerber X3** | export | M4, done (`export.gerber`) |
+| Drill / route | **Excellon** (XNC profile, Ucamco), optionally Gerber X2 drill files | export | M4, drills done (`export.drill`); routed slots later |
+| Bare-board electrical test netlist | **IPC-D-356A** | export | M4, done (`export.ipc356`) |
+| Pick and place | CSV (generic + per-fab column layouts), Gerber X3 | export | M4, generic CSV done (`export.pnp`); per-fab layouts with fab profiles |
 | Assembly BOM | CSV / XLSX (generic + per-fab layouts) | export | M1/M4 |
 | Intelligent fab data | **IPC-2581** (rev C) | export | M9 |
 | Intelligent fab data | ODB++ (check spec license terms first) | export | later |
@@ -22,6 +22,27 @@ published specifications.
 | Simulation | SPICE netlist (ngspice dialect) | export | M8 |
 | Documentation | SVG, PNG, PDF | export | M3/M4 |
 | KiCad | `.kicad_pcb`, `.kicad_sch`, `.kicad_sym`, `.kicad_mod`, netlist | import + export | M2–M7, see below |
+
+### Generic fab outputs (`src/fabout/`, `export.*`)
+
+Implemented from the Ucamco Gerber Layer Format Specification (rev. 2026.05) and XNC Format Specification
+(rev. 2021.11); IPC-D-356A from its published fixed-column record layout. Output is deterministic (no dates).
+`export.all` writes (generic names, defined in one table, `fabout::file_name`):
+
+| File | Content |
+|---|---|
+| `<project>-F_Cu.gbr`, `-In1_Cu.gbr`, ..., `-B_Cu.gbr` | `Copper,Ln,Top/Inr/Bot`: pads flashed (`C`/`R`/`O`, fixed macros for rounded or rotated pads), tracks drawn (arcs with `G75`), pours as fractured regions; `.N`/`.P`/`.C` object attributes, `.AperFunction` on every aperture |
+| `-F_Mask.gbr`, `-B_Mask.gbr` | `Soldermask`, negative (the image is the openings); openings grown by `mask_expansion` (default 0); vias tented |
+| `-F_Paste.gbr`, `-B_Paste.gbr` | SMD pads, or the pad's paste windows (exposed pads) |
+| `-F_SilkS.gbr`, `-B_SilkS.gbr` | `Legend`: footprint silk, designators (Hershey strokes, mirrored on the bottom), board graphics; clipped at mask openings |
+| `-Edge_Cuts.gbr` | `Profile,NP`: outline contours with arcs |
+| `-F_Component.gbr`, `-B_Component.gbr` | Gerber X3: `ComponentMain` flash with `.CRot/.CMfr/.CMPN/.CVal/.CMnt/.CFtp/.CPgN/.CHgt`, courtyard outline, pins; DNP excluded |
+| `-PTH.drl`, `-NPTH.drl` (`-PTH-L1-L2.drl` for blind/buried spans) | XNC: metric, decimal coordinates, one tool per (function, diameter), X2 attributes in `; #@!` comments. `export.drill {gerber: true}` also writes `-PTH-drl.gbr` X2 drill files |
+| `-pos.csv` | Designator, value, package, footprint, X/Y in mm from the outline's lower-left corner, rotation (placement, CCW from the IPC-7351 zero orientation), side; DNP excluded |
+| `.d356` | IPC-D-356A, `UNITS CUST 1`: `327` SMD pads, `317` plated holes and vias (mid-net `M`, tented `S3`), `367` non-plated holes |
+
+Gerber, drill and IPC-D-356A files use board coordinates unchanged (`.SameCoordinates`). Fab-specific names,
+origins and rotation offsets are applied by fab profiles at export (D12).
 
 Design standards used as rule and geometry sources (from the standards themselves, never from another tool's
 implementation):

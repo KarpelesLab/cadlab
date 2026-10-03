@@ -91,6 +91,11 @@ expression: names
   "schematic.export",
   "render.board",
   "board.export_kicad",
+  "export.gerber",
+  "export.drill",
+  "export.pnp",
+  "export.ipc356",
+  "export.all",
   "history.undo",
   "history.redo",
   "history.list"

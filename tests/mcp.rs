@@ -104,6 +104,7 @@ fn mcp_session() {
             "keepout",
             "render",
             "schematic",
+            "export",
             "history",
             "describe",
             "call",
