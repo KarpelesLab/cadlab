@@ -22,11 +22,7 @@ pub fn migrate(raw: &mut RawProject) -> Result<u32, ModelError> {
     migrate_with(raw, MIGRATIONS, CURRENT_SCHEMA_VERSION)
 }
 
-pub(crate) fn migrate_with(
-    raw: &mut RawProject,
-    migrations: &[Migration],
-    current: u32,
-) -> Result<u32, ModelError> {
+pub(crate) fn migrate_with(raw: &mut RawProject, migrations: &[Migration], current: u32) -> Result<u32, ModelError> {
     let found = raw.schema_version()?;
     if found > current {
         return Err(ModelError::NewerSchema {
@@ -35,18 +31,11 @@ pub(crate) fn migrate_with(
         });
     }
     if found == 0 {
-        return Err(ModelError::invalid(
-            "cadlab.toml",
-            "schema_version must be >= 1",
-        ));
+        return Err(ModelError::invalid("cadlab.toml", "schema_version must be >= 1"));
     }
     for v in found..current {
-        migrations[(v - 1) as usize](raw).map_err(|e| {
-            ModelError::invalid(
-                "cadlab.toml",
-                format!("migration {v} -> {} failed: {e}", v + 1),
-            )
-        })?;
+        migrations[(v - 1) as usize](raw)
+            .map_err(|e| ModelError::invalid("cadlab.toml", format!("migration {v} -> {} failed: {e}", v + 1)))?;
         raw.set_schema_version(v + 1);
     }
     Ok(found)
@@ -86,9 +75,6 @@ mod tests {
     #[test]
     fn rejects_newer() {
         let mut r = raw(CURRENT_SCHEMA_VERSION + 1);
-        assert!(matches!(
-            migrate(&mut r),
-            Err(ModelError::NewerSchema { .. })
-        ));
+        assert!(matches!(migrate(&mut r), Err(ModelError::NewerSchema { .. })));
     }
 }

@@ -5,9 +5,7 @@ use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{
-    CancelToken, Command, CommandError, CommandKind, Context, NoProgress, Progress, Session,
-};
+use super::{CancelToken, Command, CommandError, CommandKind, Context, NoProgress, Progress, Session};
 
 /// A command invocation in data form: one line of a batch file or of the operation log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -116,44 +114,27 @@ pub fn schema_of<T: JsonSchema>() -> Value {
         s.meta_schema = None;
     });
     settings = settings.for_deserialize();
-    let mut v = settings
-        .into_generator()
-        .into_root_schema_for::<T>()
-        .to_value();
+    let mut v = settings.into_generator().into_root_schema_for::<T>().to_value();
     if let Some(o) = v.as_object_mut() {
         o.remove("title");
     }
     v
 }
 
-fn run_erased<C: Command>(
-    ctx: &mut Context<'_>,
-    args: Value,
-) -> Result<(Value, String), CommandError> {
+fn run_erased<C: Command>(ctx: &mut Context<'_>, args: Value) -> Result<(Value, String), CommandError> {
     let args = if args.is_null() {
         Value::Object(Default::default())
     } else {
         args
     };
     let cmd: C = serde_json::from_value(args).map_err(|e| {
-        CommandError::invalid_args(
-            "args.invalid",
-            format!("invalid arguments for `{}`: {e}", C::NAME),
-        )
-        .with_hint(format!(
-            "see `describe {}` for the expected arguments",
-            C::NAME
-        ))
+        CommandError::invalid_args("args.invalid", format!("invalid arguments for `{}`: {e}", C::NAME))
+            .with_hint(format!("see `describe {}` for the expected arguments", C::NAME))
     })?;
     let out = cmd.run(ctx)?;
     let summary = C::summarize(&out);
-    let value = serde_json::to_value(&out).map_err(|e| {
-        CommandError::new(
-            super::ErrorKind::Internal,
-            "internal.serialize",
-            e.to_string(),
-        )
-    })?;
+    let value = serde_json::to_value(&out)
+        .map_err(|e| CommandError::new(super::ErrorKind::Internal, "internal.serialize", e.to_string()))?;
     Ok((value, summary))
 }
 
@@ -214,8 +195,7 @@ impl Registry {
     fn lookup(&self, name: &str) -> Result<&Entry, CommandError> {
         self.get(name).ok_or_else(|| {
             let s = crate::suggest::did_you_mean(name, self.entries.keys().copied(), 3);
-            CommandError::not_found("command.unknown", format!("unknown command `{name}`"))
-                .with_suggestions(&s)
+            CommandError::not_found("command.unknown", format!("unknown command `{name}`")).with_suggestions(&s)
         })
     }
 
@@ -252,16 +232,9 @@ impl Registry {
             args: args.clone(),
         };
         let run = entry.run;
-        transact(
-            session,
-            entry.kind,
-            name,
-            vec![step],
-            opts,
-            progress,
-            cancel,
-            |ctx| run(ctx, args),
-        )
+        transact(session, entry.kind, name, vec![step], opts, progress, cancel, |ctx| {
+            run(ctx, args)
+        })
         .map(|(output, summary, diagnostics, changed)| Outcome {
             command: name.to_string(),
             output,
@@ -293,10 +266,7 @@ impl Registry {
                 return Err(fail(
                     CommandError::invalid_args(
                         "batch.session_command",
-                        format!(
-                            "`{}` manages the session and cannot run inside a batch",
-                            s.cmd
-                        ),
+                        format!("`{}` manages the session and cannot run inside a batch", s.cmd),
                     )
                     .with_hint("run it separately, before or after the batch"),
                 ));
@@ -366,8 +336,7 @@ impl Registry {
     }
 }
 
-type TransactResult<T> =
-    Result<(T, String, Vec<Diagnostic>, bool), (CommandError, Vec<Diagnostic>)>;
+type TransactResult<T> = Result<(T, String, Vec<Diagnostic>, bool), (CommandError, Vec<Diagnostic>)>;
 
 /// Runs `f` with transaction semantics according to `kind`.
 #[allow(clippy::too_many_arguments)]
@@ -391,10 +360,7 @@ fn transact<T>(
         CommandKind::Session => {
             if opts.dry_run {
                 return Err((
-                    CommandError::invalid_args(
-                        "dry_run.unsupported",
-                        format!("`{label}` cannot be dry-run"),
-                    ),
+                    CommandError::invalid_args("dry_run.unsupported", format!("`{label}` cannot be dry-run")),
                     vec![],
                 ));
             }

@@ -27,9 +27,7 @@ pub enum ModelError {
     #[error("{0}: a cadlab project already exists here")]
     AlreadyExists(PathBuf),
     /// Written by a newer cadlab.
-    #[error(
-        "project schema version {found} is newer than this cadlab supports ({supported}); upgrade cadlab"
-    )]
+    #[error("project schema version {found} is newer than this cadlab supports ({supported}); upgrade cadlab")]
     NewerSchema {
         /// Version in the files.
         found: u32,

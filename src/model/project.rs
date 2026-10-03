@@ -7,9 +7,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::model::ModelError;
+use crate::model::footprint::Footprint;
 use crate::model::format::to_canonical_string;
 use crate::model::manifest::Manifest;
 use crate::model::migrate::migrate;
+use crate::model::part::Part;
 use crate::model::raw::RawProject;
 use crate::model::sections::{Board, Bom, Circuit, Library, Schematic};
 
@@ -18,6 +20,10 @@ pub const MANIFEST_FILE: &str = "cadlab.toml";
 
 /// Sections stored as `<name>.json`, in write order. `schematic` is optional.
 const SECTION_FILES: &[&str] = &["bom", "circuit", "schematic", "board"];
+
+/// Library subdirectories: parts and footprints, one JSON file per item.
+const PARTS_DIR: &str = "library/parts";
+const FOOTPRINTS_DIR: &str = "library/footprints";
 
 /// A cadlab project, in memory.
 ///
@@ -129,12 +135,23 @@ impl Project {
     pub fn to_raw(&self) -> RawProject {
         let mut raw = RawProject::from_manifest(to_value(&*self.manifest));
         raw.sections.insert("bom".into(), to_value(&*self.bom));
-        raw.sections
-            .insert("circuit".into(), to_value(&*self.circuit));
+        raw.sections.insert("circuit".into(), to_value(&*self.circuit));
         if let Some(s) = &self.schematic {
             raw.sections.insert("schematic".into(), to_value(&**s));
         }
         raw.sections.insert("board".into(), to_value(&*self.board));
+        raw.parts = self
+            .library
+            .parts
+            .iter()
+            .map(|(k, v)| (k.clone(), to_value(v)))
+            .collect();
+        raw.footprints = self
+            .library
+            .footprints
+            .iter()
+            .map(|(k, v)| (k.clone(), to_value(v)))
+            .collect();
         raw
     }
 
@@ -148,14 +165,34 @@ impl Project {
         let schematic = section(&mut take, "schematic")?;
         let board = section(&mut take, "board")?.unwrap_or_default();
         if let Some(extra) = raw.sections.keys().next() {
-            return Err(ModelError::invalid(
-                format!("{extra}.json"),
-                "unknown project section",
-            ));
+            return Err(ModelError::invalid(format!("{extra}.json"), "unknown project section"));
+        }
+        let mut library = Library::default();
+        for (id, v) in raw.parts {
+            let file = format!("{PARTS_DIR}/{id}.json");
+            let p: Part = from_value(&file, v)?;
+            if p.id != id {
+                return Err(ModelError::invalid(
+                    file,
+                    format!("part id `{}` does not match the file name", p.id),
+                ));
+            }
+            library.parts.insert(id, p);
+        }
+        for (name, v) in raw.footprints {
+            let file = format!("{FOOTPRINTS_DIR}/{name}.json");
+            let f: Footprint = from_value(&file, v)?;
+            if f.name != name {
+                return Err(ModelError::invalid(
+                    file,
+                    format!("footprint name `{}` does not match the file name", f.name),
+                ));
+            }
+            library.footprints.insert(name, f);
         }
         Ok(Project {
             manifest: Arc::new(manifest),
-            library: Arc::default(),
+            library: Arc::new(library),
             bom: Arc::new(bom),
             circuit: Arc::new(circuit),
             schematic: schematic.map(Arc::new),
@@ -184,6 +221,12 @@ impl Project {
                 files.push((format!("{name}.json"), to_canonical_string(v)));
             }
         }
+        for (id, v) in &raw.parts {
+            files.push((format!("{PARTS_DIR}/{id}.json"), to_canonical_string(v)));
+        }
+        for (name, v) in &raw.footprints {
+            files.push((format!("{FOOTPRINTS_DIR}/{name}.json"), to_canonical_string(v)));
+        }
         files
     }
 
@@ -197,8 +240,7 @@ impl Project {
             }
             Err(e) => return Err(ModelError::io(manifest_path, e)),
         };
-        let manifest: Value =
-            toml::from_str(&text).map_err(|e| ModelError::invalid(&manifest_path, e))?;
+        let manifest: Value = toml::from_str(&text).map_err(|e| ModelError::invalid(&manifest_path, e))?;
         let mut raw = RawProject::from_manifest(manifest);
         for name in SECTION_FILES {
             let path = dir.join(format!("{name}.json"));
@@ -211,6 +253,8 @@ impl Project {
                 Err(e) => return Err(ModelError::io(path, e)),
             }
         }
+        raw.parts = read_items(&dir.join(PARTS_DIR))?;
+        raw.footprints = read_items(&dir.join(FOOTPRINTS_DIR))?;
         Project::from_raw(raw)
     }
 
@@ -225,6 +269,9 @@ impl Project {
             if fs::read_to_string(&path).is_ok_and(|old| &old == content) {
                 continue;
             }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|e| ModelError::io(parent, e))?;
+            }
             write_atomic(&path, content)?;
             report.written.push(path);
         }
@@ -238,6 +285,19 @@ impl Project {
                 }
             }
         }
+        // Library items that were removed.
+        for sub in [PARTS_DIR, FOOTPRINTS_DIR] {
+            let Ok(rd) = fs::read_dir(dir.join(sub)) else { continue };
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let rel = format!("{sub}/{name}");
+                if name.ends_with(".json") && !files.iter().any(|(n, _)| *n == rel) {
+                    fs::remove_file(e.path()).map_err(|err| ModelError::io(e.path(), err))?;
+                    report.removed.push(e.path());
+                }
+            }
+        }
+        report.removed.sort();
         Ok(report)
     }
 }
@@ -248,6 +308,27 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
         .ancestors()
         .find(|d| d.join(MANIFEST_FILE).is_file())
         .map(Path::to_path_buf)
+}
+
+/// Reads every `<key>.json` in `dir` (missing directory = empty).
+fn read_items(dir: &Path) -> Result<std::collections::BTreeMap<String, Value>, ModelError> {
+    let mut out = std::collections::BTreeMap::new();
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(ModelError::io(dir, e)),
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(key) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let path = e.path();
+        let text = fs::read_to_string(&path).map_err(|err| ModelError::io(&path, err))?;
+        let v = serde_json::from_str(&text).map_err(|err| ModelError::invalid(&path, err))?;
+        out.insert(key.to_string(), v);
+    }
+    Ok(out)
 }
 
 fn manifest_toml(m: &Manifest) -> String {
@@ -267,9 +348,7 @@ fn section<T: DeserializeOwned>(
     take: &mut impl FnMut(&str) -> Option<Value>,
     name: &str,
 ) -> Result<Option<T>, ModelError> {
-    take(name)
-        .map(|v| from_value(&format!("{name}.json"), v))
-        .transpose()
+    take(name).map(|v| from_value(&format!("{name}.json"), v)).transpose()
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), ModelError> {

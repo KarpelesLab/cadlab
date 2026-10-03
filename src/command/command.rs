@@ -5,17 +5,7 @@ use serde::de::DeserializeOwned;
 use super::{CommandError, Context};
 
 /// How a command interacts with project state.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandKind {
     /// Reads only. Never changes the project.

@@ -40,17 +40,9 @@ fn create_set_undo_redo_persisted() {
     assert_eq!(s2.history.undo_len(), 2);
     let out = exec(&r, &mut s2, "history.undo", json!({}));
     assert_eq!(out["steps"], json!(["project.set"]));
+    assert_eq!(s2.project.as_ref().unwrap().manifest().metadata.get("rev"), None);
     assert_eq!(
-        s2.project.as_ref().unwrap().manifest().metadata.get("rev"),
-        None
-    );
-    assert_eq!(
-        s2.project
-            .as_ref()
-            .unwrap()
-            .manifest()
-            .description
-            .as_deref(),
+        s2.project.as_ref().unwrap().manifest().description.as_deref(),
         Some("first")
     );
     s2.save().unwrap();
@@ -99,10 +91,7 @@ fn create_set_undo_redo_persisted() {
             "project.set"
         ]
     );
-    assert_eq!(
-        std::fs::read_to_string(root.join(".cadlab/.gitignore")).unwrap(),
-        "*\n"
-    );
+    assert_eq!(std::fs::read_to_string(root.join(".cadlab/.gitignore")).unwrap(), "*\n");
 }
 
 #[test]
@@ -136,12 +125,7 @@ fn dry_run_and_errors_leave_state_unchanged() {
     assert_eq!(s.project, before);
 
     let f = r
-        .execute(
-            &mut s,
-            "project.set",
-            json!({"nmae": "typo"}),
-            RunOptions::default(),
-        )
+        .execute(&mut s, "project.set", json!({"nmae": "typo"}), RunOptions::default())
         .unwrap_err();
     assert_eq!(f.error.diagnostic.code, "args.invalid");
     assert!(
@@ -153,12 +137,7 @@ fn dry_run_and_errors_leave_state_unchanged() {
     // A no-op mutation does not create an undo step.
     let name = s.project.as_ref().unwrap().manifest().name.clone();
     let o = r
-        .execute(
-            &mut s,
-            "project.set",
-            json!({"name": name}),
-            RunOptions::default(),
-        )
+        .execute(&mut s, "project.set", json!({"name": name}), RunOptions::default())
         .unwrap();
     assert!(!o.changed);
     assert_eq!(s.history.undo_len(), 0);
@@ -172,10 +151,7 @@ fn unknown_command_suggests() {
         .execute(&mut s, "project.inf", json!({}), RunOptions::default())
         .unwrap_err();
     assert_eq!(f.error.kind, ErrorKind::NotFound);
-    assert_eq!(
-        f.error.diagnostic.hint.as_deref(),
-        Some("did you mean `project.info`?")
-    );
+    assert_eq!(f.error.diagnostic.hint.as_deref(), Some("did you mean `project.info`?"));
 
     let f = r
         .execute(&mut s, "project.info", json!({}), RunOptions::default())
@@ -194,9 +170,7 @@ fn batch_is_atomic() {
         {"cmd": "project.set", "args": {"targets": ["no good"]}}
     ]))
     .unwrap();
-    let f = r
-        .execute_batch(&mut s, steps, RunOptions::default())
-        .unwrap_err();
+    let f = r.execute_batch(&mut s, steps, RunOptions::default()).unwrap_err();
     assert_eq!(f.step, Some(1));
     assert_eq!(s.project, before);
 
@@ -206,9 +180,7 @@ fn batch_is_atomic() {
         {"cmd": "project.info"}
     ]))
     .unwrap();
-    let outs = r
-        .execute_batch(&mut s, steps, RunOptions::default())
-        .unwrap();
+    let outs = r.execute_batch(&mut s, steps, RunOptions::default()).unwrap();
     assert_eq!(outs.len(), 3);
     assert_eq!(outs[2].output["name"], "a");
     assert_eq!(s.history.undo_len(), 1);
@@ -218,9 +190,7 @@ fn batch_is_atomic() {
         cmd: "history.undo".into(),
         args: json!({}),
     }];
-    let f = r
-        .execute_batch(&mut s, steps, RunOptions::default())
-        .unwrap_err();
+    let f = r.execute_batch(&mut s, steps, RunOptions::default()).unwrap_err();
     assert_eq!(f.error.diagnostic.code, "batch.session_command");
 }
 

@@ -62,10 +62,7 @@ fn step(ctx: &mut Context<'_>, steps: u32, forward: bool) -> Result<StepResult, 
     }
     if done.is_empty() {
         let what = if forward { "redo" } else { "undo" };
-        return Err(CommandError::conflict(
-            "history.empty",
-            format!("nothing to {what}"),
-        ));
+        return Err(CommandError::conflict("history.empty", format!("nothing to {what}")));
     }
     Ok(StepResult {
         steps: done,

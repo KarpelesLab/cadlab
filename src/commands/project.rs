@@ -100,10 +100,7 @@ impl ProjectInfo {
         if let Some(p) = &self.path {
             s += &format!("\n  path: {p}");
         }
-        s += &format!(
-            "\n  undo: {} step(s), redo: {}",
-            self.undo_depth, self.redo_depth
-        );
+        s += &format!("\n  undo: {} step(s), redo: {}", self.undo_depth, self.redo_depth);
         if self.unsaved_changes {
             s += "\n  (unsaved changes)";
         }
@@ -116,16 +113,11 @@ fn normalize_targets(targets: Vec<String>) -> Result<Vec<String>, CommandError> 
     let mut out: Vec<String> = Vec::new();
     for t in targets {
         let t = t.trim().to_ascii_lowercase();
-        if t.is_empty()
-            || !t
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(CommandError::invalid_args(
-                "project.invalid_target",
-                format!("invalid fab target `{t}`"),
-            )
-            .with_hint("fab profile IDs look like `jlcpcb`, `pcbway`, `oshpark`"));
+        if t.is_empty() || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(
+                CommandError::invalid_args("project.invalid_target", format!("invalid fab target `{t}`"))
+                    .with_hint("fab profile IDs look like `jlcpcb`, `pcbway`, `oshpark`"),
+            );
         }
         if !out.contains(&t) {
             out.push(t);
@@ -191,11 +183,8 @@ fn default_name(path: &Path) -> Result<String, CommandError> {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .ok_or_else(|| {
-            CommandError::invalid_args(
-                "project.invalid_name",
-                "cannot derive a project name from the path",
-            )
-            .with_hint("pass `name` explicitly")
+            CommandError::invalid_args("project.invalid_name", "cannot derive a project name from the path")
+                .with_hint("pass `name` explicitly")
         })
 }
 
@@ -253,11 +242,7 @@ impl Command for Save {
     fn run(self, ctx: &mut Context<'_>) -> Result<SaveResult, CommandError> {
         ctx.project()?;
         let report = ctx.session.save()?;
-        let root = ctx
-            .session
-            .root()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
+        let root = ctx.session.root().map(Path::to_path_buf).unwrap_or_default();
         let rel = |v: Vec<PathBuf>| -> Vec<String> {
             v.iter()
                 .map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string())

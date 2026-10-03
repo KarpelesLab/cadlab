@@ -52,20 +52,12 @@ impl ArgKind {
             };
         }
         if let Some(e) = schema.get("enum").and_then(Value::as_array) {
-            let choices = e
-                .iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect();
+            let choices = e.iter().filter_map(Value::as_str).map(String::from).collect();
             return ArgKind::String { choices };
         }
         let types: Vec<&str> = match schema.get("type") {
             Some(Value::String(t)) => vec![t.as_str()],
-            Some(Value::Array(ts)) => ts
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|t| *t != "null")
-                .collect(),
+            Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).filter(|t| *t != "null").collect(),
             _ => vec![],
         };
         match types.as_slice() {
@@ -74,10 +66,7 @@ impl ArgKind {
             ["number"] => ArgKind::Number,
             ["string"] => ArgKind::String { choices: vec![] },
             ["array"] => {
-                let item = schema
-                    .get("items")
-                    .map(ArgKind::of)
-                    .unwrap_or(ArgKind::Json);
+                let item = schema.get("items").map(ArgKind::of).unwrap_or(ArgKind::Json);
                 match item {
                     ArgKind::Array(_) | ArgKind::Map | ArgKind::Json => ArgKind::Json,
                     k => ArgKind::Array(Box::new(k)),
@@ -162,17 +151,11 @@ fn entry_command(e: &Entry) -> ClapCommand {
             None => arg = arg.long(kebab(&name)),
         }
         arg = match &kind {
-            ArgKind::Bool => arg
-                .num_args(0..=1)
-                .default_missing_value("true")
-                .value_name("BOOL"),
+            ArgKind::Bool => arg.num_args(0..=1).default_missing_value("true").value_name("BOOL"),
             ArgKind::String { choices } if !choices.is_empty() => {
                 arg.value_parser(clap::builder::PossibleValuesParser::new(choices.clone()))
             }
-            ArgKind::Array(_) => arg
-                .action(ArgAction::Append)
-                .value_delimiter(',')
-                .value_name("A,B,..."),
+            ArgKind::Array(_) => arg.action(ArgAction::Append).value_delimiter(',').value_name("A,B,..."),
             ArgKind::Map => arg.action(ArgAction::Append).value_name("KEY=VALUE"),
             ArgKind::Json => arg.value_name("JSON"),
             _ => arg,
@@ -192,7 +175,13 @@ pub fn global_args(cmd: ClapCommand) -> ClapCommand {
             .value_name("DIR")
             .help("Project directory (default: search upward from the current directory for cadlab.toml)"),
     )
-    .arg(Arg::new("json").long("json").global(true).action(ArgAction::SetTrue).help("Machine-readable JSON output on stdout"))
+    .arg(
+        Arg::new("json")
+            .long("json")
+            .global(true)
+            .action(ArgAction::SetTrue)
+            .help("Machine-readable JSON output on stdout"),
+    )
     .arg(
         Arg::new("dry_run")
             .long("dry-run")
@@ -200,7 +189,14 @@ pub fn global_args(cmd: ClapCommand) -> ClapCommand {
             .action(ArgAction::SetTrue)
             .help("Run, report the result, then roll back"),
     )
-    .arg(Arg::new("quiet").short('q').long("quiet").global(true).action(ArgAction::SetTrue).help("Only print errors"))
+    .arg(
+        Arg::new("quiet")
+            .short('q')
+            .long("quiet")
+            .global(true)
+            .action(ArgAction::SetTrue)
+            .help("Only print errors"),
+    )
 }
 
 /// The full clap tree.
@@ -299,9 +295,7 @@ pub fn to_args(e: &Entry, m: &ArgMatches) -> Result<Value, String> {
                 let mut map = Map::new();
                 for r in raw {
                     if r.trim_start().starts_with('{') {
-                        let Value::Object(o) =
-                            serde_json::from_str(r).map_err(|e| err(e.to_string()))?
-                        else {
+                        let Value::Object(o) = serde_json::from_str(r).map_err(|e| err(e.to_string()))? else {
                             return Err(err("expected a JSON object".into()));
                         };
                         map.extend(o);
@@ -343,23 +337,16 @@ mod tests {
             ArgKind::Array(Box::new(ArgKind::String { choices: vec![] }))
         );
         assert_eq!(
-            ArgKind::of(
-                &json!({"anyOf": [{"type": "string", "enum": ["mm", "mil"]}, {"type": "null"}]})
-            ),
+            ArgKind::of(&json!({"anyOf": [{"type": "string", "enum": ["mm", "mil"]}, {"type": "null"}]})),
             ArgKind::String {
                 choices: vec!["mm".into(), "mil".into()]
             }
         );
         assert_eq!(
-            ArgKind::of(
-                &json!({"type": "object", "additionalProperties": {"type": ["string", "null"]}})
-            ),
+            ArgKind::of(&json!({"type": "object", "additionalProperties": {"type": ["string", "null"]}})),
             ArgKind::Map
         );
-        assert_eq!(
-            ArgKind::of(&json!({"type": "object", "properties": {}})),
-            ArgKind::Json
-        );
+        assert_eq!(ArgKind::of(&json!({"type": "object", "properties": {}})), ArgKind::Json);
     }
 
     #[test]

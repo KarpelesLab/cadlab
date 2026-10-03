@@ -18,9 +18,7 @@ pub use polyclip as poly;
 /// A point (or vector) in board or schematic space. Y points up.
 ///
 /// Serialized as a two-element array of lengths: `["12.7mm", "8.4mm"]`.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(from = "(Nm, Nm)", into = "(Nm, Nm)")]
 pub struct Point {
     /// X coordinate.
@@ -147,10 +145,7 @@ impl BBox {
     pub fn of_points<I: IntoIterator<Item = Point>>(pts: I) -> Option<BBox> {
         let mut it = pts.into_iter();
         let first = it.next()?;
-        let mut b = BBox {
-            min: first,
-            max: first,
-        };
+        let mut b = BBox { min: first, max: first };
         for p in it {
             b.add_point(p);
         }
@@ -202,11 +197,7 @@ impl Transform {
 
     /// Applies the transform to a point.
     pub fn apply(&self, p: Point) -> Point {
-        let p = if self.mirror {
-            Point::new(-p.x, p.y)
-        } else {
-            p
-        };
+        let p = if self.mirror { Point::new(-p.x, p.y) } else { p };
         p.rotated(self.rotation) + self.offset
     }
 }
@@ -234,10 +225,7 @@ mod tests {
             mirror: true,
         };
         // mirror (1,0) -> (-1,0); rotate 90 -> (0,-1); translate -> (10,-1)
-        assert_eq!(
-            t.apply(Point::new(mm(1), Nm(0))),
-            Point::new(mm(10), mm(-1))
-        );
+        assert_eq!(t.apply(Point::new(mm(1), Nm(0))), Point::new(mm(10), mm(-1)));
     }
 
     #[test]

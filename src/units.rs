@@ -492,13 +492,7 @@ fn parse_decimal(s: &str) -> Result<(Decimal, &str), UnitError> {
     if neg {
         mantissa = -mantissa;
     }
-    Ok((
-        Decimal {
-            mantissa,
-            frac_digits,
-        },
-        &t[i..],
-    ))
+    Ok((Decimal { mantissa, frac_digits }, &t[i..]))
 }
 
 /// Integer division rounding half away from zero.
@@ -555,20 +549,11 @@ mod tests {
     #[test]
     fn rejects_bad_lengths() {
         assert!(matches!(Nm::parse("12"), Err(UnitError::MissingUnit(_))));
-        assert!(matches!(
-            Nm::parse("12ft"),
-            Err(UnitError::UnknownUnit { .. })
-        ));
+        assert!(matches!(Nm::parse("12ft"), Err(UnitError::UnknownUnit { .. })));
         assert!(matches!(Nm::parse("mm"), Err(UnitError::NotANumber(_))));
         assert!(matches!(Nm::parse(""), Err(UnitError::NotANumber(_))));
-        assert!(matches!(
-            Nm::parse("1e5mm"),
-            Err(UnitError::UnknownUnit { .. })
-        ));
-        assert!(matches!(
-            Nm::parse("99999999999999mm"),
-            Err(UnitError::OutOfRange(_))
-        ));
+        assert!(matches!(Nm::parse("1e5mm"), Err(UnitError::UnknownUnit { .. })));
+        assert!(matches!(Nm::parse("99999999999999mm"), Err(UnitError::OutOfRange(_))));
     }
 
     #[test]

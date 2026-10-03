@@ -17,8 +17,7 @@ fn cadlab(cwd: &Path, args: &[&str]) -> Output {
 }
 
 fn json_of(o: &Output) -> Value {
-    serde_json::from_slice(&o.stdout)
-        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&o.stdout)))
+    serde_json::from_slice(&o.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&o.stdout)))
 }
 
 #[test]
@@ -26,14 +25,7 @@ fn new_then_info_json() {
     let dir = tempfile::tempdir().unwrap();
     let o = cadlab(
         dir.path(),
-        &[
-            "project",
-            "new",
-            "demo",
-            "--targets",
-            "jlcpcb,pcbway",
-            "--json",
-        ],
+        &["project", "new", "demo", "--targets", "jlcpcb,pcbway", "--json"],
     );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let v = json_of(&o);
@@ -56,13 +48,7 @@ fn new_project_matches_golden_files() {
     let dir = tempfile::tempdir().unwrap();
     let o = cadlab(
         dir.path(),
-        &[
-            "project",
-            "new",
-            "demo",
-            "--description",
-            "Golden test project",
-        ],
+        &["project", "new", "demo", "--description", "Golden test project"],
     );
     assert!(o.status.success());
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/new-project");
@@ -77,32 +63,18 @@ fn set_undo_redo_across_invocations() {
     assert!(
         cadlab(
             &p,
-            &[
-                "project",
-                "set",
-                "--metadata",
-                "rev=A",
-                "--metadata",
-                "author=me"
-            ]
+            &["project", "set", "--metadata", "rev=A", "--metadata", "author=me"]
         )
         .status
         .success()
     );
-    assert!(
-        cadlab(&p, &["project", "set", "--metadata", "rev="])
-            .status
-            .success()
-    );
+    assert!(cadlab(&p, &["project", "set", "--metadata", "rev="]).status.success());
     let info = json_of(&cadlab(&p, &["project", "info", "--json"]));
     assert_eq!(info["output"]["metadata"], json!({"author": "me"}));
 
     assert!(cadlab(&p, &["undo"]).status.success());
     let info = json_of(&cadlab(&p, &["project", "info", "--json"]));
-    assert_eq!(
-        info["output"]["metadata"],
-        json!({"author": "me", "rev": "A"})
-    );
+    assert_eq!(info["output"]["metadata"], json!({"author": "me", "rev": "A"}));
 
     assert!(cadlab(&p, &["redo"]).status.success());
     let info = json_of(&cadlab(&p, &["project", "info", "--json"]));
@@ -118,15 +90,9 @@ fn dry_run_does_not_write() {
     cadlab(dir.path(), &["project", "new", "p"]);
     let p = dir.path().join("p");
     let before = std::fs::read_to_string(p.join("cadlab.toml")).unwrap();
-    let o = cadlab(
-        &p,
-        &["project", "set", "--name", "other", "--dry-run", "--json"],
-    );
+    let o = cadlab(&p, &["project", "set", "--name", "other", "--dry-run", "--json"]);
     assert_eq!(json_of(&o)["output"]["name"], "other");
-    assert_eq!(
-        std::fs::read_to_string(p.join("cadlab.toml")).unwrap(),
-        before
-    );
+    assert_eq!(std::fs::read_to_string(p.join("cadlab.toml")).unwrap(), before);
 }
 
 #[test]
@@ -134,15 +100,7 @@ fn call_and_batch() {
     let dir = tempfile::tempdir().unwrap();
     cadlab(dir.path(), &["project", "new", "p"]);
     let p = dir.path().join("p");
-    let o = cadlab(
-        &p,
-        &[
-            "call",
-            "project.set",
-            r#"{"description": "via call"}"#,
-            "--json",
-        ],
-    );
+    let o = cadlab(&p, &["call", "project.set", r#"{"description": "via call"}"#, "--json"]);
     assert_eq!(json_of(&o)["output"]["description"], "via call");
 
     std::fs::write(
@@ -174,14 +132,9 @@ fn errors_and_exit_codes() {
     assert!(v["error"]["hint"].as_str().unwrap().contains("project.new"));
 
     // Usage errors.
+    assert_eq!(cadlab(dir.path(), &["project", "nope"]).status.code(), Some(2));
     assert_eq!(
-        cadlab(dir.path(), &["project", "nope"]).status.code(),
-        Some(2)
-    );
-    assert_eq!(
-        cadlab(dir.path(), &["call", "project.info", "{not json"])
-            .status
-            .code(),
+        cadlab(dir.path(), &["call", "project.info", "{not json"]).status.code(),
         Some(2)
     );
 

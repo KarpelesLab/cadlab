@@ -129,9 +129,7 @@ fn is_ident(s: &str) -> bool {
 /// Letters followed by digits, optionally with a hierarchical prefix: `R12`, `U3`, `PWR_U1`.
 fn is_refdes(s: &str) -> bool {
     let letters = s.trim_end_matches(|c: char| c.is_ascii_digit());
-    letters.len() < s.len()
-        && !letters.is_empty()
-        && letters.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+    letters.len() < s.len() && !letters.is_empty() && letters.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 /// Standard layer names: `F.Cu`, `B.SilkS`, `In3.Cu`, `Edge.Cuts`, ...

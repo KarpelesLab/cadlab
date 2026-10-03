@@ -34,11 +34,7 @@ fn main() -> ExitCode {
         Ok(m) => m,
         Err(e) => {
             let _ = e.print();
-            return ExitCode::from(if e.use_stderr() {
-                exit::USAGE
-            } else {
-                exit::OK
-            });
+            return ExitCode::from(if e.use_stderr() { exit::USAGE } else { exit::OK });
         }
     };
     let g = Globals {
@@ -54,18 +50,12 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
     let (sub, sm) = m.subcommand().expect("subcommand required");
     match sub {
         "mcp" => mcp::serve(registry, !sm.get_flag("no_autosave")),
-        "describe" => describe(
-            registry,
-            g,
-            sm.get_one::<String>("command").map(String::as_str),
-        ),
+        "describe" => describe(registry, g, sm.get_one::<String>("command").map(String::as_str)),
         "call" => {
             let name = sm.get_one::<String>("command").unwrap();
             let args = match sm.get_one::<String>("args").map(String::as_str) {
                 None => Ok(json!({})),
-                Some("-") => {
-                    read_stdin().and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
-                }
+                Some("-") => read_stdin().and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())),
                 Some(s) => serde_json::from_str(s).map_err(|e| e.to_string()),
             };
             match args {
@@ -87,12 +77,7 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
         }
         "undo" | "redo" => {
             let steps = sm.get_one::<u32>("steps").copied().unwrap_or(1);
-            run_one(
-                registry,
-                g,
-                &format!("history.{sub}"),
-                json!({ "steps": steps }),
-            )
+            run_one(registry, g, &format!("history.{sub}"), json!({ "steps": steps }))
         }
         group => {
             let Some((action, am)) = sm.subcommand() else {
@@ -117,9 +102,7 @@ fn open_session(g: &Globals, command: &str) -> Result<(Session, Vec<Diagnostic>)
     }
     let root = match &g.project {
         Some(p) => Some(p.clone()),
-        None => std::env::current_dir()
-            .ok()
-            .and_then(|d| find_project_root(&d)),
+        None => std::env::current_dir().ok().and_then(|d| find_project_root(&d)),
     };
     match root {
         Some(r) => Session::open(&r).map_err(|error| Failure {
@@ -170,10 +153,7 @@ fn run_batch(registry: &Registry, g: &Globals, steps: Vec<Step>) -> u8 {
                 .chain(&warnings)
                 .any(|d| d.severity == Severity::Error);
             if g.json {
-                println!(
-                    "{}",
-                    json!({ "ok": true, "results": outs, "diagnostics": warnings })
-                );
+                println!("{}", json!({ "ok": true, "results": outs, "diagnostics": warnings }));
             } else {
                 print_diagnostics(&warnings);
                 for o in &outs {
@@ -183,11 +163,7 @@ fn run_batch(registry: &Registry, g: &Globals, steps: Vec<Step>) -> u8 {
                     print_diagnostics(&o.diagnostics);
                 }
             }
-            if has_errors {
-                exit::CHECKS_FAILED
-            } else {
-                exit::OK
-            }
+            if has_errors { exit::CHECKS_FAILED } else { exit::OK }
         }
         Err(f) => report_failure(g, &f),
     }
@@ -264,9 +240,7 @@ fn read_stdin() -> Result<String, String> {
     if std::io::stdin().is_terminal() {
         eprintln!("(reading from stdin; end with Ctrl-D)");
     }
-    std::io::stdin()
-        .read_to_string(&mut s)
-        .map_err(|e| e.to_string())?;
+    std::io::stdin().read_to_string(&mut s).map_err(|e| e.to_string())?;
     Ok(s)
 }
 
@@ -313,11 +287,7 @@ fn describe(registry: &Registry, g: &Globals, name: Option<&str>) -> u8 {
             .chain(registry.groups().keys().copied())
             .collect();
         let s = cadlab::suggest::did_you_mean(name, names, 3);
-        let d = Diagnostic::error(
-            "command.unknown",
-            format!("unknown command or group `{name}`"),
-        )
-        .with_suggestions(&s);
+        let d = Diagnostic::error("command.unknown", format!("unknown command or group `{name}`")).with_suggestions(&s);
         if g.json {
             println!("{}", json!({"ok": false, "error": d}));
         } else {
@@ -327,14 +297,7 @@ fn describe(registry: &Registry, g: &Globals, name: Option<&str>) -> u8 {
     }
     if g.json {
         let v: Vec<Value> = entries.iter().map(|e| e.describe()).collect();
-        println!(
-            "{}",
-            if v.len() == 1 {
-                v[0].clone()
-            } else {
-                Value::Array(v)
-            }
-        );
+        println!("{}", if v.len() == 1 { v[0].clone() } else { Value::Array(v) });
     } else {
         for e in entries {
             println!("{}\n", describe_text(e));
@@ -379,46 +342,67 @@ pub fn describe_text(e: &cadlab::command::Entry) -> String {
 
 /// Compact type label for a property schema: `string`, `string[]`, `mm|mil|...`.
 pub fn type_label(v: &Value) -> String {
-    if let Some(variants) = v
-        .get("anyOf")
-        .or_else(|| v.get("oneOf"))
-        .and_then(Value::as_array)
-    {
-        let parts: Vec<String> = variants
+    if let Some(variants) = v.get("anyOf").or_else(|| v.get("oneOf")).and_then(Value::as_array) {
+        let variants: Vec<&Value> = variants
             .iter()
             .filter(|x| x.get("type") != Some(&json!("null")))
-            .map(type_label)
             .collect();
+        // Tagged unions: name the tag and its values (`{family: chip|qfn|..., ...}`).
+        let tag = variants
+            .first()
+            .and_then(|f| f["properties"].as_object())
+            .and_then(|props| {
+                props
+                    .keys()
+                    .find(|k| {
+                        variants
+                            .iter()
+                            .all(|x| x["properties"][k.as_str()].get("const").is_some())
+                    })
+                    .cloned()
+            });
+        if let Some(tag) = tag.filter(|_| variants.len() > 1) {
+            let values: Vec<&str> = variants
+                .iter()
+                .filter_map(|x| x["properties"][tag.as_str()]["const"].as_str())
+                .collect();
+            return format!("{{{tag}: {}, ...}}", values.join("|"));
+        }
+        let parts: Vec<String> = variants.into_iter().map(type_label).collect();
         return parts.join("|");
     }
     if let Some(c) = v.get("const") {
         return c.as_str().map_or_else(|| c.to_string(), String::from);
     }
     if let Some(e) = v.get("enum").and_then(Value::as_array) {
-        return e
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("|");
+        return e.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("|");
     }
     let t: Vec<&str> = match v.get("type") {
         Some(Value::String(t)) => vec![t],
-        Some(Value::Array(ts)) => ts
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|t| *t != "null")
-            .collect(),
+        Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).filter(|t| *t != "null").collect(),
         _ => vec!["any"],
     };
     match t.as_slice() {
-        ["array"] => format!(
-            "{}[]",
-            v.get("items")
-                .map(type_label)
-                .unwrap_or_else(|| "any".into())
-        ),
-        ["object"] => match v.get("additionalProperties") {
-            Some(a) if a.is_object() => format!("map<string, {}>", type_label(a)),
+        ["array"] => format!("{}[]", v.get("items").map(type_label).unwrap_or_else(|| "any".into())),
+        ["object"] => match (v.get("additionalProperties"), v["properties"].as_object()) {
+            (Some(a), _) if a.is_object() => format!("map<string, {}>", type_label(a)),
+            (_, Some(props)) if !props.is_empty() => {
+                let required: Vec<&str> = v["required"]
+                    .as_array()
+                    .map(|r| r.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let fields: Vec<String> = props
+                    .keys()
+                    .map(|k| {
+                        if required.contains(&k.as_str()) {
+                            k.clone()
+                        } else {
+                            format!("{k}?")
+                        }
+                    })
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
             _ => "object".into(),
         },
         ts => ts.join("|"),

@@ -7,10 +7,7 @@ fn new_project_files() {
     p.manifest_mut().targets = vec!["jlcpcb".into(), "pcbway".into()];
     let files = p.to_files();
     let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(
-        names,
-        ["cadlab.toml", "bom.json", "circuit.json", "board.json"]
-    );
+    assert_eq!(names, ["cadlab.toml", "bom.json", "circuit.json", "board.json"]);
     assert_eq!(
         files[0].1,
         "schema_version = 1\nname = \"demo\"\ndescription = \"A test board\"\ndisplay_units = \"mm\"\ntargets = [\"jlcpcb\", \"pcbway\"]\nnext_id = 1\n"
@@ -22,9 +19,7 @@ fn new_project_files() {
 fn save_load_roundtrip_and_determinism() {
     let dir = tempfile::tempdir().unwrap();
     let mut p = Project::new("demo");
-    p.manifest_mut()
-        .metadata
-        .insert("author".into(), "someone".into());
+    p.manifest_mut().metadata.insert("author".into(), "someone".into());
     p.alloc_id();
     p.schematic_mut();
 
@@ -56,16 +51,9 @@ fn packed_roundtrip() {
 #[test]
 fn errors() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        Project::load(dir.path()),
-        Err(ModelError::NotAProject(_))
-    ));
+    assert!(matches!(Project::load(dir.path()), Err(ModelError::NotAProject(_))));
 
-    std::fs::write(
-        dir.path().join(MANIFEST_FILE),
-        "schema_version = 999\nname = \"x\"\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(MANIFEST_FILE), "schema_version = 999\nname = \"x\"\n").unwrap();
     assert!(matches!(
         Project::load(dir.path()),
         Err(ModelError::NewerSchema { found: 999, .. })
@@ -79,11 +67,7 @@ fn errors() {
     let e = Project::load(dir.path()).unwrap_err().to_string();
     assert!(e.contains("unknown field `typo`"), "{e}");
 
-    std::fs::write(
-        dir.path().join(MANIFEST_FILE),
-        "schema_version = 1\nname = \"x\"\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(MANIFEST_FILE), "schema_version = 1\nname = \"x\"\n").unwrap();
     std::fs::write(dir.path().join("board.json"), "{not json").unwrap();
     let e = Project::load(dir.path()).unwrap_err().to_string();
     assert!(e.contains("board.json"), "{e}");

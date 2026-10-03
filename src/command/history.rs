@@ -129,9 +129,7 @@ impl History {
     pub fn undo_items(&self) -> Vec<HistoryItem> {
         self.undo
             .iter()
-            .map(|e| HistoryItem {
-                label: e.label.clone(),
-            })
+            .map(|e| HistoryItem { label: e.label.clone() })
             .collect()
     }
 
@@ -139,9 +137,7 @@ impl History {
     pub fn redo_items(&self) -> Vec<HistoryItem> {
         self.redo
             .iter()
-            .map(|e| HistoryItem {
-                label: e.label.clone(),
-            })
+            .map(|e| HistoryItem { label: e.label.clone() })
             .collect()
     }
 
@@ -206,19 +202,12 @@ impl History {
         let text = serde_json::to_string_pretty(&index).expect("index serializes");
         write(&dir.join(INDEX_FILE), &text)?;
         // Garbage-collect unreferenced snapshots.
-        let live: std::collections::BTreeSet<u64> = self
-            .undo
-            .iter()
-            .chain(self.redo.iter())
-            .map(|e| e.seq)
-            .collect();
+        let live: std::collections::BTreeSet<u64> = self.undo.iter().chain(self.redo.iter()).map(|e| e.seq).collect();
         if let Ok(rd) = fs::read_dir(&dir) {
             for f in rd.flatten() {
                 let name = f.file_name();
                 let name = name.to_string_lossy();
-                if let Some(seq) = name
-                    .strip_suffix(".json")
-                    .and_then(|s| s.parse::<u64>().ok())
+                if let Some(seq) = name.strip_suffix(".json").and_then(|s| s.parse::<u64>().ok())
                     && !live.contains(&seq)
                 {
                     let _ = fs::remove_file(f.path());
@@ -242,10 +231,7 @@ impl History {
         match &e.snapshot {
             Snapshot::Loaded(p) => Ok(p.clone()),
             Snapshot::OnDisk => {
-                let dir = self
-                    .dir
-                    .as_ref()
-                    .expect("on-disk snapshot implies a directory");
+                let dir = self.dir.as_ref().expect("on-disk snapshot implies a directory");
                 let path = snapshot_path(dir, e.seq);
                 let text = fs::read_to_string(&path).map_err(|err| ModelError::Io {
                     path: path.clone(),

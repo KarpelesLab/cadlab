@@ -42,10 +42,7 @@ impl Client {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         loop {
             let mut line = String::new();
-            assert!(
-                self.stdout.read_line(&mut line).unwrap() > 0,
-                "server closed stdout"
-            );
+            assert!(self.stdout.read_line(&mut line).unwrap() > 0, "server closed stdout");
             let v: Value = serde_json::from_str(&line).unwrap();
             if v["id"] == json!(id) {
                 return v;
@@ -72,7 +69,10 @@ fn mcp_session() {
     let dir = tempfile::tempdir().unwrap();
     let mut c = Client::start(dir.path());
 
-    let init = c.request("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}));
+    let init = c.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init["result"]["serverInfo"]["name"], "cadlab");
     c.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
@@ -86,16 +86,25 @@ fn mcp_session() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["project", "history", "describe", "call", "batch"]);
+    assert_eq!(
+        names,
+        [
+            "project",
+            "part",
+            "footprint",
+            "circuit",
+            "bom",
+            "history",
+            "describe",
+            "call",
+            "batch"
+        ]
+    );
     for t in tools["result"]["tools"].as_array().unwrap() {
         assert_eq!(t["inputSchema"]["type"], "object");
         // Clients such as the Claude API reject top-level oneOf/anyOf/allOf.
         for k in ["oneOf", "anyOf", "allOf"] {
-            assert!(
-                t["inputSchema"].get(k).is_none(),
-                "{} has top-level {k}",
-                t["name"]
-            );
+            assert!(t["inputSchema"].get(k).is_none(), "{} has top-level {k}", t["name"]);
         }
     }
 
@@ -113,10 +122,7 @@ fn mcp_session() {
     assert_eq!(r["isError"], false, "{r}");
     assert!(path.join("cadlab.toml").is_file());
 
-    let r = c.tool(
-        "project",
-        json!({"action": "set", "args": {"description": "from mcp"}}),
-    );
+    let r = c.tool("project", json!({"action": "set", "args": {"description": "from mcp"}}));
     assert_eq!(r["structuredContent"]["output"]["description"], "from mcp");
     // Autosave is on by default.
     assert!(
@@ -136,11 +142,7 @@ fn mcp_session() {
     let r = c.tool("history", json!({"action": "undo"}));
     assert_eq!(r["isError"], false, "{r}");
     let r = c.tool("call", json!({"command": "project.info"}));
-    assert!(
-        r["structuredContent"]["output"]
-            .get("description")
-            .is_none()
-    );
+    assert!(r["structuredContent"]["output"].get("description").is_none());
 
     let r = c.tool(
         "batch",
@@ -163,12 +165,7 @@ fn mcp_session() {
     // describe
     let r = c.tool("describe", json!({"command": "project.set"}));
     assert_eq!(r["structuredContent"]["commands"][0]["name"], "project.set");
-    assert!(
-        r["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("display_units")
-    );
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("display_units"));
 
     // Invalid arguments are tool errors (visible to the model), with a hint.
     let r = c.tool("project", json!({"action": "set", "args": {"nmae": "x"}}));

@@ -13,9 +13,7 @@ use crate::geom::Point;
 use crate::refs::ObjectRef;
 
 /// How serious a diagnostic is.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Informational.
@@ -48,11 +46,7 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     /// New diagnostic.
-    pub fn new(
-        severity: Severity,
-        code: impl Into<Cow<'static, str>>,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn new(severity: Severity, code: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Self {
         Diagnostic {
             severity,
             code: code.into(),
@@ -103,10 +97,7 @@ impl Diagnostic {
             [one] => self.with_hint(format!("did you mean `{one}`?")),
             many => self.with_hint(format!(
                 "did you mean one of: {}?",
-                many.iter()
-                    .map(|s| format!("`{s}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                many.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")
             )),
         }
     }

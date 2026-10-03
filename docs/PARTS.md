@@ -43,38 +43,55 @@ therefore be built at JLCPCB one month and PCBWay the next. See
 ## Footprint generation (IPC-7351B)
 
 Many standard packages can be computed instead of looked up, which helps agents a lot: given datasheet
-dimensions, cadlab produces a correct land pattern.
+dimensions, cadlab produces a correct land pattern (`src/landpattern/`).
 
-- Families: chip (01005–2512), MELF, SOD/SOT, SOIC/SSOP/TSSOP/MSOP, QFP, QFN/DFN (with exposed pad, paste
-  subdivision), BGA, SON, through-hole (axial, radial, DIP, pin headers, terminal blocks).
-- Inputs: body and lead dimensions with tolerances, pitch, density level (Most/Nominal/Least).
-- Outputs: pads, paste and mask apertures, courtyard, silkscreen, fab layer outline, pin-1 marker, 3D body dims.
-- Names follow the IPC-7351B naming convention (`QFN50P500X500X80-33N`, `RESC1005X40N`). Common package names
-  (`0402`, `SOT-23-5`, `QFN-32 5x5 0.5mm`) are accepted as aliases and resolved to generator parameters.
+- Pads from the IPC-7351B equations (Z/G/X with toe/heel/side fillets, RMS tolerance stacking, F = 0.05 mm,
+  P = 0.025 mm, 0.01 mm rounding; all configurable), at Most/Nominal/Least density.
+- Families today: chip (0201–2512, resistor/capacitor/inductor/LED/diode/fuse), gull-wing two-row (SOIC, SOP,
+  TSSOP, MSOP, SOT-23-3/5/6 with unpopulated slots), QFP, DFN/SON, QFN (exposed pad with paste windows), THT pin
+  headers. Planned: SOT-223/DPAK (tab), SOD/MELF, molded bodies (SMA/SMB), BGA, DIP, terminal blocks.
+- Outputs: pads, paste windows, courtyard, silkscreen clipped around pads (via polyclip), fab outline with pin-1
+  chamfer, pin-1 dot, body dimensions for 3D.
+- Names follow IPC-7351 (`RESC1005X40N`, `SOIC127P600X175-8N`, `QFN50P500X500X90-33N`). Common names (`0402`,
+  `SOT-23-5`, `SOIC-8`, `TSSOP-20`, `LQFP-48`, `QFN-32 5x5mm P0.5mm EP3.1mm`, `PinHeader 2x05`) map to typical
+  JEDEC/EIA dimensions (`landpattern::packages`); for anything else, pass the datasheet dimensions as a
+  `PackageSpec` (`"0.15..0.35mm"`, `"1.0±0.05mm"`).
+- **To verify:** the fillet goal table (`src/landpattern/ipc.rs`) follows IPC-7351B as best known; review it
+  against the standard. A SOIC-8 computed with it matches widely used IPC-derived footprints to 0.01 mm.
 
 ## Symbol generation
 
-From a pin table (which an agent can extract from a datasheet), generate a clean rectangular symbol: pins grouped by
-function (power top/bottom, inputs left, outputs right, by port), with configurable ordering. Multi-unit split for
-large parts.
+From a pin table (which an agent can extract from a datasheet), `symbolgen` lays out a box symbol on a 2.54 mm
+grid: ground pins at the bottom, supply inputs at the top, inputs and bidirectional pins left, outputs right,
+connector pins left in number order. Ports (`PA*`, `PB*`, or explicit `group`s) stay together and are moved
+between sides to balance them; explicit `side`s are kept. Two-terminal parts get fixed styles (resistor,
+capacitor, inductor, diode/LED with pin 1 = cathode, ...). Multi-unit symbols are planned. Drawing happens in M3.
 
-## BOM
+## Generic part specs
 
-The BOM is a view over circuit components plus a sourcing overlay.
+`R 10k 1% 0402`, `C 100nF 16V X7R 0402`, `L 4.7uH 1A 0805`, `FB 600R 0603`, `LED red 0603`: type, value and
+package, plus optional tolerance, voltage/current/power rating, dielectric, color. The spec gets a canonical
+form and ID (`R_10k_1pct_0402`), so the same requirement written differently reuses the same part.
+
+## Commands
 
 | Command | Purpose |
 |---|---|
-| `bom list` | grouped lines (same part → one line, refdes list, qty) |
-| `bom add <part>` | add part to library (and optionally instantiate) |
-| `bom remove <part|refdes>` | remove, with impact report (nets left dangling) |
-| `bom replace <old> <new>` | swap part, checking pin/footprint compatibility; reports remapping |
-| `bom set-dnp <refdes>` | do not populate (stays on board, excluded from assembly) |
-| `bom alternates <part> add/remove` | approved substitutes |
-| `bom resolve` | propose approved MPNs for generic lines, given policy (stock across suppliers, price, lifecycle) |
-| `bom availability --fab a,b` | per-line stock/coverage at each fab or supplier |
-| `bom check` | stock at build qty, lifecycle (NRND/EOL), missing footprints/MPNs |
-| `bom cost --qty 100` | price rollup per supplier, best mix |
-| `bom export --fab jlcpcb|pcbway|...` | assembly BOM files in the fab profile's layout (see MANUFACTURING.md) |
+| `part.generic <spec>` | add a generic passive with generated symbol and footprint |
+| `part.create` | concrete or custom part from a pin list + package name or dimensions |
+| `part.list / show / set / remove` | inspect and edit the library (removal refused while in use) |
+| `footprint.generate / list / show / remove` | land patterns |
+| `circuit.add <part or spec>` | add components (`--count`), auto-numbered by category (R1, C3, U2) |
+| `circuit.remove / list` | components |
+| `bom.list` | one line per part: quantity, designators, DNP, order MPN, unsourced lines |
+| `bom.approve <part>` | approved MPNs: alternates (concrete parts) or candidates (generic parts) |
+| `bom.dnp <refdes>` | do not populate (stays on the board, excluded from assembly) |
+| `bom.note <part> <text>` | purchasing/assembly note |
+| `bom.replace <from> <to>` | switch components to another part, warning about missing pins |
+| `bom.export <path> --format generic|jlcpcb|pcbway` | CSV; fab layouts omit DNP and warn about lines without MPN |
+
+Planned with supplier research (rest of M1): `part.search`, `bom.resolve`, `bom.check`, `bom.cost`. Fab
+column layouts move to fab profiles in M4 (they follow the fabs' current templates; verify before ordering).
 
 ## Research providers
 

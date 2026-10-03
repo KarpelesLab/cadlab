@@ -11,15 +11,16 @@
 //! }
 //! ```
 //!
-//! Rules: the root is always expanded; a container is written inline when it fits in
-//! [`MAX_LINE`] columns and holds no array of containers (lists of records or points always
-//! get one element per line, so adding one is a one-line diff). Key order is the order of the
+//! Rules: the root is always expanded. A *leaf record* is written inline when it fits in
+//! [`MAX_LINE`] columns: an array of scalars (a point), or an object whose values are scalars
+//! or arrays of scalars (a via, a component). Anything holding records or points is expanded,
+//! one element per line, so adding an element is a one-line diff. Key order is the order of the
 //! input value (struct field order, or sorted for maps).
 
 use serde_json::Value;
 
 /// Maximum line width for inline containers.
-pub const MAX_LINE: usize = 100;
+pub const MAX_LINE: usize = 140;
 
 const INDENT: &str = "  ";
 
@@ -81,7 +82,7 @@ fn newline(depth: usize, out: &mut String) {
 
 /// The inline rendering of `v`, if `v` may be inlined at this depth.
 fn inline(v: &Value, depth: usize) -> Option<String> {
-    if has_container_array(v) {
+    if !is_leaf_record(v) {
         return None;
     }
     let s = compact(v);
@@ -89,19 +90,18 @@ fn inline(v: &Value, depth: usize) -> Option<String> {
     (depth * INDENT.len() + s.len() <= MAX_LINE).then_some(s)
 }
 
-/// Whether `v` contains (at any depth, including itself) a non-empty array whose elements
-/// include a non-empty container.
-fn has_container_array(v: &Value) -> bool {
+/// Arrays of scalars, and objects whose values are scalars or arrays of scalars.
+fn is_leaf_record(v: &Value) -> bool {
+    let scalar = |x: &Value| !matches!(x, Value::Array(_) | Value::Object(_));
+    let scalar_array = |x: &Value| match x {
+        Value::Array(a) => a.iter().all(scalar),
+        Value::Object(o) => o.is_empty(),
+        _ => true,
+    };
     match v {
-        Value::Array(items) => {
-            items.iter().any(|i| match i {
-                Value::Array(a) => !a.is_empty(),
-                Value::Object(o) => !o.is_empty(),
-                _ => false,
-            }) || items.iter().any(has_container_array)
-        }
-        Value::Object(map) => map.values().any(has_container_array),
-        _ => false,
+        Value::Array(items) => items.iter().all(scalar),
+        Value::Object(map) => map.values().all(scalar_array),
+        _ => true,
     }
 }
 
@@ -155,18 +155,24 @@ mod tests {
     #[test]
     fn single_record_list_still_expanded() {
         let v = json!({"vias": [{"id": 1}]});
-        assert_eq!(
-            to_canonical_string(&v),
-            "{\n  \"vias\": [\n    {\"id\": 1}\n  ]\n}\n"
-        );
+        assert_eq!(to_canonical_string(&v), "{\n  \"vias\": [\n    {\"id\": 1}\n  ]\n}\n");
     }
 
     #[test]
     fn long_records_expand() {
-        let long = "x".repeat(120);
+        let long = "x".repeat(MAX_LINE + 20);
         let v = json!({"a": {"b": long}});
         let s = to_canonical_string(&v);
         assert!(s.contains("\"a\": {\n    \"b\": "), "{s}");
+    }
+
+    #[test]
+    fn maps_of_records_expand() {
+        let v = json!({"components": {"R1": {"id": 1, "part": "r"}, "R2": {"id": 2, "part": "r"}}});
+        assert_eq!(
+            to_canonical_string(&v),
+            "{\n  \"components\": {\n    \"R1\": {\"id\": 1, \"part\": \"r\"},\n    \"R2\": {\"id\": 2, \"part\": \"r\"}\n  }\n}\n"
+        );
     }
 
     #[test]

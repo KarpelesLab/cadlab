@@ -2,9 +2,11 @@
 //! files are migrated. See `docs/DATA_MODEL.md`.
 
 mod error;
+pub mod footprint;
 pub mod format;
 mod manifest;
 pub mod migrate;
+pub mod part;
 mod project;
 mod raw;
 pub mod sections;

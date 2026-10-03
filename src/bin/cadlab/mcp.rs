@@ -12,9 +12,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use cadlab::Diagnostic;
-use cadlab::command::{
-    CancelToken, Failure, Outcome, Progress, Registry, RunOptions, Session, Step,
-};
+use cadlab::command::{CancelToken, Failure, Outcome, Progress, Registry, RunOptions, Session, Step};
 use serde_json::{Value, json};
 
 /// Protocol revisions this server speaks, newest first.
@@ -59,10 +57,7 @@ pub fn serve(registry: &'static Registry, autosave: bool) -> u8 {
                 let msg: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(e) => {
-                        send(
-                            &out,
-                            &error_response(Value::Null, -32700, &format!("parse error: {e}")),
-                        );
+                        send(&out, &error_response(Value::Null, -32700, &format!("parse error: {e}")));
                         continue;
                     }
                 };
@@ -101,10 +96,7 @@ pub fn serve(registry: &'static Registry, autosave: bool) -> u8 {
         let id = msg.get("id").cloned();
         let response = server.handle(&msg, &cancel);
         if let Some(id) = id {
-            tokens
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id.to_string());
+            tokens.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.to_string());
             if let Some(r) = response {
                 send(&out, &r);
             }
@@ -163,10 +155,7 @@ impl Server {
         let id = id?; // Other notifications (initialized, ...) need no answer.
         let r = match method {
             "initialize" => {
-                let asked = params
-                    .get("protocolVersion")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
                 let version = PROTOCOL_VERSIONS
                     .iter()
                     .find(|v| **v == asked)
@@ -191,8 +180,7 @@ impl Server {
 
     fn tools(&self) -> Vec<Value> {
         let project_prop = json!({"type": "string", "description": "Project directory to act on (default: the most recently opened or created project)"});
-        let dry_run_prop =
-            json!({"type": "boolean", "description": "Run, report the result, then roll back"});
+        let dry_run_prop = json!({"type": "boolean", "description": "Run, report the result, then roll back"});
         let mut tools = Vec::new();
         for (group, entries) in self.registry.groups() {
             let mut desc = format!("{group} commands. Actions:");
@@ -265,15 +253,9 @@ impl Server {
             .and_then(Value::as_str)
             .ok_or((-32602, "missing tool name".to_string()))?;
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
-        let project = args
-            .get("project")
-            .and_then(Value::as_str)
-            .map(PathBuf::from);
+        let project = args.get("project").and_then(Value::as_str).map(PathBuf::from);
         let opts = RunOptions {
-            dry_run: args
-                .get("dry_run")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            dry_run: args.get("dry_run").and_then(Value::as_bool).unwrap_or(false),
         };
         let progress = McpProgress {
             out: self.out.clone(),
@@ -287,11 +269,10 @@ impl Server {
                 Ok(self.run(cmd, cmd_args, project.as_deref(), opts, &progress, cancel))
             }
             "batch" => {
-                let steps: Vec<Step> =
-                    match serde_json::from_value(args.get("steps").cloned().unwrap_or(json!([]))) {
-                        Ok(s) => s,
-                        Err(e) => return Ok(tool_error(&format!("invalid steps: {e}"))),
-                    };
+                let steps: Vec<Step> = match serde_json::from_value(args.get("steps").cloned().unwrap_or(json!([]))) {
+                    Ok(s) => s,
+                    Err(e) => return Ok(tool_error(&format!("invalid steps: {e}"))),
+                };
                 Ok(self.run_batch(steps, project.as_deref(), opts))
             }
             group if self.registry.groups().contains_key(group) => {
@@ -386,20 +367,11 @@ impl Server {
                 if self.sessions.iter().any(|(sp, _)| *sp == abs) {
                     // Already open (possibly with unsaved changes): switch to it.
                     self.current = Some(abs.clone());
-                    return self.run(
-                        "project.info",
-                        json!({}),
-                        Some(&abs),
-                        opts,
-                        progress,
-                        cancel,
-                    );
+                    return self.run("project.info", json!({}), Some(&abs), opts, progress, cancel);
                 }
             }
             let mut s = Session::new();
-            let r = self
-                .registry
-                .execute_with(&mut s, cmd, args, opts, progress, cancel);
+            let r = self.registry.execute_with(&mut s, cmd, args, opts, progress, cancel);
             return match r {
                 Ok(o) => {
                     let root = s.root().map(Path::to_path_buf).unwrap_or_default();
@@ -418,9 +390,9 @@ impl Server {
             Ok(i) => i,
             Err(f) => return failure_result(&f),
         };
-        let r =
-            self.registry
-                .execute_with(&mut self.sessions[i].1, cmd, args, opts, progress, cancel);
+        let r = self
+            .registry
+            .execute_with(&mut self.sessions[i].1, cmd, args, opts, progress, cancel);
         let result = match r {
             Ok(o) => match self.maybe_save_at(i) {
                 Ok(()) => outcome_result(&o),
@@ -440,9 +412,7 @@ impl Server {
             Ok(i) => i,
             Err(f) => return failure_result(&f),
         };
-        let r = self
-            .registry
-            .execute_batch(&mut self.sessions[i].1, steps, opts);
+        let r = self.registry.execute_batch(&mut self.sessions[i].1, steps, opts);
         let result = match r {
             Ok(outs) => match self.maybe_save_at(i) {
                 Ok(()) => {
@@ -500,11 +470,7 @@ fn args_signature(schema: &Value) -> String {
     let parts: Vec<String> = props
         .iter()
         .map(|(k, v)| {
-            let opt = if required.contains(&k.as_str()) {
-                ""
-            } else {
-                "?"
-            };
+            let opt = if required.contains(&k.as_str()) { "" } else { "?" };
             format!("{k}{opt}: {}", crate::type_label(v))
         })
         .collect();
@@ -546,8 +512,7 @@ fn failure_result(f: &Failure) -> Value {
     for d in &f.diagnostics {
         text += &format!("\n{d}");
     }
-    let mut s =
-        json!({"ok": false, "command": f.command, "error": f.error, "diagnostics": f.diagnostics});
+    let mut s = json!({"ok": false, "command": f.command, "error": f.error, "diagnostics": f.diagnostics});
     if let Some(i) = f.step {
         s["step"] = json!(i);
     }

@@ -50,11 +50,7 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
-    pub(crate) fn new(
-        session: &'a mut Session,
-        progress: &'a dyn Progress,
-        cancel: &'a CancelToken,
-    ) -> Self {
+    pub(crate) fn new(session: &'a mut Session, progress: &'a dyn Progress, cancel: &'a CancelToken) -> Self {
         Context {
             session,
             diagnostics: Vec::new(),

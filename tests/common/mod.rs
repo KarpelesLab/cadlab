@@ -56,9 +56,7 @@ pub mod oracle {
             return None;
         }
         let (name, var) = o.program();
-        let path = std::env::var_os(var)
-            .map(PathBuf::from)
-            .or_else(|| find_in_path(name));
+        let path = std::env::var_os(var).map(PathBuf::from).or_else(|| find_in_path(name));
         match path {
             Some(p) => Some(p),
             None => {
@@ -104,12 +102,8 @@ pub mod golden {
             std::fs::write(path, actual).unwrap();
             return;
         }
-        let expected = std::fs::read_to_string(path).unwrap_or_else(|e| {
-            panic!(
-                "{}: {e} (run with CADLAB_BLESS=1 to create it)",
-                path.display()
-            )
-        });
+        let expected = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("{}: {e} (run with CADLAB_BLESS=1 to create it)", path.display()));
         assert!(
             expected == actual,
             "{} differs from the current output (CADLAB_BLESS=1 to update):\n--- expected\n{expected}\n--- actual\n{actual}",
@@ -131,23 +125,14 @@ pub mod golden {
             let mut expected = Vec::new();
             collect(golden, golden, &[], &mut expected);
             expected.sort();
-            assert_eq!(
-                files,
-                expected,
-                "file set differs from {}",
-                golden.display()
-            );
+            assert_eq!(files, expected, "file set differs from {}", golden.display());
         }
     }
 
     fn collect(root: &Path, dir: &Path, skip: &[&str], out: &mut Vec<String>) {
         for e in std::fs::read_dir(dir).unwrap().flatten() {
             let p = e.path();
-            let rel = p
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
             if skip.iter().any(|s| rel.starts_with(s)) {
                 continue;
             }

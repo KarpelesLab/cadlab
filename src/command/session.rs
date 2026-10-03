@@ -43,13 +43,8 @@ impl Session {
             Ok(h) => h,
             Err(e) => {
                 warnings.push(
-                    Diagnostic::warning(
-                        "history.unreadable",
-                        format!("undo history discarded: {e}"),
-                    )
-                    .with_hint(
-                        "undo is unavailable for earlier steps; this does not affect the project",
-                    ),
+                    Diagnostic::warning("history.unreadable", format!("undo history discarded: {e}"))
+                        .with_hint("undo is unavailable for earlier steps; this does not affect the project"),
                 );
                 History::new(Some(history_dir(&root)))
             }

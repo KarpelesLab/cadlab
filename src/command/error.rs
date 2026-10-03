@@ -71,6 +71,15 @@ impl CommandError {
         self
     }
 
+    /// Sets the hint only if none was set (e.g. by suggestions).
+    pub fn with_hint_if_none(self, hint: impl Into<String>) -> Self {
+        if self.diagnostic.hint.is_some() {
+            self
+        } else {
+            self.with_hint(hint)
+        }
+    }
+
     /// Adds a subject.
     pub fn with_subject(mut self, r: crate::ObjectRef) -> Self {
         self.diagnostic = Box::new(self.diagnostic.with_subject(r));
@@ -89,19 +98,14 @@ impl std::error::Error for CommandError {}
 impl From<ModelError> for CommandError {
     fn from(e: ModelError) -> Self {
         match &e {
-            ModelError::NotAProject(_) => {
-                CommandError::not_found("project.not_found", e.to_string())
-                    .with_hint("create one with `project.new`, or pass the project directory")
+            ModelError::NotAProject(_) => CommandError::not_found("project.not_found", e.to_string())
+                .with_hint("create one with `project.new`, or pass the project directory"),
+            ModelError::AlreadyExists(_) => {
+                CommandError::conflict("project.exists", e.to_string()).with_hint("open it with `project.open` instead")
             }
-            ModelError::AlreadyExists(_) => CommandError::conflict("project.exists", e.to_string())
-                .with_hint("open it with `project.open` instead"),
-            ModelError::NewerSchema { .. } => {
-                CommandError::new(ErrorKind::Io, "project.newer_schema", e.to_string())
-            }
-            ModelError::Invalid { .. } => {
-                CommandError::new(ErrorKind::Io, "project.invalid_file", e.to_string())
-                    .with_hint("fix the file by hand, or restore it from version control")
-            }
+            ModelError::NewerSchema { .. } => CommandError::new(ErrorKind::Io, "project.newer_schema", e.to_string()),
+            ModelError::Invalid { .. } => CommandError::new(ErrorKind::Io, "project.invalid_file", e.to_string())
+                .with_hint("fix the file by hand, or restore it from version control"),
             ModelError::Io { .. } => CommandError::new(ErrorKind::Io, "io", e.to_string()),
         }
     }

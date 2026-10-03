@@ -31,21 +31,27 @@
 
 use std::sync::OnceLock;
 
+pub mod bom;
 pub mod command;
 pub mod commands;
 pub mod diag;
 pub mod geom;
 pub mod id;
+pub mod landpattern;
 pub mod model;
+pub mod partspec;
 pub mod refs;
 pub mod suggest;
+pub mod symbolgen;
 pub mod units;
+pub mod value;
 
 pub use diag::{Diagnostic, Severity};
 pub use geom::{BBox, Point, Transform};
 pub use id::{IdAllocator, ObjectId};
 pub use refs::ObjectRef;
 pub use units::{Angle, LengthUnit, Nm, UnitError, mil, mm};
+pub use value::{Quantity, Unit};
 
 /// The registry of all built-in commands.
 pub fn registry() -> &'static command::Registry {
@@ -58,7 +64,5 @@ pub mod prelude {
     pub use crate::command::{Command, CommandError, Registry, RunOptions, Session, run};
     pub use crate::model::Project;
     pub use crate::registry;
-    pub use crate::{
-        Angle, BBox, Diagnostic, LengthUnit, Nm, ObjectRef, Point, Severity, Transform, mil, mm,
-    };
+    pub use crate::{Angle, BBox, Diagnostic, LengthUnit, Nm, ObjectRef, Point, Severity, Transform, mil, mm};
 }

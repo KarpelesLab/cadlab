@@ -34,15 +34,19 @@ pass. **Done 2026-10-04** (spatial index deferred to M4).
 
 Details in [PARTS.md](PARTS.md).
 
-- [ ] Part model: MPN, manufacturer, typed parameters, symbol (pins + electrical types), footprint(s), pin↔pad map
-- [ ] Generic parts (`R 10k 1% 0402`) vs concrete parts (MPN), resolution between them
-- [ ] Project-local library + shared user libraries
-- [ ] Own base library: footprint generator (IPC-7351B) and symbol generator from pin tables, covering common
-      passives, discretes, regulators, connectors and IC packages (no KiCad library content, see D7)
-- [ ] BOM commands: add, remove, replace, set quantity/DNP, alternates, grouping, notes
+- [x] Part model: MPN, manufacturer, typed parameters (exact decimal values), symbol (pins + electrical types),
+      footprint(s), pin↔pad map
+- [x] Generic parts (`R 10k 1% 0402`) vs concrete parts (MPN); manual resolution (`bom.approve`, `bom.replace`)
+- [x] Project-local library (one file per part/footprint)
+- [ ] Shared user libraries
+- [x] Own base library: footprint generator (IPC-7351B: chip, SOIC/SOP/TSSOP/MSOP/SOT-23, QFP, DFN, QFN, pin
+      headers) and symbol generator from pin tables (no KiCad library content, see D7)
+- [ ] More footprint families: SOT-223/DPAK, SOD/MELF, SMA/SMB, BGA, DIP
+- [x] BOM commands: list (grouped), replace, DNP, approved alternates, notes; components via `circuit.add/remove`
 - [ ] Supplier research provider trait + first providers (see PARTS.md for candidates), response cache with TTL
 - [ ] Search and filter by parameters, stock, price, lifecycle
-- [ ] BOM cost rollup at build quantity, availability check, CSV export (generic, JLCPCB, PCBWay layouts)
+- [x] BOM CSV export (generic, JLCPCB, PCBWay layouts)
+- [ ] BOM cost rollup at build quantity, availability check
 
 **Exit:** an agent can go from "I need a 3.3 V LDO, 500 mA, SOT-23-5, in stock" to a concrete part in the BOM with
 symbol and footprint attached.
