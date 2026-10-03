@@ -351,6 +351,12 @@ impl Quantity {
         format!("{}{prefix}", format_decimal(self.mantissa, self.exp as i32 - eng))
     }
 
+    /// The value in units of `10^exp` as an exact decimal string: `100nF` in µF (`exp = -6`) is
+    /// `"0.1"`.
+    pub fn decimal_in(&self, exp: i32) -> String {
+        format_decimal(self.mantissa, self.exp as i32 - exp)
+    }
+
     /// Compares values, ignoring units.
     pub fn cmp_value(&self, o: &Quantity) -> Ordering {
         let sign = |m: i64| m.signum();

@@ -46,6 +46,37 @@ const CHIPS: &[ChipSize] = &[
     ("2512", "6332", 6300, 200, 3200, 200, 350, 850, 700, 700),
 ];
 
+/// Package names that share one land pattern, canonical name first. Distributors use all of
+/// them (DigiKey lists AP2112K as `SOT-25`). Thin variants (TSOT) share the footprint.
+const ALIASES: &[&[&str]] = &[
+    &["SOT-23", "SOT-23-3", "TO-236", "TO-236-3", "TO-236AB"],
+    &["SOT-23-5", "SOT-25", "SOT-753", "SC-74A", "TSOT-23-5", "SOT-23-5L"],
+    &["SOT-23-6", "SOT-26", "SOT-457", "SC-74", "TSOT-23-6", "SOT-23-6L"],
+    &["SOT-223", "SOT-223-3", "SOT-223-4", "TO-261-4", "TO-261AA"],
+];
+
+fn alnum_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// Canonical name of a package: `SOT-25` → `SOT-23-5`. Unknown names are returned as given.
+pub fn canonical(name: &str) -> &str {
+    let k = alnum_key(name);
+    ALIASES
+        .iter()
+        .find(|g| g.iter().any(|a| alnum_key(a) == k))
+        .map_or(name, |g| g[0])
+}
+
+/// Comparison key for package names: aliases and spelling variants compare equal
+/// (`SOT-25`, `sot23-5`, `SOT-23-5`).
+pub fn package_key(name: &str) -> String {
+    alnum_key(canonical(name))
+}
+
 /// Imperial chip codes, for recognizing package tokens in part specs.
 pub fn chip_codes() -> impl Iterator<Item = &'static str> {
     CHIPS.iter().map(|c| c.0)
@@ -109,8 +140,8 @@ pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
         });
     }
 
-    match n.as_str() {
-        "SOT-23" | "SOT-23-3" | "SOT23" | "SOT23-3" | "TO-236" => {
+    match norm(canonical(name)).as_str() {
+        "SOT-23" => {
             return Ok(sot23(
                 3,
                 range(2100, 2640),
@@ -120,7 +151,7 @@ pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
                 vec![2, 4, 6],
             ));
         }
-        "SOT-23-5" | "SOT23-5" | "SOT-25" | "SOT-753" => {
+        "SOT-23-5" => {
             return Ok(sot23(
                 5,
                 range(2600, 3000),
@@ -130,7 +161,7 @@ pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
                 vec![5],
             ));
         }
-        "SOT-23-6" | "SOT23-6" | "SOT-26" => {
+        "SOT-23-6" => {
             return Ok(sot23(6, range(2600, 3000), range(1500, 1700), um(1450), None, vec![]));
         }
         _ => {}

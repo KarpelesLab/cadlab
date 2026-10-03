@@ -537,7 +537,7 @@ impl Command for Resolve {
                         scheme: "local".into(),
                         id: u.clone(),
                     })
-                    .with_hint("relax the part's requirements (`part.set`), or search manually with `part.search`"),
+                    .with_hint("the combination may not exist or be out of stock: relax one requirement (dielectric X7R→X5R, a larger package, voltage) with `part.set`, or search with `part.search`"),
             );
         }
         Ok(Resolution { lines, unresolved })

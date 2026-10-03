@@ -93,10 +93,7 @@ impl ParamFilter {
 
 /// Normalizes package names for comparison: `SOT-23-5`, `sot23-5` and `SOT 23 5` are equal.
 pub fn package_key(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_uppercase())
-        .collect()
+    crate::landpattern::packages::package_key(s)
 }
 
 /// A search.
@@ -244,5 +241,9 @@ mod tests {
     #[test]
     fn packages_normalize() {
         assert_eq!(package_key("SOT-23-5"), package_key("sot23 5"));
+        assert_eq!(package_key("SOT-25"), package_key("SOT-23-5"));
+        assert_eq!(package_key("SC-74A"), package_key("TSOT-23-5"));
+        assert_ne!(package_key("SC-74"), package_key("SC-74A"));
+        assert_ne!(package_key("SOT-23"), package_key("SOT-23-5"));
     }
 }

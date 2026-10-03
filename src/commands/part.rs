@@ -907,9 +907,11 @@ impl Command for Search {
                     c.mpn,
                     c.package.as_deref().unwrap_or("-"),
                     c.stock,
-                    c.unit_price(o.quantity)
-                        .map(|p| format!("{p}/u @{}", o.quantity))
-                        .unwrap_or_else(|| "no price".into()),
+                    match c.unit_price(o.quantity) {
+                        Some(p) if c.moq > o.quantity => format!("{p}/u (MOQ {})", c.moq),
+                        Some(p) => format!("{p}/u @{}", o.quantity),
+                        None => "no price".into(),
+                    },
                     c.description
                 )
             })

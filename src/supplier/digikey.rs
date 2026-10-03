@@ -19,6 +19,10 @@ use crate::config::{DigiKeySettings, UserConfig};
 use crate::model::part::ParamValue;
 
 const ID: &str = "digikey";
+/// Results per request (DigiKey's maximum).
+const PAGE: u32 = 50;
+/// Pages fetched at most per keyword set.
+const MAX_PAGES: u32 = 3;
 
 /// DigiKey provider.
 pub struct DigiKey {
@@ -199,12 +203,90 @@ impl DigiKey {
     }
 
     fn keyword(&self, keywords: &str, limit: u32) -> Result<Vec<Candidate>, ProviderError> {
+        self.keyword_page(keywords, limit, 0).map(|(c, _)| c)
+    }
+
+    /// One page of results, and whether more pages exist.
+    fn keyword_page(&self, keywords: &str, limit: u32, offset: u32) -> Result<(Vec<Candidate>, bool), ProviderError> {
         let v = self.post(
             "/products/v4/search/keyword",
-            &json!({"Keywords": keywords, "Limit": limit, "Offset": 0}),
+            &json!({"Keywords": keywords, "Limit": limit, "Offset": offset}),
         )?;
-        Ok(parse_keyword_response(&v, &self.currency))
+        let total = v["ProductsCount"].as_u64().unwrap_or(0);
+        let more = (offset as u64 + limit as u64) < total;
+        Ok((parse_keyword_response(&v, &self.currency), more))
     }
+
+    /// Pages through results (up to [`MAX_PAGES`]) until enough of them pass `q`'s filters:
+    /// keyword relevance is fuzzy ("1UF" also matches "0.1UF"), so the first page may hold none.
+    fn keyword_matching(&self, keywords: &str, q: &SearchQuery, out: &mut Vec<Candidate>) -> Result<(), ProviderError> {
+        for page in 0..MAX_PAGES {
+            let (cands, more) = self.keyword_page(keywords, PAGE, page * PAGE)?;
+            for c in cands {
+                if !out.iter().any(|o| o.sku == c.sku) {
+                    out.push(c);
+                }
+            }
+            if !more || out.iter().filter(|c| q.matches(c)).count() >= q.limit {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// DigiKey description-style keywords for generic passives: `CAP CER 1UF 16V X7R`,
+/// `RES 10K OHM 1%`, `FIXED IND 4.7UH`. `None` when the query is not a passive.
+fn passive_words(q: &SearchQuery) -> Option<Vec<String>> {
+    use crate::model::part::Category;
+    let get = |k: &str| q.filters.iter().find(|f| f.key == k).map(|f| &f.value);
+    let qty = |k: &str| match get(k) {
+        Some(ParamValue::Quantity(v)) => Some(*v),
+        _ => None,
+    };
+    let mut w: Vec<String> = Vec::new();
+    match q.category? {
+        Category::Capacitor => {
+            let c = qty("capacitance")?;
+            w.extend(["CAP".into(), "CER".into()]);
+            // DigiKey writes picofarads below 1 nF, microfarads above: 100PF, 0.1UF, 1UF.
+            w.push(if c.cmp_value(&crate::value::Quantity::new(1, -9, c.unit)).is_lt() {
+                format!("{}PF", c.decimal_in(-12))
+            } else {
+                format!("{}UF", c.decimal_in(-6))
+            });
+            if let Some(v) = qty("voltage_rating") {
+                w.push(format!("{}V", v.decimal_in(0)));
+            }
+            if let Some(ParamValue::Text(d)) = get("dielectric") {
+                w.push(d.clone());
+            }
+        }
+        Category::Resistor => {
+            let r = qty("resistance")?;
+            let (e, suffix) = match r.decimal_in(0).split('.').next().map(str::len).unwrap_or(0) {
+                0..=3 => (0, ""),
+                4..=6 => (3, "K"),
+                _ => (6, "M"),
+            };
+            w.extend(["RES".into(), format!("{}{suffix}", r.decimal_in(e)), "OHM".into()]);
+            if let Some(t) = qty("tolerance") {
+                w.push(format!("{}%", t.decimal_in(0)));
+            }
+        }
+        Category::Inductor => {
+            let l = qty("inductance")?;
+            w.extend(["FIXED".into(), "IND".into()]);
+            w.push(if l.cmp_value(&crate::value::Quantity::new(1, -6, l.unit)).is_lt() {
+                format!("{}NH", l.decimal_in(-9))
+            } else {
+                format!("{}UH", l.decimal_in(-6))
+            });
+        }
+        _ => return None,
+    }
+    w.extend(q.text.split_whitespace().map(String::from));
+    Some(w)
 }
 
 /// Error message from a DigiKey problem-details body.
@@ -365,27 +447,42 @@ impl Provider for DigiKey {
     }
 
     fn search(&self, q: &SearchQuery) -> Result<Vec<Candidate>, ProviderError> {
-        // DigiKey's keyword search works best with the values themselves: "LDO SOT-23-5 3.3V".
-        let mut words: Vec<String> = q.text.split_whitespace().map(String::from).collect();
-        if let Some(p) = &q.package {
-            words.push(p.clone());
-        }
-        for f in q.filters.iter().filter(|f| f.op == Op::Eq) {
-            match &f.value {
-                ParamValue::Quantity(v) => words.push(v.to_string().replace('Ω', "")),
-                ParamValue::Text(t) => words.push(t.clone()),
-                ParamValue::Range { .. } => {}
+        // DigiKey's keyword search matches its description text, so passives are phrased the way
+        // DigiKey writes them ("CAP CER 1UF 16V X7R"); otherwise the values themselves ("LDO 3.3V").
+        let mut words: Vec<String> = match passive_words(q) {
+            Some(w) => w,
+            None => {
+                let mut w: Vec<String> = q.text.split_whitespace().map(String::from).collect();
+                for f in q.filters.iter().filter(|f| f.op == Op::Eq) {
+                    match &f.value {
+                        ParamValue::Quantity(v) => w.push(v.to_string().replace('Ω', "")),
+                        ParamValue::Text(t) if f.key != "package" => w.push(t.clone()),
+                        _ => {}
+                    }
+                }
+                w
             }
-        }
+        };
         if words.is_empty()
             && let Some(c) = q.category
         {
             words.push(c.label().to_string());
         }
-        if words.is_empty() {
+        if words.is_empty() && q.package.is_none() {
             return Ok(vec![]);
         }
-        self.keyword(&words.join(" "), 50)
+        // With a package, search with it (precise when DigiKey uses the same name) and without it
+        // (DigiKey may name it differently: SOT-25 for SOT-23-5); the caller filters on aliases.
+        let mut out = Vec::new();
+        if let Some(p) = &q.package {
+            let mut with = words.clone();
+            with.push(p.clone());
+            self.keyword_matching(&with.join(" "), q, &mut out)?;
+        }
+        if !words.is_empty() && out.iter().filter(|c| q.matches(c)).count() < q.limit {
+            self.keyword_matching(&words.join(" "), q, &mut out)?;
+        }
+        Ok(out)
     }
 
     fn lookup(&self, mpn: &str) -> Result<Vec<Candidate>, ProviderError> {
@@ -467,6 +564,40 @@ mod tests {
         let tr = &c[1];
         assert_eq!(tr.moq, 3000);
         assert_eq!(tr.unit_price(10).unwrap().to_string(), "0.09879 USD");
+    }
+
+    #[test]
+    fn passive_keywords() {
+        use crate::model::part::Category;
+        use crate::supplier::ParamFilter;
+        let q = |cat, filters: &[(&str, &str)]| SearchQuery {
+            category: Some(cat),
+            filters: filters.iter().map(|(k, v)| ParamFilter::parse(k, v).unwrap()).collect(),
+            ..Default::default()
+        };
+        let w = |q: SearchQuery| passive_words(&q).unwrap().join(" ");
+        assert_eq!(
+            w(q(
+                Category::Capacitor,
+                &[
+                    ("capacitance", "1uF"),
+                    ("voltage_rating", ">=16V"),
+                    ("dielectric", "X7R")
+                ]
+            )),
+            "CAP CER 1UF 16V X7R"
+        );
+        assert_eq!(w(q(Category::Capacitor, &[("capacitance", "100nF")])), "CAP CER 0.1UF");
+        assert_eq!(w(q(Category::Capacitor, &[("capacitance", "22pF")])), "CAP CER 22PF");
+        assert_eq!(
+            w(q(Category::Resistor, &[("resistance", "10k"), ("tolerance", "<=1%")])),
+            "RES 10K OHM 1%"
+        );
+        assert_eq!(w(q(Category::Resistor, &[("resistance", "4k7")])), "RES 4.7K OHM");
+        assert_eq!(w(q(Category::Resistor, &[("resistance", "220")])), "RES 220 OHM");
+        assert_eq!(w(q(Category::Resistor, &[("resistance", "1M")])), "RES 1M OHM");
+        assert_eq!(w(q(Category::Inductor, &[("inductance", "4.7uH")])), "FIXED IND 4.7UH");
+        assert!(passive_words(&q(Category::Ldo, &[])).is_none());
     }
 
     #[test]

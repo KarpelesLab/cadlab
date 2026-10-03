@@ -63,6 +63,9 @@ fn ipc_names() {
     assert_eq!(gen_named("SOIC-8", ChipKind::Resistor).name, "SOIC127P600X175-8N");
     assert_eq!(gen_named("TSSOP-20", ChipKind::Resistor).name, "SOP65P640X120-20N");
     assert_eq!(gen_named("SOT-23-5", ChipKind::Resistor).name, "SOT95P280X145-5N");
+    assert_eq!(gen_named("SOT-25", ChipKind::Resistor).name, "SOT95P280X145-5N");
+    assert_eq!(gen_named("SC-74A", ChipKind::Resistor).name, "SOT95P280X145-5N");
+    assert_eq!(gen_named("TO-236-3", ChipKind::Resistor).name, "SOT95P237X112-3N");
     assert_eq!(gen_named("LQFP-48", ChipKind::Resistor).name, "QFP50P900X900X160-48N");
     assert_eq!(
         gen_named("QFN-32 5x5mm P0.5mm EP3.1mm", ChipKind::Resistor).name,
