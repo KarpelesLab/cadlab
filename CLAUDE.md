@@ -24,8 +24,10 @@ Rules:
 - Update `docs/ROADMAP.md` checkboxes and `docs/DECISIONS.md` when finishing items or making design choices.
 
 Development:
-- `cargo test` (all), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`. CI also runs docs with
-  `-D warnings`, MSRV 1.89 and `cargo-deny`.
+- Before every push run what CI runs: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo test --all-features`, `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features` (CI also checks MSRV 1.89
+  and `cargo-deny`).
+- Oracle tests: `CADLAB_ORACLES=1 CADLAB_ORACLE_KICAD_CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli cargo test`.
 - Golden files: `CADLAB_BLESS=1 cargo test` rewrites them; snapshots: `cargo insta review`.
 - Adding a command: a struct implementing `Command` in `src/commands/<group>.rs`, registered
   in that file's `register`. CLI flags and MCP tools are generated from it; doc comments become help text.
