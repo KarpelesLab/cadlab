@@ -48,6 +48,16 @@ pub fn to_svg(scene: &Scene, view: &View) -> String {
                     .unwrap_or_default();
                 let _ = writeln!(s, r#"<polygon points="{}" fill="{}"{st}/>"#, pts(v), fill.css());
             }
+            Prim::Region { rings, fill } => {
+                let mut d = String::new();
+                for r in rings.iter().filter(|r| r.len() >= 3) {
+                    for (i, &(x, y)) in r.iter().enumerate() {
+                        let _ = write!(d, "{}{},{} ", if i == 0 { "M" } else { "L" }, px(x), py(y));
+                    }
+                    d += "Z ";
+                }
+                let _ = writeln!(s, r#"<path d="{}" fill="{}" fill-rule="evenodd"/>"#, d.trim_end(), fill.css());
+            }
             Prim::Circle { c, r, fill, stroke } => {
                 let f = fill.map_or("none".to_string(), |c| c.css());
                 let st = stroke
@@ -77,5 +87,19 @@ mod tests {
             "{s}"
         );
         assert!(s.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm""#));
+    }
+
+    #[test]
+    fn region_with_hole() {
+        let mut sc = Scene::default();
+        let sq = |a: f64, b: f64| vec![(a, a), (b, a), (b, b), (a, b)];
+        sc.region(vec![sq(0.0, 4.0), sq(1.0, 3.0)], Color::hex(0xff0000));
+        let s = to_svg(&sc, &View { area: (0.0, 0.0, 4.0, 4.0), px_per_mm: 1.0 });
+        assert!(
+            s.contains(
+                r##"<path d="M0,4 L4,4 L4,0 L0,0 Z M1,3 L3,3 L3,1 L1,1 Z" fill="#ff0000" fill-rule="evenodd"/>"##
+            ),
+            "{s}"
+        );
     }
 }

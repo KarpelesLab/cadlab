@@ -13,7 +13,8 @@ model ──► Scene (lines, polygons, circles; text as strokes) ──► SVG 
   the same primitives, so they match; neither needs fonts installed.
 - Text uses the Hershey Simplex stroke font, embedded (`src/render/font/`, see its `NOTICE`), turned into
   polylines when added to the scene.
-- PNG resolution is set in pixels per millimeter (`--px-per-mm`, default 10 for sheets, 80 for footprints).
+- PNG resolution is set in pixels per millimeter (`--px-per-mm`, default 10 for sheets, 80 for footprints; boards
+  default to about 1600 px on the longer side).
 - PNG support is the default `png` feature (tiny-skia); SVG has no extra dependency.
 - Over MCP, a rendered PNG is returned as image content in the tool result.
 
@@ -24,11 +25,12 @@ model ──► Scene (lines, polygons, circles; text as strokes) ──► SVG 
 | `schematic` | auto-laid-out symbols, wires, labels, power symbols, refdes/values (`render.schematic`) |
 | `symbol` | one part's symbol (`render.symbol`) |
 | `footprint` | pads, paste windows, courtyard, silkscreen, fab outline (`render.footprint`) |
-| `board` | selected layers with standard colors, outline, drill holes |
-| `board --realistic` | soldermask color, silkscreen, exposed copper finish, as the fab would produce |
-| `ratsnest` overlay | unrouted connections as straight lines |
-| `drc` overlay | markers + labels for violations |
-| `highlight` | emphasize nets/components, dim everything else |
+| `board` | selected layers (`--layers`, default all copper + silk + outline) in viewer colors on a dark background: copper semi-transparent and unioned per layer (front red, back blue, inner amber/green/purple/...), silk white (front) / yellow (back), fab grey, courtyard magenta, mask/paste openings, outline yellow, drill holes; bottom-side footprints mirrored on `B.*` layers; refdes at the footprint origin on its silk layer, sized to the courtyard (`render.board`, `src/render/board.rs`) |
+| `board --around U1` | the same, cropped to a component's courtyard plus `--margin` (default 3 mm) |
+| `board --realistic top\|bottom` | solder mask over laminate and copper, silkscreen, exposed pads in the finish color (ENIG gold, HASL silver, OSP copper), colors from the `board.setup` preferences; the bottom view is mirrored as seen from below |
+| `ratsnest` overlay | unrouted connections as thin straight lines (on by default in `render.board`, `--ratsnest false` hides) |
+| `drc` overlay | markers + labels at given points (`render.board --markers '[{"at": ["5mm", "3mm"], "label": "clearance"}]'`) |
+| `highlight` | emphasize nets/components (`render.board --highlight GND,U1`), dim everything else |
 | `placement` | courtyards, refdes, orientation markers only: fast layout review |
 
 Annotations (dimensions, grid, scale bar, legend) are optional so agents can read real distances from images.

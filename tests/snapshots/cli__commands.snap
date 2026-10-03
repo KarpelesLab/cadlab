@@ -80,6 +80,7 @@ expression: names
   "schematic.place",
   "schematic.unplace",
   "schematic.export",
+  "render.board",
   "history.undo",
   "history.redo",
   "history.list"
