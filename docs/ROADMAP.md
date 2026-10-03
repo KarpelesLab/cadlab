@@ -77,7 +77,7 @@ Details in [RENDERING.md](RENDERING.md).
       net labels and power/ground symbols elsewhere; papers A4..A0
 - [ ] Layout improvements: group by block instance, denser packing, multi-sheet
 - [x] Optional manual hints (`schematic.place/unplace`) persisted in `schematic.json`
-- [ ] KiCad `.kicad_sch` export: lets `kicad-cli` run ERC as an oracle, and lets humans open it if they want
+- [x] KiCad `.kicad_sch` export (`schematic.export`): lets `kicad-cli` run ERC as an oracle, and lets humans open it if they want
 
 **Exit:** `cadlab render schematic -o sch.png` produces a readable schematic of the M2 board.
 

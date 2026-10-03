@@ -36,6 +36,13 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
 - **DRC:** compare violation sets by (type, objects involved, location within tolerance). Known semantic
   differences go in a reviewed allowlist with a reason for each entry.
 - **Routing:** metric comparison only (completion %, vias, length, time), with regression thresholds.
+- **Schematic** (`tests/kicad_oracle.rs`, from M3): the ATtiny85 board is exported with `schematic.export`, then
+  `kicad-cli sch erc` must report no errors (allowlisted warnings: `lib_symbol_issues` and
+  `footprint_link_issues`, because the embedded `cadlab`/`cadlab_power` libraries are not in KiCad's library
+  tables), and `kicad-cli sch export netlist` must give every cadlab net exactly the same (ref, pin) nodes,
+  under the same name (KiCad prefixes local labels with the sheet path `/`). A variant with rotated box symbols
+  checks the netlist only. Tested with KiCad 10.0.6. Example:
+  `CADLAB_ORACLES=1 CADLAB_ORACLE_KICAD_CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli cargo test --test kicad_oracle`.
 
 ### Oracle availability
 
