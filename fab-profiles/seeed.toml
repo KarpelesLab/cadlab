@@ -1,0 +1,164 @@
+# Seeed Fusion fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`,
+# read on `verified_at`; `cite` names the page per field, and `unverified` lists values kept although
+# they could not be confirmed there. Override any of it with ~/.config/cadlab/fab-profiles/seeed.toml
+# (tables merge key by key, other values replace).
+#
+# Copper weights are thicknesses: 1 oz = 35 um. Track/space minimums are the 1 oz values (4/4 mil;
+# 5/5 and 6/6 mil are cheaper options); 2 oz needs 10/10 mil and 3 oz 15/15 mil.
+
+id = "seeed"
+name = "Seeed Fusion"
+website = "https://www.seeedstudio.com/fusion.html"
+verified_at = "2026-10-04"
+sources = [
+    "https://support.seeed.cc/portal/en/kb/articles/fusion-pcb-specification",
+    "https://www.seeedstudio.com/fusion_pcb.html",
+    "https://support.seeed.cc/portal/en/kb/articles/fusion-pcba-specification",
+]
+notes = """Fusion PCB, rigid FR-4. Board size tolerance +/-0.2 mm, thickness +/-10% (+/-0.1 mm up to \
+1 mm). Hole to track >= 12 mil; inner track to hole >= 0.2 mm. Plated hole tolerance +/-0.075 mm, \
+NPTH +/-0.05 mm. Slots: non-plated >= 0.8 mm, plated >= 0.65 mm. Castellated holes >= 0.50 mm. \
+Silkscreen is white on green/red/yellow/blue/black mask and black on white mask. V-cut boards \
+55-380 mm. Mask dam 0.32 mm (green) / 0.35 mm (other colors) by default, 0.10 / 0.13 mm with the \
+0.1 mm dam option. The Advanced PCB service (other materials, more layers) is not modelled. Fusion \
+PCBA: both sides, through-hole supported; no minimum package size is stated."""
+
+[[process]]
+id = "two-layer"
+name = "Fusion PCB, 1-2 layers"
+layers = [1, 2]
+thickness = ["0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.5mm", "3.0mm"]
+outer_copper = ["35um", "70um"]  # 1, 2 oz
+min_track = "4mil"
+min_space = "4mil"
+min_drill = "0.2mm"
+max_drill = "5.8mm"           # PTH (NPTH up to 6.3 mm, larger ones milled)
+min_npth = "0.2mm"
+min_via_ring = "0.1mm"        # 4 mil
+min_pth_ring = "6mil"         # 0.152 mm
+hole_to_hole = "0.3mm"        # via to via, 12 mil
+pad_hole_to_hole = "0.45mm"   # plated through-holes, 18 mil
+copper_to_edge = "0.3mm"
+min_silk_width = "4mil"
+min_silk_height = "23mil"
+silk_to_pad = "6mil"
+mask_dam = "0.32mm"           # green, default; see notes
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP", "Hard gold"]
+mask_colors = ["Green", "Red", "Yellow", "Blue", "Black", "White"]
+silk_colors = ["White", "Black"]
+max_size = ["500mm", "500mm"]
+min_size = ["10mm", "10mm"]
+# The page lists copper weights 1, 2 and 3 oz but outer copper 0.035-0.07 mm (1-2 oz); 3 oz is
+# left out.
+unverified = ["outer_copper"]
+
+[[process]]
+id = "four-layer"
+name = "Fusion PCB, 4 layers"
+layers = [4]
+thickness = ["0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.5mm", "3.0mm"]
+outer_copper = ["35um", "70um"]
+inner_copper = ["17.5um"]     # 0.5 oz (page: 0.017 mm)
+min_track = "6mil"            # inner layer minimum (outer layers: 4 mil)
+min_space = "4mil"
+min_drill = "0.2mm"
+max_drill = "5.8mm"
+min_npth = "0.2mm"
+min_via_ring = "0.1mm"
+min_pth_ring = "6mil"
+hole_to_hole = "0.3mm"
+pad_hole_to_hole = "0.45mm"
+copper_to_edge = "0.3mm"
+min_silk_width = "4mil"
+min_silk_height = "23mil"
+silk_to_pad = "6mil"
+mask_dam = "0.32mm"
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP", "Hard gold"]
+mask_colors = ["Green", "Red", "Yellow", "Blue", "Black", "White"]
+silk_colors = ["White", "Black"]
+max_size = ["500mm", "500mm"]
+min_size = ["10mm", "10mm"]
+# Inner spacing is not given separately; the 4 mil value is the 1 oz (outer) one.
+unverified = ["outer_copper", "min_space"]
+
+[[process]]
+id = "six-layer"
+name = "Fusion PCB, 6 layers"
+layers = [6]
+thickness = ["1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.5mm", "3.0mm"]  # listed for 6-8 layers
+outer_copper = ["35um", "70um"]
+inner_copper = ["17.5um"]
+min_track = "6mil"
+min_space = "4mil"
+min_drill = "0.2mm"
+max_drill = "5.8mm"
+min_npth = "0.2mm"
+min_via_ring = "0.1mm"
+min_pth_ring = "6mil"
+hole_to_hole = "0.3mm"
+pad_hole_to_hole = "0.45mm"
+copper_to_edge = "0.3mm"
+min_silk_width = "4mil"
+min_silk_height = "23mil"
+silk_to_pad = "6mil"
+mask_dam = "0.32mm"
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP", "Hard gold"]
+mask_colors = ["Green", "Red", "Yellow", "Blue", "Black", "White"]
+silk_colors = ["White", "Black"]
+max_size = ["500mm", "500mm"]
+min_size = ["10mm", "10mm"]
+# Available layers are "1-6", but thicknesses are listed for "6-8 layers"; 8 layers is left out.
+unverified = ["outer_copper", "min_space", "thickness"]
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-seeed.zip"
+drill_format = "excellon"
+# Extensions from the specification's table (RS-274X, zip or rar). The table names a single drill
+# file (.TXT) and no paste layers; the NPTH and paste names are cadlab's generic ones.
+unverified = ["names"]
+[output.names]
+copper_top = "{project}.GTL"
+copper_inner = "{project}.GL{layer}"
+copper_bottom = "{project}.GBL"
+mask_top = "{project}.GTS"
+mask_bottom = "{project}.GBS"
+silk_top = "{project}.GTO"
+silk_bottom = "{project}.GBO"
+profile = "{project}.GKO"
+drill_pth = "{project}.TXT"
+
+[assembly]
+sides = ["top", "bottom"]
+through_hole = true
+# Seeed asks for an XY / centroid file without publishing its columns or origin.
+unverified = ["cpl.columns", "cpl.origin"]
+[assembly.cite]
+sides = "https://support.seeed.cc/portal/en/kb/articles/fusion-pcba-specification"
+through_hole = "https://support.seeed.cc/portal/en/kb/articles/fusion-pcba-specification"
+bom = "https://support.seeed.cc/portal/en/kb/articles/fusion-pcba-specification"
+cpl = "https://support.seeed.cc/portal/en/kb/articles/fusion-pcba-specification"
+
+# Columns of Seeed's BOM template (CSV, XLS or XLSX).
+[assembly.bom]
+file = "{project}-BOM-seeed.csv"
+columns = [
+    { header = "Part/Designator", field = "designators" },
+    { header = "Manufacturer Part Number/Seeed SKU", field = "mpn" },
+    { header = "Quantity", field = "quantity" },
+]
+
+[assembly.cpl]
+file = "{project}-CPL-seeed.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "Mid X", field = "x" },
+    { header = "Mid Y", field = "y" },
+    { header = "Layer", field = "side" },
+    { header = "Rotation", field = "rotation" },
+]
+side_names = ["Top", "Bottom"]
+origin = "board"

@@ -1,0 +1,58 @@
+# ALLPCB fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`; `cite` names the page per field, and `unverified` lists values kept although they
+# could not be confirmed there. Override any of it with ~/.config/cadlab/fab-profiles/allpcb.toml
+# (tables merge key by key, other values replace).
+#
+# ALLPCB publishes one rigid capability table for 1 to 14 layers. Track/space: 4 mil minimum, 6 mil
+# "strongly suggested" to save cost. Copper weights are thicknesses: 1 oz = 35 um.
+
+id = "allpcb"
+name = "ALLPCB"
+website = "https://www.allpcb.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://www.allpcb.com/standard_pcb_manufacturing_capability.html",
+    "https://www.allpcb.com/pcb_assembly_capability.html",
+    "https://www.allpcb.com/elements_for_auto_assembly.html",
+]
+notes = """Rigid FR-4 (Shengyi/Kingboard, Tg 170), 0.4-3.2 mm thick (no discrete options listed, \
+not checked); inner copper 18-70 um. Outline tolerance +/-0.15 mm. Hole tolerance +/-0.075 mm. \
+Same-net vias >= 8 mil apart. Aspect ratio <= 6:1 (7:1 to 8:1 adds a day). Slots >= 0.6 mm. \
+Max PTH 8 mm (drilling 0.2-6.5 mm, larger holes drilled in steps or milled). Castellated (half) \
+holes >= 1 mm, at most 10. Mask dam 0.1 mm may cost extra. Copper to V-cut >= 0.4 mm. HASL is not \
+available on 0.4 mm boards. The table's "Min 80*80mm" dimension is not used as a minimum board \
+size (it is not explained). Assembly (SMT and THT, one or two sides, 01005, boards under 50 x 50 \
+mm panelized) needs a centroid file and BOM, but ALLPCB publishes no BOM or placement layout, so \
+no [assembly] is modelled."""
+
+[[process]]
+id = "standard"
+name = "Rigid FR-4, 1-14 layers"
+layers = [1, 2, 4, 6, 8, 10, 12, 14]
+outer_copper = ["35um", "70um"]  # 1, 2 oz
+min_track = "4mil"
+min_space = "4mil"
+min_drill = "0.2mm"
+max_drill = "6.5mm"
+min_via_ring = "6mil"         # 0.153 mm
+min_pth_ring = "6mil"
+hole_to_hole = "17mil"        # vias on different nets
+pad_hole_to_hole = "24mil"    # component holes on different nets
+copper_to_edge = "0.3mm"      # individual boards
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+mask_dam = "0.1mm"
+castellated = true
+finishes = ["HASL", "ENIG", "Immersion silver", "Immersion tin", "OSP", "Hard gold", "Soft gold", "ENEPIG"]
+mask_colors = ["Green", "Red", "Blue", "White", "Black"]
+silk_colors = ["Green", "Red", "Blue", "White", "Black"]
+max_size = ["580mm", "506mm"]
+# Layer counts are given as "1-14"; the order form offers 1, 2, 4, ... 14.
+[process.cite]
+layers = "https://www.allpcb.com/elements_for_auto_assembly.html"
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-allpcb.zip"
+drill_format = "excellon"
+# No `names`: ALLPCB publishes no file naming convention.

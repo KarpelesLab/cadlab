@@ -152,7 +152,8 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] KiCad netlist import (circuits come in as netlists; no `.kicad_sch` parser, see DECISIONS D13):
   `circuit.import`, parts matched or created per DECISIONS D27, oracle round trip through `kicad-cli`
 - [ ] Round-trip and oracle tests on open-source projects fetched in CI
-- [ ] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow
+- [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
+  verified 2026-10-04; table in MANUFACTURING.md)
 
 ## M8 — Advanced electrical (L)
 

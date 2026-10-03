@@ -1,0 +1,237 @@
+# AISLER fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`; `cite` names the page per field, and `unverified` lists values kept although they
+# could not be confirmed there. Override any of it with ~/.config/cadlab/fab-profiles/aisler.toml
+# (tables merge key by key, other values replace).
+#
+# AISLER publishes one design rule page per product. The 35 um products are modelled; the 70 um
+# products have wider limits (2 layers: 225/225 um track/space with HASL, 175/175 um with ENIG; see
+# the 70 um design rule pages) and are not modelled. Copper weights are thicknesses: 1 oz = 35 um.
+# Drills up to 0.45 mm are vias (left as designed); larger ones are component holes, enlarged by
+# AISLER to compensate for plating.
+
+id = "aisler"
+name = "AISLER"
+website = "https://aisler.net"
+verified_at = "2026-10-04"
+sources = [
+    "https://community.aisler.net/t/2-layer-1-6mm-35-m-enig-design-rules/3732",
+    "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735",
+    "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733",
+    "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467",
+    "https://community.aisler.net/t/pcb-portfolio/101",
+    "https://community.aisler.net/t/pcb-design-rules/41",
+    "https://community.aisler.net/t/support-for-traditional-gerber-files/99",
+]
+notes = """Rigid FR-4 made in Germany, 1.6 mm (0.8 mm also for 4 layers). Small drills (< 0.3 mm), \
+castellated edges or track/space below 200/150 um require ENIG. NPTH to copper >= 0.25 mm, NPTH \
+slot to copper >= 0.3 mm. Slots: NPTH >= 0.8 mm (milled from 1.8 mm, smaller ones nibbled), PTH \
+0.7-2.6 mm with a 0.3 mm ring. Buried, blind, micro and tented vias, pressfit parts and user \
+subpanels are not supported; silkscreen over 25% of a side is rejected. Assembly (Amazing \
+Assembly) is ordered from native CAD, ODB++ or IPC files; AISLER states no assembly is possible \
+from traditional Gerber files and publishes no BOM/CPL layout, so no [assembly] is modelled."""
+
+[[process]]
+id = "two-layer"
+name = "2 Layer 1.6 mm 35 um ENIG"
+layers = [2]
+thickness = ["1.6mm"]
+outer_copper = ["35um"]
+min_track = "0.125mm"
+min_space = "0.125mm"
+min_drill = "0.25mm"          # via drill
+max_drill = "5.6mm"           # PTH and NPTH
+min_npth = "0.5mm"
+min_via_ring = "0.10mm"
+min_pth_ring = "0.30mm"
+hole_to_hole = "0.30mm"       # drill spacing
+copper_to_edge = "0.30mm"
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+silk_to_pad = "0.125mm"
+mask_dam = "0.10mm"
+castellated = true
+finishes = ["ENIG"]
+mask_colors = ["Green", "White", "Black", "Red", "Blue"]
+silk_colors = ["White", "Black"]
+max_size = ["500mm", "500mm"]
+min_size = ["10mm", "10mm"]   # "> 10 mm" in the smallest dimension
+[process.cite]
+mask_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+silk_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+
+[[process]]
+id = "two-layer-hasl"
+name = "2 Layer 1.6 mm 35 um HASL"
+layers = [2]
+thickness = ["1.6mm"]
+outer_copper = ["35um"]
+min_track = "0.20mm"
+min_space = "0.15mm"
+min_drill = "0.30mm"          # may be enlarged up to 0.45 mm
+max_drill = "5.6mm"
+min_npth = "0.5mm"
+min_via_ring = "0.20mm"       # 175 um absolute minimum, 200 um required wherever possible
+min_pth_ring = "0.30mm"
+hole_to_hole = "0.30mm"
+copper_to_edge = "0.30mm"
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+silk_to_pad = "0.125mm"
+mask_dam = "0.10mm"           # required between pads with HASL
+castellated = false
+finishes = ["HASL lead-free"]
+mask_colors = ["Green", "White", "Black", "Red", "Blue"]
+silk_colors = ["White", "Black"]
+max_size = ["500mm", "500mm"]
+min_size = ["10mm", "10mm"]
+[process.cite]
+layers = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+thickness = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+outer_copper = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_track = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_space = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_drill = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+max_drill = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_npth = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_via_ring = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_pth_ring = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+hole_to_hole = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+copper_to_edge = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_silk_width = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_silk_height = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+silk_to_pad = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+mask_dam = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+castellated = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+finishes = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+mask_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+silk_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+max_size = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+min_size = "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735"
+
+[[process]]
+id = "four-layer"
+name = "4 Layer 35 um ENIG (1.6 or 0.8 mm)"
+layers = [4]
+thickness = ["1.6mm", "0.8mm"]
+outer_copper = ["35um"]
+inner_copper = ["35um"]
+min_track = "0.125mm"
+min_space = "0.125mm"
+min_drill = "0.25mm"
+max_drill = "5.6mm"
+min_npth = "0.5mm"
+min_via_ring = "0.10mm"
+min_pth_ring = "0.30mm"
+hole_to_hole = "0.30mm"
+copper_to_edge = "0.30mm"
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+silk_to_pad = "0.125mm"
+mask_dam = "0.10mm"
+castellated = true
+finishes = ["ENIG"]
+mask_colors = ["Green", "White", "Black", "Red", "Blue"]
+silk_colors = ["White", "Black"]
+max_size = ["500mm", "500mm"]
+min_size = ["10mm", "10mm"]
+[process.cite]
+layers = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+thickness = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+outer_copper = "https://community.aisler.net/t/pcb-portfolio/101"
+inner_copper = "https://community.aisler.net/t/pcb-portfolio/101"
+min_track = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_space = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_drill = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+max_drill = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_npth = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_via_ring = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_pth_ring = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+hole_to_hole = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+copper_to_edge = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_silk_width = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_silk_height = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+silk_to_pad = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+mask_dam = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+castellated = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+finishes = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+mask_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+silk_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+max_size = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+min_size = "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733"
+
+[[process]]
+id = "multilayer"
+name = "6 and 8 Layer 1.6 mm 35 um ENIG"
+layers = [6, 8]
+thickness = ["1.6mm"]
+outer_copper = ["35um"]
+inner_copper = ["35um"]
+min_track = "0.10mm"
+min_space = "0.10mm"
+min_drill = "0.25mm"
+max_drill = "5.6mm"
+min_npth = "0.5mm"
+min_via_ring = "0.10mm"
+min_pth_ring = "0.30mm"
+hole_to_hole = "0.30mm"
+copper_to_edge = "0.30mm"
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+silk_to_pad = "0.125mm"
+mask_dam = "0.10mm"
+castellated = true
+finishes = ["ENIG"]
+mask_colors = ["Green", "White", "Black", "Red", "Blue"]
+silk_colors = ["White", "Black"]
+max_size = ["500mm", "500mm"]
+min_size = ["10mm", "10mm"]
+[process.cite]
+layers = "https://community.aisler.net/t/pcb-portfolio/101"
+thickness = "https://community.aisler.net/t/pcb-portfolio/101"
+outer_copper = "https://community.aisler.net/t/pcb-portfolio/101"
+inner_copper = "https://community.aisler.net/t/pcb-portfolio/101"
+min_track = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_space = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_drill = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+max_drill = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_npth = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_via_ring = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_pth_ring = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+hole_to_hole = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+copper_to_edge = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_silk_width = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_silk_height = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+silk_to_pad = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+mask_dam = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+castellated = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+finishes = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+mask_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+silk_colors = "https://community.aisler.net/t/pcb-portfolio/101"
+max_size = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+min_size = "https://community.aisler.net/t/6l-layer-35-m-enig-design-rules/5467"
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-aisler.zip"
+drill_format = "excellon"
+# AISLER asks for drill files in inches with 2:4 precision; cadlab writes metric Excellon (XNC).
+# AISLER recommends ODB++ or native CAD files over Gerber.
+unverified = ["drill_format"]
+[output.cite]
+names = "https://community.aisler.net/t/support-for-traditional-gerber-files/99"
+archive = "https://community.aisler.net/t/support-for-traditional-gerber-files/99"
+drill_format = "https://community.aisler.net/t/support-for-traditional-gerber-files/99"
+# AISLER's naming table for traditional Gerber files; internal planes are numbered from 1.
+[output.names]
+copper_top = "{project}.toplayer.ger"
+copper_inner = "{project}.internalplane{n}.ger"
+copper_bottom = "{project}.bottomlayer.ger"
+mask_top = "{project}.topsoldermask.ger"
+mask_bottom = "{project}.bottomsoldermask.ger"
+paste_top = "{project}.toppaste.ger"
+paste_bottom = "{project}.bottompaste.ger"
+silk_top = "{project}.topsilkscreen.ger"
+silk_bottom = "{project}.bottomsilkscreen.ger"
+profile = "{project}.boardoutline.ger"
+drill_pth = "{project}.drills_pth.xln"
+drill_npth = "{project}.holes_npth.xln"

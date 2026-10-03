@@ -96,7 +96,19 @@ fn list_and_show() {
     let o = exec(&r, &mut s, "fab.list", json!({}));
     let ids: Vec<&str> =
         o["output"]["profiles"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
-    for id in ["generic", "jlcpcb", "pcbway"] {
+    for id in [
+        "generic",
+        "jlcpcb",
+        "pcbway",
+        "oshpark",
+        "aisler",
+        "eurocircuits",
+        "seeed",
+        "nextpcb",
+        "pcbgogo",
+        "allpcb",
+        "elecrow",
+    ] {
         assert!(ids.contains(&id), "{ids:?}");
     }
     let o = exec(&r, &mut s, "fab.show", json!({"fab": "jlcpcb"}));
@@ -134,6 +146,36 @@ fn profiles_are_sourced_and_consistent() {
     assert_eq!(j.process_for(4).unwrap().id, "four-layer");
     assert_eq!(j.process_for(8).unwrap().id, "multilayer");
     assert!(j.process_for(3).is_none());
+}
+
+/// Every built-in profile checks and exports the clean board: errors only where the profile
+/// publishes a stricter limit than the board uses, and a complete, deterministic bundle.
+#[test]
+fn every_builtin_profile_checks_and_exports() {
+    let (d, r, mut s) = routed();
+    let ps = Profiles::builtin();
+    let mut errors = BTreeMap::new();
+    for fab in ps.ids() {
+        let o = exec(&r, &mut s, "fab.check", json!({"fab": fab, "parts": false}));
+        assert!(o["output"]["process"].is_string(), "{fab}");
+        let e = codes(&o, "error");
+        if !e.is_empty() {
+            errors.insert(fab.to_string(), e);
+        }
+        let o = exec(&r, &mut s, "fab.export", json!({"fab": fab, "force": true, "dir": format!("out/{fab}")}));
+        let files = o["output"]["files"].as_array().unwrap();
+        assert!(files.len() >= 10, "{fab}: {files:#?}");
+        let lock = d.path().join(format!("p/out/{fab}/fab-lock.json"));
+        let lock: Value = serde_json::from_str(&std::fs::read_to_string(lock).unwrap()).unwrap();
+        assert_eq!(lock["profile"]["id"], fab);
+    }
+    // Real differences: Eurocircuits pools 1.55 mm boards (the board asks for 1.6 mm), and
+    // ALLPCB asks for 6 mil (0.1524 mm) rings where the board's vias and pads have 0.15 mm.
+    let expected = BTreeMap::from([
+        ("allpcb".to_string(), vec!["fab.annular_ring".to_string(); 3]),
+        ("eurocircuits".to_string(), vec!["fab.thickness".to_string()]),
+    ]);
+    assert_eq!(errors, expected);
 }
 
 #[test]
@@ -183,11 +225,33 @@ fn thin_tracks_fail_where_the_minimum_is_larger() {
     assert_eq!(rows[2]["feasible"], false);
     assert_eq!(rows[2]["failing"], json!(["fab.track_width"]));
 
-    // 0.09 mm is below both fabs' 2-layer minimum.
+    // 0.09 mm: across every built-in fab, exactly those whose 2-layer minimum is larger fail,
+    // and track width fails only there (NextPCB and PCBgogo publish 3 mil). The other failures
+    // are those of `every_builtin_profile_checks_and_exports`.
     thin_track(&mut s, 90);
     let o = exec(&r, &mut s, "fab.compare", json!({}));
     let rows = o["output"]["fabs"].as_array().unwrap();
-    assert!(rows.iter().all(|r| r["feasible"] == false && r["failing"] == json!(["fab.track_width"])), "{rows:#?}");
+    let ps = Profiles::builtin();
+    assert_eq!(rows.len(), ps.profiles.len());
+    let mut passing = Vec::new();
+    for row in rows {
+        let fab = row["fab"].as_str().unwrap();
+        let min = ps.get(fab).unwrap().process_for(2).unwrap().min_track.unwrap();
+        let failing = row["failing"].as_array().unwrap();
+        let track = failing.iter().any(|c| c == "fab.track_width");
+        assert_eq!(track, min > Nm::from_um(90), "{row:#}");
+        let other = match fab {
+            "allpcb" => vec![json!("fab.annular_ring")],
+            "eurocircuits" => vec![json!("fab.thickness")],
+            _ => vec![],
+        };
+        assert_eq!(failing.iter().filter(|c| *c != "fab.track_width").cloned().collect::<Vec<_>>(), other, "{row:#}");
+        if row["feasible"] == true {
+            passing.push(fab);
+        }
+    }
+    passing.sort();
+    assert_eq!(passing, ["nextpcb", "pcbgogo"]);
 }
 
 #[test]

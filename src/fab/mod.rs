@@ -30,6 +30,14 @@ pub use sha256::sha256_hex;
 const BUILTIN: &[(&str, &str)] = &[
     ("jlcpcb.toml", include_str!("../../fab-profiles/jlcpcb.toml")),
     ("pcbway.toml", include_str!("../../fab-profiles/pcbway.toml")),
+    ("oshpark.toml", include_str!("../../fab-profiles/oshpark.toml")),
+    ("aisler.toml", include_str!("../../fab-profiles/aisler.toml")),
+    ("eurocircuits.toml", include_str!("../../fab-profiles/eurocircuits.toml")),
+    ("seeed.toml", include_str!("../../fab-profiles/seeed.toml")),
+    ("nextpcb.toml", include_str!("../../fab-profiles/nextpcb.toml")),
+    ("pcbgogo.toml", include_str!("../../fab-profiles/pcbgogo.toml")),
+    ("allpcb.toml", include_str!("../../fab-profiles/allpcb.toml")),
+    ("elecrow.toml", include_str!("../../fab-profiles/elecrow.toml")),
     ("generic.toml", include_str!("../../fab-profiles/generic.toml")),
 ];
 
@@ -713,7 +721,22 @@ mod tests {
     fn builtins_parse_and_validate() {
         let ps = Profiles::builtin();
         assert!(ps.warnings.is_empty(), "{:?}", ps.warnings);
-        assert_eq!(ps.ids(), ["generic", "jlcpcb", "pcbway"]);
+        assert_eq!(
+            ps.ids(),
+            [
+                "aisler",
+                "allpcb",
+                "elecrow",
+                "eurocircuits",
+                "generic",
+                "jlcpcb",
+                "nextpcb",
+                "oshpark",
+                "pcbgogo",
+                "pcbway",
+                "seeed"
+            ]
+        );
         for (p, _) in ps.profiles.values() {
             assert!(p.sources.iter().all(|s| s.starts_with("https://") || s.starts_with("docs/")), "{}", p.id);
             assert!(p.process_for(2).is_some(), "{} makes 2-layer boards", p.id);
@@ -749,7 +772,23 @@ mod tests {
         let generic = include_str!("../../fab-profiles/generic.toml").replace("id = \"generic\"", "id = \"myfab\"");
         std::fs::write(dir.path().join("myfab.toml"), generic).unwrap();
         let ps = Profiles::load_from(Some(dir.path()));
-        assert_eq!(ps.ids(), ["generic", "jlcpcb", "myfab", "pcbway"]);
+        assert_eq!(
+            ps.ids(),
+            [
+                "aisler",
+                "allpcb",
+                "elecrow",
+                "eurocircuits",
+                "generic",
+                "jlcpcb",
+                "myfab",
+                "nextpcb",
+                "oshpark",
+                "pcbgogo",
+                "pcbway",
+                "seeed"
+            ]
+        );
         assert_eq!(ps.get("jlcpcb").unwrap().notes.as_deref(), Some("mine"));
         assert_eq!(ps.profiles["jlcpcb"].1, ProfileSource::Merged);
         assert_eq!(ps.profiles["myfab"].1, ProfileSource::User);
