@@ -24,7 +24,7 @@ required-features = ["cli"]
 doc = false
 
 [dependencies]
-polyclip = { version = "0.0.1", features = ["serde"] }
+polyclip = { version = "0.0.2", features = ["serde"] }
 
 indexmap = { version = "2.14", features = ["serde"] }
 schemars = "1.2"
