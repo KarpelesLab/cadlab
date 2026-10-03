@@ -1,4 +1,4 @@
-//! `circuit.*`: components (nets arrive in M2).
+//! `circuit.*`: components, ERC, netlist export and import.
 
 use std::collections::BTreeMap;
 
@@ -16,13 +16,11 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Rename>()
         .register::<Summary>()
         .register::<Erc>()
-        .register::<Export>();
+        .register::<Export>()
+        .register::<Import>();
 }
 
-fn valid_refdes(s: &str) -> bool {
-    let letters = s.trim_end_matches(|c: char| c.is_ascii_digit());
-    !letters.is_empty() && letters.len() < s.len() && letters.chars().all(|c| c.is_ascii_uppercase() || c == '_')
-}
+use crate::model::circuit::valid_refdes;
 
 /// Add components: one or more instances of a part.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -436,5 +434,91 @@ impl Command for Export {
 
     fn summarize(o: &Exported) -> String {
         format!("wrote {} ({} components, {} nets)", o.path, o.components, o.nets)
+    }
+}
+
+/// Netlist formats that can be imported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportFormat {
+    /// KiCad netlist (.net, S-expression), as written by `kicad-cli sch export netlist`.
+    #[default]
+    Kicad,
+}
+
+/// Import a netlist (KiCad .net) into the circuit. Components keep their designators and are
+/// matched to project parts (symbol name, MPN, value + footprint); unmatched passives become
+/// generic parts, anything else gets a part built from the netlist's pins (a placeholder, with a
+/// warning, when it lacks an MPN or a footprint). Nets keep their names.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Import {
+    /// Netlist file (relative paths are relative to the project directory).
+    pub path: std::path::PathBuf,
+    /// Format (only `kicad`).
+    #[serde(default)]
+    pub format: ImportFormat,
+    /// Replace the circuit: remove every component and net first. Board placements of
+    /// components that are in the netlist are kept. Without it, designators must be free.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
+}
+
+impl Command for Import {
+    const NAME: &'static str = "circuit.import";
+    const SUMMARY: &'static str = "Import a KiCad netlist (.net): components matched to parts, nets with their names";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = crate::netlist::import::ImportReport;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Self::Output, CommandError> {
+        use crate::netlist::import::{self, ImportErrorKind, ImportOptions};
+        ctx.project()?;
+        let path = match ctx.session.root() {
+            Some(root) if self.path.is_relative() => root.join(&self.path),
+            _ => self.path.clone(),
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| CommandError::from(crate::model::ModelError::Io { path: path.clone(), source: e }))?;
+        let ImportFormat::Kicad = self.format;
+        let to_error = |e: import::ImportError| {
+            let mut err = match e.kind {
+                ImportErrorKind::Invalid => CommandError::invalid_args(e.code, e.message),
+                ImportErrorKind::Conflict => CommandError::conflict(e.code, e.message),
+            }
+            .with_hint(e.hint);
+            for s in e.subjects {
+                err = err.with_subject(s);
+            }
+            err
+        };
+        let nl = import::parse_kicad(&text).map_err(to_error)?;
+        let opts = ImportOptions {
+            replace: self.replace,
+            file_name: path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+        };
+        let (report, diags) = import::import(ctx.project_mut()?, &nl, &opts).map_err(to_error)?;
+        for d in diags {
+            ctx.report(d);
+        }
+        Ok(report)
+    }
+
+    fn summarize(o: &Self::Output) -> String {
+        let mut s = format!("imported {} components, {} nets", o.components, o.nets);
+        if o.replaced > 0 {
+            s += &format!(" (replaced {} components)", o.replaced);
+        }
+        for p in &o.parts {
+            let how = serde_json::to_value(p.resolution).ok().and_then(|v| v.as_str().map(String::from));
+            s += &format!(
+                "\n  {:<15} {}{}: {}",
+                how.unwrap_or_default(),
+                p.part,
+                if p.created { " (new)" } else { "" },
+                p.refdes.join(", ")
+            );
+        }
+        s
     }
 }

@@ -60,7 +60,8 @@ KiCad is GPL. cadlab (MIT) uses it **only as a verification oracle**, plus file-
 - Main purpose: export cadlab designs to KiCad so `kicad-cli` can independently run DRC/ERC and generate Gerbers to
   compare against ours (see [TESTING.md](TESTING.md)).
 - Import for migration covers boards (`.kicad_pcb`) and netlists. Schematics come in as a netlist exported by
-  `kicad-cli`; there is no `.kicad_sch` parser (DECISIONS D13).
+  `kicad-cli`; there is no `.kicad_sch` parser (DECISIONS D13). Netlist import is `circuit.import` (M7):
+  components matched to project parts or created as generic, concrete or placeholder parts (DECISIONS D27).
 - KiCad's official symbol/footprint/3D libraries are **not** bundled, converted or used as a data source. cadlab
   generates its own (see [PARTS.md](PARTS.md)).
 

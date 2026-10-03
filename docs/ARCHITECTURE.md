@@ -24,7 +24,8 @@ cadlab/
 
 M1 added `value` (exact electrical quantities), `landpattern` (IPC-7351B footprints), `symbolgen`, `partspec`
 (generic part specs), `bom`, `supplier` (providers, catalogs, cache), `sourcing`, `config` (user settings) and
-`userlib` (shared libraries outside projects, D19). Modules to come: `erc` (M2),
+`userlib` (shared libraries outside projects, D19). M7 added `sexpr` (S-expression reader for KiCad files)
+and `netlist::import` (D27). Modules to come: `erc` (M2),
 `schematic` and `render` (M3), `board`, `drc`, `io` and `fab` (M4), `router` (M5). Spin-off candidates: the
 router, Gerber/Excellon I/O, the footprint generator (`landpattern`).
 

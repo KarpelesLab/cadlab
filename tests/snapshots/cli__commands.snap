@@ -26,6 +26,7 @@ expression: names
   "circuit.summary",
   "circuit.erc",
   "circuit.export",
+  "circuit.import",
   "net.connect",
   "net.disconnect",
   "net.no_connect",
