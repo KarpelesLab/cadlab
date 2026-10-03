@@ -41,7 +41,10 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
   `footprint_link_issues`, because the embedded `cadlab`/`cadlab_power` libraries are not in KiCad's library
   tables), and `kicad-cli sch export netlist` must give every cadlab net exactly the same (ref, pin) nodes,
   under the same name (KiCad prefixes local labels with the sheet path `/`). A variant with rotated box symbols
-  checks the netlist only. Tested with KiCad 10.0.6. Example:
+  checks the netlist only. Netlist import (M7) closes the loop: KiCad's netlist of the exported schematic,
+  read back with `circuit.import` into an empty project, must give the original nets, designators, values and
+  pin names and types (ATtiny85 and STM32 boards); `tests/netlist_import.rs` covers cadlab's own netlist
+  export → import without KiCad. Tested with KiCad 10.0.6. Example:
   `CADLAB_ORACLES=1 CADLAB_ORACLE_KICAD_CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli cargo test --test kicad_oracle`.
 
 ### KiCad board oracle (`tests/kicad_pcb_oracle.rs`)

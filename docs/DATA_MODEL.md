@@ -82,6 +82,7 @@ cadlab net no-connect U2.PB4                      # intentionally open
 cadlab block create status_led R2 D1               # capture; then: block instantiate status_led LED2
 cadlab circuit erc                                # exit code 3 on errors
 cadlab circuit export out/board.net               # KiCad netlist; --format json
+cadlab circuit import kicad.net                   # KiCad netlist in (kicad-cli sch export netlist); --replace
 ```
 
 `circuit.json` stores nets as sets of `REFDES.PIN` (pin *numbers*), one net per line. Connecting a pin that

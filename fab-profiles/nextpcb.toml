@@ -1,0 +1,151 @@
+# NextPCB fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`; `cite` names the page per field, and `unverified` lists values kept although they
+# could not be confirmed there. Override any of it with ~/.config/cadlab/fab-profiles/nextpcb.toml
+# (tables merge key by key, other values replace).
+#
+# NextPCB publishes one capability table for all rigid FR-4 boards (1 to 32 layers); only the board
+# size is given per layer count. Copper weights are thicknesses: 1 oz = 35 um. Track/space minimums
+# are the 1 oz outer values (3/3 mil); 2 oz outer needs 5.5/5.5 mil, 0.5 oz inner allows 2.5/3 mil.
+
+id = "nextpcb"
+name = "NextPCB"
+website = "https://www.nextpcb.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://www.nextpcb.com/pcb-capabilities",
+    "https://www.nextpcb.com/pcb-assembly-capabilities",
+    "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly-files-explanation",
+]
+notes = """Rigid FR-4 (Tg 130/150/170). Outline tolerance +/-0.15 mm (CNC), +/-0.2 mm (V-cut). Hole \
+tolerance: plated +/-0.075 mm, non-plated +/-0.05 mm. Same-net via spacing >= 8 mil; component \
+pads with holes (different nets) >= 0.40 mm apart; SMD pad to pad >= 0.15 mm. Via to track 7 mil, \
+PTH to track 9 mil, NPTH to track 8 mil, SMD pad to track 4 mil. Slots >= 0.5 mm. Castellated holes \
+>= 0.5 mm. Copper to V-cut >= 0.4 mm. Mask dam 3.5 mil green, 4 mil other colors, 5 mil black and \
+white. Silkscreen 5 mil line / 30 mil text (screen printing); 3 mil / 24 mil with the printer. \
+Annular ring for 2 oz copper 4.5 mil. HDI (blind/buried, laser vias) is not modelled. The \
+capability page does not list surface finishes or silkscreen colors."""
+
+[[process]]
+id = "two-layer"
+name = "Rigid FR-4, 1-2 layers"
+layers = [1, 2]
+thickness = ["0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.5mm", "3.0mm", "3.2mm"]
+outer_copper = ["35um", "70um"]  # 1, 2 oz
+min_track = "3mil"
+min_space = "3mil"
+min_drill = "0.2mm"           # 0.15 mm only for boards up to 1.2 mm thick
+max_drill = "6.5mm"
+min_npth = "0.4mm"
+min_via_ring = "3.5mil"
+min_pth_ring = "3.5mil"
+hole_to_hole = "12mil"        # different nets
+copper_to_edge = "0.2mm"      # CNC routed edge
+min_silk_width = "5mil"
+min_silk_height = "30mil"
+silk_to_pad = "6mil"
+mask_dam = "3.5mil"           # green
+castellated = true
+mask_colors = ["Green", "Red", "Yellow", "Blue", "White", "Matte Black", "Black"]
+max_size = ["1500mm", "600mm"]
+min_size = ["10mm", "10mm"]
+# The drill row gives 0.15-6.5 mm (0.15 mm up to 1.2 mm thickness); the PTH row gives >= 0.2 mm.
+unverified = ["min_drill"]
+
+[[process]]
+id = "four-layer"
+name = "Rigid FR-4, 4 layers"
+layers = [4]
+thickness = ["0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.5mm", "3.0mm", "3.2mm"]
+outer_copper = ["35um", "70um"]
+inner_copper = ["17.5um", "35um", "70um"]  # 0.5, 1, 2 oz
+min_track = "3mil"
+min_space = "3mil"
+min_drill = "0.2mm"
+max_drill = "6.5mm"
+min_npth = "0.4mm"
+min_via_ring = "3.5mil"
+min_pth_ring = "3.5mil"
+hole_to_hole = "12mil"
+copper_to_edge = "0.2mm"
+min_silk_width = "5mil"
+min_silk_height = "30mil"
+silk_to_pad = "6mil"
+mask_dam = "3.5mil"
+castellated = true
+mask_colors = ["Green", "Red", "Yellow", "Blue", "White", "Matte Black", "Black"]
+max_size = ["1500mm", "500mm"]
+min_size = ["10mm", "10mm"]
+# Thickness options are not given per layer count.
+unverified = ["thickness", "min_drill"]
+
+[[process]]
+id = "multilayer"
+name = "Rigid FR-4, 6-32 layers"
+layers = [6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
+thickness = ["0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm", "2.5mm", "3.0mm", "3.2mm"]
+outer_copper = ["35um", "70um"]
+inner_copper = ["17.5um", "35um", "70um"]
+min_track = "3mil"
+min_space = "3mil"
+min_drill = "0.2mm"
+max_drill = "6.5mm"
+min_npth = "0.4mm"
+min_via_ring = "3.5mil"
+min_pth_ring = "3.5mil"
+hole_to_hole = "12mil"
+copper_to_edge = "0.2mm"
+min_silk_width = "5mil"
+min_silk_height = "30mil"
+silk_to_pad = "6mil"
+mask_dam = "3.5mil"
+castellated = true
+mask_colors = ["Green", "Red", "Yellow", "Blue", "White", "Matte Black", "Black"]
+max_size = ["500mm", "400mm"]
+min_size = ["10mm", "10mm"]
+# Layer counts are given as "1 - 32"; odd counts are left out. Thickness options are not given
+# per layer count.
+unverified = ["layers", "thickness", "min_drill"]
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-nextpcb.zip"
+drill_format = "excellon"
+# No `names`: NextPCB asks for RS-274X or X2 Gerber and Excellon drill files without a naming
+# convention.
+[output.cite]
+drill_format = "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly-files-explanation"
+
+[assembly]
+sides = ["top", "bottom"]
+min_package = "01005"
+through_hole = true
+# NextPCB lists the centroid content (designator, X, Y, rotation, side) but not its column names,
+# units or origin; the exact BOM headers come from its template, which was not read.
+unverified = ["bom.columns", "cpl.columns", "cpl.origin"]
+[assembly.cite]
+sides = "https://www.nextpcb.com/pcb-assembly-capabilities"
+min_package = "https://www.nextpcb.com/pcb-assembly-capabilities"
+through_hole = "https://www.nextpcb.com/pcb-assembly-capabilities"
+bom = "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly-files-explanation"
+cpl = "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly-files-explanation"
+
+# Required BOM fields: Designator, Quantity, Manufacturer Part Number.
+[assembly.bom]
+file = "{project}-BOM-nextpcb.csv"
+columns = [
+    { header = "Designator", field = "designators" },
+    { header = "Quantity", field = "quantity" },
+    { header = "Manufacturer Part Number", field = "mpn" },
+]
+
+[assembly.cpl]
+file = "{project}-CPL-nextpcb.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "X", field = "x" },
+    { header = "Y", field = "y" },
+    { header = "Rotation", field = "rotation" },
+    { header = "Side", field = "side" },
+]
+side_names = ["Top", "Bottom"]
+origin = "board"

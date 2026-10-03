@@ -61,7 +61,8 @@ KiCad is GPL. cadlab (MIT) uses it **only as a verification oracle**, plus file-
 - Main purpose: export cadlab designs to KiCad so `kicad-cli` can independently run DRC/ERC and generate Gerbers to
   compare against ours (see [TESTING.md](TESTING.md)).
 - Import for migration covers boards (`.kicad_pcb`) and netlists. Schematics come in as a netlist exported by
-  `kicad-cli`; there is no `.kicad_sch` parser (DECISIONS D13).
+  `kicad-cli`; there is no `.kicad_sch` parser (DECISIONS D13). Netlist import is `circuit.import` (M7):
+  components matched to project parts or created as generic, concrete or placeholder parts (DECISIONS D27).
 - KiCad's official symbol/footprint/3D libraries are **not** bundled, converted or used as a data source. cadlab
   generates its own (see [PARTS.md](PARTS.md)).
 
@@ -71,8 +72,24 @@ Each manufacturer is described by a **fab profile**, a data file (TOML) shipped 
 Capabilities change over time, so every value carries its source URL and the date it was verified. The values
 must be filled from each fab's current published capabilities, not from memory.
 
-Built-in profiles live in `fab-profiles/` (embedded in the binary): `jlcpcb`, `pcbway` and `generic` (cadlab's
-conservative IPC class 2 defaults, for any other fab). Users add profiles or override built-in ones with
+Built-in profiles live in `fab-profiles/` (embedded in the binary), all verified 2026-10-04 against the fab's own
+pages (`fab.show <id>` lists sources and unverified values):
+
+| ID | Processes (layers) | Assembly (BOM/CPL layout) | File names | Unverified / left out (main ones) |
+|---|---|---|---|---|
+| `jlcpcb` | 1, 2, 4, 6–32 | yes, LCSC SKUs | JLCPCB's | CPL origin |
+| `pcbway` | 1–2, 4–14 | yes | generic | CPL columns/origin; drill and copper where its pages disagree |
+| `oshpark` | 2 (1 oz, 2 oz), 4, 6 | no service | generic (auto-detected) | drill format; no max drill (milled), no silk height |
+| `aisler` | 2 (ENIG, HASL), 4, 6–8 | not from Gerbers | Aisler's table | drill format (asks inch 2:4) |
+| `eurocircuits` | 1–2 and 4–8 pooling, PCB proto 2/4 | yes (content only) | generic | hole-to-hole (derived), finishes, multilayer thickness, BOM/CPL headers |
+| `seeed` | 1–2, 4, 6 | yes | Seeed's (one drill file) | outer copper, multilayer spacing, 6-layer thickness, names, CPL columns (JS-rendered pages) |
+| `nextpcb` | 1–2, 4, 6–32 | yes | generic | min drill, multilayer layers/thickness, BOM/CPL headers; no finish list |
+| `pcbgogo` | 1–2, 4–40 | yes | generic | min NPTH, silk height, double-sided assembly, CPL layout; no thickness/copper options |
+| `allpcb` | 1–14 (one table) | not published | generic | no thickness/copper options, min size, inner copper |
+| `elecrow` | 1–2, 4–8 | yes | Elecrow's | track/space, drill, multilayer rings, names, BOM/CPL headers |
+| `generic` | any | — | generic | cadlab's conservative IPC class 2 defaults, for any other fab |
+
+Values a fab does not publish are left out (not checked), never filled in from elsewhere. Users add profiles or override built-in ones with
 `*.toml` files in `~/.config/cadlab/fab-profiles/` (`$XDG_CONFIG_HOME/cadlab/fab-profiles/`). A user file whose
 `id` (or file stem) matches a built-in profile is merged onto it: tables merge key by key, other values (arrays
 included) replace. Code: `src/fab/` (types, loading, `check`, `export`).
@@ -193,7 +210,7 @@ Support as many as practical, in this order:
 
 1. **JLCPCB**: PCB + assembly, LCSC parts catalog.
 2. **PCBWay**: PCB + assembly.
-3. Then: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow, and a
+3. Then (profiles shipped in M7): OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow, and a
    **generic IPC class 2 / class 3** profile for any other manufacturer.
 
 Adding a fab should only need a profile file and, if needed, a small output-format adapter (BOM/CPL layout), with no

@@ -1,0 +1,208 @@
+# Eurocircuits fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`,
+# read on `verified_at`; `cite` names the page per field, and `unverified` lists values kept although
+# they could not be confirmed there. Override any of it with
+# ~/.config/cadlab/fab-profiles/eurocircuits.toml (tables merge key by key, other values replace).
+#
+# Eurocircuits grades designs by pattern class (track, gap, rings) and drill class (smallest tool);
+# the service decides which classes are pooled. Modelled: STANDARD pool at its pooling limits
+# (pattern class 8: 0.100 mm track/gap; drill class E: 0.10 mm finished PTH) and PCB proto (pattern
+# class 6, drill class C). Eurocircuits drills with TOOLSIZE = finished hole + 0.10 mm for PTH.
+# Copper values are base foils, before plating. The 0.100 mm track/gap needs <= 18 um outer base
+# copper (classification table: 35 um allows 0.125 mm, 70 um 0.200 mm, 105 um 0.250 mm).
+
+id = "eurocircuits"
+name = "Eurocircuits"
+website = "https://www.eurocircuits.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://www.eurocircuits.com/services/standard-pool/",
+    "https://www.eurocircuits.com/services/pcb-proto/",
+    "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/classification/",
+    "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/drilled-holes/",
+    "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/",
+    "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/soldermask/",
+    "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/input-data-formats/",
+    "https://www.eurocircuits.com/services/pcb-assembly-capabilities/",
+    "https://www.eurocircuits.com/technical-guidelines/pcb-assembly-guidelines/bom-cpl-data/",
+    "https://www.eurocircuits.com/user-guides/visualizer-user-guides/upload-bom-data-user-guide/",
+    "https://www.eurocircuits.com/user-guides/visualizer-user-guides/upload-cpl-data-user-guide/",
+]
+notes = """European pooling service on FR-4 (Tg 150). STANDARD pool non-pooling options (10-16 layers, \
+0.090 mm track/gap, immersion silver, transparent mask, other builds) are not modelled; neither \
+are the DEFINED IMPEDANCE, RF, IMS, SEMI-FLEX, HDI and BINDI pools. Copper to edge: inner layers \
+0.400 mm routed, V-cut 0.450 mm. Inner layer pad isolation (IPI) >= 0.200 mm. Via holes (finished \
+<= 0.45 mm) may be reduced by up to 0.30 mm to fix annular rings. Drills are rounded to 0.05 mm \
+steps. Connected NPTH holes: 0.30 mm ring recommended. Slot and cutout tools 0.5, 1.2 and 2.0 mm. \
+Legend clearance: 0.250 mm to routed edges, 0.100 mm to holes. Minimum mask opening 0.40 mm; white \
+mask (photo-imaged) needs a 0.13 mm web. Data: one flat zip with one design version; KiCad, Gerber \
+X2/X3 with a Gerber job file, or ODB++. Assembly: 1 or 2 sides, SMT and THT, boards made by \
+Eurocircuits only, max 340 x 440 mm."""
+
+[[process]]
+id = "standard-pool"
+name = "STANDARD pool, 1-2 layers (pooling)"
+layers = [1, 2]
+thickness = ["1.0mm", "1.55mm", "2.4mm"]
+outer_copper = ["12um", "18um", "35um", "70um"]  # base foil, 2 layers (1 layer: 35, 70 um)
+min_track = "0.100mm"
+min_space = "0.100mm"
+min_drill = "0.100mm"         # finished PTH (drill class E)
+min_npth = "0.200mm"
+min_via_ring = "0.150mm"      # outer pad = finished hole + 0.300 mm
+min_pth_ring = "0.150mm"
+hole_to_hole = "0.35mm"       # 0.25 mm between tool sizes, which are 0.10 mm over finished PTH
+copper_to_edge = "0.250mm"    # outer layers, routed
+min_silk_width = "0.10mm"
+min_silk_height = "1.00mm"
+silk_to_pad = "0.100mm"       # legend to exposed copper
+mask_dam = "0.075mm"          # green/black/red/blue (direct imaging); white 0.130 mm
+castellated = true            # plated holes on edge
+finishes = ["ENIG", "HASL lead-free"]  # immersion silver: see unverified
+mask_colors = ["Green", "Blue", "Black", "White", "Red"]
+silk_colors = ["White"]
+max_size = ["580mm", "425mm"]
+min_size = ["5mm", "5mm"]
+# Immersion silver is listed as pooling in the parameter table but as non-pooling in the summary;
+# it is left out. hole_to_hole is derived from the tool-size rule, not published as a finished size.
+unverified = ["hole_to_hole", "finishes"]
+[process.cite]
+hole_to_hole = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/drilled-holes/"
+min_silk_width = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+min_silk_height = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+silk_to_pad = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+mask_dam = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/soldermask/"
+
+[[process]]
+id = "standard-pool-multilayer"
+name = "STANDARD pool, 4-8 layers (pooling)"
+layers = [4, 6, 8]
+thickness = ["1.0mm", "1.55mm"]  # 1.00 mm for 4 layers only
+inner_copper = ["18um", "35um"]  # base foil
+min_track = "0.100mm"
+min_space = "0.100mm"
+min_drill = "0.100mm"
+min_npth = "0.200mm"
+min_via_ring = "0.175mm"      # inner pad = finished hole + 0.350 mm (outer: + 0.300 mm)
+min_pth_ring = "0.175mm"
+hole_to_hole = "0.35mm"
+copper_to_edge = "0.400mm"    # inner layers, routed (outer: 0.250 mm)
+min_silk_width = "0.10mm"
+min_silk_height = "1.00mm"
+silk_to_pad = "0.100mm"
+mask_dam = "0.075mm"
+castellated = true
+finishes = ["ENIG", "HASL lead-free"]  # immersion silver: see unverified
+mask_colors = ["Green", "Blue", "Black", "White", "Red"]
+silk_colors = ["White"]
+max_size = ["500mm", "425mm"]
+min_size = ["5mm", "5mm"]
+# Pooled multilayer thicknesses are listed as "1.00 mm (4 layers only)" and "1.55 mm (6 to 16
+# layers)"; whether 4 layers also pool at 1.55 mm is not stated.
+unverified = ["thickness", "hole_to_hole", "finishes"]
+[process.cite]
+hole_to_hole = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/drilled-holes/"
+min_silk_width = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+min_silk_height = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+silk_to_pad = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+mask_dam = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/soldermask/"
+
+[[process]]
+id = "pcb-proto"
+name = "PCB proto, 2 or 4 layers"
+layers = [2, 4]
+thickness = ["1.55mm"]
+outer_copper = ["18um"]       # base foil
+inner_copper = ["35um"]
+min_track = "0.150mm"
+min_space = "0.150mm"
+min_drill = "0.250mm"         # finished PTH (drill class C)
+min_npth = "0.350mm"
+min_via_ring = "0.175mm"      # pad = finished hole + 0.350 mm
+min_pth_ring = "0.175mm"
+hole_to_hole = "0.35mm"
+copper_to_edge = "0.400mm"    # inner layers; outer layers 0.250 mm
+min_silk_width = "0.10mm"
+min_silk_height = "1.00mm"
+silk_to_pad = "0.100mm"
+mask_dam = "0.075mm"
+finishes = ["ENIG", "HASL lead-free"]
+mask_colors = ["Green"]
+silk_colors = ["White"]
+max_size = ["500mm", "425mm"] # 4 layers; 2 layers 580 x 425 mm
+min_size = ["20mm", "20mm"]
+unverified = ["hole_to_hole"]
+[process.cite]
+layers = "https://www.eurocircuits.com/services/pcb-proto/"
+thickness = "https://www.eurocircuits.com/services/pcb-proto/"
+outer_copper = "https://www.eurocircuits.com/services/pcb-proto/"
+inner_copper = "https://www.eurocircuits.com/services/pcb-proto/"
+min_track = "https://www.eurocircuits.com/services/pcb-proto/"
+min_space = "https://www.eurocircuits.com/services/pcb-proto/"
+min_drill = "https://www.eurocircuits.com/services/pcb-proto/"
+min_npth = "https://www.eurocircuits.com/services/pcb-proto/"
+min_via_ring = "https://www.eurocircuits.com/services/pcb-proto/"
+min_pth_ring = "https://www.eurocircuits.com/services/pcb-proto/"
+hole_to_hole = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/drilled-holes/"
+copper_to_edge = "https://www.eurocircuits.com/services/pcb-proto/"
+min_silk_width = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+min_silk_height = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+silk_to_pad = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/legend-print/"
+mask_dam = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/soldermask/"
+finishes = "https://www.eurocircuits.com/services/pcb-proto/"
+mask_colors = "https://www.eurocircuits.com/services/pcb-proto/"
+silk_colors = "https://www.eurocircuits.com/services/pcb-proto/"
+max_size = "https://www.eurocircuits.com/services/pcb-proto/"
+min_size = "https://www.eurocircuits.com/services/pcb-proto/"
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-eurocircuits.zip"
+drill_format = "excellon"
+# No `names`: Eurocircuits only asks for short names that identify the layer function (Gerber X2
+# attributes identify layers too). The zip must be flat with a single design version.
+[output.cite]
+names = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/input-data-formats/"
+archive = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/input-data-formats/"
+drill_format = "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/input-data-formats/"
+
+[assembly]
+sides = ["top", "bottom"]
+min_package = "0201"
+through_hole = true
+# Eurocircuits lists the required BOM and CPL content, not column headers (columns are mapped on
+# upload); the CPL origin is not documented.
+unverified = ["bom.columns", "cpl.columns", "cpl.origin"]
+[assembly.cite]
+sides = "https://www.eurocircuits.com/services/pcb-assembly-capabilities/"
+min_package = "https://www.eurocircuits.com/services/pcb-assembly-capabilities/"
+through_hole = "https://www.eurocircuits.com/services/pcb-assembly-capabilities/"
+bom = "https://www.eurocircuits.com/user-guides/visualizer-user-guides/upload-bom-data-user-guide/"
+cpl = "https://www.eurocircuits.com/user-guides/visualizer-user-guides/upload-cpl-data-user-guide/"
+
+# Required BOM content: MPN, designators, full description, value, quantity, package; optional
+# manufacturer and supplier part number.
+[assembly.bom]
+file = "{project}-BOM-eurocircuits.csv"
+columns = [
+    { header = "Reference Designators", field = "designators" },
+    { header = "Quantity", field = "quantity" },
+    { header = "Manufacturer", field = "manufacturer" },
+    { header = "MPN", field = "mpn" },
+    { header = "Description", field = "description" },
+    { header = "Value", field = "value" },
+    { header = "Package", field = "package" },
+]
+
+# Required CPL content: designator, X/Y of the component centre, rotation, side (Top or Bottom),
+# with a header row.
+[assembly.cpl]
+file = "{project}-CPL-eurocircuits.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "X", field = "x" },
+    { header = "Y", field = "y" },
+    { header = "Rotation", field = "rotation" },
+    { header = "Side", field = "side" },
+]
+side_names = ["Top", "Bottom"]
+origin = "board"

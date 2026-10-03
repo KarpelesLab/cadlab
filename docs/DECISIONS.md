@@ -194,6 +194,28 @@ so non-passives need explicit cross-reference data. A substitution made because 
 is a fab-specific sourcing choice, which is what the lock already records; `bom.approve` stays the way to make
 it a design decision for every fab.
 
+### D27. KiCad netlist import: match parts conservatively, create the rest visibly (2026-10-04)
+`circuit.import` (next to `circuit.export`, in the `circuit` group rather than a new `import` group) reads
+KiCad S-expression netlists with a small in-house S-expression reader (`cadlab::sexpr`, shared with later
+KiCad imports). Components keep their designators; each is matched to a project part in a fixed order:
+the symbol's library part name as a part ID (only with the same value), the `MPN` field, then value plus
+footprint name. A part is used only if it has every pin the netlist connects (`import.pin_mismatch`
+otherwise). Unmatched passives without an MPN become generic parts when the footprint name gives a chip size
+(`R_0402_1005Metric`, `RESC1005X40N` → `R 10k 0402`). Everything else gets a part built from the netlist:
+pins with names and types from `libparts`, MPN and manufacturer from fields, a footprint generated when the
+footprint name is a package the generator knows (or a footprint of that name is already in the project).
+Such a part is `created` when it got a footprint (concrete when the netlist had an MPN, generic otherwise,
+like any cadlab part), else a `placeholder` that cannot be placed yet, with a warning per component
+(`import.placeholder_part`) whose hint gives the `bom.replace` / `footprint.generate` + `part.set` fix. KiCad footprints and
+symbols are never converted (D7): only their names are read, as hints. Other fields stay as component
+properties; nets keep their names minus the root sheet prefix; single-pin `unconnected-(...)` nets are
+skipped. Without `replace` the designators must be free (`import.refdes_taken`); with it the circuit is
+replaced and board placements of components that come back are kept. `kicad-cli` leaves power symbols and
+`PWR_FLAG`s out of netlists, so `driven` marks cannot be recovered.
+*Why:* a wrong silent match is worse than a visible placeholder: agents act on the diagnostics, and a
+placeholder is one `bom.replace` away from a real part. Matching only on exact IDs, MPNs and value plus
+footprint keeps the result deterministic and explainable.
+
 ## Open questions
 
 None currently.

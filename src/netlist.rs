@@ -1,8 +1,10 @@
-//! Netlist export: KiCad netlist (`.net`, S-expression format version "E") for interoperability
+//! Netlist export (import in [`import`]): KiCad netlist (`.net`, S-expression format version "E") for interoperability
 //! and oracle tests, and a plain JSON netlist.
 //!
 //! The KiCad writer follows the format as documented and as seen in files KiCad writes; it shares
 //! no code with KiCad (DECISIONS D7). Output is deterministic: no dates, sorted entries.
+
+pub mod import;
 
 use std::fmt::Write as _;
 

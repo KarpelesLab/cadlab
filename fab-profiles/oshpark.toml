@@ -1,0 +1,197 @@
+# OSH Park fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`; `cite` names the page per field. Override any of it with
+# ~/.config/cadlab/fab-profiles/oshpark.toml (tables merge key by key, other values replace).
+#
+# OSH Park runs fixed pooled stackups: every service has one thickness, one copper weight, ENIG and
+# purple mask. Copper weights are thicknesses (1 oz = 35 um); the stackups list 1 oz as 0.0356 mm and
+# 0.5 oz inner copper as 0.0175 mm.
+
+id = "oshpark"
+name = "OSH Park"
+website = "https://oshpark.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://docs.oshpark.com/services/two-layer/",
+    "https://docs.oshpark.com/services/two-layer-hhdc/",
+    "https://docs.oshpark.com/services/four-layer/",
+    "https://docs.oshpark.com/services/six-layer/",
+    "https://docs.oshpark.com/services/",
+    "https://docs.oshpark.com/submitting-orders/drill-specs/",
+    "https://docs.oshpark.com/submitting-orders/board-outline/",
+    "https://docs.oshpark.com/submitting-orders/naming-pattern/",
+    "https://docs.oshpark.com/design-tools/kicad/",
+    "https://docs.oshpark.com/tips+tricks/castellation/",
+]
+notes = """Pooled rigid boards made in the USA: ENIG over purple mask both sides, silkscreen both sides. \
+One-sided boards are ordered on the 2-layer services. Drills below the minimum are rounded up; holes \
+above 260 mil (6.604 mm) are milled instead of drilled (no maximum). Drill size tolerance +/-2.5 mil \
+max. Minimum slot 0.508 mm (drill slots only). Outline milled with a 1.72 mm bit (cutouts >= 1.7272 mm, \
+interior corners r = 0.8636 mm). 4 and 6 layers: plated drill to inner copper >= 10 mil (0.254 mm). \
+No blind or buried vias, no filled vias (via-in-pad). Castellations are allowed but not guaranteed \
+(round pads extending at most 40 mil past the edge). Not modelled: After Dark (clear mask on black \
+FR-4, same 2-layer rules), Super Swift, Medium Run and Flex services; no assembly service."""
+
+[[process]]
+id = "two-layer"
+name = "2 Layer Prototype (1.6 mm, 1 oz)"
+layers = [1, 2]               # one-sided boards ride the 2-layer services
+thickness = ["1.6mm"]
+outer_copper = ["35um"]
+min_track = "0.1524mm"        # 6 mil
+min_space = "0.1524mm"        # 6 mil
+min_drill = "0.254mm"         # 10 mil
+min_via_ring = "0.127mm"      # 5 mil
+min_pth_ring = "0.127mm"
+hole_to_hole = "0.127mm"      # 5 mil recommended between holes (overlapping drills not guaranteed)
+copper_to_edge = "0.381mm"    # 15 mil board edge keepout
+min_silk_width = "0.127mm"    # 5 mil recommended (3 mil for short lines, text, graphics)
+mask_dam = "0.1016mm"         # 4 mil
+via_in_pad = false
+castellated = true            # allowed, not guaranteed
+finishes = ["ENIG"]
+mask_colors = ["Purple"]
+max_size = ["558.8mm", "406.4mm"]
+min_size = ["6.35mm", "6.35mm"]
+[process.cite]
+layers = "https://docs.oshpark.com/services/"
+castellated = "https://docs.oshpark.com/tips+tricks/castellation/"
+
+[[process]]
+id = "two-layer-2oz"
+name = "2 Layer 2oz 0.8mm"
+layers = [1, 2]
+thickness = ["0.8mm"]
+outer_copper = ["70um"]       # 2 oz (2.8 mil)
+min_track = "0.1524mm"
+min_space = "0.1524mm"
+min_drill = "0.254mm"
+min_via_ring = "0.127mm"
+min_pth_ring = "0.127mm"
+hole_to_hole = "0.127mm"
+copper_to_edge = "0.381mm"
+min_silk_width = "0.127mm"
+mask_dam = "0.1016mm"
+via_in_pad = false
+castellated = true
+finishes = ["ENIG"]
+mask_colors = ["Purple"]
+max_size = ["558.8mm", "406.4mm"]
+min_size = ["6.35mm", "6.35mm"]
+[process.cite]
+layers = "https://docs.oshpark.com/services/"
+thickness = "https://docs.oshpark.com/services/two-layer-hhdc/"
+outer_copper = "https://docs.oshpark.com/services/two-layer-hhdc/"
+min_track = "https://docs.oshpark.com/services/two-layer-hhdc/"
+min_space = "https://docs.oshpark.com/services/two-layer-hhdc/"
+min_drill = "https://docs.oshpark.com/services/two-layer-hhdc/"
+min_via_ring = "https://docs.oshpark.com/services/two-layer-hhdc/"
+min_pth_ring = "https://docs.oshpark.com/services/two-layer-hhdc/"
+hole_to_hole = "https://docs.oshpark.com/services/two-layer-hhdc/"
+copper_to_edge = "https://docs.oshpark.com/services/two-layer-hhdc/"
+min_silk_width = "https://docs.oshpark.com/services/two-layer-hhdc/"
+mask_dam = "https://docs.oshpark.com/services/two-layer-hhdc/"
+via_in_pad = "https://docs.oshpark.com/services/two-layer-hhdc/"
+castellated = "https://docs.oshpark.com/services/two-layer-hhdc/"
+finishes = "https://docs.oshpark.com/services/two-layer-hhdc/"
+mask_colors = "https://docs.oshpark.com/services/two-layer-hhdc/"
+max_size = "https://docs.oshpark.com/services/two-layer-hhdc/"
+min_size = "https://docs.oshpark.com/services/two-layer-hhdc/"
+
+[[process]]
+id = "four-layer"
+name = "4 Layer Prototype (1.6 mm FR408-HR)"
+layers = [4]
+thickness = ["1.6mm"]
+outer_copper = ["35um"]
+inner_copper = ["17.5um"]     # 0.5 oz
+min_track = "0.127mm"         # 5 mil
+min_space = "0.127mm"         # 5 mil
+min_drill = "0.254mm"         # 10 mil
+min_via_ring = "0.1016mm"     # 4 mil
+min_pth_ring = "0.1016mm"
+hole_to_hole = "0.127mm"
+copper_to_edge = "0.381mm"
+min_silk_width = "0.127mm"
+mask_dam = "0.1016mm"
+via_in_pad = false
+castellated = true
+finishes = ["ENIG"]
+mask_colors = ["Purple"]
+max_size = ["558.8mm", "406.4mm"]
+min_size = ["6.35mm", "6.35mm"]
+[process.cite]
+layers = "https://docs.oshpark.com/services/four-layer/"
+thickness = "https://docs.oshpark.com/services/four-layer/"
+outer_copper = "https://docs.oshpark.com/services/four-layer/"
+inner_copper = "https://docs.oshpark.com/services/four-layer/"
+min_track = "https://docs.oshpark.com/services/four-layer/"
+min_space = "https://docs.oshpark.com/services/four-layer/"
+min_drill = "https://docs.oshpark.com/services/four-layer/"
+min_via_ring = "https://docs.oshpark.com/services/four-layer/"
+min_pth_ring = "https://docs.oshpark.com/services/four-layer/"
+hole_to_hole = "https://docs.oshpark.com/services/four-layer/"
+copper_to_edge = "https://docs.oshpark.com/services/four-layer/"
+min_silk_width = "https://docs.oshpark.com/services/four-layer/"
+mask_dam = "https://docs.oshpark.com/services/four-layer/"
+via_in_pad = "https://docs.oshpark.com/services/four-layer/"
+castellated = "https://docs.oshpark.com/services/four-layer/"
+finishes = "https://docs.oshpark.com/services/four-layer/"
+mask_colors = "https://docs.oshpark.com/services/four-layer/"
+max_size = "https://docs.oshpark.com/services/four-layer/"
+min_size = "https://docs.oshpark.com/services/four-layer/"
+
+[[process]]
+id = "six-layer"
+name = "6 Layer Prototype (1.6 mm)"
+layers = [6]
+thickness = ["1.6mm"]
+outer_copper = ["35um"]
+inner_copper = ["17.5um"]
+min_track = "0.127mm"
+min_space = "0.127mm"
+min_drill = "0.2032mm"        # 8 mil
+min_via_ring = "0.1016mm"
+min_pth_ring = "0.1016mm"
+hole_to_hole = "0.127mm"
+copper_to_edge = "0.381mm"
+min_silk_width = "0.127mm"
+mask_dam = "0.1016mm"
+via_in_pad = false
+castellated = true
+finishes = ["ENIG"]
+mask_colors = ["Purple"]
+max_size = ["558.8mm", "406.4mm"]
+min_size = ["6.35mm", "6.35mm"]
+[process.cite]
+layers = "https://docs.oshpark.com/services/six-layer/"
+thickness = "https://docs.oshpark.com/services/six-layer/"
+outer_copper = "https://docs.oshpark.com/services/six-layer/"
+inner_copper = "https://docs.oshpark.com/services/six-layer/"
+min_track = "https://docs.oshpark.com/services/six-layer/"
+min_space = "https://docs.oshpark.com/services/six-layer/"
+min_drill = "https://docs.oshpark.com/services/six-layer/"
+min_via_ring = "https://docs.oshpark.com/services/six-layer/"
+min_pth_ring = "https://docs.oshpark.com/services/six-layer/"
+hole_to_hole = "https://docs.oshpark.com/services/six-layer/"
+copper_to_edge = "https://docs.oshpark.com/services/six-layer/"
+min_silk_width = "https://docs.oshpark.com/services/six-layer/"
+mask_dam = "https://docs.oshpark.com/services/six-layer/"
+via_in_pad = "https://docs.oshpark.com/services/six-layer/"
+castellated = "https://docs.oshpark.com/services/six-layer/"
+finishes = "https://docs.oshpark.com/services/six-layer/"
+mask_colors = "https://docs.oshpark.com/services/six-layer/"
+max_size = "https://docs.oshpark.com/services/six-layer/"
+min_size = "https://docs.oshpark.com/services/six-layer/"
+
+[output]
+include = ["copper", "mask", "silk", "profile", "drill"]  # no stencil service; paste is not used
+archive = "{project}-oshpark.zip"
+drill_format = "excellon"
+# No `names`: OSH Park detects KiCad's output names and Gerber X2 automatically; the suggested
+# Protel-style pattern is only for tools it cannot detect. Its drill page asks tools it has no guide
+# for to write Excellon in inches 2:4; cadlab's metric Excellon (as KiCad writes it) is not covered
+# by that page.
+unverified = ["drill_format"]
+[output.cite]
+names = "https://docs.oshpark.com/design-tools/kicad/"
+drill_format = "https://docs.oshpark.com/submitting-orders/drill-specs/"

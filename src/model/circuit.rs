@@ -11,6 +11,12 @@ use crate::id::ObjectId;
 use crate::model::sections::natural_cmp;
 use crate::units::Nm;
 
+/// Whether `s` is a reference designator: uppercase letters (or `_`), then a number (`R1`, `SW3`).
+pub fn valid_refdes(s: &str) -> bool {
+    let letters = s.trim_end_matches(|c: char| c.is_ascii_digit());
+    !letters.is_empty() && letters.len() < s.len() && letters.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+}
+
 /// A use of a part in the circuit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

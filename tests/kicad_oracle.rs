@@ -346,3 +346,63 @@ fn check_netlist(cli: &Path, r: &Registry, s: &mut Session, root: &Path) {
         assert_eq!(kicad.get(name), Some(nodes), "net `{name}`");
     }
 }
+
+/// Oracle: KiCad's netlist of our schematic, imported back with `circuit.import`, has the
+/// original circuit's connectivity, designators, values and pins.
+#[test]
+fn kicad_netlist_import_round_trip() {
+    let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
+    let (dir, r, mut s) = board();
+    check_import(&cli, &r, &mut s, dir.path());
+    keep(dir);
+}
+
+/// Oracle: the same on the STM32 board (block nets with `/` in their names, more parts).
+#[test]
+fn kicad_netlist_import_round_trip_stm32() {
+    let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
+    let (dir, r, mut s) = stm32_board();
+    check_import(&cli, &r, &mut s, dir.path());
+    keep(dir);
+}
+
+fn check_import(cli: &Path, r: &Registry, s: &mut Session, root: &Path) {
+    let (path, _) = export(r, s, root);
+    let net_path = root.join("kicad.net");
+    oracle::run(cli, &["sch", "export", "netlist", "-o", net_path.to_str().unwrap(), path.to_str().unwrap()]);
+
+    let mut b = Session::new();
+    exec(r, &mut b, "project.new", json!({"path": root.join("imported"), "name": "imported"}));
+    let o = exec(r, &mut b, "circuit.import", json!({"path": net_path}));
+    let (a, b) = (s.project.as_ref().unwrap(), b.project.as_ref().unwrap());
+    let nets = |p: &cadlab::model::Project| -> BTreeMap<String, BTreeSet<String>> {
+        p.circuit()
+            .nets
+            .iter()
+            .map(|(n, net)| (n.clone(), net.pins.iter().map(ToString::to_string).collect()))
+            .collect()
+    };
+    assert_eq!(nets(a), nets(b));
+    // Designators, values, and every pin's label and electrical type (from KiCad's libparts).
+    type Pins = Vec<(String, String, String)>;
+    let parts = |p: &cadlab::model::Project| -> BTreeMap<String, (String, Pins)> {
+        p.circuit()
+            .components
+            .iter()
+            .map(|(r, c)| {
+                let part = &p.library().parts[&c.part];
+                let mut pins: Vec<_> = part
+                    .symbol
+                    .pins
+                    .iter()
+                    .map(|q| (q.number.clone(), q.label().to_string(), format!("{:?}", q.kind)))
+                    .collect();
+                pins.sort();
+                (r.clone(), (part.value(), pins))
+            })
+            .collect()
+    };
+    assert_eq!(parts(a), parts(b));
+    // KiCad lists unconnected pins as one-pin nets; they are skipped.
+    assert!(o["output"]["unconnected_skipped"].as_u64().unwrap() > 0);
+}

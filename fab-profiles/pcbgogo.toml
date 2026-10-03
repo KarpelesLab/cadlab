@@ -1,0 +1,134 @@
+# PCBgogo fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`; `cite` names the page per field, and `unverified` lists values kept although they
+# could not be confirmed there. Override any of it with ~/.config/cadlab/fab-profiles/pcbgogo.toml
+# (tables merge key by key, other values replace).
+#
+# PCBgogo's standard (FR-4) capability table covers 1 to 40 layers; board size is the only value
+# given per layer count. Track/space: >= 3 mil on outer layers, >= 4 mil on inner layers. Thickness
+# (0.2-7 mm) and copper (up to 8 oz) are given as ranges without discrete options, so they are not
+# checked.
+
+id = "pcbgogo"
+name = "PCBgogo"
+website = "https://www.pcbgogo.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://www.pcbgogo.com/capabilities/fr-4-pcb-manufacturing.html",
+    "https://www.pcbgogo.com/capabilities/pcba-capabilities.html",
+    "https://www.pcbgogo.com/capabilities/files-requested-for-pcba.html",
+    "https://www.pcbgogo.com/template/Bom_Template.xlsx",
+    "https://www.pcbgogo.com/Common/DownLoadFile?realname=Pick%20Place%20file.txt",
+]
+notes = """Rigid FR-4 (Tg 130-170). Board size tolerance +/-0.1 mm routed, +/-0.4 mm V-scored. \
+Finished hole tolerance +/-0.08 mm. Minimum hole grows with thickness and copper: 0.3 mm at 2.0 mm, \
+0.4 mm at 2.4 mm, 0.25 mm with 2 oz, 0.3 mm with 3 oz copper. Same-net vias >= 0.15 mm apart. Plated \
+slots >= 0.5 mm (length:width >= 2.5:1). Castellated holes >= 0.6 mm. Mask dam 0.1 mm green, 0.15 mm \
+other colors; mask to pad >= 0.05 mm. Copper to V-cut >= 0.4 mm. Via-in-pad and resin-filled vias \
+are special options. The advanced (HDI) table is not modelled. Assembly: 01005 passives, SMT, THT \
+and mixed; boards under 45 x 45 mm are panelized for assembly."""
+
+[[process]]
+id = "two-layer"
+name = "Standard FR-4, 1-2 layers"
+layers = [1, 2]
+min_track = "3mil"
+min_space = "3mil"
+min_drill = "0.2mm"           # CNC, finished
+max_drill = "6.3mm"
+min_npth = "0.5mm"
+min_via_ring = "0.13mm"
+min_pth_ring = "0.13mm"
+hole_to_hole = "0.25mm"       # through-hole vias, different nets
+copper_to_edge = "0.3mm"      # track to outline
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+silk_to_pad = "0.1mm"
+mask_dam = "0.1mm"            # green
+via_in_pad = true
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP", "Hard gold", "ENEPIG", "Immersion silver"]
+mask_colors = ["Green", "Red", "Yellow", "White", "Black", "Blue", "Purple", "Matte Green", "Matte Black", "None"]
+silk_colors = ["White", "Black", "Yellow", "None"]
+max_size = ["1143mm", "660mm"]
+min_size = ["3mm", "3mm"]
+# The table gives non-plated holes as ">= 0.3 mm" and ">= 0.5 mm", and text height as ">= 0.75 mm"
+# with a note that under 0.8 mm is too small; the stricter values are used.
+unverified = ["min_npth", "min_silk_height"]
+
+[[process]]
+id = "multilayer"
+name = "Standard FR-4, 4-40 layers"
+layers = [4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40]
+min_track = "4mil"            # inner layers (outer: 3 mil)
+min_space = "4mil"
+min_drill = "0.2mm"
+max_drill = "6.3mm"
+min_npth = "0.5mm"
+min_via_ring = "0.13mm"
+min_pth_ring = "0.13mm"
+hole_to_hole = "0.25mm"
+copper_to_edge = "0.3mm"
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+silk_to_pad = "0.1mm"
+mask_dam = "0.1mm"
+via_in_pad = true
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG", "OSP", "Hard gold", "ENEPIG", "Immersion silver"]
+mask_colors = ["Green", "Red", "Yellow", "White", "Black", "Blue", "Purple", "Matte Green", "Matte Black", "None"]
+silk_colors = ["White", "Black", "Yellow", "None"]
+max_size = ["965mm", "648mm"]
+min_size = ["3mm", "3mm"]
+# Layer counts are given as "1-40" (sizes for ">= 3 layers"); odd counts are left out.
+unverified = ["layers", "min_npth", "min_silk_height"]
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-pcbgogo.zip"
+drill_format = "excellon"
+# No `names`: PCBgogo asks for clearly named RS-274X layers, without a naming convention.
+[output.cite]
+names = "https://www.pcbgogo.com/capabilities/files-requested-for-pcba.html"
+
+[assembly]
+sides = ["top", "bottom"]
+min_package = "01005"
+through_hole = true
+# Double-sided assembly is only implied (top/bottom drawings and a side column are requested). The
+# sample placement file is Altium text in mils with "TopLayer"; cadlab writes CSV in millimeters,
+# and the bottom side name and the origin are not documented.
+unverified = ["sides", "cpl.columns", "cpl.side_names", "cpl.origin"]
+[assembly.cite]
+sides = "https://www.pcbgogo.com/capabilities/files-requested-for-pcba.html"
+min_package = "https://www.pcbgogo.com/capabilities/pcba-capabilities.html"
+through_hole = "https://www.pcbgogo.com/capabilities/pcba-capabilities.html"
+bom = "https://www.pcbgogo.com/template/Bom_Template.xlsx"
+cpl = "https://www.pcbgogo.com/Common/DownLoadFile?realname=Pick%20Place%20file.txt"
+
+# Columns of PCBgogo's BOM template (its last column, a reference buying link, is left out).
+[assembly.bom]
+file = "{project}-BOM-pcbgogo.csv"
+columns = [
+    { header = "Quantity", field = "quantity" },
+    { header = "Designator", field = "designators" },
+    { header = "Description", field = "description" },
+    { header = "Value", field = "value" },
+    { header = "Footprint", field = "footprint" },
+    { header = "Manufacturer", field = "manufacturer" },
+    { header = "Part Number", field = "mpn" },
+]
+
+# Columns of PCBgogo's sample placement file, with millimeter coordinates.
+[assembly.cpl]
+file = "{project}-CPL-pcbgogo.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "Comment", field = "value" },
+    { header = "Layer", field = "side" },
+    { header = "Footprint", field = "footprint" },
+    { header = "Center-X(mm)", field = "x" },
+    { header = "Center-Y(mm)", field = "y" },
+    { header = "Rotation", field = "rotation" },
+]
+side_names = ["TopLayer", "BottomLayer"]
+origin = "board"

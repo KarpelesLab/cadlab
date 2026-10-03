@@ -1,0 +1,157 @@
+# Elecrow fab profile (docs/MANUFACTURING.md). Values come only from the pages in `sources`, read on
+# `verified_at`; `cite` names the page per field, and `unverified` lists values kept although they
+# could not be confirmed there. Where the order page and Elecrow's "PCB Specification && FAQ" PDF
+# disagree, the stricter value is used and the field is listed in `unverified`. Override with
+# ~/.config/cadlab/fab-profiles/elecrow.toml (tables merge key by key, other values replace).
+#
+# Modelled: the Regular Custom PCB (online order) service. Copper weights are thicknesses: 1 oz =
+# 35 um; multilayer boards have 0.5 oz inner copper with 1 oz outer, 1 oz with 2 oz outer. Track/space
+# are the 1 oz values (2 oz: 0.25 mm). Pads need 8 mil spacing (order page; the PDF says 0.15 mm),
+# which cadlab's single min_space does not model.
+
+id = "elecrow"
+name = "Elecrow"
+website = "https://www.elecrow.com"
+verified_at = "2026-10-04"
+sources = [
+    "https://www.elecrow.com/pcb-manufacturing.html",
+    "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf",
+    "https://www.elecrow.com/download/quote/Read_Me_before_Ordering.pdf",
+    "https://www.elecrow.com/pcb-assembly.html",
+    "https://www.elecrow.com/media/product/BOM_Template.xlsx",
+    "https://www.elecrow.com/download/Assembly/PCB-Assembly-Coordinate-file.pdf",
+]
+notes = """FR-4 Tg 130. Thickness tolerance +/-10% (+/-0.1 mm under 1 mm); outline +/-0.2 mm. Drill \
+tolerance 0.05 mm non-plated, 0.1 mm plated. Copper to outline >= 0.7 mm for 0.6-1.6 mm boards, \
+>= 1 mm for 2 mm boards. Trace to pad >= 0.15 mm. Slots >= 0.8 mm wide and 0.8 mm apart; corners \
+filleted (about 2 mm radius). Castellated holes >= 0.6 mm. No blind/buried vias or resin plugging. \
+All holes are plated unless a separate -NPTH drill file is supplied. 2 mm boards cost extra. \
+Silkscreen color cannot be chosen (white, black on white or yellow mask). The Premium PCB service \
+(quoted by email) is not modelled. Assembly: SMT down to 0201, through-hole, single and double \
+sided."""
+
+[[process]]
+id = "two-layer"
+name = "Regular Custom PCB, 1-2 layers"
+layers = [1, 2]
+thickness = ["0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm"]
+outer_copper = ["35um", "70um"]  # 1, 2 oz
+min_track = "6mil"            # 8 mil recommended
+min_space = "6mil"
+min_drill = "0.3mm"
+hole_to_hole = "0.35mm"
+min_via_ring = "0.15mm"
+min_pth_ring = "0.15mm"
+copper_to_edge = "0.7mm"      # 0.6-1.6 mm boards; 1 mm for 2 mm boards
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+mask_dam = "0.25mm"           # IC solder mask dam
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG"]
+mask_colors = ["Green", "Red", "Yellow", "Blue", "White", "Black", "Matte Black", "Purple"]
+silk_colors = ["White", "Black"]
+max_size = ["550mm", "550mm"]
+# The order page gives 6 mil track/space, the PDF 0.15 mm; the PDF gives 0.25 mm for vias and
+# 0.3 mm for through holes, but 0.3 mm as the minimum drill in its own comparison table.
+unverified = ["min_track", "min_space", "min_drill"]
+[process.cite]
+hole_to_hole = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+min_via_ring = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+min_pth_ring = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+copper_to_edge = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+mask_dam = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+castellated = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+
+[[process]]
+id = "multilayer"
+name = "Regular Custom PCB, 4-8 layers"
+layers = [4, 6, 8]
+thickness = ["0.6mm", "0.8mm", "1.0mm", "1.2mm", "1.6mm", "2.0mm"]
+outer_copper = ["35um", "70um"]
+inner_copper = ["17.5um", "35um"]  # 0.5, 1 oz (order page: 17 um / 35 um)
+min_track = "6mil"
+min_space = "6mil"
+min_drill = "0.3mm"
+hole_to_hole = "0.35mm"
+min_via_ring = "0.2mm"        # given for 4 layers
+min_pth_ring = "0.2mm"
+copper_to_edge = "0.7mm"
+min_silk_width = "0.15mm"
+min_silk_height = "0.8mm"
+mask_dam = "0.25mm"
+castellated = true
+finishes = ["HASL", "HASL lead-free", "ENIG"]
+mask_colors = ["Green", "Red", "Yellow", "Blue", "White", "Black", "Matte Black", "Purple"]
+silk_colors = ["White", "Black"]
+max_size = ["550mm", "550mm"]
+# The annular ring is only given for 2 and 4 layers; 6 and 8 layers use the 4-layer value.
+unverified = ["min_track", "min_space", "min_drill", "min_via_ring", "min_pth_ring"]
+[process.cite]
+inner_copper = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+hole_to_hole = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+min_via_ring = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+min_pth_ring = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+copper_to_edge = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+mask_dam = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+castellated = "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf"
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill"]
+archive = "{project}-elecrow.zip"
+drill_format = "excellon"
+# Names from the order page's "Gerber Files Required" tables (RS-274X, zip or rar): inner layers
+# G1, G2 (the FAQ PDF names them the same); the NC drill file is .TXT and non-plated holes go in a
+# separate -NPTH.txt file. Paste layers are named GTP/GBP in the stencil notes. Only 4-layer inner
+# names are published.
+unverified = ["names"]
+[output.names]
+copper_top = "{project}.GTL"
+copper_inner = "{project}.G{n}"
+copper_bottom = "{project}.GBL"
+mask_top = "{project}.GTS"
+mask_bottom = "{project}.GBS"
+paste_top = "{project}.GTP"
+paste_bottom = "{project}.GBP"
+silk_top = "{project}.GTO"
+silk_bottom = "{project}.GBO"
+profile = "{project}.GML"
+drill_pth = "{project}.TXT"
+drill_npth = "{project}-NPTH.txt"
+
+[assembly]
+sides = ["top", "bottom"]
+min_package = "0201"
+through_hole = true
+# Elecrow lists the coordinate file content (designator, X, Y, rotation, side) and shows Eagle's
+# mount.ulp output, without column names or origin. The BOM template's "*Original" column (Y/N) is
+# not explained and is left empty.
+unverified = ["bom.columns", "cpl.columns", "cpl.origin"]
+[assembly.cite]
+sides = "https://www.elecrow.com/pcb-assembly.html"
+min_package = "https://www.elecrow.com/pcb-assembly.html"
+through_hole = "https://www.elecrow.com/pcb-assembly.html"
+bom = "https://www.elecrow.com/media/product/BOM_Template.xlsx"
+cpl = "https://www.elecrow.com/download/Assembly/PCB-Assembly-Coordinate-file.pdf"
+
+# Columns of Elecrow's BOM template (starred columns are required; the purchase link is left out).
+[assembly.bom]
+file = "{project}-BOM-elecrow.csv"
+columns = [
+    { header = "*Reference", field = "designators" },
+    { header = "*Manufacturer Part number", field = "mpn" },
+    { header = "*QTY", field = "quantity" },
+    { header = "*Original", field = "empty" },
+    { header = "Description", field = "description" },
+]
+
+[assembly.cpl]
+file = "{project}-CPL-elecrow.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "X", field = "x" },
+    { header = "Y", field = "y" },
+    { header = "Rotation", field = "rotation" },
+    { header = "Side", field = "side" },
+]
+side_names = ["Top", "Bottom"]
+origin = "board"

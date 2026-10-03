@@ -53,6 +53,7 @@ pub mod refs;
 pub mod render;
 pub mod router;
 pub mod schematic;
+pub mod sexpr;
 pub mod sourcing;
 pub mod substitute;
 pub mod suggest;

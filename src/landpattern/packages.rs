@@ -95,6 +95,11 @@ pub fn chip_codes() -> impl Iterator<Item = &'static str> {
     CHIPS.iter().map(|c| c.0)
 }
 
+/// Imperial chip code for a metric one: `1005` → `0402` (EIA sizes the generator knows).
+pub fn imperial_from_metric(metric: &str) -> Option<&'static str> {
+    CHIPS.iter().find(|c| c.1 == metric || (c.0 == "2512" && metric == "6432")).map(|c| c.0)
+}
+
 /// Normalizes a name: uppercase, separators to `-`.
 fn norm(s: &str) -> String {
     let mut out = String::new();
