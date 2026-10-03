@@ -138,8 +138,64 @@ net, plus GND and VCC on all ICs.
 | 24× SOIC-16 grid | 4 | 140 | 184 | 100% | 149 | 1666 mm | 5 | 589 ms |
 
 The ATtiny85 board of `tests/common` routes to 100% on 2 layers, auto-placed (22 connections, 11 vias) and hand
-placed with a 0.5 mm power class (6 vias), in well under a second in debug builds. A freerouting comparison
-needs the Specctra DSN/SES front end (not in this milestone).
+placed with a 0.5 mm power class (6 vias), in well under a second in debug builds. Boards can also be routed by
+freerouting through the Specctra front end below (`tests/specctra.rs`); a metric comparison corpus is still to come.
+
+## Specctra DSN/SES (`src/specctra/`)
+
+External autorouters (freerouting and other Specctra-compatible ones) read a design file (DSN) and write a
+session file (SES). cadlab writes the first and reads the second, implemented from the Specctra Design Language
+Reference and session file description (D7, D25). Workflow:
+
+```sh
+cadlab export dsn out/route/board.dsn            # route it externally, e.g.
+java -jar freerouting.jar -de out/route/board.dsn -do out/route/board.ses -mp 20 --gui.enabled=false
+cadlab route import-ses out/route/board.ses     # then: cadlab drc run
+```
+
+**`export.dsn {path?, protect_existing?, resolution?}`** (`specctra::export`): `(resolution um 10)` by default
+(the router's grid; coordinates themselves are written in µm with up to three decimals, i.e. exact nm). Written:
+
+| DSN | from |
+|---|---|
+| `structure/layer` | copper layers, all `signal`, top to bottom |
+| `boundary (path pcb 0 …)` | outer contour, arcs as chords within 1 µm |
+| `keepout` on layer `signal` | each cutout (`cutout1`, ...) |
+| `keepout` / `wire_keepout` / `via_keepout` | keep-outs forbidding tracks and vias / tracks / vias, one per layer (`signal` when all); pour- or footprint-only keep-outs are left out with a warning |
+| `structure/via`, `structure/rule` | via padstacks in use (rules default first); rules track width and clearance |
+| `placement` | each footprint: image = footprint name, position, `front`/`back`, rotation, `lock_type position` when locked, `PN` = part; mounting holes as components `H1`… (locked) |
+| `library/image` | pins in footprint-local coordinates (pin ID = pad number; repeated or empty numbers become `<number>@<index>`), courtyard as outline, non-plated holes as image keep-outs; a non-plated mounting hole is an image with only a keep-out |
+| `library/padstack` | one per distinct pad: `smd_…` on `F.Cu`, `tht_d<drill>_…` on every layer; rectangles as `rect` (a quarter turn swaps the sides), circles as `circle`, ovals as `path` with the minor width, round rectangles as polygons circumscribing the corner arcs (4 segments per corner), other pad angles as rotated polygons; vias `via_<diameter>_<drill>[_<from>-<to>]` in µm |
+| `network/net`, `network/class` | nets with pins `U1-3`; one class per net class (track width, clearance, `use_via`) plus `default` from the rules |
+| `wiring` | tracks as `wire (path …)` (arcs as chords), vias; `(type protect)` when locked, or all with `protect_existing` |
+
+Back-side parts: Specctra mirrors the image across its Y axis and then rotates counter-clockwise by the
+placement angle, which is cadlab's own transform, so rotations are written unchanged
+(`specctra::dsn::place_point`). Zones are not written: they are refilled after import. Netless or unplaced
+items stay out.
+
+**`route.import_ses {path, keep_existing?}`** (`specctra::ses`): session coordinates are integers in steps of the
+session's `(resolution <unit> <n>)` and convert exactly to nanometers (any unit: inch, mil, cm, mm, µm). Every
+`network_out` net must exist in the circuit (`ses.unknown_net`, with suggestions), every wire layer must be a
+copper layer (`ses.unknown_layer`). Wires (`path` only; others are counted in `ses.unsupported_wire`) become
+track segments of the path's width; vias take diameter, drill and span from cadlab's padstack names, or the
+diameter and layers from the session's `library_out` padstack and the drill from the net class or rules
+(`ses.unknown_padstack` otherwise). Unless `keep_existing`, the unlocked tracks and vias of the session's nets
+are removed first; locked items stay, and session wiring lying on them (within one resolution step; routers split
+wires at junctions) is counted as duplicate instead of added. Placement differences between the session and the
+board are reported (`ses.placement_mismatch`). The result gives counts and the unrouted connections left.
+
+**Oracle** (`tests/specctra.rs`, `CADLAB_ORACLES=1 CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar`, run with
+`java -jar`): the ATtiny85 board (parts on both sides, rotated, holes, cutout, keep-out, a locked track) and the
+STM32 board auto-placed on four layers are routed by freerouting 2.1 and imported; cadlab DRC must have no error
+and no unrouted connection. freerouting 2.1 occasionally reports a complete route but leaves some wiring out of
+its session (a net or a few connections missing from `network_out`); such runs are retried, up to 5 times. Also
+tested without the oracle: a golden DSN, the reader round trip (equal data, every pin at its pad center through
+`place_point`, nets complete), and a hand-written session (`tests/fixtures/ldo.ses`).
+
+Limits: no DSN-to-project import (the reader is a library function used by tests); arcs (`qarc`) and polygon
+wires in sessions are skipped; Specctra strings cannot contain `"` (written as `'`, with a warning); zones,
+copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC checks them after import).
 
 ## v2: gridless (M6)
 

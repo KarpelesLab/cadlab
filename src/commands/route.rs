@@ -20,7 +20,116 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<RouteNets>()
         .register::<RouteConnection>()
         .register::<RouteRip>()
-        .register::<RouteStatus>();
+        .register::<RouteStatus>()
+        .register::<ImportSes>();
+}
+
+/// Apply a Specctra session (`.ses`, the result of an external autorouter run on the design
+/// from `export.dsn`): its wires and vias become tracks and vias, nets matched by name.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportSes {
+    /// Session file (relative paths are relative to the project directory).
+    pub path: std::path::PathBuf,
+    /// Keep the existing unlocked tracks and vias of the session's nets and only add what is
+    /// new (default: replace them with the session's wiring). Locked items always stay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_existing: bool,
+}
+
+/// Result of `route.import_ses`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SesImported {
+    /// Nets with wiring in the session.
+    pub nets: usize,
+    /// Track segments added.
+    pub tracks_added: usize,
+    /// Vias added.
+    pub vias_added: usize,
+    /// Existing tracks removed (replaced by the session).
+    pub tracks_removed: usize,
+    /// Existing vias removed.
+    pub vias_removed: usize,
+    /// Session items already on the board (protected wiring), not added again.
+    pub duplicates: usize,
+    /// Unrouted connections after the import.
+    pub unrouted: usize,
+}
+
+impl Command for ImportSes {
+    const NAME: &'static str = "route.import_ses";
+    const SUMMARY: &'static str = "Apply a Specctra session (.ses) from an external autorouter: tracks and vias";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = SesImported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<SesImported, CommandError> {
+        use crate::specctra::ses::{ImportError, ImportOptions, Session, plan};
+        let path = match ctx.session.root() {
+            Some(root) if self.path.is_relative() => root.join(&self.path),
+            _ => self.path.clone(),
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| CommandError::from(crate::model::ModelError::Io { path: path.clone(), source: e }))?;
+        let session = Session::parse(&text).map_err(|e| {
+            CommandError::invalid_args("ses.parse", format!("{}: {e}", path.display()))
+                .with_hint("give the session file (.ses) the router wrote for the design from `export.dsn`")
+        })?;
+        let p = ctx.project()?;
+        let plan = plan(p, &session, &ImportOptions { keep_existing: self.keep_existing }).map_err(|e| {
+            let msg = e.to_string();
+            match e {
+                ImportError::UnknownNet { name, suggestions } => CommandError::not_found("ses.unknown_net", msg)
+                    .with_subject(ObjectRef::Net(name))
+                    .with_suggestions(&suggestions)
+                    .with_hint("the session belongs to another design: export the DSN again and re-route it"),
+                ImportError::UnknownLayer(l) => CommandError::invalid_args("ses.unknown_layer", msg)
+                    .with_subject(ObjectRef::Layer(l))
+                    .with_hint("the board's copper layers changed since the DSN export: export and route again"),
+                ImportError::UnknownPadstack(ps) => CommandError::invalid_args("ses.unknown_padstack", msg)
+                    .with_subject(ObjectRef::Named { kind: "padstack".into(), name: ps })
+                    .with_hint("use the via padstacks of the exported DSN, or a router that writes `library_out`"),
+            }
+        })?;
+        for d in plan.warnings.iter().cloned() {
+            ctx.report(d);
+        }
+        let pm = ctx.project_mut()?;
+        let board = pm.board_mut();
+        board.tracks.retain(|t| !plan.remove_tracks.contains(&t.id));
+        board.vias.retain(|v| !plan.remove_vias.contains(&v.id));
+        let (tracks_added, vias_added) = (plan.tracks.len(), plan.vias.len());
+        for mut t in plan.tracks {
+            t.id = pm.alloc_id();
+            pm.board_mut().tracks.push(t);
+        }
+        for mut v in plan.vias {
+            v.id = pm.alloc_id();
+            pm.board_mut().vias.push(v);
+        }
+        let unrouted = geo::ratsnest(ctx.project()?).len();
+        Ok(SesImported {
+            nets: plan.nets,
+            tracks_added,
+            vias_added,
+            tracks_removed: plan.remove_tracks.len(),
+            vias_removed: plan.remove_vias.len(),
+            duplicates: plan.duplicates,
+            unrouted,
+        })
+    }
+
+    fn summarize(o: &SesImported) -> String {
+        let mut s = format!(
+            "imported {} net(s): added {} track segment(s) and {} via(s), removed {} track(s) and {} via(s)",
+            o.nets, o.tracks_added, o.vias_added, o.tracks_removed, o.vias_removed
+        );
+        if o.duplicates > 0 {
+            s.push_str(&format!(", {} already on the board", o.duplicates));
+        }
+        s.push_str(&format!("; {} unrouted connection(s) left", o.unrouted));
+        s
+    }
 }
 
 /// Default time budget.

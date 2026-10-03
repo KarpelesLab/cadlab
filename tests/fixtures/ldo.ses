@@ -1,0 +1,93 @@
+(session ldo
+  (base_design ldo.dsn)
+  (placement
+    (resolution um 10)
+    (component "SOT95P280X145-5N"
+      (place U1 100000 75000 front 0)
+    )
+    (component CAPC1005X55N
+      (place C1 50000 90000 front 90)
+      (place C2 150000 91000 front 90)
+    )
+  )
+  (was_is
+  )
+  (routes
+    (resolution um 10)
+    (parser
+      (host_cad "hand written")
+    )
+    (library_out
+      (padstack "Via[0-1]_800:400_um"
+        (shape (circle F.Cu 8000 0 0))
+        (shape (circle B.Cu 8000 0 0))
+        (attach off)
+      )
+    )
+    (network_out
+      (net VIN
+        (wire
+          (path F.Cu 2500
+            88475 84500
+            50000 84500
+          )
+        )
+        (wire
+          (path F.Cu 2500
+            88475 65500
+            70000 65500
+            70000 84500
+          )
+        )
+      )
+      (net "3V3"
+        (wire
+          (path F.Cu 2500
+            111525 84500
+            150000 84500
+          )
+        )
+      )
+      (net GND
+        (wire
+          (path F.Cu 2500
+            88475 75000
+            100000 75000
+          )
+        )
+        (wire
+          (path B.Cu 2540
+            100000 75000
+            100000 110000
+          )
+        )
+        (wire
+          (path B.Cu 2540
+            50000 110000
+            100000 110000
+            150000 110000
+          )
+        )
+        (wire
+          (path F.Cu 2500
+            50000 110000
+            50000 94525
+          )
+          (type protect)
+        )
+        (wire
+          (path F.Cu 2500
+            150000 110000
+            150000 94525
+          )
+        )
+        (via via_600_300 100000 75000
+        )
+        (via via_600_300 50000 110000
+        )
+        (via "Via[0-1]_800:400_um" 150000 110000
+        )
+      )
+    )
+  )
+)

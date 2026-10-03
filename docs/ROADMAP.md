@@ -124,8 +124,9 @@ exports bundles that pass both JLCPCB's and PCBWay's online checks.
 
 Details in [ROUTER.md](ROUTER.md).
 
-- [ ] Specctra DSN import / SES export, implemented from the published Specctra spec (freerouting as benchmark
-      oracle only)
+- [x] Specctra DSN/SES, implemented from the published Specctra spec (freerouting as benchmark oracle only):
+      DSN export (`export.dsn`) and SES import (`route.import_ses`) for external routers, DSN reader in the
+      library (`src/specctra/`; freerouting oracle in `tests/specctra.rs`)
 - [x] Obstacle model, connection planning (per-net MST), ordering heuristics
 - [x] Grid-based multi-layer A* maze router with vias, 45° moves
 - [x] Negotiated-congestion rip-up and reroute

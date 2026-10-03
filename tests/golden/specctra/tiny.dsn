@@ -1,0 +1,175 @@
+(pcb tiny
+  (parser (string_quote ") (space_in_quoted_tokens on) (host_cad cadlab))
+  (resolution um 10)
+  (unit um)
+  (structure
+    (layer F.Cu
+      (type signal)
+      (property (index 0))
+    )
+    (layer B.Cu
+      (type signal)
+      (property (index 1))
+    )
+    (boundary
+      (path pcb 0 1000 0 35000 0 35087.156 3.805 35173.648 15.192 35258.819 34.074 35342.02 60.307 35422.618 93.692 35500 133.974 35573.577 180.848 35642.788 233.955 35707.107 292.893 35766.045 357.212 35819.152 426.423 35866.026 500 35906.308 577.382 35939.693 657.98 35965.926 741.181 35984.808 826.352 35996.195 912.844 36000 1000 36000 27000 35996.195 27087.156 35984.808 27173.648 35965.926 27258.819 35939.693 27342.02 35906.308 27422.618 35866.026 27500 35819.152 27573.577 35766.045 27642.788 35707.107 27707.107 35642.788 27766.045 35573.577 27819.152 35500 27866.026 35422.618 27906.308 35342.02 27939.693 35258.819 27965.926 35173.648 27984.808 35087.156 27996.195 35000 28000 1000 28000 912.844 27996.195 826.352 27984.808 741.181 27965.926 657.98 27939.693 577.382 27906.308 500 27866.026 426.423 27819.152 357.212 27766.045 292.893 27707.107 233.955 27642.788 180.848 27573.577 133.974 27500 93.692 27422.618 60.307 27342.02 34.074 27258.819 15.192 27173.648 3.805 27087.156 0 27000 0 1000 3.805 912.844 15.192 826.352 34.074 741.181 60.307 657.98 93.692 577.382 133.974 500 180.848 426.423 233.955 357.212 292.893 292.893 357.212 233.955 426.423 180.848 500 133.974 577.382 93.692 657.98 60.307 741.181 34.074 826.352 15.192 912.844 3.805 1000 0)
+    )
+    (keepout cutout1 (polygon signal 0 30000 2000 33000 2000 33000 5000 30000 5000))
+    (wire_keepout antenna (polygon F.Cu 0 24000 22000 29000 22000 29000 26000 24000 26000))
+    (via via_600_300)
+    (rule (width 250) (clearance 200))
+    (control (via_at_smd off))
+  )
+  (placement
+    (component CAPC1005X55N
+      (place C1 7000 22500 front 90 (PN C_1uF_16V_X5R_0402))
+      (place C2 13500 22500 front 90 (PN C_1uF_16V_X5R_0402))
+      (place C3 18000 18500 front 0 (PN C_100nF_16V_X7R_0402))
+    )
+    (component LEDC1608X87N
+      (place D1 19000 5000 front 30 (PN LED_red_0603))
+    )
+    (component PinHeader_1x02_P2.54mm
+      (place J1 4000 13000 front 0 (lock_type position) (PN PWR_HDR))
+    )
+    (component PinHeader_2x03_P2.54mm
+      (place J2 29000 13000 back 90 (PN ISP_HDR))
+    )
+    (component RESC1005X40N
+      (place R1 23000 18500 front 0 (PN R_10k_1pct_0402))
+      (place R2 14000 7000 back 90 (PN R_1k_1pct_0402))
+    )
+    (component SOIC127P600X175-8N
+      (place U2 18000 13000 front 0 (PN ATTINY85-20SU))
+    )
+    (component SOT95P280X145-5N
+      (place U1 10000 19000 front 0 (PN AP2112K-3.3TRG1))
+    )
+    (component hole_1200
+      (place H2 33000 25000 front 0 (lock_type position))
+    )
+    (component hole_1800_1000
+      (place H1 3000 3000 front 0 (lock_type position))
+    )
+  )
+  (library
+    (image CAPC1005X55N
+      (outline (path signal 0 -890 -440 890 -440 890 440 -890 440 -890 -440))
+      (pin smd_roundrect_565x570_141.25 1 -452.5 0)
+      (pin smd_roundrect_565x570_141.25 2 452.5 0)
+    )
+    (image LEDC1608X87N
+      (outline (path signal 0 -1460 -710 1460 -710 1460 710 -1460 710 -1460 -710))
+      (pin smd_roundrect_875x910_218.75 1 -767.5 0)
+      (pin smd_roundrect_875x910_218.75 2 767.5 0)
+    )
+    (image PinHeader_1x02_P2.54mm
+      (outline (path signal 0 -1520 -2790 1520 -2790 1520 2790 -1520 2790 -1520 -2790))
+      (pin tht_d1000_rect_1700x1700 1 0 1270)
+      (pin tht_d1000_circle_1700 2 0 -1270)
+    )
+    (image PinHeader_2x03_P2.54mm
+      (outline (path signal 0 -2790 -4060 2790 -4060 2790 4060 -2790 4060 -2790 -4060))
+      (pin tht_d1000_rect_1700x1700 1 -1270 2540)
+      (pin tht_d1000_circle_1700 2 1270 2540)
+      (pin tht_d1000_circle_1700 3 -1270 0)
+      (pin tht_d1000_circle_1700 4 1270 0)
+      (pin tht_d1000_circle_1700 5 -1270 -2540)
+      (pin tht_d1000_circle_1700 6 1270 -2540)
+    )
+    (image RESC1005X40N
+      (outline (path signal 0 -890 -440 890 -440 890 440 -890 440 -890 -440))
+      (pin smd_roundrect_565x570_141.25 1 -452.5 0)
+      (pin smd_roundrect_565x570_141.25 2 452.5 0)
+    )
+    (image SOIC127P600X175-8N
+      (outline (path signal 0 -3710 -2700 3710 -2700 3710 2700 -3710 2700 -3710 -2700))
+      (pin smd_roundrect_1965x580_145 1 -2472.5 1905)
+      (pin smd_roundrect_1965x580_145 2 -2472.5 635)
+      (pin smd_roundrect_1965x580_145 3 -2472.5 -635)
+      (pin smd_roundrect_1965x580_145 4 -2472.5 -1905)
+      (pin smd_roundrect_1965x580_145 5 2472.5 -1905)
+      (pin smd_roundrect_1965x580_145 6 2472.5 -635)
+      (pin smd_roundrect_1965x580_145 7 2472.5 635)
+      (pin smd_roundrect_1965x580_145 8 2472.5 1905)
+    )
+    (image SOT95P280X145-5N
+      (outline (path signal 0 -2110 -1710 2110 -1710 2110 1710 -2110 1710 -2110 -1710))
+      (pin smd_roundrect_1405x570_142.5 1 -1152.5 950)
+      (pin smd_roundrect_1405x570_142.5 2 -1152.5 0)
+      (pin smd_roundrect_1405x570_142.5 3 -1152.5 -950)
+      (pin smd_roundrect_1405x570_142.5 4 1152.5 -950)
+      (pin smd_roundrect_1405x570_142.5 5 1152.5 950)
+    )
+    (image hole_1200
+      (keepout "" (circle signal 1200))
+    )
+    (image hole_1800_1000 (pin tht_d1000_circle_1800 1 0 0))
+    (padstack smd_roundrect_1405x570_142.5
+      (shape
+        (polygon F.Cu 0 588.345 -285 640.72 -263.306 680.806 -223.22 702.5 -170.845 702.5 170.845 680.806 223.22 640.72 263.306 588.345 285 -588.345 285 -640.72 263.306 -680.806 223.22 -702.5 170.845 -702.5 -170.845 -680.806 -223.22 -640.72 -263.306 -588.345 -285)
+      )
+      (attach off)
+    )
+    (padstack smd_roundrect_1965x580_145
+      (shape
+        (polygon F.Cu 0 866.342 -290 919.636 -267.925 960.425 -227.136 982.5 -173.842 982.5 173.842 960.425 227.136 919.636 267.925 866.342 290 -866.342 290 -919.636 267.925 -960.425 227.136 -982.5 173.842 -982.5 -173.842 -960.425 -227.136 -919.636 -267.925 -866.342 -290)
+      )
+      (attach off)
+    )
+    (padstack smd_roundrect_565x570_141.25
+      (shape
+        (polygon F.Cu 0 169.346 -285 221.262 -263.496 260.996 -223.762 282.5 -171.846 282.5 171.846 260.996 223.762 221.262 263.496 169.346 285 -169.346 285 -221.262 263.496 -260.996 223.762 -282.5 171.846 -282.5 -171.846 -260.996 -223.762 -221.262 -263.496 -169.346 -285)
+      )
+      (attach off)
+    )
+    (padstack smd_roundrect_875x910_218.75
+      (shape
+        (polygon F.Cu 0 262.262 -455 342.662 -421.697 404.197 -360.162 437.5 -279.762 437.5 279.762 404.197 360.162 342.662 421.697 262.262 455 -262.262 455 -342.662 421.697 -404.197 360.162 -437.5 279.762 -437.5 -279.762 -404.197 -360.162 -342.662 -421.697 -262.262 -455)
+      )
+      (attach off)
+    )
+    (padstack tht_d1000_circle_1700
+      (shape (circle F.Cu 1700))
+      (shape (circle B.Cu 1700))
+      (attach off)
+    )
+    (padstack tht_d1000_circle_1800
+      (shape (circle F.Cu 1800))
+      (shape (circle B.Cu 1800))
+      (attach off)
+    )
+    (padstack tht_d1000_rect_1700x1700
+      (shape (rect F.Cu -850 -850 850 850))
+      (shape (rect B.Cu -850 -850 850 850))
+      (attach off)
+    )
+    (padstack via_600_300
+      (shape (circle F.Cu 600))
+      (shape (circle B.Cu 600))
+      (attach off)
+    )
+  )
+  (network
+    (net 3V3 (pins C2-1 C3-1 J2-2 R1-1 U1-5 U2-8))
+    (net GND (pins C1-2 C2-2 C3-2 D1-1 J1-2 J2-6 U1-2 U2-4 H1-1))
+    (net LED_A (pins D1-2 R2-2))
+    (net LED_DRIVE (pins R2-1 U2-2))
+    (net MISO (pins J2-1 U2-6))
+    (net MOSI (pins J2-4 U2-5))
+    (net RESET (pins J2-5 R1-2 U2-1))
+    (net SCK (pins J2-3 U2-7))
+    (net VBUS (pins C1-1 J1-1 U1-1 U1-3))
+    (class default LED_A LED_DRIVE MISO MOSI RESET SCK
+      (circuit (use_via via_600_300))
+      (rule (width 250) (clearance 200))
+    )
+    (class power 3V3 GND VBUS
+      (circuit (use_via via_600_300))
+      (rule (width 400) (clearance 250))
+    )
+  )
+  (wiring
+    (wire (path F.Cu 400 4000 14270 4000 17000) (net VBUS) (type protect))
+  )
+)

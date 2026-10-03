@@ -175,6 +175,27 @@ interchange target here: a multi-sheet KiCad schematic needs a root sheet with s
 global labels for every net crossing sheets, and per-sheet instance paths, all of which the ERC and netlist
 oracles would then test instead of the layout. One flat sheet keeps local labels and the exported netlist
 exactly cadlab's; hierarchical export can come later if humans need it.
+### D25. Specctra: DSN out, SES in, written from the spec and checked against freerouting (2026-10-04)
+cadlab exchanges routing with external autorouters through Specctra files, implemented from the Specctra
+Design Language Reference and its session file description (`src/specctra/`, an algorithm module with its own
+small S-expression reader/writer, since the KiCad writers are output-only and quote differently).
+`export.dsn` writes the board (coordinates in µm with as many decimals as needed, so nothing is rounded;
+`resolution` only sets the router's grid, default 0.1 µm); `route.import_ses` applies a session: nets matched by
+name, integer resolution steps converted exactly to nanometers, the unlocked routing of the session's nets
+replaced (locked items stay, and session wiring that only repeats them is not added again), unknown nets, layers
+or via padstacks rejected with stable codes. Choices: pad rotation is baked into padstacks (quarter turns swap
+the rectangle, other angles become polygons) rather than relying on pin `rotate`; round rectangles are polygons
+circumscribing the corner arcs (never smaller than the pad); via padstack names carry diameter, drill and layer
+span (`via_600_300`) because Specctra padstacks have no drill; back-side placement is written with cadlab's own
+rotation, since Specctra mirrors the image across its Y axis and then rotates counter-clockwise exactly as
+cadlab does (confirmed by the freerouting oracle, which fails with the opposite convention); zones are not
+written and are refilled after import. The DSN reader parses every field the writer emits (round trip) and the
+common forms of other writers, but there is no "import a DSN as a new project" command: designs come from
+cadlab's own circuit and parts.
+*Why:* freerouting is the reference router to benchmark against (D7) and a fallback for boards the M5 router
+does not finish; file-level exchange keeps it an external process. Exact unit conversion and DRC after import
+keep cadlab the judge of what is legal.
+
 ### D26. Rule presets and fab-derived rules store numbers; substitutes are per-fab lock entries (2026-10-04)
 `board.rules` builds the rule set from a preset (`ipc2` = the defaults, `ipc3` = class 3 annular ring and
 vias), then from a fab profile (`fab`, `margin` `tightest` = the fab's limits, `comfortable` = limits + 25 %

@@ -16,7 +16,7 @@ published specifications.
 | Assembly BOM | CSV / XLSX (generic + per-fab layouts) | export | M1/M4, CSV done (`bom.export`, `fab.export`) |
 | Intelligent fab data | **IPC-2581** (rev C) | export | M9 |
 | Intelligent fab data | ODB++ (check spec license terms first) | export | later |
-| Routing exchange | **Specctra DSN / SES** | import + export | M5 |
+| Routing exchange | **Specctra DSN / SES** | DSN export, SES import (DSN reader as library) | M5, done (`export.dsn`, `route.import_ses`; [ROUTER.md](ROUTER.md)) |
 | Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | later |
 | 3D | **STEP** AP214/AP242 (export), STEP/VRML models (import) | both | M9 |
 | Simulation | SPICE netlist (ngspice dialect) | export | M8 |

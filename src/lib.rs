@@ -55,6 +55,7 @@ pub mod router;
 pub mod schematic;
 pub mod sexpr;
 pub mod sourcing;
+pub mod specctra;
 pub mod substitute;
 pub mod suggest;
 pub mod supplier;
