@@ -412,7 +412,7 @@ impl Ctx<'_> {
                 refs.sort_by(|a, b| natural_cmp(a, b));
                 let mut d = Diagnostic::warning(
                     "fab.silk_width",
-                    format!("footprint {name} has {w} silkscreen lines, {who}'s minimum is {m} ({})", refs.join(", ")),
+                    format!("footprint {name} has {w} silkscreen lines, {who}'s minimum is {m}"),
                 )
                 .with_hint("the fab may print thin lines faintly or drop them; widen the footprint's silk lines in the project library if they matter");
                 d.subjects = refs.into_iter().map(ObjectRef::Name).collect();
