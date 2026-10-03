@@ -9,6 +9,7 @@
 //! The KiCad writer exports it as a KiCad schematic.
 
 mod draw;
+pub mod kicad;
 mod layout;
 pub mod symbol;
 

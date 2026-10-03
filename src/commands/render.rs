@@ -1,4 +1,4 @@
-//! `render.*` (images) and `schematic.*` (layout hints).
+//! `render.*` (images) and `schematic.*` (layout hints, KiCad export).
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,12 @@ use crate::schematic::{self, Placement};
 use crate::units::{LengthUnit, Nm};
 
 pub(crate) fn register(r: &mut Registry) {
-    r.register::<Schematic>().register::<Symbol>().register::<Footprint>().register::<Place>().register::<Unplace>();
+    r.register::<Schematic>()
+        .register::<Symbol>()
+        .register::<Footprint>()
+        .register::<Place>()
+        .register::<Unplace>()
+        .register::<Export>();
 }
 
 /// Default resolution: 10 px/mm (about 254 dpi).
@@ -386,5 +391,65 @@ impl Command for Unplace {
 
     fn summarize(o: &Placements) -> String {
         format!("{} fixed placement(s)", o.placements.len())
+    }
+}
+
+/// Export the schematic (automatic layout) as a KiCad schematic.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Export {
+    /// Output file (`.kicad_sch`), relative to the project. KiCad takes the project name from the
+    /// file name, so `board.kicad_sch` belongs to KiCad project `board`.
+    pub path: PathBuf,
+}
+
+/// What a KiCad export wrote.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Exported {
+    /// File written.
+    pub path: String,
+    /// Component symbols.
+    pub symbols: usize,
+    /// Power symbols, including power flags.
+    pub power_symbols: usize,
+    /// Wires.
+    pub wires: usize,
+    /// Net labels.
+    pub labels: usize,
+}
+
+impl Command for Export {
+    const NAME: &'static str = "schematic.export";
+    const SUMMARY: &'static str = "Export the schematic (automatic layout) as a KiCad .kicad_sch file";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = Exported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Exported, CommandError> {
+        let path = out_path(ctx, &Some(self.path.clone()), "schematic.kicad_sch");
+        let p = ctx.project()?;
+        let hints = p.schematic().map(|s| s.placements.clone()).unwrap_or_default();
+        let layout = schematic::layout(p, &hints);
+        let stem = path.file_stem().and_then(|s| s.to_str()).map(str::to_string);
+        let sch = schematic::kicad::export(p, &layout, &schematic::kicad::Options { project_name: stem });
+        let io = |e| CommandError::from(crate::model::ModelError::Io { path: path.clone(), source: e });
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        std::fs::write(&path, &sch.text).map_err(io)?;
+        Ok(Exported {
+            path: path.display().to_string(),
+            symbols: sch.symbols,
+            power_symbols: sch.power_symbols,
+            wires: sch.wires,
+            labels: sch.labels,
+        })
+    }
+
+    fn summarize(o: &Exported) -> String {
+        format!(
+            "wrote {} ({} symbols, {} power symbols, {} wires, {} labels)",
+            o.path, o.symbols, o.power_symbols, o.wires, o.labels
+        )
     }
 }

@@ -4,6 +4,7 @@
 //!   tests run only when `CADLAB_ORACLES=1`; they never link or vendor those tools
 //!   (docs/TESTING.md, DECISIONS D7).
 //! - [`golden`]: compare output with checked-in golden files.
+//! - [`boards`]: example boards built through the command registry.
 
 // Each test binary uses a different subset of these helpers.
 #![allow(dead_code, missing_docs)]
@@ -138,5 +139,51 @@ pub mod golden {
                 out.push(rel);
             }
         }
+    }
+}
+
+pub mod boards {
+    //! Example boards built through the command registry.
+
+    use cadlab::command::{Registry, RunOptions, Session, Step};
+    use serde_json::{Value, json};
+
+    pub fn pins(list: &[(&str, &str, &str)]) -> Value {
+        Value::Array(list.iter().map(|(n, name, kind)| json!({"number": n, "name": name, "kind": kind})).collect())
+    }
+
+    /// Parts and components of a small ATtiny85 board.
+    pub fn build_board(r: &Registry, s: &mut Session) {
+        let steps = vec![
+            json!({"cmd": "part.create", "args": {"id": "PWR_HDR", "category": "connector", "description": "2-pin power header",
+                "package": "PinHeader 1x02", "pins": pins(&[("1", "VBUS", "passive"), ("2", "GND", "passive")])}}),
+            json!({"cmd": "part.create", "args": {"category": "ldo", "manufacturer": "Diodes", "mpn": "AP2112K-3.3TRG1", "package": "SOT-23-5",
+                "pins": pins(&[("1", "VIN", "power_in"), ("2", "GND", "power_in"), ("3", "EN", "input"), ("4", "NC", "no_connect"), ("5", "VOUT", "power_out")])}}),
+            json!({"cmd": "part.create", "args": {"category": "mcu", "manufacturer": "Microchip", "mpn": "ATTINY85-20SU", "package": "SOIC-8",
+                "pins": pins(&[("1", "PB5", "bidirectional"), ("2", "PB3", "bidirectional"), ("3", "PB4", "bidirectional"), ("4", "GND", "power_in"),
+                               ("5", "PB0", "bidirectional"), ("6", "PB1", "bidirectional"), ("7", "PB2", "bidirectional"), ("8", "VCC", "power_in")])}}),
+            json!({"cmd": "part.create", "args": {"id": "ISP_HDR", "category": "connector", "description": "AVR ISP 2x3 header", "package": "PinHeader 2x03",
+                "pins": pins(&[("1", "MISO", "passive"), ("2", "VCC", "passive"), ("3", "SCK", "passive"), ("4", "MOSI", "passive"), ("5", "RESET", "passive"), ("6", "GND", "passive")])}}),
+            json!({"cmd": "circuit.add", "args": {"part": "PWR_HDR", "refdes": "J1"}}),
+            json!({"cmd": "circuit.add", "args": {"part": "AP2112K-3.3TRG1"}}),
+            json!({"cmd": "circuit.add", "args": {"part": "ATTINY85-20SU"}}),
+            json!({"cmd": "circuit.add", "args": {"part": "ISP_HDR", "refdes": "J2"}}),
+            json!({"cmd": "circuit.add", "args": {"part": "C 1uF 16V X5R 0402", "count": 2}}),
+            json!({"cmd": "circuit.add", "args": {"part": "C 100nF 16V X7R 0402"}}),
+            json!({"cmd": "circuit.add", "args": {"part": "R 10k 1% 0402"}}),
+            json!({"cmd": "circuit.add", "args": {"part": "R 1k 1% 0402"}}),
+            json!({"cmd": "circuit.add", "args": {"part": "LED red 0603"}}),
+            json!({"cmd": "net.connect", "args": {"net": "VBUS", "pins": ["J1.VBUS", "U1.VIN", "U1.EN", "C1.1"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "GND", "pins": ["J1.GND", "U1.GND", "C1.2", "C2.2", "C3.2", "U2.GND", "D1.K", "J2.GND"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "3V3", "pins": ["U1.VOUT", "C2.1", "C3.1", "U2.VCC", "R1.1", "J2.VCC"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "RESET", "pins": ["U2.PB5", "R1.2", "J2.RESET"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "MOSI", "pins": ["U2.PB0", "J2.MOSI"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "MISO", "pins": ["U2.PB1", "J2.MISO"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "SCK", "pins": ["U2.PB2", "J2.SCK"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "LED_DRIVE", "pins": ["U2.PB3", "R2.1"]}}),
+            json!({"cmd": "net.connect", "args": {"net": "LED_A", "pins": ["R2.2", "D1.A"]}}),
+        ];
+        let steps: Vec<Step> = serde_json::from_value(Value::Array(steps)).unwrap();
+        r.execute_batch(s, steps, RunOptions::default()).unwrap_or_else(|f| panic!("step {:?}: {}", f.step, f.error));
     }
 }
