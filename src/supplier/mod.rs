@@ -195,11 +195,29 @@ impl Suppliers {
         self
     }
 
-    /// Providers from the environment: catalog files listed in `CADLAB_CATALOGS`
-    /// (path-separated), `*.json` in the user catalog directory
-    /// (`$XDG_CONFIG_HOME/cadlab/catalogs` or `~/.config/cadlab/catalogs`), and DigiKey when
-    /// `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET` are set.
+    /// Providers from the user settings and environment, ignoring problems; see
+    /// [`Suppliers::from_user_settings`].
     pub fn from_env() -> Self {
+        Self::from_user_settings().0
+    }
+
+    /// Providers from the user settings and environment: catalog files listed in
+    /// `CADLAB_CATALOGS` (path-separated), `*.json` in the user catalog directory
+    /// (`$XDG_CONFIG_HOME/cadlab/catalogs` or `~/.config/cadlab/catalogs`), and DigiKey when
+    /// credentials are in `config.toml` or `DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`.
+    /// Returns warnings (e.g. an unreadable settings file) alongside.
+    pub fn from_user_settings() -> (Self, Vec<crate::diag::Diagnostic>) {
+        let mut warnings = Vec::new();
+        let cfg = match crate::config::UserConfig::load() {
+            Ok(c) => c,
+            Err(e) => {
+                warnings.push(
+                    crate::diag::Diagnostic::warning("config.invalid", format!("user settings ignored: {e}"))
+                        .with_hint("fix or delete the file; `cadlab config path` shows where it is"),
+                );
+                crate::config::UserConfig::default()
+            }
+        };
         let mut s = Suppliers::new();
         let mut paths = Vec::new();
         if let Some(v) = std::env::var_os("CADLAB_CATALOGS") {
@@ -220,10 +238,12 @@ impl Suppliers {
             s = s.with(Arc::new(catalog::Catalog::lazy(p)));
         }
         #[cfg(feature = "net")]
-        if let Some(dk) = digikey::DigiKey::from_env() {
+        if let Some(dk) = digikey::DigiKey::from_settings(cfg.digikey.as_ref()) {
             s = s.with(Arc::new(dk));
         }
-        s
+        #[cfg(not(feature = "net"))]
+        let _ = cfg;
+        (s, warnings)
     }
 
     /// Provider IDs.

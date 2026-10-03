@@ -81,6 +81,7 @@ cadlab call bom.add '{"part": "mpn:AP2112K-3.3TRG1"}'   # any command, JSON args
 cadlab batch script.jsonl                               # transaction of many commands
 cadlab describe [<command>]                             # list commands / print a command's schema
 cadlab undo | cadlab redo | cadlab history
+cadlab config digikey | show | path | remove        # user settings: supplier credentials (CLI only, D17)
 ```
 
 ### Conventions

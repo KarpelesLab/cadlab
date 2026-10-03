@@ -215,3 +215,44 @@ fn catalogs_from_environment() {
     let o = cadlab_env(&p, &["bom", "check"], &env);
     assert_eq!(o.status.code(), Some(3), "{}", String::from_utf8_lossy(&o.stderr));
 }
+
+#[test]
+fn user_settings_for_digikey() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_home = dir.path().join("cfg");
+    let env = [("XDG_CONFIG_HOME", cfg_home.to_str().unwrap())];
+    let run = |args: &[&str], stdin: &str| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cadlab"))
+            .current_dir(dir.path())
+            .envs(env.iter().copied())
+            .env_remove("DIGIKEY_CLIENT_ID")
+            .env_remove("DIGIKEY_CLIENT_SECRET")
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let o = run(
+        &["config", "digikey", "--client-id", "my-id", "--no-verify", "--json"],
+        "my-secret-value\n",
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(json_of(&o)["client_secret"], "my-s…alue");
+    let stored = std::fs::read_to_string(cfg_home.join("cadlab/config.toml")).unwrap();
+    assert!(stored.contains("client_secret = \"my-secret-value\""));
+    let o = run(&["config", "show", "--json"], "");
+    let v = json_of(&o);
+    assert_eq!(v["digikey"]["client_id"], "my-id");
+    assert_eq!(v["digikey"]["client_secret"], "my-s…alue");
+    // No secret on stdin: the stored one is kept.
+    let o = run(&["config", "digikey", "--client-id", "x", "--no-verify"], "");
+    assert!(o.status.success(), "keeps the stored secret when none is given");
+    let o = run(&["config", "remove", "digikey"], "");
+    assert!(o.status.success());
+    assert_eq!(json_of(&run(&["config", "show", "--json"], ""))["digikey"], Value::Null);
+}

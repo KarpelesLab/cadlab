@@ -89,6 +89,13 @@ as with polyclip, rather than splitting cadlab into internal sub-crates.
 *Why:* simpler to work on and to depend on; one version, one changelog. Reusable parts still get a clean,
 public home.
 
+### D17. Credentials live in user settings, entered through the CLI only (2026-10-04)
+Supplier credentials are stored in `~/.config/cadlab/config.toml` (owner-only permissions), set with the
+interactive `cadlab config digikey` (secret typed without echo, verified before saving), and overridable by
+environment variables. There is deliberately no registry/MCP command to set them, and `config show` masks
+secrets.
+*Why:* secrets must not pass through an agent's context or land in projects, logs or the operation log.
+
 ## Open questions
 
 None currently.

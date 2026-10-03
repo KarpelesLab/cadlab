@@ -2,6 +2,7 @@
 
 mod cli;
 mod mcp;
+mod settings;
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
@@ -51,6 +52,7 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
     let (sub, sm) = m.subcommand().expect("subcommand required");
     match sub {
         "mcp" => mcp::serve(registry, !sm.get_flag("no_autosave")),
+        "config" => settings::run(sm, g.json),
         "describe" => describe(registry, g, sm.get_one::<String>("command").map(String::as_str)),
         "call" => {
             let name = sm.get_one::<String>("command").unwrap();
@@ -98,8 +100,10 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
 /// Opens the session a command runs in: the project from `-p` or found upward from the current
 /// directory. Commands that create or open projects start from an empty session.
 fn open_session(g: &Globals, command: &str) -> Result<(Session, Vec<Diagnostic>), Failure> {
-    let (mut s, d) = open_session_inner(g, command)?;
-    s.suppliers = Suppliers::from_env();
+    let (mut s, mut d) = open_session_inner(g, command)?;
+    let (suppliers, warnings) = Suppliers::from_user_settings();
+    s.suppliers = suppliers;
+    d.extend(warnings);
     Ok((s, d))
 }
 

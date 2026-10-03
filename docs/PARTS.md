@@ -115,9 +115,11 @@ at the needed quantity, most stock. A failing provider is reported as a warning;
 - **Catalog files** (offline): JSON lists of candidates (format in `src/supplier/catalog.rs`): a stock list, a
   parts drawer, or data exported from a distributor. Loaded from `~/.config/cadlab/catalogs/*.json` and the
   paths in `CADLAB_CATALOGS`.
-- **DigiKey** (Product Information API v4, client-credentials OAuth): enabled when `DIGIKEY_CLIENT_ID` and
-  `DIGIKEY_CLIENT_SECRET` are set; optional `DIGIKEY_SITE` (US), `DIGIKEY_LANGUAGE` (en), `DIGIKEY_CURRENCY`
-  (USD), `DIGIKEY_SANDBOX=1`. One candidate per packaging (cut tape, tape & reel; Digi-Reel skipped), with
+- **DigiKey** (Product Information API v4, client-credentials OAuth): run `cadlab config digikey` once; it asks
+  for the client ID and secret of your DigiKey API app, checks them with DigiKey and stores them in
+  `~/.config/cadlab/config.toml` (owner-only). Optional `--site` (US), `--currency` (USD), `--language` (en),
+  `--sandbox`. Environment variables `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `DIGIKEY_SITE`,
+  `DIGIKEY_LANGUAGE`, `DIGIKEY_CURRENCY`, `DIGIKEY_SANDBOX=1` override the file. One candidate per packaging (cut tape, tape & reel; Digi-Reel skipped), with
   parameters normalized to cadlab keys (`src/supplier/normalize.rs`). `cargo test --test digikey_live` checks
   the integration against the real API when credentials are set.
 

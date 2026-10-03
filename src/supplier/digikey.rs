@@ -15,6 +15,7 @@ use super::cache::{Cache, offline};
 use super::normalize;
 use super::query::Op;
 use super::{Candidate, Money, PriceBreak, Provider, ProviderError, SearchQuery};
+use crate::config::{DigiKeySettings, UserConfig};
 use crate::model::part::ParamValue;
 
 const ID: &str = "digikey";
@@ -47,17 +48,22 @@ fn bad_data(message: impl Into<String>) -> ProviderError {
 }
 
 impl DigiKey {
-    /// From the environment; `None` when `DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET` are unset.
-    pub fn from_env() -> Option<Self> {
-        let id = std::env::var("DIGIKEY_CLIENT_ID").ok().filter(|v| !v.is_empty())?;
-        let secret = std::env::var("DIGIKEY_CLIENT_SECRET").ok().filter(|v| !v.is_empty())?;
-        let var = |k: &str, d: &str| {
-            std::env::var(k)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| d.to_string())
+    /// From the user settings (`[digikey]` in `config.toml`), overridden by the environment
+    /// (`DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `DIGIKEY_SITE`, `DIGIKEY_LANGUAGE`,
+    /// `DIGIKEY_CURRENCY`, `DIGIKEY_SANDBOX=1`). `None` without both an ID and a secret.
+    pub fn from_settings(settings: Option<&DigiKeySettings>) -> Option<Self> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let pick = |k: &str, file: Option<&String>, d: &str| env(k).or(file.cloned()).unwrap_or_else(|| d.to_string());
+        let id = env("DIGIKEY_CLIENT_ID")
+            .or_else(|| settings.map(|s| s.client_id.clone()))
+            .filter(|v| !v.is_empty())?;
+        let secret = env("DIGIKEY_CLIENT_SECRET")
+            .or_else(|| settings.map(|s| s.client_secret.clone()))
+            .filter(|v| !v.is_empty())?;
+        let sandbox = match env("DIGIKEY_SANDBOX") {
+            Some(v) => v == "1",
+            None => settings.is_some_and(|s| s.sandbox),
         };
-        let sandbox = std::env::var("DIGIKEY_SANDBOX").is_ok_and(|v| v == "1");
         Some(DigiKey::new(
             id,
             secret,
@@ -66,11 +72,22 @@ impl DigiKey {
             } else {
                 "https://api.digikey.com"
             },
-            &var("DIGIKEY_SITE", "US"),
-            &var("DIGIKEY_LANGUAGE", "en"),
-            &var("DIGIKEY_CURRENCY", "USD"),
+            &pick("DIGIKEY_SITE", settings.and_then(|s| s.site.as_ref()), "US"),
+            &pick("DIGIKEY_LANGUAGE", settings.and_then(|s| s.language.as_ref()), "en"),
+            &pick("DIGIKEY_CURRENCY", settings.and_then(|s| s.currency.as_ref()), "USD"),
             Cache::user_default(),
         ))
+    }
+
+    /// From the user settings file and the environment.
+    pub fn from_env() -> Option<Self> {
+        let cfg = UserConfig::load().ok().unwrap_or_default();
+        DigiKey::from_settings(cfg.digikey.as_ref())
+    }
+
+    /// Checks the credentials by requesting a fresh token.
+    pub fn verify(&self) -> Result<(), ProviderError> {
+        self.token(true).map(|_| ())
     }
 
     /// Explicit configuration.
@@ -121,10 +138,10 @@ impl DigiKey {
         let status = resp.status().as_u16();
         let body = resp.body_mut().read_to_string().map_err(|e| err(e.to_string()))?;
         if status != 200 {
-            return Err(ProviderError::NotConfigured {
-                provider: ID.into(),
-                message: format!("authentication failed (HTTP {status}): {}", error_text(&body)),
-            });
+            return Err(err(format!(
+                "credentials rejected (HTTP {status}): {}",
+                error_text(&body)
+            )));
         }
         let v: Value = serde_json::from_str(&body).map_err(|e| bad_data(e.to_string()))?;
         let tok = v["access_token"]

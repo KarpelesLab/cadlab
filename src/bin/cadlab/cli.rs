@@ -243,6 +243,7 @@ pub fn build(registry: &Registry) -> ClapCommand {
                 .about("List commands, or show one command's arguments and schema")
                 .arg(Arg::new("command").help("Command name (e.g. project.new) or group (e.g. project)")),
         )
+        .subcommand(crate::settings::command())
         .subcommand(
             ClapCommand::new("mcp")
                 .about("Run the MCP server on stdio")
