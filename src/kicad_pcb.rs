@@ -571,7 +571,7 @@ fn write_hole(w: &mut Writer<'_>, h: &crate::model::board::Hole) {
     let pad = geo::holes::hole_pad(h);
     let nets: BTreeMap<String, String> =
         h.net.iter().filter(|_| h.pad.is_some()).map(|n| (pad.number.clone(), n.clone())).collect();
-    write_pad(w, &f, &format!("{key}/pad"), &pad, &nets, &BTreeMap::new());
+    write_pad(w, &f, &h.name, &format!("{key}/pad"), &pad, &nets, &BTreeMap::new());
     w.line(1, ")");
 }
 
