@@ -51,6 +51,7 @@ pub mod netlist;
 pub mod partspec;
 pub mod refs;
 pub mod render;
+pub mod router;
 pub mod schematic;
 pub mod sourcing;
 pub mod suggest;

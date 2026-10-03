@@ -102,6 +102,7 @@ fn mcp_session() {
             "drc",
             "zone",
             "keepout",
+            "route",
             "render",
             "schematic",
             "export",
