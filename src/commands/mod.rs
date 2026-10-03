@@ -11,6 +11,7 @@ pub mod part;
 pub mod project;
 pub mod render;
 mod util;
+pub mod zone;
 
 use crate::command::Registry;
 
@@ -24,6 +25,7 @@ pub fn register_all(r: &mut Registry) {
     block::register(r);
     bom::register(r);
     board::register(r);
+    zone::register(r);
     render::register(r);
     history::register(r);
 }

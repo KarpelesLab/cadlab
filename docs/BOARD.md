@@ -1,7 +1,7 @@
 # Board (M4 design)
 
 The physical board: stackup, outline, rules, footprint placement, copper (tracks, vias, zones), keep-outs and
-graphics. Stored in `board.json`; zone fills are derived data cached under `.cadlab/`.
+graphics. Stored in `board.json`; zone fills are derived data, recomputed on demand (see "Zone fill").
 
 ## Conventions
 
@@ -44,6 +44,40 @@ router agree on what copper exists:
   already connects), from the circuit's nets.
 - `connectivity(board, project)`: copper islands and which nets they join (shorts) or split (opens).
 
+## Zone fill (`src/board/zones.rs`)
+
+For each zone and each of its layers, in priority order (higher first, ties in board order):
+
+1. Area = zone outline ∩ board outline (outer contour minus cutouts, shrunk by `copper_to_edge`).
+2. Minus every other-net copper item on the layer (netless items too) inflated by max(zone clearance, the item's
+   net-class clearance); NPTH holes inflated by the zone clearance; higher-priority fills of other nets inflated by
+   the larger of both zones' clearances; keep-outs with `no_pours` on that layer.
+3. Same-net pads: `solid` merges them; `thermal` keeps a `thermal_gap` around the pad (default: the clearance) and
+   adds spokes of width `thermal_spoke` (default: max(net track width, 0.25 mm)) in the four axis directions;
+   `none` keeps a clearance gap. Same-net tracks and vias are always solid.
+4. Opening by `min_width / 2` removes copper narrower than `min_width` (default: rules `zone_min_width`).
+5. Spokes are added only when they lie entirely in the allowed area of step 2 and reach the pour (a spoke that
+   would violate a clearance is dropped, never trimmed into a sliver).
+6. Islands not touching a pad, via or track of the zone's net are removed (netless zones keep all islands and
+   treat every item as an obstacle).
+
+Zone clearance defaults to max(rules clearance, the zone net's class clearance). Arcs are approximated with
+5 µm tolerance, outward for obstacles and inward for fill boundaries, and every keep-away region carries a 10 nm
+margin covering vertex rounding, so approximation never violates a clearance. Output is a canonical
+`PolygonSet` per (zone, layer), in board order: `zones::fill_zones(project, base_items)`.
+
+Fills join the shared geometry: `copper_items` = `base_copper_items` (pads, tracks, vias) + one
+`ItemRef::Zone(id, layer, island)` item per fill island (`zone#12@F.Cu/0`). Connectivity, the ratsnest
+(pads joined through a pour are connected; zone items are never ratsnest endpoints), DRC, rendering and Gerber
+output see zone copper through it.
+
+Performance and caching: layers fill in parallel (zones interact only within a layer). A 100 × 100 mm two-layer
+board with ~550 copper items (120 pads, 200 tracks, 240 vias) fills both GND layers in ~110–140 ms (release).
+Fills are not stored on disk: `copper_items` has no project directory, and a recompute is cheap. Instead
+`fill_zones` keeps the last 4 results in process, keyed by the exact input bytes (board, base copper, NPTH holes,
+net classes; FNV-1a for lookup, full comparison for equality), so repeated queries on the same state in one MCP
+or batch session cost ~1.5 ms.
+
 ## Commands
 
 | Group | Commands |
@@ -52,7 +86,8 @@ router agree on what copper exists:
 | `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `list`, `auto` (initial grid by schematic groups), `near` (place a part next to another's pin) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
-| `zone` | `add`, `remove`, `fill` (M4 zone workstream) |
+| `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set`, `remove`, `list`, `fill` (report area/islands, warn empty or split) |
+| `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given), `remove`, `list` |
 | `drc` | `run` (M4 DRC workstream) |
 | `render` | `board` (layers, realistic) (M4 rendering workstream) |
 | `export` | `gerber`, `drill`, `pnp`, `ipc356`, `fab` (M4 outputs and fab workstreams) |

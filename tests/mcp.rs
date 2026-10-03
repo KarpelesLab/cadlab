@@ -97,6 +97,8 @@ fn mcp_session() {
             "place",
             "track",
             "via",
+            "zone",
+            "keepout",
             "render",
             "schematic",
             "history",

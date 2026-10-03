@@ -3,6 +3,8 @@
 
 use std::collections::BTreeMap;
 
+pub mod zones;
+
 use polyclip::{ArcTol, Circle, Curve, EndCap, Join, Path, Polygon, PolygonSet, Shape, Side};
 
 use crate::geom::Point;
@@ -231,6 +233,8 @@ pub enum ItemRef {
     Track(ObjectId),
     /// A via.
     Via(ObjectId),
+    /// One island of a zone fill: (zone, copper layer, island index in the fill).
+    Zone(ObjectId, String, usize),
 }
 
 impl std::fmt::Display for ItemRef {
@@ -239,6 +243,7 @@ impl std::fmt::Display for ItemRef {
             ItemRef::Pad(r, n) => write!(f, "{r}.{n}"),
             ItemRef::Track(id) => write!(f, "track#{}", id.0),
             ItemRef::Via(id) => write!(f, "via#{}", id.0),
+            ItemRef::Zone(id, layer, i) => write!(f, "zone#{}@{layer}/{i}", id.0),
         }
     }
 }
@@ -258,8 +263,17 @@ pub struct CopperItem {
     pub anchor: Point,
 }
 
-/// All copper items: pads, tracks, vias (zone fills are added by the zone module).
+/// All copper items: pads, tracks, vias and zone fills (one item per fill island, computed
+/// from the other items by [`zones::fill_zones`]).
 pub fn copper_items(p: &Project) -> Vec<CopperItem> {
+    let mut out = base_copper_items(p);
+    let z = zones::zone_items(p, &out);
+    out.extend(z);
+    out
+}
+
+/// Copper items other than zone fills: pads, tracks, vias.
+pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
     let mut out: Vec<CopperItem> = placed_pads(p)
         .into_iter()
         .filter(|pp| !pp.layers.is_empty())
@@ -366,7 +380,7 @@ pub fn ratsnest(p: &Project) -> Vec<RatLine> {
     let mut by_net: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
         if let Some(n) = &it.net
-            && !matches!(it.item, ItemRef::Track(_))
+            && !matches!(it.item, ItemRef::Track(_) | ItemRef::Zone(..))
         {
             by_net.entry(n.as_str()).or_default().push(i);
         }
