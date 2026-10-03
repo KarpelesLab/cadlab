@@ -98,7 +98,7 @@ Details in [RENDERING.md](RENDERING.md).
 - [ ] "Place near", decoupling caps next to pins, placement by schematic groups
 - [x] Manual routing commands: tracks through coordinates or pins (net inferred, shorts refused), vias; net
       class widths and via sizes
-- [ ] Copper zones with fill (thermal reliefs, clearances, islands removal)
+- [x] Copper zones with fill (thermal reliefs, clearances, islands removal, priorities, keep-outs)
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper once zone fill
       lands; zone min width is left to the zone filler

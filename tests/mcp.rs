@@ -100,6 +100,8 @@ fn mcp_session() {
             "via",
             "lib",
             "drc",
+            "zone",
+            "keepout",
             "render",
             "schematic",
             "history",

@@ -14,6 +14,7 @@ pub mod part;
 pub mod project;
 pub mod render;
 mod util;
+pub mod zone;
 
 use crate::command::Registry;
 
@@ -29,6 +30,7 @@ pub fn register_all(r: &mut Registry) {
     board::register(r);
     lib::register(r);
     drc::register(r);
+    zone::register(r);
     render::register(r);
     kicad_pcb::register(r);
     history::register(r);
