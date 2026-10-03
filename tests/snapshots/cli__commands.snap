@@ -82,6 +82,7 @@ expression: names
   "schematic.unplace",
   "schematic.export",
   "render.board",
+  "board.export_kicad",
   "history.undo",
   "history.redo",
   "history.list"

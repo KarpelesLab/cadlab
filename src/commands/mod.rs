@@ -7,6 +7,7 @@ pub mod circuit;
 pub mod drc;
 pub mod footprint;
 pub mod history;
+pub mod kicad_pcb;
 pub mod lib;
 pub mod net;
 pub mod part;
@@ -29,5 +30,6 @@ pub fn register_all(r: &mut Registry) {
     lib::register(r);
     drc::register(r);
     render::register(r);
+    kicad_pcb::register(r);
     history::register(r);
 }

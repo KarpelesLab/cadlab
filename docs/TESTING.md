@@ -44,6 +44,25 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
   checks the netlist only. Tested with KiCad 10.0.6. Example:
   `CADLAB_ORACLES=1 CADLAB_ORACLE_KICAD_CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli cargo test --test kicad_oracle`.
 
+### KiCad board oracle (`tests/kicad_pcb_oracle.rs`)
+
+`board.export_kicad` writes `.kicad_pcb` (KiCad 8 format, loaded by KiCad 8–10), `.kicad_pro` (board design
+rules, net classes with exact-name patterns) and `.kicad_dru` (each net class track width as a minimum width rule,
+since KiCad does not check net class widths by itself). `kicad-cli` then checks:
+
+- **DRC, clean board:** the LDO board, fully routed with tracks, vias and a bottom GND pour, has no KiCad DRC
+  item (`--severity-all --refill-zones`, no schematic parity) except the allowlist: `lib_footprint_issues`
+  (footprints are embedded; there is no `cadlab` KiCad library to configure, D7).
+- **DRC, deliberate violations:** KiCad reports `clearance`, `track_width` (net class rule),
+  `copper_edge_clearance` and `unconnected_items` for the corresponding defects.
+- **Pad placement:** KiCad's IPC-D-356 export (relative to the auxiliary origin, which the export puts at cadlab's
+  origin) matches `board::placed_pads` in position, size and angle, for rotated and bottom-side parts.
+- **Round trip:** `pcb upgrade --force` re-saves a board using every exported feature without losing items.
+- **Gerbers and drill:** KiCad's outputs are kept in `$CARGO_TARGET_TMPDIR/kicad_pcb_oracle/` for the raster
+  comparison with cadlab's Gerbers.
+
+KiCad report coordinates are converted back with `kicad_pcb::Frame::from_kicad`.
+
 ### Oracle availability
 
 - Oracle tests are behind an env flag (`CADLAB_ORACLES=1`). Without it they skip with a message; with it, a
