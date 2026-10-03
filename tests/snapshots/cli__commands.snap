@@ -74,6 +74,7 @@ expression: names
   "render.footprint",
   "schematic.place",
   "schematic.unplace",
+  "render.board",
   "history.undo",
   "history.redo",
   "history.list"

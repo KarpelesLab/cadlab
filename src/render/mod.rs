@@ -3,6 +3,7 @@
 //! Text is converted to strokes with an embedded stroke font when added to the scene, so both
 //! outputs come from exactly the same geometry. See `docs/RENDERING.md`.
 
+pub mod board;
 pub mod font;
 #[cfg(feature = "png")]
 mod png;
@@ -71,6 +72,13 @@ pub enum Prim {
         /// Outline width and color.
         stroke: Option<(f64, Color)>,
     },
+    /// Filled region of several closed rings (outer boundaries and holes), even-odd rule.
+    Region {
+        /// Rings.
+        rings: Vec<Vec<(f64, f64)>>,
+        /// Fill.
+        fill: Color,
+    },
 }
 
 /// A scene to render.
@@ -102,6 +110,11 @@ impl Scene {
     /// A filled polygon.
     pub fn fill(&mut self, pts: Vec<(f64, f64)>, fill: Color, stroke: Option<(f64, Color)>) {
         self.prims.push(Prim::Polygon { pts, fill, stroke });
+    }
+
+    /// A filled region made of several rings (even-odd: holes are rings inside outer rings).
+    pub fn region(&mut self, rings: Vec<Vec<(f64, f64)>>, fill: Color) {
+        self.prims.push(Prim::Region { rings, fill });
     }
 
     /// A circle.
@@ -138,6 +151,7 @@ impl Scene {
                     pts.iter().for_each(|&(x, y)| add(x, y, pad));
                 }
                 Prim::Circle { c, r, stroke, .. } => add(c.0, c.1, r + stroke.map_or(0.0, |s| s.0 / 2.0)),
+                Prim::Region { rings, .. } => rings.iter().flatten().for_each(|&(x, y)| add(x, y, 0.0)),
             }
         }
         b

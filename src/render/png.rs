@@ -59,6 +59,19 @@ pub fn to_png(scene: &Scene, view: &View) -> Result<Vec<u8>, String> {
                     }
                 }
             }
+            Prim::Region { rings, fill } => {
+                let mut b = PathBuilder::new();
+                for r in rings.iter().filter(|r| r.len() >= 3) {
+                    b.move_to(r[0].0 as f32, r[0].1 as f32);
+                    for &(x, y) in &r[1..] {
+                        b.line_to(x as f32, y as f32);
+                    }
+                    b.close();
+                }
+                if let Some(pa) = b.finish() {
+                    pm.fill_path(&pa, &paint(*fill), FillRule::EvenOdd, tf, None);
+                }
+            }
             Prim::Circle { c, r, fill, stroke: st } => {
                 if let Some(pa) = PathBuilder::from_circle(c.0 as f32, c.1 as f32, *r as f32) {
                     if let Some(f) = fill {

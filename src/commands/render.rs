@@ -15,6 +15,7 @@ use crate::units::{LengthUnit, Nm};
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<Schematic>().register::<Symbol>().register::<Footprint>().register::<Place>().register::<Unplace>();
+    r.register::<board::Board>(); // render.board (board rendering workstream)
 }
 
 /// Default resolution: 10 px/mm (about 254 dpi).
@@ -388,3 +389,7 @@ impl Command for Unplace {
         format!("{} fixed placement(s)", o.placements.len())
     }
 }
+
+// ---- render.board (board rendering workstream, M4) ----
+
+mod board;
