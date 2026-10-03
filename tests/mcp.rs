@@ -99,6 +99,7 @@ fn mcp_session() {
             "track",
             "via",
             "lib",
+            "drc",
             "render",
             "schematic",
             "history",

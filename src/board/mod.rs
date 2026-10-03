@@ -293,20 +293,12 @@ pub fn copper_items(p: &Project) -> Vec<CopperItem> {
 }
 
 fn touches(a: &CopperItem, b: &CopperItem) -> bool {
-    if !a.layers.iter().any(|l| b.layers.contains(l)) {
-        return false;
-    }
-    let (Some(ba), Some(bb)) = (polyclip::Geometry::bbox(&a.shape), polyclip::Geometry::bbox(&b.shape)) else {
-        return false;
-    };
-    if !ba.intersects(&bb) {
-        return false;
-    }
-    polyclip::intersects(&a.shape, &b.shape)
+    a.layers.iter().any(|l| b.layers.contains(l)) && polyclip::intersects(&a.shape, &b.shape)
 }
 
 /// Copper islands: groups of items that touch (same layer, overlapping shapes; vias and
-/// through-hole pads join layers). Returns the island index of every item.
+/// through-hole pads join layers). Returns the island index of every item: the lowest index
+/// of the items in its island.
 pub fn islands(items: &[CopperItem]) -> Vec<usize> {
     let n = items.len();
     let mut parent: Vec<usize> = (0..n).collect();
@@ -323,12 +315,20 @@ pub fn islands(items: &[CopperItem]) -> Vec<usize> {
         }
         r
     }
-    for i in 0..n {
-        for j in i + 1..n {
-            if touches(&items[i], &items[j]) {
-                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+    // Sweep over bounding boxes sorted by their left edge.
+    let boxes: Vec<Option<polyclip::Rect>> = items.iter().map(|it| polyclip::Geometry::bbox(&it.shape)).collect();
+    let mut order: Vec<(polyclip::Rect, usize)> =
+        boxes.iter().enumerate().filter_map(|(i, b)| b.map(|b| (b, i))).collect();
+    order.sort_by_key(|(b, i)| (b.min.x, *i));
+    for (k, (bi, i)) in order.iter().enumerate() {
+        for (bj, j) in &order[k + 1..] {
+            if bj.min.x > bi.max.x {
+                break;
+            }
+            if bi.intersects(bj) && touches(&items[*i], &items[*j]) {
+                let (a, b) = (find(&mut parent, *i), find(&mut parent, *j));
                 if a != b {
-                    parent[b] = a;
+                    parent[a.max(b)] = a.min(b);
                 }
             }
         }
@@ -413,6 +413,18 @@ pub fn ratsnest(p: &Project) -> Vec<RatLine> {
         }
     }
     out
+}
+
+/// Courtyard of a placed footprint in board coordinates; `None` when the component is not
+/// placed, has no footprint or its courtyard is empty.
+pub fn placed_courtyard(p: &Project, refdes: &str) -> Option<polyclip::Ring> {
+    let pf = p.board().footprints.get(refdes)?;
+    let fp = footprint_for(p, refdes)?;
+    if fp.courtyard.len() < 3 {
+        return None;
+    }
+    let tf = transform(pf);
+    Some(fp.courtyard.iter().map(|q| pt(tf(*q))).collect())
 }
 
 /// Outline contour as a polygon ring (arcs approximated).

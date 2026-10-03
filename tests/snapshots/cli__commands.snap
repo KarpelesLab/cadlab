@@ -74,6 +74,7 @@ expression: names
   "lib.publish",
   "lib.import",
   "lib.remove",
+  "drc.run",
   "render.schematic",
   "render.symbol",
   "render.footprint",

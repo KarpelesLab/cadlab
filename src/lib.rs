@@ -38,6 +38,7 @@ pub mod commands;
 pub mod config;
 pub mod connect;
 pub mod diag;
+pub mod drc;
 pub mod erc;
 pub mod geom;
 pub mod id;

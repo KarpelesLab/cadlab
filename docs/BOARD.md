@@ -57,6 +57,35 @@ router agree on what copper exists:
 | `render` | `board` (layers, realistic) (M4 rendering workstream) |
 | `export` | `gerber`, `drill`, `pnp`, `ipc356`, `fab` (M4 outputs and fab workstreams) |
 
+## DRC (`src/drc.rs`, `drc.run`)
+
+`drc::check(project)` returns diagnostics sorted by code, then location; `drc.run` reports them (the CLI exits 3
+on errors). Each has the objects involved (pins `U1.3`, `track#12`, `via#4`, `net:GND`, designators), a board
+location and a fix hint. Clearance and track width come from the net's class when it sets them, else from
+`board.rules`. Distances are exact between the shared polygon shapes; since arcs are approximated outward by up
+to 1 µm, distance rules accept a 2 µm deficit.
+
+| Code | Severity | Rule |
+|---|---|---|
+| `drc.no_outline` | error | the board has no outline (edge rules are skipped) |
+| `drc.unplaced`, `drc.no_footprint` | warning | component not placed / placed without a footprint |
+| `drc.short` | error | copper of different nets touches on a shared layer (also no-net copper touching a net) |
+| `drc.clearance` | error | copper of different nets (or no net vs a net) closer than the larger of the two clearances; pads of one footprint are not checked against each other |
+| `drc.track_width` / `drc.track_width_class` | error / warning | track narrower than `min_track_width` / than its net class width |
+| `drc.via_drill`, `drc.pad_drill` | error | via or pad hole below `min_drill` |
+| `drc.via_annular_ring`, `drc.pad_annular_ring` | error | (pad size − drill) / 2 below `min_annular_ring` (vias, plated pads) |
+| `drc.hole_to_hole` | error | holes (vias, plated and non-plated pads) closer than `hole_to_hole`, edge to edge |
+| `drc.outside_board` | error | copper not inside the outer contour, or overlapping a cutout |
+| `drc.copper_to_edge` | error | copper closer than `copper_to_edge` to any contour |
+| `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine) |
+| `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout |
+| `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad on that side |
+| `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
+| `drc.unrouted` | error | a ratsnest connection, with both ends |
+
+Candidate pairs come from a uniform grid over bounding boxes (no extra dependency), so a board with a few
+thousand items checks in well under a second in release builds (3000 tracks + 200 vias: about 75 ms).
+
 ## Workstreams after the model lands
 
 DRC, zone fill, board rendering, fab outputs (Gerber X2/X3, Excellon, IPC-D-356A, pick-and-place), fab profiles
