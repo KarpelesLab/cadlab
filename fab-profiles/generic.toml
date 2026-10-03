@@ -1,0 +1,59 @@
+# Generic conservative profile: cadlab's default IPC-6012 class 2 design rules (docs/BOARD.md,
+# `Rules::default`), for a manufacturer without a profile of its own. Mainstream fabs make these
+# limits; check the actual fab's capabilities before ordering. Board options (thickness, copper,
+# finishes, colors, size) are not checked.
+
+id = "generic"
+name = "Generic"
+website = "https://www.ipc.org"
+verified_at = "2026-10-04"
+sources = ["docs/BOARD.md"]
+notes = "cadlab's conservative default rules, not a specific manufacturer's published capabilities."
+
+[[process]]
+id = "ipc-class2"
+name = "Conservative IPC class 2, rigid"
+layers = [1, 2, 4, 6, 8, 10, 12]
+min_track = "0.15mm"
+min_space = "0.20mm"
+min_drill = "0.30mm"
+min_via_ring = "0.13mm"
+min_pth_ring = "0.13mm"
+hole_to_hole = "0.50mm"
+copper_to_edge = "0.30mm"
+min_silk_width = "0.15mm"
+silk_to_pad = "0.15mm"
+
+[output]
+include = ["copper", "mask", "paste", "silk", "profile", "drill", "ipc356"]
+archive = "{project}-fab.zip"
+
+[assembly]
+sides = ["top", "bottom"]
+
+[assembly.bom]
+file = "{project}-BOM.csv"
+columns = [
+    { header = "Line", field = "line" },
+    { header = "Quantity", field = "quantity" },
+    { header = "Designators", field = "designators" },
+    { header = "Value", field = "value" },
+    { header = "Description", field = "description" },
+    { header = "Package", field = "package" },
+    { header = "Manufacturer", field = "manufacturer" },
+    { header = "MPN", field = "mpn" },
+]
+
+[assembly.cpl]
+file = "{project}-pos.csv"
+columns = [
+    { header = "Designator", field = "designator" },
+    { header = "Value", field = "value" },
+    { header = "Package", field = "package" },
+    { header = "X (mm)", field = "x" },
+    { header = "Y (mm)", field = "y" },
+    { header = "Rotation", field = "rotation" },
+    { header = "Side", field = "side" },
+]
+side_names = ["top", "bottom"]
+origin = "outline_lower_left"

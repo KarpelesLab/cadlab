@@ -105,6 +105,7 @@ fn mcp_session() {
             "render",
             "schematic",
             "export",
+            "fab",
             "history",
             "describe",
             "call",

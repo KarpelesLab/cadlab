@@ -91,9 +91,10 @@ or batch session cost ~1.5 ms.
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set`, `remove`, `list`, `fill` (report area/islands, warn empty or split) |
 | `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given), `remove`, `list` |
-| `drc` | `run` (M4 DRC workstream) |
+| `drc` | `run` (plus `fab.check` warnings for the manifest `targets`) |
 | `render` | `board` (layers, realistic) (M4 rendering workstream) |
-| `export` | `gerber`, `drill`, `pnp`, `ipc356`, `fab` (M4 outputs and fab workstreams) |
+| `export` | `gerber`, `drill`, `pnp`, `ipc356`, `all` (generic outputs) |
+| `fab` | `list`, `show`, `check`, `compare`, `export` (fab profiles, [MANUFACTURING.md](MANUFACTURING.md)) |
 
 ## Placement (`src/board/place.rs`)
 

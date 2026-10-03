@@ -60,19 +60,51 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     out
 }
 
+/// Manufacturing limits only, with `rules` in place of the board's and net class values
+/// ignored: clearance (and shorts), track width, hole-to-hole, copper-to-edge (and copper
+/// outside the board), silk-to-pad. Same codes as [`check`]; a zero limit is not checked. Used by
+/// fab profile checks (`crate::fab::check`), which must not change the project's own rules.
+pub fn check_limits(p: &Project, rules: &Rules) -> Vec<Diagnostic> {
+    let ctx = Ctx { p, rules, layers: p.board().stackup.copper_names(), classes: false };
+    let mut out = Vec::new();
+    let items = geo::copper_items(p);
+    let pads = geo::placed_pads(p);
+    copper_pairs(&ctx, &items, &mut out);
+    track_widths(&ctx, &mut out);
+    if rules.hole_to_hole > Nm::ZERO {
+        hole_to_hole(&ctx, &pads, &mut out);
+    }
+    if let Some(o) = BoardShape::of(p) {
+        board_edges(&ctx, &items, &o, &mut out);
+    }
+    if rules.silk_to_pad > Nm::ZERO {
+        silk_to_pads(&ctx, &pads, &mut out);
+    }
+    out.sort_by(|a, b| {
+        let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
+        (a.code.as_ref(), loc(a), &a.message).cmp(&(b.code.as_ref(), loc(b), &b.message))
+    });
+    out
+}
+
 /// Effective rules.
 struct Ctx<'a> {
     p: &'a Project,
     rules: &'a Rules,
     layers: Vec<String>,
+    /// Whether net class values override the rules.
+    classes: bool,
 }
 
 impl<'a> Ctx<'a> {
     fn new(p: &'a Project) -> Self {
-        Ctx { p, rules: &p.board().rules, layers: p.board().stackup.copper_names() }
+        Ctx { p, rules: &p.board().rules, layers: p.board().stackup.copper_names(), classes: true }
     }
 
     fn class(&self, net: Option<&str>) -> Option<&'a NetClass> {
+        if !self.classes {
+            return None;
+        }
         let c = self.p.circuit();
         net.and_then(|n| c.nets.get(n)).and_then(|n| n.class.as_ref()).and_then(|k| c.netclasses.get(k))
     }

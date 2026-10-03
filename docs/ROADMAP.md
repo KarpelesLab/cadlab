@@ -88,10 +88,11 @@ Details in [RENDERING.md](RENDERING.md).
       conservative IPC class 2 defaults, tracks, vias, zones, keep-outs, graphics
 - [x] Mounting holes, outline cutouts (`board.hole`, `board.cutout`; seen by DRC, zones, rendering, outputs)
 - [ ] Design rules: clearances, widths, via/drill limits, per net class, IPC class 2/3 presets
-- [ ] Fab profiles ([MANUFACTURING.md](MANUFACTURING.md)): JLCPCB and PCBWay, verified from their published
-      capabilities
+- [x] Fab profiles ([MANUFACTURING.md](MANUFACTURING.md)): JLCPCB and PCBWay, verified from their published
+      capabilities (2026-10-04), plus a generic IPC class 2 profile; user overrides (`fab-profiles/`, `src/fab/`)
 - [ ] Provider-agnostic flow: compatibility targets, `fab check`, `fab compare`, `export fab --fab`, per-fab part
-      resolution with substitution report, `fab-lock.json`
+      resolution with substitution report, `fab-lock.json` (all done as `fab.*` and `drc.run` targets except the
+      substitution report: unavailable parts get hints, not substitute candidates)
 - [x] Footprint placement commands: set, move, rotate, flip (bottom side mirrored), lock, remove, list
 - [x] Align, distribute (`place.align`, `place.distribute`)
 - [x] Ratsnest (MST between copper islands per net), initial auto-placement (rows inside the outline)
@@ -105,7 +106,7 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Board rendering (per layer, composite, realistic top/bottom; highlight, ratsnest, markers, crop)
 - [x] Outputs: Gerber X2 (+ X3 component data), Excellon/XNC drill (+ optional Gerber X2 drill), generic
       pick-and-place CSV, IPC-D-356A (`export.*`, `src/fabout/`)
-- [ ] Outputs per fab profile: file naming/layout, CPL columns and rotation offsets, archive
+- [x] Outputs per fab profile: file naming/layout, CPL columns and rotation offsets, archive (`fab.export`)
 - [x] KiCad `.kicad_pcb` export for oracle tests (`board.export_kicad`, with `.kicad_pro`/`.kicad_dru`; KiCad DRC,
       IPC-D-356 and Gerber oracle in `tests/kicad_pcb_oracle.rs`)
 - [ ] Cross-checks: KiCad DRC vs cadlab DRC on the same boards, KiCad Gerbers vs ours (raster XOR)

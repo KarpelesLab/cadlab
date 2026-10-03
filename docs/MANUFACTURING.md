@@ -12,8 +12,8 @@ published specifications.
 | Component data (assembly) | **Gerber X3** | export | M4, done (`export.gerber`) |
 | Drill / route | **Excellon** (XNC profile, Ucamco), optionally Gerber X2 drill files | export | M4, drills done (`export.drill`); routed slots later |
 | Bare-board electrical test netlist | **IPC-D-356A** | export | M4, done (`export.ipc356`) |
-| Pick and place | CSV (generic + per-fab column layouts), Gerber X3 | export | M4, generic CSV done (`export.pnp`); per-fab layouts with fab profiles |
-| Assembly BOM | CSV / XLSX (generic + per-fab layouts) | export | M1/M4 |
+| Pick and place | CSV (generic + per-fab column layouts), Gerber X3 | export | M4, done (`export.pnp`; per-fab layouts in `fab.export`) |
+| Assembly BOM | CSV / XLSX (generic + per-fab layouts) | export | M1/M4, CSV done (`bom.export`, `fab.export`) |
 | Intelligent fab data | **IPC-2581** (rev C) | export | M9 |
 | Intelligent fab data | ODB++ (check spec license terms first) | export | later |
 | Routing exchange | **Specctra DSN / SES** | import + export | M5 |
@@ -70,25 +70,71 @@ Each manufacturer is described by a **fab profile**, a data file (TOML) shipped 
 Capabilities change over time, so every value carries its source URL and the date it was verified. The values
 must be filled from each fab's current published capabilities, not from memory.
 
+Built-in profiles live in `fab-profiles/` (embedded in the binary): `jlcpcb`, `pcbway` and `generic` (cadlab's
+conservative IPC class 2 defaults, for any other fab). Users add profiles or override built-in ones with
+`*.toml` files in `~/.config/cadlab/fab-profiles/` (`$XDG_CONFIG_HOME/cadlab/fab-profiles/`). A user file whose
+`id` (or file stem) matches a built-in profile is merged onto it: tables merge key by key, other values (arrays
+included) replace. Code: `src/fab/` (types, loading, `check`, `export`).
+
 ```
-FabProfile
-├── id, name, website, verified_at, sources[]
-├── pcb processes[]                     e.g. "standard 2L", "4L/6L", "HDI"
-│   ├── layer counts, board thickness options, copper weights
-│   ├── min track / space, min drill (mechanical, laser), min annular ring, via-in-pad availability
-│   ├── hole-to-hole, copper-to-edge, silk min width/height, mask dam / expansion
-│   ├── surface finishes, mask/silk colors, impedance control, castellations, edge plating
-│   └── stackups offered (for impedance calculation)
-├── output conventions
-│   ├── Gerber file naming/extensions, units, format (e.g. 4.6), X2 vs plain RS-274X
-│   ├── drill format and plated/non-plated split
-│   └── archive layout
-└── assembly (optional)
-    ├── BOM and CPL column layouts
-    ├── rotation/origin conventions and known per-package rotation offsets
-    ├── part catalog provider (see PARTS.md) and part classes (e.g. basic vs extended)
-    └── assembly constraints (min part size, sides, through-hole support)
+FabProfile                               fab-profiles/<id>.toml, deny_unknown_fields
+├── id, name, website, verified_at ("YYYY-MM-DD"), sources[], notes
+├── [[process]]                          preferred first; the first offering the board's layer count is used
+│   ├── id, name, layers[]
+│   ├── thickness[], outer_copper[], inner_copper[]       lengths (35um = 1 oz); empty = not checked
+│   ├── min_track, min_space, min_drill, max_drill, min_npth, min_via_ring, min_pth_ring
+│   ├── hole_to_hole (any holes), pad_hole_to_hole (component holes), copper_to_edge
+│   ├── min_silk_width, min_silk_height, silk_to_pad, mask_dam
+│   ├── via_in_pad, castellated
+│   ├── finishes[], mask_colors[], silk_colors[], max_size [a, b], min_size [a, b]
+│   └── cite {field = url}, unverified [field, ...]
+├── [output]
+│   ├── include[]       file kinds or groups: copper, mask, paste, silk, profile, component, drill, ipc356
+│   ├── names {kind = template}   copper_top, copper_inner, copper_bottom, mask_*, paste_*, silk_*, profile,
+│   │                             component_*, drill_pth, drill_npth, drill_span, ipc356; placeholders
+│   │                             {project} {layer} {n} {from} {to}; kinds left out keep cadlab's generic names
+│   ├── archive         zip name template ({project}, {fab})
+│   ├── drill_format    informative ("excellon": XNC, metric, PTH/NPTH split)
+│   └── cite, unverified
+└── [assembly]                           optional
+    ├── sides[], min_package (chip code "0201"), through_hole, part_classes[]
+    ├── catalog[]       supplier provider IDs whose SKUs fill the `sku` BOM column (JLCPCB: lcsc)
+    ├── bom  {file, mount_names, columns = [{header, field}]}     fields: line, quantity, designators, value,
+    │                                                             description, value_description, package,
+    │                                                             footprint, manufacturer, mpn, sku, mount, notes
+    ├── cpl  {file, columns, side_names, coordinate_suffix, origin = "board" | "outline_lower_left"}
+    │                                                             fields: designator, value, package, footprint,
+    │                                                             x, y, side, rotation
+    ├── [[rotation_offsets]] {package = "SOT-23*", offset, source}   added to the rotation at export only
+    └── cite, unverified ("cpl.origin" names a sub-field)
 ```
+
+Values that could not be confirmed on the fab's pages are either left out (not checked) or kept and listed in
+`unverified`; `fab.show` lists them. Where a fab's own pages contradict each other (PCBWay's capabilities and
+tolerances pages), the stricter value is used and marked unverified. No per-package rotation offsets are shipped:
+neither fab publishes a table, so they are user data (see D21).
+
+### Commands (`fab.*`)
+
+| Command | What it does |
+|---|---|
+| `fab.list` | profiles with their processes, origin (builtin, user, merged) and verification date |
+| `fab.show {fab}` | a profile in full, with its unverified values and sources |
+| `fab.check {fab, process?, parts?, boards?}` | can the fab make and assemble the board: layer count, thickness, copper, finish/color preferences (first offered one is chosen), board size; track width, clearance, hole-to-hole, copper-to-edge and silk-to-pad through cadlab's DRC with a temporary rule set holding the profile's minimums (net class values ignored, the project's rules untouched); drills, annular rings, pad hole-to-hole; silk line width and text height; assembly sides, package size, through-hole; parts availability through the configured suppliers (`fab.no_suppliers` when none). Codes `fab.*`, each with a hint |
+| `fab.compare {fabs?, parts?}` | one row per fab: feasible, error/warning counts, failing constraint codes |
+| `fab.export {fab, dir?, process?, boards?, force?}` | runs the check (refuses on errors unless `force`), then writes to `out/fab/<fab>/`: the fabrication files named by the profile, the zip archive of them (flat, deflated, fixed timestamps: byte-identical across runs), BOM and CPL in the fab's layouts with rotation offsets applied, and `fab-lock.json` |
+
+`fab-lock.json` records: lock version, generator, project, profile (`id`, `name`, `verified_at`, `source`),
+process (`id`, layers, thickness, copper, chosen finish/colors), every file written with its SHA-256 and size
+(the archive included, the lock excluded), each populated BOM line with the chosen manufacturer/MPN, the fab SKU
+and provider when one of the profile's `catalog` providers offers it and its availability status, and the
+rotation offsets applied per designator.
+
+Manifest `targets`: `drc.run` also runs the board and assembly part of `fab.check` for each target and reports
+its findings as warnings prefixed `[<fab>]` (never errors), plus `fab.unknown_target` for unknown IDs.
+
+`bom.export --format jlcpcb|pcbway` writes the BOM layout of that profile (without SKUs, which need a supplier
+lookup; `fab.export` fills them).
 
 ## Provider-agnostic projects
 
@@ -115,19 +161,19 @@ project ──► fab check  (capabilities vs design, parts availability vs that
         ──► export     (files in the fab's layout + fab-lock.json)
 ```
 
-- `fab check --fab <id>`: can fab X make this board and assemble this BOM *today*? Reports rule violations,
-  unavailable or unsupported parts, with substitute candidates drawn from the approved alternates first, then from
-  matching generics.
-- `fab compare --fab jlcpcb,pcbway,...`: side-by-side feasibility, part coverage, estimated cost and lead time
-  where the provider exposes them.
-- `export fab --fab <id>`: writes the fab's files plus a **`fab-lock.json`** recording exactly what was produced: profile
+- `fab.check <id>`: can fab X make this board and assemble this BOM *today*? Reports rule violations,
+  unavailable or unsupported parts (substitute candidates drawn from the approved alternates first, then from
+  matching generics, are still to come; today the hints point to `bom.approve` / `bom.resolve`).
+- `fab.compare jlcpcb,pcbway,...`: side-by-side feasibility (part coverage with `parts`; estimated cost and lead
+  time later, where the provider exposes them).
+- `fab.export <id>`: writes the fab's files plus a **`fab-lock.json`** recording exactly what was produced: profile
   version, process options, the SKU picked for each BOM line, applied rotation offsets. The lock belongs to the
   export (commit it to reproduce an order), not to the design.
 - Fab-specific conventions (CPL rotation offsets, BOM columns, file naming) are applied only at export, from the
   profile. They never leak into the project.
 
-Retargeting from JLCPCB to PCBWay is therefore `fab check --fab pcbway`, fix what it reports (usually substitute a few
-parts), then `export fab --fab pcbway`.
+Retargeting from JLCPCB to PCBWay is therefore `cadlab fab check pcbway`, fix what it reports (usually substitute a
+few parts), then `cadlab fab export pcbway`.
 
 ### Target fabs
 

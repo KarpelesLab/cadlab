@@ -2,10 +2,8 @@
 //!
 //! The BOM is computed from the circuit's components plus the sourcing overlay (`bom.json`).
 //!
-//! Fab-specific column layouts (JLCPCB, PCBWay) follow those fabs' published BOM templates as of
-//! writing. They move into fab profiles in M4, where each layout records its source and
-//! verification date (`docs/MANUFACTURING.md`); until then, check them against the fab's current
-//! template before ordering.
+//! Fab-specific column layouts (JLCPCB, PCBWay) come from the fab profiles (`fab-profiles/*.toml`,
+//! [`crate::fab`]), where each layout records its source and verification date.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -116,11 +114,21 @@ pub enum CsvFormat {
     /// Every field, DNP lines included and flagged.
     #[default]
     Generic,
-    /// JLCPCB assembly: Comment, Designator, Footprint, JLCPCB Part #.
+    /// The BOM layout of the `jlcpcb` fab profile.
     Jlcpcb,
-    /// PCBWay assembly: Item #, Designator, Qty, Manufacturer, Mfg Part #, Description / Value,
-    /// Package/Footprint, Type, Your Instructions / Notes.
+    /// The BOM layout of the `pcbway` fab profile.
     Pcbway,
+}
+
+impl CsvFormat {
+    /// The fab profile whose BOM layout this format uses.
+    pub fn profile_id(self) -> Option<&'static str> {
+        match self {
+            CsvFormat::Generic => None,
+            CsvFormat::Jlcpcb => Some("jlcpcb"),
+            CsvFormat::Pcbway => Some("pcbway"),
+        }
+    }
 }
 
 fn csv_field(s: &str) -> String {
@@ -133,7 +141,8 @@ fn csv_line(fields: &[String]) -> String {
     l
 }
 
-/// Writes rows as CSV (RFC 4180, CRLF line endings). Fab layouts omit DNP components.
+/// Writes rows as CSV (RFC 4180, CRLF line endings). Fab layouts come from the built-in fab
+/// profiles (`bom.export` also applies user overrides) and omit DNP components.
 pub fn to_csv(rows: &[BomRow], format: CsvFormat) -> String {
     let mut out = String::new();
     let s = |v: &str| v.to_string();
@@ -184,46 +193,11 @@ pub fn to_csv(rows: &[BomRow], format: CsvFormat) -> String {
                 ]);
             }
         }
-        CsvFormat::Jlcpcb => {
-            out += &csv_line(&["Comment", "Designator", "Footprint", "JLCPCB Part #"].map(s));
-            for r in rows.iter().filter(|r| r.quantity > 0) {
-                out += &csv_line(&[r.value.clone(), r.refdes.join(","), o(&r.package), String::new()]);
-            }
-        }
-        CsvFormat::Pcbway => {
-            out += &csv_line(
-                &[
-                    "Item #",
-                    "Designator",
-                    "Qty",
-                    "Manufacturer",
-                    "Mfg Part #",
-                    "Description / Value",
-                    "Package/Footprint",
-                    "Type",
-                    "Your Instructions / Notes",
-                ]
-                .map(s),
-            );
-            for (i, r) in rows.iter().filter(|r| r.quantity > 0).enumerate() {
-                let (mfr, mpn) =
-                    r.order_mpn().map_or((String::new(), String::new()), |(m, p)| (m.unwrap_or("").into(), p.into()));
-                let kind = match r.mount {
-                    Some(Mount::Tht) => "THT",
-                    Some(Mount::Smd) => "SMD",
-                    None => "",
-                };
-                out += &csv_line(&[
-                    (i + 1).to_string(),
-                    r.refdes.join(","),
-                    r.quantity.to_string(),
-                    mfr,
-                    mpn,
-                    format!("{} {}", r.value, r.description).trim().to_string(),
-                    o(&r.package),
-                    kind.into(),
-                    o(&r.notes),
-                ]);
+        CsvFormat::Jlcpcb | CsvFormat::Pcbway => {
+            let profiles = crate::fab::Profiles::builtin();
+            let id = format.profile_id().unwrap_or_default();
+            if let Some(a) = profiles.get(id).and_then(|p| p.assembly.as_ref()) {
+                out = crate::fab::export::bom_csv(&a.bom, rows, &Default::default());
             }
         }
     }

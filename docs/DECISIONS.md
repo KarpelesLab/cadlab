@@ -130,6 +130,19 @@ randomized annealing.
 *Why:* a mounting hole is a mechanical board feature that agents add while designing the board, and making it a
 pad reuses every consumer of pads. A deterministic heuristic is reviewable and stable across runs, which matters
 more for an agent-driven flow than squeezing the last millimeters of ratsnest.
+### D21. Fab profiles: sourced data, temporary rules, check before export (2026-10-04)
+Fab profiles are TOML files (`fab-profiles/`, embedded; user files in `<config dir>/fab-profiles/` merge onto
+them table by table). Every value is taken from the fab's own published pages, listed in `sources` with a
+per-field `cite`; values that could not be confirmed are left out (not checked) or kept and listed in
+`unverified`, and where a fab's pages disagree the stricter value is used and marked unverified. No per-package
+CPL rotation offsets ship, because neither JLCPCB nor PCBWay publishes a table; the profile format supports them
+and they are applied at export only. `fab.check` reuses the DRC (`drc::check_limits`) with a temporary rule set
+built from the profile and net class values ignored, so the project's rules are never touched. The manifest
+`targets` run the same check from `drc.run`, as warnings only. The fab-specific export is `fab.export` (in the
+`fab` group with the other fab commands, rather than `export.fab`); it refuses when `fab.check` finds errors
+unless `force`, and writes a deterministic zip (fixed timestamps) and a `fab-lock.json` with SHA-256 file hashes.
+*Why:* fab data goes stale and is easy to misremember, so provenance must be visible per value; reusing the DRC
+keeps one geometry engine; a deterministic bundle and lock make an order reproducible and diffable.
 
 ## Open questions
 

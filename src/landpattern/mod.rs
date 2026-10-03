@@ -583,7 +583,7 @@ impl Default for GenOptions {
             min_pad_gap: Nm::from_um(150),
             corner_ratio_pct: 25,
             max_corner_radius: Nm::from_um(250),
-            silk_width: Nm::from_um(120),
+            silk_width: Nm::from_um(150),
             silk_clearance: Nm::from_um(150),
             fab_width: Nm::from_um(100),
             courtyard_width: Nm::from_um(50),

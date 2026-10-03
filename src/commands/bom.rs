@@ -348,7 +348,7 @@ impl Command for Replace {
 pub struct Export {
     /// Output file (relative paths are relative to the project directory).
     pub path: PathBuf,
-    /// Column layout: generic (all fields), jlcpcb or pcbway (their assembly BOM templates).
+    /// Column layout: generic (all fields), jlcpcb or pcbway (the BOM layout of that fab profile).
     #[serde(default)]
     pub format: CsvFormat,
 }
@@ -371,7 +371,17 @@ impl Command for Export {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Exported, CommandError> {
         let list = bom_list(ctx)?;
-        let csv = bom::to_csv(&list.lines, self.format);
+        // Fab layouts come from the fab profiles, user overrides included.
+        let profiles = self.format.profile_id().map(|_| crate::fab::Profiles::load());
+        let layout = self
+            .format
+            .profile_id()
+            .and_then(|id| profiles.as_ref()?.get(id)?.assembly.as_ref())
+            .map(|a| a.bom.clone());
+        let csv = match layout {
+            Some(l) => crate::fab::export::bom_csv(&l, &list.lines, &Default::default()),
+            None => bom::to_csv(&list.lines, self.format),
+        };
         let path = match ctx.session.root() {
             Some(root) if self.path.is_relative() => root.join(&self.path),
             _ => self.path.clone(),
