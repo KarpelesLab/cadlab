@@ -34,10 +34,7 @@ fn json_of(o: &Output) -> Value {
 #[test]
 fn new_then_info_json() {
     let dir = tempfile::tempdir().unwrap();
-    let o = cadlab(
-        dir.path(),
-        &["project", "new", "demo", "--targets", "jlcpcb,pcbway", "--json"],
-    );
+    let o = cadlab(dir.path(), &["project", "new", "demo", "--targets", "jlcpcb,pcbway", "--json"]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let v = json_of(&o);
     assert_eq!(v["ok"], true);
@@ -57,10 +54,7 @@ fn new_then_info_json() {
 #[test]
 fn new_project_matches_golden_files() {
     let dir = tempfile::tempdir().unwrap();
-    let o = cadlab(
-        dir.path(),
-        &["project", "new", "demo", "--description", "Golden test project"],
-    );
+    let o = cadlab(dir.path(), &["project", "new", "demo", "--description", "Golden test project"]);
     assert!(o.status.success());
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/new-project");
     assert_golden_dir(&dir.path().join("demo"), &golden, &[".cadlab"]);
@@ -71,14 +65,7 @@ fn set_undo_redo_across_invocations() {
     let dir = tempfile::tempdir().unwrap();
     cadlab(dir.path(), &["project", "new", "p"]);
     let p = dir.path().join("p");
-    assert!(
-        cadlab(
-            &p,
-            &["project", "set", "--metadata", "rev=A", "--metadata", "author=me"]
-        )
-        .status
-        .success()
-    );
+    assert!(cadlab(&p, &["project", "set", "--metadata", "rev=A", "--metadata", "author=me"]).status.success());
     assert!(cadlab(&p, &["project", "set", "--metadata", "rev="]).status.success());
     let info = json_of(&cadlab(&p, &["project", "info", "--json"]));
     assert_eq!(info["output"]["metadata"], json!({"author": "me"}));
@@ -144,10 +131,7 @@ fn errors_and_exit_codes() {
 
     // Usage errors.
     assert_eq!(cadlab(dir.path(), &["project", "nope"]).status.code(), Some(2));
-    assert_eq!(
-        cadlab(dir.path(), &["call", "project.info", "{not json"]).status.code(),
-        Some(2)
-    );
+    assert_eq!(cadlab(dir.path(), &["call", "project.info", "{not json"]).status.code(), Some(2));
 
     // Unknown command through `call` suggests the right one.
     let o = cadlab(dir.path(), &["call", "project.inf", "--json"]);
@@ -163,12 +147,7 @@ fn errors_and_exit_codes() {
 fn describe_lists_commands() {
     let dir = tempfile::tempdir().unwrap();
     let v = json_of(&cadlab(dir.path(), &["describe", "--json"]));
-    let names: Vec<&str> = v
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = v.as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
     insta::assert_json_snapshot!("commands", names);
     let v = json_of(&cadlab(dir.path(), &["describe", "project.new", "--json"]));
     insta::assert_json_snapshot!("project_new_schema", v);
@@ -183,27 +162,13 @@ fn catalogs_from_environment() {
     let env = [("CADLAB_CATALOGS", catalog.to_str().unwrap())];
     let o = cadlab_env(
         &p,
-        &[
-            "part",
-            "search",
-            "LDO",
-            "--package",
-            "SOT-23-5",
-            "--params",
-            "current_out=>=500mA",
-            "--in-stock",
-            "--json",
-        ],
+        &["part", "search", "LDO", "--package", "SOT-23-5", "--params", "current_out=>=500mA", "--in-stock", "--json"],
         &env,
     );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
     let v = json_of(&o);
-    let mpns: Vec<&str> = v["output"]["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["mpn"].as_str().unwrap())
-        .collect();
+    let mpns: Vec<&str> =
+        v["output"]["candidates"].as_array().unwrap().iter().map(|c| c["mpn"].as_str().unwrap()).collect();
     assert_eq!(mpns, ["ME6211C33M5G-N", "AP2112K-3.3TRG1"]);
 
     // Without catalogs: a clear error.
@@ -237,10 +202,7 @@ fn user_settings_for_digikey() {
         child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
         child.wait_with_output().unwrap()
     };
-    let o = run(
-        &["config", "digikey", "--client-id", "my-id", "--no-verify", "--json"],
-        "my-secret-value\n",
-    );
+    let o = run(&["config", "digikey", "--client-id", "my-id", "--no-verify", "--json"], "my-secret-value\n");
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(json_of(&o)["client_secret"], "my-s…alue");
     let stored = std::fs::read_to_string(cfg_home.join("cadlab/config.toml")).unwrap();

@@ -134,10 +134,7 @@ mod tests {
         let d = Diagnostic::error("bom.part_not_found", "no part `R1O`")
             .with_subject(ObjectRef::Name("R1O".into()))
             .with_suggestions(&["R10".into()]);
-        assert_eq!(
-            d.to_string(),
-            "error[bom.part_not_found]: no part `R1O` (R1O)\n  hint: did you mean `R10`?"
-        );
+        assert_eq!(d.to_string(), "error[bom.part_not_found]: no part `R1O` (R1O)\n  hint: did you mean `R10`?");
         let j = serde_json::to_value(&d).unwrap();
         assert_eq!(j["severity"], "error");
         assert!(j.get("location").is_none());

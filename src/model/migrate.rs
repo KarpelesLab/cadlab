@@ -25,10 +25,7 @@ pub fn migrate(raw: &mut RawProject) -> Result<u32, ModelError> {
 pub(crate) fn migrate_with(raw: &mut RawProject, migrations: &[Migration], current: u32) -> Result<u32, ModelError> {
     let found = raw.schema_version()?;
     if found > current {
-        return Err(ModelError::NewerSchema {
-            found,
-            supported: current,
-        });
+        return Err(ModelError::NewerSchema { found, supported: current });
     }
     if found == 0 {
         return Err(ModelError::invalid("cadlab.toml", "schema_version must be >= 1"));

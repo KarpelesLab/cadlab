@@ -76,5 +76,5 @@ MCP client configuration (e.g. Claude Code): `claude mcp add cadlab -- /path/to/
 
 ## License
 
-MIT. No code from GPL projects (KiCad, freerouting, ...) may enter this repository. See
+MIT. Third-party data: the Hershey stroke font used for text in rendered images (`src/render/font/NOTICE`). No code from GPL projects (KiCad, freerouting, ...) may enter this repository. See
 [docs/DECISIONS.md](docs/DECISIONS.md) (D7).

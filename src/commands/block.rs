@@ -20,11 +20,7 @@ use crate::model::sections::natural_cmp;
 use crate::suggest::did_you_mean;
 
 pub(crate) fn register(r: &mut Registry) {
-    r.register::<Create>()
-        .register::<Instantiate>()
-        .register::<List>()
-        .register::<Show>()
-        .register::<Remove>();
+    r.register::<Create>().register::<Instantiate>().register::<List>().register::<Show>().register::<Remove>();
 }
 
 fn block_name(p: &Project, name: &str) -> Result<String, CommandError> {
@@ -66,13 +62,7 @@ fn summary(p: &Project, name: &str) -> BlockSummary {
         components,
         ports: b.ports.clone(),
         internal_nets: b.nets.keys().filter(|n| !b.ports.contains(n)).cloned().collect(),
-        instances: p
-            .circuit()
-            .instances
-            .iter()
-            .filter(|(_, bl)| *bl == name)
-            .map(|(i, _)| i.clone())
-            .collect(),
+        instances: p.circuit().instances.iter().filter(|(_, bl)| *bl == name).map(|(i, _)| i.clone()).collect(),
     }
 }
 
@@ -82,21 +72,9 @@ fn line(b: &BlockSummary) -> String {
         b.name,
         b.components.len(),
         b.components.join(", "),
-        if b.ports.is_empty() {
-            "-".into()
-        } else {
-            b.ports.join(", ")
-        },
-        if b.instances.is_empty() {
-            String::new()
-        } else {
-            format!("; instances: {}", b.instances.join(", "))
-        },
-        if b.description.is_empty() {
-            String::new()
-        } else {
-            format!(" — {}", b.description)
-        }
+        if b.ports.is_empty() { "-".into() } else { b.ports.join(", ") },
+        if b.instances.is_empty() { String::new() } else { format!("; instances: {}", b.instances.join(", ")) },
+        if b.description.is_empty() { String::new() } else { format!(" — {}", b.description) }
     )
 }
 
@@ -135,16 +113,11 @@ impl Command for Create {
         }
         let p = ctx.project()?;
         if p.circuit().blocks.contains_key(&self.name) && !self.replace {
-            return Err(
-                CommandError::conflict("block.exists", format!("block `{}` already exists", self.name))
-                    .with_hint("pass `replace: true` to overwrite it"),
-            );
+            return Err(CommandError::conflict("block.exists", format!("block `{}` already exists", self.name))
+                .with_hint("pass `replace: true` to overwrite it"));
         }
         if self.components.is_empty() {
-            return Err(CommandError::invalid_args(
-                "block.empty",
-                "give the components to capture",
-            ));
+            return Err(CommandError::invalid_args("block.empty", "give the components to capture"));
         }
         let mut set = BTreeSet::new();
         for r in &self.components {
@@ -154,12 +127,7 @@ impl Command for Create {
         let mut nets: BTreeMap<String, BTreeSet<PinRef>> = BTreeMap::new();
         let mut leaving = BTreeSet::new();
         for (name, net) in &c.nets {
-            let inside: BTreeSet<PinRef> = net
-                .pins
-                .iter()
-                .filter(|pin| set.contains(&pin.refdes))
-                .cloned()
-                .collect();
+            let inside: BTreeSet<PinRef> = net.pins.iter().filter(|pin| set.contains(&pin.refdes)).cloned().collect();
             if inside.is_empty() {
                 continue;
             }
@@ -188,13 +156,7 @@ impl Command for Create {
             .iter()
             .map(|r| {
                 let comp = &c.components[r];
-                (
-                    r.clone(),
-                    BlockComponent {
-                        part: comp.part.clone(),
-                        properties: comp.properties.clone(),
-                    },
-                )
+                (r.clone(), BlockComponent { part: comp.part.clone(), properties: comp.properties.clone() })
             })
             .collect();
         let block = Block {
@@ -202,12 +164,7 @@ impl Command for Create {
             components,
             nets,
             ports,
-            no_connect: c
-                .no_connect
-                .iter()
-                .filter(|pin| set.contains(&pin.refdes))
-                .cloned()
-                .collect(),
+            no_connect: c.no_connect.iter().filter(|pin| set.contains(&pin.refdes)).cloned().collect(),
         };
         let name = self.name.clone();
         ctx.project_mut()?.circuit_mut().blocks.insert(name.clone(), block);
@@ -264,10 +221,7 @@ impl Command for Instantiate {
             ));
         }
         if p.circuit().instances.contains_key(&inst) {
-            return Err(CommandError::conflict(
-                "block.instance_exists",
-                format!("instance `{inst}` already exists"),
-            ));
+            return Err(CommandError::conflict("block.instance_exists", format!("instance `{inst}` already exists")));
         }
         for port in self.connect.keys() {
             if !block.ports.contains(port) {
@@ -287,19 +241,13 @@ impl Command for Instantiate {
                 let t = self.connect.get(local).cloned().unwrap_or_else(|| local.clone());
                 let expanded = connect::expand_net(&t)?;
                 let [single] = expanded.as_slice() else {
-                    return Err(CommandError::invalid_args(
-                        "block.invalid_port",
-                        "connect ports to single nets",
-                    ));
+                    return Err(CommandError::invalid_args("block.invalid_port", "connect ports to single nets"));
                 };
                 single.clone()
             } else {
                 let t = format!("{inst}/{local}");
                 if p.circuit().nets.contains_key(&t) {
-                    return Err(CommandError::conflict(
-                        "net.exists",
-                        format!("net `{t}` already exists"),
-                    ));
+                    return Err(CommandError::conflict("net.exists", format!("net `{t}` already exists")));
                 }
                 t
             };
@@ -326,12 +274,7 @@ impl Command for Instantiate {
             let id = p.alloc_id();
             p.circuit_mut().components.insert(
                 refdes.clone(),
-                Component {
-                    id,
-                    part: bc.part.clone(),
-                    block: Some(inst.clone()),
-                    properties: bc.properties.clone(),
-                },
+                Component { id, part: bc.part.clone(), block: Some(inst.clone()), properties: bc.properties.clone() },
             );
             comp_map.insert(local.clone(), refdes);
         }
@@ -346,24 +289,13 @@ impl Command for Instantiate {
             c.no_connect.insert(map_pin(pin));
         }
         c.instances.insert(inst.clone(), name.clone());
-        Ok(Instance {
-            instance: inst,
-            block: name,
-            components: comp_map,
-            nets: net_map,
-        })
+        Ok(Instance { instance: inst, block: name, components: comp_map, nets: net_map })
     }
 
     fn summarize(o: &Instance) -> String {
         let comps: Vec<String> = o.components.iter().map(|(l, g)| format!("{l}→{g}")).collect();
         let nets: Vec<String> = o.nets.iter().map(|(l, g)| format!("{l}→{g}")).collect();
-        format!(
-            "instance {} of {}: {}; nets {}",
-            o.instance,
-            o.block,
-            comps.join(", "),
-            nets.join(", ")
-        )
+        format!("instance {} of {}: {}; nets {}", o.instance, o.block, comps.join(", "), nets.join(", "))
     }
 }
 
@@ -387,17 +319,11 @@ impl Command for List {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<BlockList, CommandError> {
         let p = ctx.project()?;
-        Ok(BlockList {
-            blocks: p.circuit().blocks.keys().map(|k| summary(p, k)).collect(),
-        })
+        Ok(BlockList { blocks: p.circuit().blocks.keys().map(|k| summary(p, k)).collect() })
     }
 
     fn summarize(o: &BlockList) -> String {
-        if o.blocks.is_empty() {
-            "no blocks".into()
-        } else {
-            o.blocks.iter().map(line).collect::<Vec<_>>().join("\n")
-        }
+        if o.blocks.is_empty() { "no blocks".into() } else { o.blocks.iter().map(line).collect::<Vec<_>>().join("\n") }
     }
 }
 
@@ -430,33 +356,21 @@ impl Command for Show {
     fn run(self, ctx: &mut Context<'_>) -> Result<BlockDetail, CommandError> {
         let p = ctx.project()?;
         let name = block_name(p, &self.name)?;
-        Ok(BlockDetail {
-            instances: summary(p, &name).instances,
-            block: p.circuit().blocks[&name].clone(),
-            name,
-        })
+        Ok(BlockDetail { instances: summary(p, &name).instances, block: p.circuit().blocks[&name].clone(), name })
     }
 
     fn summarize(o: &BlockDetail) -> String {
         let mut s = format!(
             "{}{}",
             o.name,
-            if o.block.description.is_empty() {
-                String::new()
-            } else {
-                format!(": {}", o.block.description)
-            }
+            if o.block.description.is_empty() { String::new() } else { format!(": {}", o.block.description) }
         );
         for (r, c) in &o.block.components {
             s += &format!("\n  {r}: {}", c.part);
         }
         for (n, pins) in &o.block.nets {
             let pins: Vec<String> = pins.iter().map(ToString::to_string).collect();
-            s += &format!(
-                "\n  {}{n}: {}",
-                if o.block.ports.contains(n) { "port " } else { "" },
-                pins.join(" ")
-            );
+            s += &format!("\n  {}{n}: {}", if o.block.ports.contains(n) { "port " } else { "" }, pins.join(" "));
         }
         s
     }
@@ -490,9 +404,7 @@ impl Command for Remove {
         }
         ctx.project_mut()?.circuit_mut().blocks.remove(&name);
         let p = ctx.project()?;
-        Ok(BlockList {
-            blocks: p.circuit().blocks.keys().map(|k| summary(p, k)).collect(),
-        })
+        Ok(BlockList { blocks: p.circuit().blocks.keys().map(|k| summary(p, k)).collect() })
     }
 
     fn summarize(o: &BlockList) -> String {

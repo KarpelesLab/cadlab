@@ -60,10 +60,7 @@ pub(crate) fn net_name(p: &Project, name: &str) -> Result<String, CommandError> 
 }
 
 fn resolve_all(p: &Project, exprs: &[String]) -> Result<Vec<Vec<PinRef>>, CommandError> {
-    exprs
-        .iter()
-        .map(|e| connect::resolve_pins(p, e).map_err(Into::into))
-        .collect()
+    exprs.iter().map(|e| connect::resolve_pins(p, e).map_err(Into::into)).collect()
 }
 
 /// A net with its pins, as returned by commands.
@@ -83,12 +80,7 @@ pub struct NetInfo {
 
 fn info(p: &Project, name: &str) -> NetInfo {
     let n = &p.circuit().nets[name];
-    NetInfo {
-        name: name.to_string(),
-        pins: n.pins.iter().cloned().collect(),
-        class: n.class.clone(),
-        driven: n.driven,
-    }
+    NetInfo { name: name.to_string(), pins: n.pins.iter().cloned().collect(), class: n.class.clone(), driven: n.driven }
 }
 
 fn line(n: &NetInfo) -> String {
@@ -151,11 +143,7 @@ impl Command for Connect {
                 if g.len() != width {
                     return Err(CommandError::invalid_args(
                         "net.bus_width",
-                        format!(
-                            "`{expr}` gives {} pin(s) but bus `{}` has {width} nets",
-                            g.len(),
-                            self.net
-                        ),
+                        format!("`{expr}` gives {} pin(s) but bus `{}` has {width} nets", g.len(), self.net),
                     )
                     .with_hint("each pin range must have as many pins as the bus, e.g. DATA[0..7] with U1.PA0..PA7"));
                 }
@@ -180,14 +168,8 @@ impl Command for Connect {
         }
         for pin in &report.unmarked_nc {
             ctx.report(
-                Diagnostic::info(
-                    "net.nc_cleared",
-                    format!("{pin} was marked no-connect; the mark was removed"),
-                )
-                .with_subject(ObjectRef::Pin {
-                    component: pin.refdes.clone(),
-                    pin: pin.pin.clone(),
-                }),
+                Diagnostic::info("net.nc_cleared", format!("{pin} was marked no-connect; the mark was removed"))
+                    .with_subject(ObjectRef::Pin { component: pin.refdes.clone(), pin: pin.pin.clone() }),
             );
         }
         let p = ctx.project()?;
@@ -275,10 +257,8 @@ impl Command for NoConnect {
         if !self.clear {
             for pin in &pins {
                 if let Some(n) = p.circuit().net_of(pin) {
-                    return Err(
-                        CommandError::conflict("net.pin_connected", format!("{pin} is on net `{n}`"))
-                            .with_hint(format!("disconnect it first: `net.disconnect {pin}`")),
-                    );
+                    return Err(CommandError::conflict("net.pin_connected", format!("{pin} is on net `{n}`"))
+                        .with_hint(format!("disconnect it first: `net.disconnect {pin}`")));
                 }
             }
         }
@@ -290,18 +270,12 @@ impl Command for NoConnect {
                 c.no_connect.insert(pin);
             }
         }
-        Ok(NoConnectList {
-            no_connect: c.no_connect.iter().cloned().collect(),
-        })
+        Ok(NoConnectList { no_connect: c.no_connect.iter().cloned().collect() })
     }
 
     fn summarize(o: &NoConnectList) -> String {
         let v: Vec<String> = o.no_connect.iter().map(ToString::to_string).collect();
-        if v.is_empty() {
-            "no pins marked no-connect".into()
-        } else {
-            format!("no-connect: {}", v.join(" "))
-        }
+        if v.is_empty() { "no pins marked no-connect".into() } else { format!("no-connect: {}", v.join(" ")) }
     }
 }
 
@@ -329,20 +303,15 @@ impl Command for Rename {
         let from = net_name(ctx.project()?, &self.from)?;
         let to = connect::expand_net(&self.to)?;
         let [to] = to.as_slice() else {
-            return Err(CommandError::invalid_args(
-                "net.invalid_name",
-                "rename to a single net, not a bus",
-            ));
+            return Err(CommandError::invalid_args("net.invalid_name", "rename to a single net, not a bus"));
         };
         if from == *to {
             return Ok(info(ctx.project()?, &from));
         }
         let exists = ctx.project()?.circuit().nets.contains_key(to);
         if exists && !self.merge {
-            return Err(
-                CommandError::conflict("net.exists", format!("net `{to}` already exists"))
-                    .with_hint("pass `merge: true` to merge the two nets"),
-            );
+            return Err(CommandError::conflict("net.exists", format!("net `{to}` already exists"))
+                .with_hint("pass `merge: true` to merge the two nets"));
         }
         let c = ctx.project_mut()?.circuit_mut();
         let net = c.nets.remove(&from).expect("found above");
@@ -436,11 +405,9 @@ impl Command for Set {
             && !p.circuit().netclasses.contains_key(cl)
         {
             let s = did_you_mean(cl, p.circuit().netclasses.keys().map(String::as_str), 3);
-            return Err(
-                CommandError::not_found("netclass.not_found", format!("no net class `{cl}`"))
-                    .with_suggestions(&s)
-                    .with_hint_if_none("create it with `netclass.set`"),
-            );
+            return Err(CommandError::not_found("netclass.not_found", format!("no net class `{cl}`"))
+                .with_suggestions(&s)
+                .with_hint_if_none("create it with `netclass.set`"));
         }
         let c = ctx.project_mut()?.circuit_mut();
         for n in &names {
@@ -453,9 +420,7 @@ impl Command for Set {
             }
         }
         let p = ctx.project()?;
-        Ok(NetList {
-            nets: names.iter().map(|n| info(p, n)).collect(),
-        })
+        Ok(NetList { nets: names.iter().map(|n| info(p, n)).collect() })
     }
 
     fn summarize(o: &NetList) -> String {
@@ -493,11 +458,7 @@ impl Command for List {
     }
 
     fn summarize(o: &NetList) -> String {
-        if o.nets.is_empty() {
-            "no nets".into()
-        } else {
-            o.nets.iter().map(line).collect::<Vec<_>>().join("\n")
-        }
+        if o.nets.is_empty() { "no nets".into() } else { o.nets.iter().map(line).collect::<Vec<_>>().join("\n") }
     }
 }
 
@@ -551,17 +512,9 @@ impl Command for Show {
             .pins
             .iter()
             .map(|pin| {
-                let part_id = p
-                    .circuit()
-                    .components
-                    .get(&pin.refdes)
-                    .map(|c| c.part.clone())
-                    .unwrap_or_default();
-                let sp = p
-                    .library()
-                    .parts
-                    .get(&part_id)
-                    .and_then(|pt| pt.symbol.pins.iter().find(|s| s.number == pin.pin));
+                let part_id = p.circuit().components.get(&pin.refdes).map(|c| c.part.clone()).unwrap_or_default();
+                let sp =
+                    p.library().parts.get(&part_id).and_then(|pt| pt.symbol.pins.iter().find(|s| s.number == pin.pin));
                 PinDetail {
                     pin: pin.clone(),
                     name: sp.map(|s| s.name.clone()).unwrap_or_default(),
@@ -570,12 +523,7 @@ impl Command for Show {
                 }
             })
             .collect();
-        Ok(NetDetail {
-            name,
-            class: net.class.clone(),
-            driven: net.driven,
-            pins,
-        })
+        Ok(NetDetail { name, class: net.class.clone(), driven: net.driven, pins })
     }
 
     fn summarize(o: &NetDetail) -> String {
@@ -586,13 +534,7 @@ impl Command for Show {
             if o.driven { " [driven]" } else { "" }
         );
         for p in &o.pins {
-            s += &format!(
-                "\n  {:<10} {:<10} {:?}  ({})",
-                p.pin.to_string(),
-                p.name,
-                p.kind,
-                p.part
-            );
+            s += &format!("\n  {:<10} {:<10} {:?}  ({})", p.pin.to_string(), p.name, p.kind, p.part);
         }
         s
     }
@@ -672,11 +614,7 @@ fn class_line(c: &ClassInfo) -> String {
         "{}: {}{}",
         c.name,
         parts.join(", "),
-        if c.nets.is_empty() {
-            String::new()
-        } else {
-            format!("  nets: {}", c.nets.join(", "))
-        }
+        if c.nets.is_empty() { String::new() } else { format!("  nets: {}", c.nets.join(", ")) }
     )
 }
 
@@ -690,10 +628,7 @@ impl Command for ClassSet {
     fn run(self, ctx: &mut Context<'_>) -> Result<ClassInfo, CommandError> {
         let name = self.name.trim().to_string();
         if name.is_empty() || name.contains(char::is_whitespace) {
-            return Err(CommandError::invalid_args(
-                "netclass.invalid_name",
-                "class names have no spaces",
-            ));
+            return Err(CommandError::invalid_args("netclass.invalid_name", "class names have no spaces"));
         }
         for (label, v) in [
             ("track_width", self.track_width),
@@ -718,12 +653,7 @@ impl Command for ClassSet {
                 "via_diameter must be larger than via_drill",
             ));
         }
-        let c = ctx
-            .project_mut()?
-            .circuit_mut()
-            .netclasses
-            .entry(name.clone())
-            .or_default();
+        let c = ctx.project_mut()?.circuit_mut().netclasses.entry(name.clone()).or_default();
         if self.description.is_some() {
             c.description = self.description.filter(|d| !d.is_empty());
         }
@@ -767,9 +697,7 @@ impl Command for ClassList {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<ClassListResult, CommandError> {
         let p = ctx.project()?;
-        Ok(ClassListResult {
-            classes: p.circuit().netclasses.keys().map(|k| class_info(p, k)).collect(),
-        })
+        Ok(ClassListResult { classes: p.circuit().netclasses.keys().map(|k| class_info(p, k)).collect() })
     }
 
     fn summarize(o: &ClassListResult) -> String {
@@ -800,10 +728,8 @@ impl Command for ClassRemove {
         let p = ctx.project()?;
         if !p.circuit().netclasses.contains_key(&self.name) {
             let s = did_you_mean(&self.name, p.circuit().netclasses.keys().map(String::as_str), 3);
-            return Err(
-                CommandError::not_found("netclass.not_found", format!("no net class `{}`", self.name))
-                    .with_suggestions(&s),
-            );
+            return Err(CommandError::not_found("netclass.not_found", format!("no net class `{}`", self.name))
+                .with_suggestions(&s));
         }
         let c = ctx.project_mut()?.circuit_mut();
         c.netclasses.remove(&self.name);

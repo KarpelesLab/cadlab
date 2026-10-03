@@ -13,42 +13,15 @@ fn gen_named(name: &str, kind: ChipKind) -> Footprint {
 }
 
 fn pad<'a>(fp: &'a Footprint, n: &str) -> &'a Pad {
-    fp.pads
-        .iter()
-        .find(|p| p.number == n)
-        .unwrap_or_else(|| panic!("no pad {n}"))
+    fp.pads.iter().find(|p| p.number == n).unwrap_or_else(|| panic!("no pad {n}"))
 }
 
 #[test]
 fn dims_parse() {
-    assert_eq!(
-        Dim::parse("1.0±0.05mm").unwrap(),
-        Dim {
-            min: um(950),
-            max: um(1050)
-        }
-    );
-    assert_eq!(
-        Dim::parse("1.0+-0.05mm").unwrap(),
-        Dim {
-            min: um(950),
-            max: um(1050)
-        }
-    );
-    assert_eq!(
-        Dim::parse("0.15..0.35mm").unwrap(),
-        Dim {
-            min: um(150),
-            max: um(350)
-        }
-    );
-    assert_eq!(
-        Dim::parse("0.15mm..0.35mm").unwrap(),
-        Dim {
-            min: um(150),
-            max: um(350)
-        }
-    );
+    assert_eq!(Dim::parse("1.0±0.05mm").unwrap(), Dim { min: um(950), max: um(1050) });
+    assert_eq!(Dim::parse("1.0+-0.05mm").unwrap(), Dim { min: um(950), max: um(1050) });
+    assert_eq!(Dim::parse("0.15..0.35mm").unwrap(), Dim { min: um(150), max: um(350) });
+    assert_eq!(Dim::parse("0.15mm..0.35mm").unwrap(), Dim { min: um(150), max: um(350) });
     assert_eq!(Dim::parse("1mm").unwrap(), Dim::exact(um(1000)));
     assert!(Dim::parse("1.0").is_err());
     assert_eq!(Dim::parse("0.95..1.05mm").unwrap().to_string(), "0.95mm..1.05mm");
@@ -67,18 +40,9 @@ fn ipc_names() {
     assert_eq!(gen_named("SC-74A", ChipKind::Resistor).name, "SOT95P280X145-5N");
     assert_eq!(gen_named("TO-236-3", ChipKind::Resistor).name, "SOT95P237X112-3N");
     assert_eq!(gen_named("LQFP-48", ChipKind::Resistor).name, "QFP50P900X900X160-48N");
-    assert_eq!(
-        gen_named("QFN-32 5x5mm P0.5mm EP3.1mm", ChipKind::Resistor).name,
-        "QFN50P500X500X90-33N"
-    );
-    assert_eq!(
-        gen_named("DFN-8 2x3mm P0.5mm EP0.9x2.4mm H0.8mm", ChipKind::Resistor).name,
-        "SON50P300X200X80-9N"
-    );
-    assert_eq!(
-        gen_named("PinHeader 1x04", ChipKind::Resistor).name,
-        "PinHeader_1x04_P2.54mm"
-    );
+    assert_eq!(gen_named("QFN-32 5x5mm P0.5mm EP3.1mm", ChipKind::Resistor).name, "QFN50P500X500X90-33N");
+    assert_eq!(gen_named("DFN-8 2x3mm P0.5mm EP0.9x2.4mm H0.8mm", ChipKind::Resistor).name, "SON50P300X200X80-9N");
+    assert_eq!(gen_named("PinHeader 1x04", ChipKind::Resistor).name, "PinHeader_1x04_P2.54mm");
 }
 
 #[test]
@@ -112,13 +76,7 @@ fn sot23_pin_slots() {
 #[test]
 fn quad_numbering_counter_clockwise() {
     let fp = gen_named("LQFP-48", ChipKind::Resistor);
-    let (p1, p12, p13, p25, p37) = (
-        pad(&fp, "1"),
-        pad(&fp, "12"),
-        pad(&fp, "13"),
-        pad(&fp, "25"),
-        pad(&fp, "37"),
-    );
+    let (p1, p12, p13, p25, p37) = (pad(&fp, "1"), pad(&fp, "12"), pad(&fp, "13"), pad(&fp, "25"), pad(&fp, "37"));
     assert!(p1.at.x < Nm::ZERO && p1.at.y > Nm::ZERO); // left side, top
     assert!(p12.at.x < Nm::ZERO && p12.at.y < Nm::ZERO); // left side, bottom
     assert!(p13.at.y < Nm::ZERO && p13.at.x < Nm::ZERO); // bottom side, left
@@ -151,15 +109,7 @@ fn exposed_pad_and_paste() {
 #[test]
 fn silkscreen_clears_pads() {
     let opts = GenOptions::default();
-    for name in [
-        "0402",
-        "0805",
-        "SOIC-8",
-        "SOT-23-5",
-        "LQFP-48",
-        "QFN-32 5x5mm P0.5mm EP3.1mm",
-        "PinHeader 2x05",
-    ] {
+    for name in ["0402", "0805", "SOIC-8", "SOT-23-5", "LQFP-48", "QFN-32 5x5mm P0.5mm EP3.1mm", "PinHeader 2x05"] {
         let fp = gen_named(name, ChipKind::Led);
         for g in &fp.graphics {
             let GraphicGeometry::Path { points } = &g.geometry else {
@@ -201,22 +151,8 @@ fn pin_header_layout() {
 #[test]
 fn density_changes_pads_and_name() {
     let spec = parse("SOIC-8", ChipKind::Resistor).unwrap();
-    let most = generate(
-        &spec,
-        &GenOptions {
-            density: Density::Most,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let least = generate(
-        &spec,
-        &GenOptions {
-            density: Density::Least,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let most = generate(&spec, &GenOptions { density: Density::Most, ..Default::default() }).unwrap();
+    let least = generate(&spec, &GenOptions { density: Density::Least, ..Default::default() }).unwrap();
     assert_eq!(most.name, "SOIC127P600X175-8M");
     assert_eq!(least.name, "SOIC127P600X175-8L");
     assert!(most.pads[0].shape.size().0 > least.pads[0].shape.size().0);
@@ -225,11 +161,7 @@ fn density_changes_pads_and_name() {
 #[test]
 fn errors() {
     assert!(parse("FOO-12", ChipKind::Resistor).is_err());
-    assert!(
-        parse("QFN-32 P0.5mm", ChipKind::Resistor)
-            .unwrap_err()
-            .contains("body size")
-    );
+    assert!(parse("QFN-32 P0.5mm", ChipKind::Resistor).unwrap_err().contains("body size"));
     let mut spec = parse("SOIC-8", ChipKind::Resistor).unwrap();
     if let PackageSpec::GullWing { pins, .. } = &mut spec {
         *pins = 7;

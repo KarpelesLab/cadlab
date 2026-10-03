@@ -28,12 +28,7 @@ impl Client {
             .unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Client {
-            child,
-            stdin,
-            stdout,
-            next_id: 1,
-        }
+        Client { child, stdin, stdout, next_id: 1 }
     }
 
     fn send(&mut self, v: Value) {
@@ -85,12 +80,8 @@ fn mcp_session() {
     assert_eq!(c.request("ping", json!({}))["result"], json!({}));
 
     let tools = c.request("tools/list", json!({}));
-    let names: Vec<&str> = tools["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> =
+        tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
         [
@@ -102,6 +93,8 @@ fn mcp_session() {
             "netclass",
             "block",
             "bom",
+            "render",
+            "schematic",
             "history",
             "describe",
             "call",
@@ -123,26 +116,16 @@ fn mcp_session() {
 
     // Create, then later calls use it.
     let path = dir.path().join("board1");
-    let r = c.tool(
-        "project",
-        json!({"action": "new", "args": {"path": path, "targets": ["jlcpcb"]}}),
-    );
+    let r = c.tool("project", json!({"action": "new", "args": {"path": path, "targets": ["jlcpcb"]}}));
     assert_eq!(r["isError"], false, "{r}");
     assert!(path.join("cadlab.toml").is_file());
 
     let r = c.tool("project", json!({"action": "set", "args": {"description": "from mcp"}}));
     assert_eq!(r["structuredContent"]["output"]["description"], "from mcp");
     // Autosave is on by default.
-    assert!(
-        std::fs::read_to_string(path.join("cadlab.toml"))
-            .unwrap()
-            .contains("from mcp")
-    );
+    assert!(std::fs::read_to_string(path.join("cadlab.toml")).unwrap().contains("from mcp"));
 
-    let r = c.tool(
-        "project",
-        json!({"action": "set", "args": {"name": "dry"}, "dry_run": true}),
-    );
+    let r = c.tool("project", json!({"action": "set", "args": {"name": "dry"}, "dry_run": true}));
     assert_eq!(r["structuredContent"]["output"]["name"], "dry");
     let r = c.tool("project", json!({"action": "info"}));
     assert_eq!(r["structuredContent"]["output"]["name"], "board1");

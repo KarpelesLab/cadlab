@@ -11,20 +11,8 @@ use crate::symbolgen;
 use crate::value::{Quantity, Unit};
 
 const DIELECTRICS: &[&str] = &["C0G", "NP0", "X5R", "X6S", "X7R", "X7S", "X7T", "X8R", "Y5V", "Z5U"];
-const COLORS: &[&str] = &[
-    "red",
-    "green",
-    "blue",
-    "yellow",
-    "orange",
-    "amber",
-    "white",
-    "warm-white",
-    "pink",
-    "purple",
-    "uv",
-    "ir",
-];
+const COLORS: &[&str] =
+    &["red", "green", "blue", "yellow", "orange", "amber", "white", "warm-white", "pink", "purple", "uv", "ir"];
 
 /// A parsed generic spec.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,11 +89,7 @@ pub fn parse(spec: &str) -> Result<GenericSpec, String> {
             Unit::Ampere => "current_rating",
             _ => return Err(format!("`{t}` does not fit a {} spec", category.label().to_lowercase())),
         };
-        let q = if q.unit == Unit::None {
-            q.with_unit(main_unit)
-        } else {
-            q
-        };
+        let q = if q.unit == Unit::None { q.with_unit(main_unit) } else { q };
         if params.get(key).is_some() {
             return Err(format!("`{t}`: {key} given twice in \"{spec}\""));
         }
@@ -174,11 +158,7 @@ impl GenericSpec {
 
     /// Builds the part and its footprint.
     pub fn build(&self, opts: &GenOptions) -> Result<(Part, Footprint), String> {
-        let package = self
-            .params
-            .get("package")
-            .and_then(ParamValue::text)
-            .ok_or("no package")?;
+        let package = self.params.get("package").and_then(ParamValue::text).ok_or("no package")?;
         let spec = landpattern::packages::parse(package, self.chip_kind())?;
         let footprint = landpattern::generate(&spec, opts).map_err(|e| e.to_string())?;
         let symbol = symbolgen::generate(self.category, symbolgen::two_terminal_pins(self.category));
@@ -243,10 +223,7 @@ mod tests {
 
     #[test]
     fn builds_part_and_footprint() {
-        let (part, fp) = parse("C 100nF 16V X7R 0402")
-            .unwrap()
-            .build(&GenOptions::default())
-            .unwrap();
+        let (part, fp) = parse("C 100nF 16V X7R 0402").unwrap().build(&GenOptions::default()).unwrap();
         assert_eq!(part.id, "C_100nF_16V_X7R_0402");
         assert_eq!(part.description, "Capacitor 100nF 16V X7R 0402");
         assert_eq!(part.footprints[0].footprint, "CAPC1005X55N");

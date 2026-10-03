@@ -39,11 +39,7 @@ pub struct Catalog {
 impl Catalog {
     /// A catalog from `path`, read when first queried.
     pub fn lazy(path: PathBuf) -> Self {
-        Catalog {
-            path,
-            id: OnceLock::new(),
-            data: OnceLock::new(),
-        }
+        Catalog { path, id: OnceLock::new(), data: OnceLock::new() }
     }
 
     /// A catalog from in-memory parts.
@@ -63,14 +59,10 @@ impl Catalog {
     fn load(&self) -> &Result<Vec<Candidate>, ProviderError> {
         self.data.get_or_init(|| {
             let name = self.path.display().to_string();
-            let text = std::fs::read_to_string(&self.path).map_err(|e| ProviderError::Unavailable {
-                provider: name.clone(),
-                message: e.to_string(),
-            })?;
-            let f: File = serde_json::from_str(&text).map_err(|e| ProviderError::InvalidData {
-                provider: name.clone(),
-                message: e.to_string(),
-            })?;
+            let text = std::fs::read_to_string(&self.path)
+                .map_err(|e| ProviderError::Unavailable { provider: name.clone(), message: e.to_string() })?;
+            let f: File = serde_json::from_str(&text)
+                .map_err(|e| ProviderError::InvalidData { provider: name.clone(), message: e.to_string() })?;
             let _ = self.id.set(f.provider.clone());
             Ok(f.parts
                 .into_iter()
@@ -98,11 +90,6 @@ impl Provider for Catalog {
     }
 
     fn lookup(&self, mpn: &str) -> Result<Vec<Candidate>, ProviderError> {
-        Ok(self
-            .load()
-            .clone()?
-            .into_iter()
-            .filter(|c| c.mpn.eq_ignore_ascii_case(mpn))
-            .collect())
+        Ok(self.load().clone()?.into_iter().filter(|c| c.mpn.eq_ignore_ascii_case(mpn)).collect())
     }
 }

@@ -11,11 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::command::{Command, CommandError, CommandKind, Context, Registry, Session};
 
 pub(crate) fn register(r: &mut Registry) {
-    r.register::<New>()
-        .register::<Open>()
-        .register::<Save>()
-        .register::<Info>()
-        .register::<Set>();
+    r.register::<New>().register::<Open>().register::<Save>().register::<Info>().register::<Set>();
 }
 
 /// Project settings (the editable part of the manifest).
@@ -114,10 +110,8 @@ fn normalize_targets(targets: Vec<String>) -> Result<Vec<String>, CommandError> 
     for t in targets {
         let t = t.trim().to_ascii_lowercase();
         if t.is_empty() || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            return Err(
-                CommandError::invalid_args("project.invalid_target", format!("invalid fab target `{t}`"))
-                    .with_hint("fab profile IDs look like `jlcpcb`, `pcbway`, `oshpark`"),
-            );
+            return Err(CommandError::invalid_args("project.invalid_target", format!("invalid fab target `{t}`"))
+                .with_hint("fab profile IDs look like `jlcpcb`, `pcbway`, `oshpark`"));
         }
         if !out.contains(&t) {
             out.push(t);
@@ -159,10 +153,7 @@ impl Command for New {
             None => default_name(&self.path)?,
         };
         if name.trim().is_empty() {
-            return Err(CommandError::invalid_args(
-                "project.invalid_name",
-                "project name cannot be empty",
-            ));
+            return Err(CommandError::invalid_args("project.invalid_name", "project name cannot be empty"));
         }
         let mut p = Project::new(name.trim());
         p.manifest_mut().description = self.description;
@@ -179,13 +170,12 @@ impl Command for New {
 }
 
 fn default_name(path: &Path) -> Result<String, CommandError> {
-    std::path::absolute(path)
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .ok_or_else(|| {
+    std::path::absolute(path).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).ok_or_else(
+        || {
             CommandError::invalid_args("project.invalid_name", "cannot derive a project name from the path")
                 .with_hint("pass `name` explicitly")
-        })
+        },
+    )
 }
 
 /// Open an existing project.
@@ -245,26 +235,16 @@ impl Command for Save {
         let report = ctx.session.save()?;
         let root = ctx.session.root().map(Path::to_path_buf).unwrap_or_default();
         let rel = |v: Vec<PathBuf>| -> Vec<String> {
-            v.iter()
-                .map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string())
-                .collect()
+            v.iter().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string()).collect()
         };
-        Ok(SaveResult {
-            path: root.display().to_string(),
-            written: rel(report.written),
-            removed: rel(report.removed),
-        })
+        Ok(SaveResult { path: root.display().to_string(), written: rel(report.written), removed: rel(report.removed) })
     }
 
     fn summarize(o: &SaveResult) -> String {
         if o.written.is_empty() && o.removed.is_empty() {
             format!("saved {} (no changes)", o.path)
         } else {
-            format!(
-                "saved {} ({} file(s) written)",
-                o.path,
-                o.written.len() + o.removed.len()
-            )
+            format!("saved {} ({} file(s) written)", o.path, o.written.len() + o.removed.len())
         }
     }
 }
@@ -319,10 +299,7 @@ impl Command for Set {
     fn run(self, ctx: &mut Context<'_>) -> Result<ProjectSettings, CommandError> {
         let targets = self.targets.map(normalize_targets).transpose()?;
         if self.name.as_deref().is_some_and(|n| n.trim().is_empty()) {
-            return Err(CommandError::invalid_args(
-                "project.invalid_name",
-                "project name cannot be empty",
-            ));
+            return Err(CommandError::invalid_args("project.invalid_name", "project name cannot be empty"));
         }
         let m = ctx.project_mut()?.manifest_mut();
         if let Some(n) = self.name {

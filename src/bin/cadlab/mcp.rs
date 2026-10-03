@@ -63,10 +63,7 @@ pub fn serve(registry: &'static Registry, autosave: bool) -> u8 {
                     }
                 };
                 if msg.get("method").and_then(Value::as_str) == Some("notifications/cancelled") {
-                    let id = msg
-                        .pointer("/params/requestId")
-                        .map(Value::to_string)
-                        .unwrap_or_default();
+                    let id = msg.pointer("/params/requestId").map(Value::to_string).unwrap_or_default();
                     if let Some(t) = tokens.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
                         t.cancel();
                     }
@@ -74,10 +71,7 @@ pub fn serve(registry: &'static Registry, autosave: bool) -> u8 {
                 }
                 let cancel = CancelToken::new();
                 if let Some(id) = msg.get("id") {
-                    tokens
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(id.to_string(), cancel.clone());
+                    tokens.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), cancel.clone());
                 }
                 if tx.send(Incoming { msg, cancel }).is_err() {
                     break;
@@ -138,10 +132,7 @@ impl Progress for McpProgress {
             if let Some(total) = total {
                 p["total"] = json!(total);
             }
-            send(
-                &self.out,
-                &json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": p}),
-            );
+            send(&self.out, &json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": p}));
         }
     }
 }
@@ -165,10 +156,7 @@ impl Server {
         let r = match method {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
-                let version = PROTOCOL_VERSIONS
-                    .iter()
-                    .find(|v| **v == asked)
-                    .unwrap_or(&PROTOCOL_VERSIONS[0]);
+                let version = PROTOCOL_VERSIONS.iter().find(|v| **v == asked).unwrap_or(&PROTOCOL_VERSIONS[0]);
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
@@ -194,12 +182,7 @@ impl Server {
         for (group, entries) in self.registry.groups() {
             let mut desc = format!("{group} commands. Actions:");
             for e in &entries {
-                desc += &format!(
-                    "\n- {}: {}. args: {}",
-                    e.action(),
-                    e.summary,
-                    args_signature(&e.input_schema)
-                );
+                desc += &format!("\n- {}: {}. args: {}", e.action(), e.summary, args_signature(&e.input_schema));
             }
             desc += "\nCall `describe` with \"<group>.<action>\" for the full schema.";
             let actions: Vec<&str> = entries.iter().map(|e| e.action()).collect();
@@ -257,19 +240,11 @@ impl Server {
     }
 
     fn call_tool(&mut self, params: &Value, cancel: &CancelToken) -> Result<Value, (i64, String)> {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or((-32602, "missing tool name".to_string()))?;
+        let name = params.get("name").and_then(Value::as_str).ok_or((-32602, "missing tool name".to_string()))?;
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
         let project = args.get("project").and_then(Value::as_str).map(PathBuf::from);
-        let opts = RunOptions {
-            dry_run: args.get("dry_run").and_then(Value::as_bool).unwrap_or(false),
-        };
-        let progress = McpProgress {
-            out: self.out.clone(),
-            token: params.pointer("/_meta/progressToken").cloned(),
-        };
+        let opts = RunOptions { dry_run: args.get("dry_run").and_then(Value::as_bool).unwrap_or(false) };
+        let progress = McpProgress { out: self.out.clone(), token: params.pointer("/_meta/progressToken").cloned() };
         let cmd_args = args.get("args").cloned().unwrap_or(json!({}));
         match name {
             "describe" => Ok(self.describe(args.get("command").and_then(Value::as_str))),
@@ -297,17 +272,10 @@ impl Server {
 
     fn describe(&self, name: Option<&str>) -> Value {
         let Some(name) = name else {
-            let list: Vec<Value> = self
-                .registry
-                .iter()
-                .map(|e| json!({"name": e.name, "kind": e.kind, "summary": e.summary}))
-                .collect();
-            let text = self
-                .registry
-                .iter()
-                .map(|e| format!("{}: {}", e.name, e.summary))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let list: Vec<Value> =
+                self.registry.iter().map(|e| json!({"name": e.name, "kind": e.kind, "summary": e.summary})).collect();
+            let text =
+                self.registry.iter().map(|e| format!("{}: {}", e.name, e.summary)).collect::<Vec<_>>().join("\n");
             return tool_ok(text, json!({"commands": list}));
         };
         let entries: Vec<_> = match self.registry.get(name) {
@@ -317,15 +285,8 @@ impl Server {
         if entries.is_empty() {
             return tool_error(&format!("unknown command or group `{name}`"));
         }
-        let text = entries
-            .iter()
-            .map(|e| crate::describe_text(e))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        tool_ok(
-            text,
-            json!({"commands": entries.iter().map(|e| e.describe()).collect::<Vec<_>>()}),
-        )
+        let text = entries.iter().map(|e| crate::describe_text(e)).collect::<Vec<_>>().join("\n\n");
+        tool_ok(text, json!({"commands": entries.iter().map(|e| e.describe()).collect::<Vec<_>>()}))
     }
 
     /// Finds or opens the session for `project` (or the current one).
@@ -400,9 +361,7 @@ impl Server {
             Ok(i) => i,
             Err(f) => return failure_result(&f),
         };
-        let r = self
-            .registry
-            .execute_with(&mut self.sessions[i].1, cmd, args, opts, progress, cancel);
+        let r = self.registry.execute_with(&mut self.sessions[i].1, cmd, args, opts, progress, cancel);
         let result = match r {
             Ok(o) => match self.maybe_save_at(i) {
                 Ok(()) => outcome_result(&o),
@@ -426,11 +385,7 @@ impl Server {
         let result = match r {
             Ok(outs) => match self.maybe_save_at(i) {
                 Ok(()) => {
-                    let text = outs
-                        .iter()
-                        .map(|o| text_of(&o.summary, &o.diagnostics))
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                    let text = outs.iter().map(|o| text_of(&o.summary, &o.diagnostics)).collect::<Vec<_>>().join("\n");
                     tool_ok(text, json!({"ok": true, "results": outs}))
                 }
                 Err(f) => failure_result(&f),
@@ -470,10 +425,8 @@ impl Server {
 
 /// Compact argument signature from a schema: `{path: string, name?: string}`.
 fn args_signature(schema: &Value) -> String {
-    let required: Vec<&str> = schema["required"]
-        .as_array()
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    let required: Vec<&str> =
+        schema["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     let Some(props) = schema["properties"].as_object() else {
         return "{}".into();
     };
@@ -508,10 +461,43 @@ fn tool_error(message: &str) -> Value {
 }
 
 fn outcome_result(o: &Outcome) -> Value {
-    tool_ok(
+    let mut v = tool_ok(
         text_of(&o.summary, &o.diagnostics),
         json!({"ok": true, "command": o.command, "output": o.output, "diagnostics": o.diagnostics}),
-    )
+    );
+    // Rendered images are sent as image content so multimodal clients can look at them.
+    if let Some(path) = o.output.get("png").and_then(Value::as_str)
+        && let Ok(bytes) = std::fs::read(path)
+        && bytes.len() <= MAX_IMAGE_BYTES
+    {
+        v["content"].as_array_mut().expect("content array").push(json!({
+            "type": "image",
+            "data": base64(&bytes),
+            "mimeType": "image/png",
+        }));
+    }
+    v
+}
+
+/// Images larger than this are referenced by path only.
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Standard base64 (RFC 4648) with padding.
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 fn failure_result(f: &Failure) -> Value {
@@ -527,4 +513,22 @@ fn failure_result(f: &Failure) -> Value {
         s["step"] = json!(i);
     }
     json!({"content": [{"type": "text", "text": text}], "structuredContent": s, "isError": true})
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn base64_rfc4648() {
+        for (i, o) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(super::base64(i.as_bytes()), o);
+        }
+    }
 }

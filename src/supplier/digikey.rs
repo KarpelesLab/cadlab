@@ -38,17 +38,11 @@ pub struct DigiKey {
 }
 
 fn err(message: impl Into<String>) -> ProviderError {
-    ProviderError::Unavailable {
-        provider: ID.into(),
-        message: message.into(),
-    }
+    ProviderError::Unavailable { provider: ID.into(), message: message.into() }
 }
 
 fn bad_data(message: impl Into<String>) -> ProviderError {
-    ProviderError::InvalidData {
-        provider: ID.into(),
-        message: message.into(),
-    }
+    ProviderError::InvalidData { provider: ID.into(), message: message.into() }
 }
 
 impl DigiKey {
@@ -58,9 +52,8 @@ impl DigiKey {
     pub fn from_settings(settings: Option<&DigiKeySettings>) -> Option<Self> {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let pick = |k: &str, file: Option<&String>, d: &str| env(k).or(file.cloned()).unwrap_or_else(|| d.to_string());
-        let id = env("DIGIKEY_CLIENT_ID")
-            .or_else(|| settings.map(|s| s.client_id.clone()))
-            .filter(|v| !v.is_empty())?;
+        let id =
+            env("DIGIKEY_CLIENT_ID").or_else(|| settings.map(|s| s.client_id.clone())).filter(|v| !v.is_empty())?;
         let secret = env("DIGIKEY_CLIENT_SECRET")
             .or_else(|| settings.map(|s| s.client_secret.clone()))
             .filter(|v| !v.is_empty())?;
@@ -71,11 +64,7 @@ impl DigiKey {
         Some(DigiKey::new(
             id,
             secret,
-            if sandbox {
-                "https://sandbox-api.digikey.com"
-            } else {
-                "https://api.digikey.com"
-            },
+            if sandbox { "https://sandbox-api.digikey.com" } else { "https://api.digikey.com" },
             &pick("DIGIKEY_SITE", settings.and_then(|s| s.site.as_ref()), "US"),
             &pick("DIGIKEY_LANGUAGE", settings.and_then(|s| s.language.as_ref()), "en"),
             &pick("DIGIKEY_CURRENCY", settings.and_then(|s| s.currency.as_ref()), "USD"),
@@ -142,16 +131,11 @@ impl DigiKey {
         let status = resp.status().as_u16();
         let body = resp.body_mut().read_to_string().map_err(|e| err(e.to_string()))?;
         if status != 200 {
-            return Err(err(format!(
-                "credentials rejected (HTTP {status}): {}",
-                error_text(&body)
-            )));
+            return Err(err(format!("credentials rejected (HTTP {status}): {}", error_text(&body))));
         }
         let v: Value = serde_json::from_str(&body).map_err(|e| bad_data(e.to_string()))?;
-        let tok = v["access_token"]
-            .as_str()
-            .ok_or_else(|| bad_data("token response without access_token"))?
-            .to_string();
+        let tok =
+            v["access_token"].as_str().ok_or_else(|| bad_data("token response without access_token"))?.to_string();
         let ttl = v["expires_in"].as_u64().unwrap_or(600);
         *t = Some((tok.clone(), Instant::now() + Duration::from_secs(ttl)));
         Ok(tok)
@@ -159,10 +143,7 @@ impl DigiKey {
 
     /// POSTs JSON to an API path, through the cache.
     fn post(&self, path: &str, body: &Value) -> Result<Value, ProviderError> {
-        let key = format!(
-            "{} {}|{}|{}|{} {}",
-            self.base, path, self.site, self.language, self.currency, body
-        );
+        let key = format!("{} {}|{}|{}|{} {}", self.base, path, self.site, self.language, self.currency, body);
         if let Some(c) = &self.cache
             && let Some(text) = c.get(ID, &key)
         {
@@ -208,10 +189,8 @@ impl DigiKey {
 
     /// One page of results, and whether more pages exist.
     fn keyword_page(&self, keywords: &str, limit: u32, offset: u32) -> Result<(Vec<Candidate>, bool), ProviderError> {
-        let v = self.post(
-            "/products/v4/search/keyword",
-            &json!({"Keywords": keywords, "Limit": limit, "Offset": offset}),
-        )?;
+        let v =
+            self.post("/products/v4/search/keyword", &json!({"Keywords": keywords, "Limit": limit, "Offset": offset}))?;
         let total = v["ProductsCount"].as_u64().unwrap_or(0);
         let more = (offset as u64 + limit as u64) < total;
         Ok((parse_keyword_response(&v, &self.currency), more))
@@ -319,11 +298,8 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
 pub fn parse_keyword_response(v: &Value, currency: &str) -> Vec<Candidate> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let products = v["ExactMatches"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .chain(v["Products"].as_array().into_iter().flatten());
+    let products =
+        v["ExactMatches"].as_array().into_iter().flatten().chain(v["Products"].as_array().into_iter().flatten());
     for p in products {
         for c in parse_product(p, currency) {
             if seen.insert(c.sku.clone()) {
@@ -346,12 +322,7 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
         .filter_map(|x| Some((x["ParameterText"].as_str()?, x["ValueText"].as_str()?)))
         .collect();
     let mut params = normalize::params(params_list.iter().copied());
-    let find = |name: &str| {
-        params_list
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| *v)
-    };
+    let find = |name: &str| params_list.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| *v);
     // Chips: "0402 (1005 Metric)" from Package / Case; ICs: the supplier device package (SOT-23-5).
     let case = find("Package / Case").and_then(normalize::package);
     let device = find("Supplier Device Package").and_then(normalize::package);
@@ -372,9 +343,7 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
             None => break,
         };
     }
-    let mut lifecycle = str_at(p, &["ProductStatus", "Status"])
-        .map(normalize::lifecycle)
-        .unwrap_or_default();
+    let mut lifecycle = str_at(p, &["ProductStatus", "Status"]).map(normalize::lifecycle).unwrap_or_default();
     if p["Discontinued"].as_bool() == Some(true) || p["EndOfLife"].as_bool() == Some(true) {
         lifecycle = super::Lifecycle::Obsolete;
     }
@@ -394,29 +363,17 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
         moq: 1,
         prices: Vec::new(),
         lifecycle,
-        datasheet: str_at(p, &["DatasheetUrl"]).map(|u| {
-            if u.starts_with("//") {
-                format!("https:{u}")
-            } else {
-                u.to_string()
-            }
-        }),
+        datasheet: str_at(p, &["DatasheetUrl"])
+            .map(|u| if u.starts_with("//") { format!("https:{u}") } else { u.to_string() }),
         url: str_at(p, &["ProductUrl"]).map(String::from),
     };
     let variations = p["ProductVariations"].as_array().cloned().unwrap_or_default();
     if variations.is_empty() {
-        return vec![Candidate {
-            sku: mpn.to_string(),
-            ..base
-        }];
+        return vec![Candidate { sku: mpn.to_string(), ..base }];
     }
     variations
         .iter()
-        .filter(|var| {
-            !str_at(var, &["PackageType", "Name"])
-                .unwrap_or("")
-                .contains("Digi-Reel")
-        })
+        .filter(|var| !str_at(var, &["PackageType", "Name"]).unwrap_or("").contains("Digi-Reel"))
         .filter_map(|var| {
             let sku = str_at(var, &["DigiKeyProductNumber"])?.to_string();
             let prices = var["StandardPricing"]
@@ -424,10 +381,7 @@ pub fn parse_product(p: &Value, currency: &str) -> Vec<Candidate> {
                 .into_iter()
                 .flatten()
                 .filter_map(|b| {
-                    Some(PriceBreak {
-                        qty: b["BreakQuantity"].as_u64()?,
-                        price: money(&b["UnitPrice"], currency)?,
-                    })
+                    Some(PriceBreak { qty: b["BreakQuantity"].as_u64()?, price: money(&b["UnitPrice"], currency)? })
                 })
                 .collect();
             Some(Candidate {
@@ -486,11 +440,7 @@ impl Provider for DigiKey {
     }
 
     fn lookup(&self, mpn: &str) -> Result<Vec<Candidate>, ProviderError> {
-        Ok(self
-            .keyword(mpn, 20)?
-            .into_iter()
-            .filter(|c| c.mpn.eq_ignore_ascii_case(mpn))
-            .collect())
+        Ok(self.keyword(mpn, 20)?.into_iter().filter(|c| c.mpn.eq_ignore_ascii_case(mpn)).collect())
     }
 }
 
@@ -556,10 +506,7 @@ mod tests {
         assert_eq!(ct.params.get("temperature").unwrap().to_string(), "-40°C..85°C");
         assert_eq!(ct.stock, 20000);
         assert_eq!(ct.prices[1].price.to_string(), "0.276 USD");
-        assert_eq!(
-            ct.datasheet.as_deref(),
-            Some("https://www.diodes.com/assets/Datasheets/AP2112.pdf")
-        );
+        assert_eq!(ct.datasheet.as_deref(), Some("https://www.diodes.com/assets/Datasheets/AP2112.pdf"));
         assert_eq!(ct.lifecycle, super::super::Lifecycle::Active);
         let tr = &c[1];
         assert_eq!(tr.moq, 3000);
@@ -577,22 +524,12 @@ mod tests {
         };
         let w = |q: SearchQuery| passive_words(&q).unwrap().join(" ");
         assert_eq!(
-            w(q(
-                Category::Capacitor,
-                &[
-                    ("capacitance", "1uF"),
-                    ("voltage_rating", ">=16V"),
-                    ("dielectric", "X7R")
-                ]
-            )),
+            w(q(Category::Capacitor, &[("capacitance", "1uF"), ("voltage_rating", ">=16V"), ("dielectric", "X7R")])),
             "CAP CER 1UF 16V X7R"
         );
         assert_eq!(w(q(Category::Capacitor, &[("capacitance", "100nF")])), "CAP CER 0.1UF");
         assert_eq!(w(q(Category::Capacitor, &[("capacitance", "22pF")])), "CAP CER 22PF");
-        assert_eq!(
-            w(q(Category::Resistor, &[("resistance", "10k"), ("tolerance", "<=1%")])),
-            "RES 10K OHM 1%"
-        );
+        assert_eq!(w(q(Category::Resistor, &[("resistance", "10k"), ("tolerance", "<=1%")])), "RES 10K OHM 1%");
         assert_eq!(w(q(Category::Resistor, &[("resistance", "4k7")])), "RES 4.7K OHM");
         assert_eq!(w(q(Category::Resistor, &[("resistance", "220")])), "RES 220 OHM");
         assert_eq!(w(q(Category::Resistor, &[("resistance", "1M")])), "RES 1M OHM");
@@ -610,9 +547,6 @@ mod tests {
             in_stock: true,
             ..Default::default()
         };
-        assert!(
-            c.iter().all(|c| q.matches(c)),
-            "normalized DigiKey data passes cadlab filters"
-        );
+        assert!(c.iter().all(|c| q.matches(c)), "normalized DigiKey data passes cadlab filters");
     }
 }

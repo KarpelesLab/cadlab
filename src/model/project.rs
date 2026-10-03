@@ -140,18 +140,8 @@ impl Project {
             raw.sections.insert("schematic".into(), to_value(&**s));
         }
         raw.sections.insert("board".into(), to_value(&*self.board));
-        raw.parts = self
-            .library
-            .parts
-            .iter()
-            .map(|(k, v)| (k.clone(), to_value(v)))
-            .collect();
-        raw.footprints = self
-            .library
-            .footprints
-            .iter()
-            .map(|(k, v)| (k.clone(), to_value(v)))
-            .collect();
+        raw.parts = self.library.parts.iter().map(|(k, v)| (k.clone(), to_value(v))).collect();
+        raw.footprints = self.library.footprints.iter().map(|(k, v)| (k.clone(), to_value(v))).collect();
         raw
     }
 
@@ -172,10 +162,7 @@ impl Project {
             let file = format!("{PARTS_DIR}/{id}.json");
             let p: Part = from_value(&file, v)?;
             if p.id != id {
-                return Err(ModelError::invalid(
-                    file,
-                    format!("part id `{}` does not match the file name", p.id),
-                ));
+                return Err(ModelError::invalid(file, format!("part id `{}` does not match the file name", p.id)));
             }
             library.parts.insert(id, p);
         }
@@ -304,10 +291,7 @@ impl Project {
 
 /// Walks up from `start` to find a directory containing `cadlab.toml`.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|d| d.join(MANIFEST_FILE).is_file())
-        .map(Path::to_path_buf)
+    start.ancestors().find(|d| d.join(MANIFEST_FILE).is_file()).map(Path::to_path_buf)
 }
 
 /// Reads every `<key>.json` in `dir` (missing directory = empty).
@@ -352,10 +336,7 @@ fn section<T: DeserializeOwned>(
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), ModelError> {
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("")
-    ));
+    let tmp = path.with_extension(format!("{}.tmp", path.extension().and_then(|e| e.to_str()).unwrap_or("")));
     fs::write(&tmp, content).map_err(|e| ModelError::io(&tmp, e))?;
     fs::rename(&tmp, path).map_err(|e| ModelError::io(path, e))
 }

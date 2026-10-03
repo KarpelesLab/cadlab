@@ -26,11 +26,7 @@ fn setup() -> (tempfile::TempDir, Registry, Session) {
 }
 
 fn mpns(v: &Value) -> Vec<String> {
-    v.as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["mpn"].as_str().unwrap().to_string())
-        .collect()
+    v.as_array().unwrap().iter().map(|c| c["mpn"].as_str().unwrap().to_string()).collect()
 }
 
 /// The M1 exit scenario: "a 3.3 V LDO, 500 mA, SOT-23-5, in stock" to a concrete part in the BOM.
@@ -74,38 +70,19 @@ fn ldo_from_requirement_to_bom() {
 #[test]
 fn search_filters_and_errors() {
     let (_d, r, mut s) = setup();
-    let o = exec(
-        &r,
-        &mut s,
-        "part.search",
-        json!({"query": "", "category": "resistor", "params": {"tolerance": "<=1%"}}),
-    );
+    let o =
+        exec(&r, &mut s, "part.search", json!({"query": "", "category": "resistor", "params": {"tolerance": "<=1%"}}));
     assert_eq!(mpns(&o["output"]["candidates"]), ["0402WGF1002TCE", "RC0402FR-0710KL"]);
-    let o = exec(
-        &r,
-        &mut s,
-        "part.search",
-        json!({"query": "LDO", "max_price": "0.04 USD", "include_obsolete": true}),
-    );
+    let o = exec(&r, &mut s, "part.search", json!({"query": "LDO", "max_price": "0.04 USD", "include_obsolete": true}));
     // In stock first (even obsolete), then out of stock.
-    assert_eq!(
-        mpns(&o["output"]["candidates"]),
-        ["XC6206P332MR", "OLD3300", "AP2112K-3.3TRG1-OUT"]
-    );
+    assert_eq!(mpns(&o["output"]["candidates"]), ["XC6206P332MR", "OLD3300", "AP2112K-3.3TRG1-OUT"]);
     let f = r
-        .execute(
-            &mut s,
-            "part.search",
-            json!({"params": {"resistance": ">=1uF"}}),
-            RunOptions::default(),
-        )
+        .execute(&mut s, "part.search", json!({"params": {"resistance": ">=1uF"}}), RunOptions::default())
         .unwrap_err();
     assert_eq!(f.error.diagnostic.code, "part.invalid_filter");
 
     let mut empty = Session::new();
-    let f = r
-        .execute(&mut empty, "part.search", json!({"query": "x"}), RunOptions::default())
-        .unwrap_err();
+    let f = r.execute(&mut empty, "part.search", json!({"query": "x"}), RunOptions::default()).unwrap_err();
     assert_eq!(f.error.diagnostic.code, "supplier.none");
 }
 
@@ -113,12 +90,7 @@ fn search_filters_and_errors() {
 fn resolve_check_cost() {
     let (_d, r, mut s) = setup();
     exec(&r, &mut s, "circuit.add", json!({"part": "R 10k 1% 0402", "count": 4}));
-    exec(
-        &r,
-        &mut s,
-        "circuit.add",
-        json!({"part": "C 100nF 16V X7R 0402", "count": 10}),
-    );
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 100nF 16V X7R 0402", "count": 10}));
     exec(&r, &mut s, "circuit.add", json!({"part": "LED red 0603"}));
 
     // Proposals only.
@@ -128,22 +100,10 @@ fn resolve_check_cost() {
     let by = |id: &str| lines.iter().find(|l| l["part"] == id).unwrap().clone();
     // 1% or better only; 5% part excluded. Capacitors: >= 16 V, enough stock for 10 (the 40-stock Murata qualifies,
     // the 10 V one does not).
-    assert_eq!(
-        mpns(&by("R_10k_1pct_0402")["candidates"]),
-        ["0402WGF1002TCE", "RC0402FR-0710KL"]
-    );
-    assert_eq!(
-        mpns(&by("C_100nF_16V_X7R_0402")["candidates"]),
-        ["GRM155R71C104KA88D", "CL05B104KO5NNNC"]
-    );
+    assert_eq!(mpns(&by("R_10k_1pct_0402")["candidates"]), ["0402WGF1002TCE", "RC0402FR-0710KL"]);
+    assert_eq!(mpns(&by("C_100nF_16V_X7R_0402")["candidates"]), ["GRM155R71C104KA88D", "CL05B104KO5NNNC"]);
     assert_eq!(o["output"]["unresolved"], json!(["LED_red_0603"]));
-    assert!(
-        o["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["code"] == "bom.unresolved")
-    );
+    assert!(o["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "bom.unresolved"));
     assert_eq!(s.history.undo_len(), undo_before, "proposals do not change the project");
 
     // For 10 boards the 40-unit capacitor stock is not enough: the other one wins.
@@ -159,48 +119,19 @@ fn resolve_check_cost() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|l| {
-            (
-                l["part"].as_str().unwrap().to_string(),
-                l["status"].as_str().unwrap().to_string(),
-            )
-        })
+        .map(|l| (l["part"].as_str().unwrap().to_string(), l["status"].as_str().unwrap().to_string()))
         .collect();
-    assert!(
-        statuses.contains(&("LED_red_0603".into(), "no_mpn".into())),
-        "{statuses:?}"
-    );
-    assert!(
-        statuses.contains(&("C_100nF_16V_X7R_0402".into(), "ok".into())),
-        "{statuses:?}"
-    );
-    assert!(
-        o["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["code"] == "bom.no_mpn" && d["severity"] == "error")
-    );
+    assert!(statuses.contains(&("LED_red_0603".into(), "no_mpn".into())), "{statuses:?}");
+    assert!(statuses.contains(&("C_100nF_16V_X7R_0402".into(), "ok".into())), "{statuses:?}");
+    assert!(o["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "bom.no_mpn" && d["severity"] == "error"));
 
     // Cost for 1 board: 4 × 0.001 + 10 × 0.003 = 0.034 USD (LED unpriced).
     let o = exec(&r, &mut s, "bom.cost", json!({"boards": 1}));
     assert_eq!(o["output"]["totals"], json!(["0.034 USD"]));
-    assert!(
-        o["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["code"] == "bom.incomplete_cost")
-    );
+    assert!(o["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "bom.incomplete_cost"));
     // 1000 boards: the line approved 0402WGF1002TCE only (cheapest at small quantity), so its single price
     // applies even though RC0402FR has a 1000+ break: 4000 × 0.001 = 4.00 USD.
     let o = exec(&r, &mut s, "bom.cost", json!({"boards": 1000}));
-    let res = o["output"]["lines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|l| l["part"] == "R_10k_1pct_0402")
-        .unwrap()
-        .clone();
+    let res = o["output"]["lines"].as_array().unwrap().iter().find(|l| l["part"] == "R_10k_1pct_0402").unwrap().clone();
     assert_eq!(res["extended"], "4.00 USD");
 }

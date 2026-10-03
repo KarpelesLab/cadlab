@@ -16,10 +16,7 @@ pub struct Money {
 impl Money {
     /// From millionths.
     pub fn new(micros: i64, currency: impl Into<String>) -> Self {
-        Money {
-            micros,
-            currency: currency.into().to_ascii_uppercase(),
-        }
+        Money { micros, currency: currency.into().to_ascii_uppercase() }
     }
 
     /// Parses `"0.0123 USD"`, `"USD 0.0123"` or `"$0.0123"` (dollar sign means USD).
@@ -52,11 +49,7 @@ impl Money {
         if frac.len() > 6 {
             return Err(format!("`{s}`: more than 6 decimals"));
         }
-        let micros = int
-            .parse::<i64>()
-            .unwrap_or(0)
-            .checked_mul(1_000_000)
-            .ok_or("amount too large")?
+        let micros = int.parse::<i64>().unwrap_or(0).checked_mul(1_000_000).ok_or("amount too large")?
             + format!("{frac:0<6}").parse::<i64>().unwrap_or(0);
         Ok(Money::new(micros, cur))
     }
@@ -73,11 +66,7 @@ impl fmt::Display for Money {
         let a = self.micros.unsigned_abs();
         let frac = format!("{:06}", a % 1_000_000);
         let frac = frac.trim_end_matches('0');
-        let frac = if frac.len() < 2 {
-            format!("{frac:0<2}")
-        } else {
-            frac.to_string()
-        };
+        let frac = if frac.len() < 2 { format!("{frac:0<2}") } else { frac.to_string() };
         write!(f, "{sign}{}.{frac} {}", a / 1_000_000, self.currency)
     }
 }

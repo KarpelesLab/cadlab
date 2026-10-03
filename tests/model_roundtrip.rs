@@ -54,16 +54,9 @@ fn errors() {
     assert!(matches!(Project::load(dir.path()), Err(ModelError::NotAProject(_))));
 
     std::fs::write(dir.path().join(MANIFEST_FILE), "schema_version = 999\nname = \"x\"\n").unwrap();
-    assert!(matches!(
-        Project::load(dir.path()),
-        Err(ModelError::NewerSchema { found: 999, .. })
-    ));
+    assert!(matches!(Project::load(dir.path()), Err(ModelError::NewerSchema { found: 999, .. })));
 
-    std::fs::write(
-        dir.path().join(MANIFEST_FILE),
-        "schema_version = 1\nname = \"x\"\ntypo = 1\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(MANIFEST_FILE), "schema_version = 1\nname = \"x\"\ntypo = 1\n").unwrap();
     let e = Project::load(dir.path()).unwrap_err().to_string();
     assert!(e.contains("unknown field `typo`"), "{e}");
 

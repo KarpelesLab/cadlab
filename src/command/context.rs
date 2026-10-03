@@ -51,12 +51,7 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     pub(crate) fn new(session: &'a mut Session, progress: &'a dyn Progress, cancel: &'a CancelToken) -> Self {
-        Context {
-            session,
-            diagnostics: Vec::new(),
-            progress,
-            cancel,
-        }
+        Context { session, diagnostics: Vec::new(), progress, cancel }
     }
 
     /// The open project, or a `project.none` error.
@@ -83,11 +78,7 @@ impl<'a> Context<'a> {
     /// regularly.
     pub fn check_cancelled(&self) -> Result<(), CommandError> {
         if self.cancel.is_cancelled() {
-            Err(CommandError::new(
-                ErrorKind::Cancelled,
-                "cancelled",
-                "operation cancelled",
-            ))
+            Err(CommandError::new(ErrorKind::Cancelled, "cancelled", "operation cancelled"))
         } else {
             Ok(())
         }

@@ -75,10 +75,7 @@ impl ObjectRef {
             && is_ident(kind)
             && let Ok(index) = rest.parse::<u64>()
         {
-            return Ok(ObjectRef::Item {
-                kind: kind.to_string(),
-                index,
-            });
+            return Ok(ObjectRef::Item { kind: kind.to_string(), index });
         }
         if let Some((scheme, rest)) = s.split_once(':')
             && is_ident(scheme)
@@ -88,14 +85,8 @@ impl ObjectRef {
             return Ok(match scheme {
                 "net" => ObjectRef::Net(rest),
                 "layer" => ObjectRef::Layer(rest),
-                _ if PART_SCHEMES.contains(&scheme) => ObjectRef::Part {
-                    scheme: scheme.to_string(),
-                    id: rest,
-                },
-                _ => ObjectRef::Named {
-                    kind: scheme.to_string(),
-                    name: rest,
-                },
+                _ if PART_SCHEMES.contains(&scheme) => ObjectRef::Part { scheme: scheme.to_string(), id: rest },
+                _ => ObjectRef::Named { kind: scheme.to_string(), name: rest },
             });
         }
         if is_layer_name(s) {
@@ -105,10 +96,7 @@ impl ObjectRef {
             && is_refdes(component)
             && !pin.is_empty()
         {
-            return Ok(ObjectRef::Pin {
-                component: component.to_string(),
-                pin: pin.to_string(),
-            });
+            return Ok(ObjectRef::Pin { component: component.to_string(), pin: pin.to_string() });
         }
         Ok(ObjectRef::Name(s.to_string()))
     }
@@ -138,9 +126,7 @@ pub fn is_layer_name(s: &str) -> bool {
         return false;
     };
     let side_ok = matches!(side, "F" | "B" | "Edge" | "User")
-        || side
-            .strip_prefix("In")
-            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        || side.strip_prefix("In").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
     side_ok && !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
@@ -208,44 +194,14 @@ mod tests {
     fn parses_forms() {
         assert_eq!(p("net:VBUS"), ObjectRef::Net("VBUS".into()));
         assert_eq!(p("net:/usb/D+"), ObjectRef::Net("/usb/D+".into()));
-        assert_eq!(
-            p("mpn:AP2112K-3.3TRG1"),
-            ObjectRef::Part {
-                scheme: "mpn".into(),
-                id: "AP2112K-3.3TRG1".into()
-            }
-        );
-        assert_eq!(
-            p("U1.4"),
-            ObjectRef::Pin {
-                component: "U1".into(),
-                pin: "4".into()
-            }
-        );
-        assert_eq!(
-            p("U1.PA9"),
-            ObjectRef::Pin {
-                component: "U1".into(),
-                pin: "PA9".into()
-            }
-        );
+        assert_eq!(p("mpn:AP2112K-3.3TRG1"), ObjectRef::Part { scheme: "mpn".into(), id: "AP2112K-3.3TRG1".into() });
+        assert_eq!(p("U1.4"), ObjectRef::Pin { component: "U1".into(), pin: "4".into() });
+        assert_eq!(p("U1.PA9"), ObjectRef::Pin { component: "U1".into(), pin: "PA9".into() });
         assert_eq!(p("F.Cu"), ObjectRef::Layer("F.Cu".into()));
         assert_eq!(p("In1.Cu"), ObjectRef::Layer("In1.Cu".into()));
         assert_eq!(p("Edge.Cuts"), ObjectRef::Layer("Edge.Cuts".into()));
-        assert_eq!(
-            p("via#42"),
-            ObjectRef::Item {
-                kind: "via".into(),
-                index: 42
-            }
-        );
-        assert_eq!(
-            p("zone:GND_bottom"),
-            ObjectRef::Named {
-                kind: "zone".into(),
-                name: "GND_bottom".into()
-            }
-        );
+        assert_eq!(p("via#42"), ObjectRef::Item { kind: "via".into(), index: 42 });
+        assert_eq!(p("zone:GND_bottom"), ObjectRef::Named { kind: "zone".into(), name: "GND_bottom".into() });
         assert_eq!(p("R12"), ObjectRef::Name("R12".into()));
         assert_eq!(p("VBUS"), ObjectRef::Name("VBUS".into()));
         assert_eq!(p("3.3V"), ObjectRef::Name("3.3V".into()));
@@ -254,16 +210,7 @@ mod tests {
 
     #[test]
     fn display_roundtrips() {
-        for s in [
-            "net:VBUS",
-            "mpn:X-1",
-            "U1.4",
-            "F.Cu",
-            "via#42",
-            "zone:GND",
-            "R12",
-            "layer:Mystery",
-        ] {
+        for s in ["net:VBUS", "mpn:X-1", "U1.4", "F.Cu", "via#42", "zone:GND", "R12", "layer:Mystery"] {
             assert_eq!(p(s).to_string(), s);
             assert_eq!(p(&p(s).to_string()), p(s));
         }

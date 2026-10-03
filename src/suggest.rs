@@ -16,11 +16,7 @@ where
             } else {
                 let jw = strsim::jaro_winkler(&needle, &lc);
                 // Prefix matches are very likely what was meant (`VBU` -> `VBUS`).
-                if lc.starts_with(&needle) || needle.starts_with(&lc) {
-                    jw + 0.5
-                } else {
-                    jw
-                }
+                if lc.starts_with(&needle) || needle.starts_with(&lc) { jw + 0.5 } else { jw }
             };
             (score >= 0.8).then_some((score, c))
         })
@@ -30,12 +26,7 @@ where
     scored.dedup_by(|a, b| a.1 == b.1);
     // Only keep candidates nearly as good as the best one.
     let best = scored.first().map_or(0.0, |s| s.0);
-    scored
-        .into_iter()
-        .take_while(|s| s.0 >= best - 0.1)
-        .take(max)
-        .map(|(_, c)| c.to_string())
-        .collect()
+    scored.into_iter().take_while(|s| s.0 >= best - 0.1).take(max).map(|(_, c)| c.to_string()).collect()
 }
 
 #[cfg(test)]

@@ -51,47 +51,25 @@ fn generic_parts_and_components() {
     assert_eq!(o["output"]["part_created"], false);
     assert_eq!(o["output"]["refdes"], json!(["R4"]));
 
-    let o = exec(
-        &r,
-        &mut s,
-        "circuit.add",
-        json!({"part": "R_10k_1pct_0402", "refdes": "r10"}),
-    );
+    let o = exec(&r, &mut s, "circuit.add", json!({"part": "R_10k_1pct_0402", "refdes": "r10"}));
     assert_eq!(o["output"]["refdes"], json!(["R10"]));
-    let f = fail(
-        &r,
-        &mut s,
-        "circuit.add",
-        json!({"part": "R_10k_1pct_0402", "refdes": "R10"}),
-    );
+    let f = fail(&r, &mut s, "circuit.add", json!({"part": "R_10k_1pct_0402", "refdes": "R10"}));
     assert_eq!(f.error.diagnostic.code, "circuit.refdes_taken");
     assert_eq!(f.error.diagnostic.hint.as_deref(), Some("next free: R11"));
 
     let f = fail(&r, &mut s, "circuit.add", json!({"part": "R_10k_1pct_0403"}));
     assert_eq!(f.error.diagnostic.code, "part.not_found");
-    assert_eq!(
-        f.error.diagnostic.hint.as_deref(),
-        Some("did you mean `R_10k_1pct_0402`?")
-    );
+    assert_eq!(f.error.diagnostic.hint.as_deref(), Some("did you mean `R_10k_1pct_0402`?"));
 
     let o = exec(&r, &mut s, "circuit.list", json!({}));
-    let refs: Vec<&str> = o["output"]["components"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["refdes"].as_str().unwrap())
-        .collect();
+    let refs: Vec<&str> =
+        o["output"]["components"].as_array().unwrap().iter().map(|c| c["refdes"].as_str().unwrap()).collect();
     assert_eq!(refs, ["R1", "R2", "R3", "R4", "R10"]);
 
     // Part in use cannot be removed.
     let f = fail(&r, &mut s, "part.remove", json!({"id": "R_10k_1pct_0402"}));
     assert_eq!(f.error.diagnostic.code, "part.in_use");
-    exec(
-        &r,
-        &mut s,
-        "circuit.remove",
-        json!({"refdes": ["R1", "r2", "R3", "R4", "R10"]}),
-    );
+    exec(&r, &mut s, "circuit.remove", json!({"refdes": ["R1", "r2", "R3", "R4", "R10"]}));
     exec(&r, &mut s, "part.remove", json!({"id": "R_10k_1pct_0402"}));
     // The footprint stays until removed explicitly.
     exec(&r, &mut s, "footprint.remove", json!({"name": "RESC1005X40N"}));
@@ -132,12 +110,7 @@ fn concrete_part_with_generated_symbol_and_footprint() {
 #[test]
 fn bom_lines_dnp_approve_replace_export() {
     let (d, r, mut s) = setup();
-    exec(
-        &r,
-        &mut s,
-        "circuit.add",
-        json!({"part": "C 100nF 16V X7R 0402", "count": 2}),
-    );
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 100nF 16V X7R 0402", "count": 2}));
     exec(&r, &mut s, "circuit.add", json!({"part": "R 10k 0402", "count": 2}));
     exec(&r, &mut s, "part.create", ldo_args());
     exec(&r, &mut s, "circuit.add", json!({"part": "AP2112K-3.3TRG1"}));
@@ -148,12 +121,7 @@ fn bom_lines_dnp_approve_replace_export() {
         "bom.approve",
         json!({"part": "C_100nF_16V_X7R_0402", "add": ["CL05B104KO5NNNC"], "manufacturer": "Samsung"}),
     );
-    exec(
-        &r,
-        &mut s,
-        "bom.note",
-        json!({"part": "AP2112K-3.3TRG1", "note": "any 3.3V SOT-23-5 LDO, same pinout"}),
-    );
+    exec(&r, &mut s, "bom.note", json!({"part": "AP2112K-3.3TRG1", "note": "any 3.3V SOT-23-5 LDO, same pinout"}));
 
     let o = exec(&r, &mut s, "bom.list", json!({}));
     let lines = o["output"]["lines"].as_array().unwrap();
@@ -172,19 +140,8 @@ fn bom_lines_dnp_approve_replace_export() {
     assert!(csv.contains("1,2,\"C1,C2\",100nF,"));
     assert!(csv.contains("Samsung CL05B104KO5NNNC"));
 
-    let o = exec(
-        &r,
-        &mut s,
-        "bom.export",
-        json!({"path": "out/pcbway.csv", "format": "pcbway"}),
-    );
-    assert!(
-        o["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["code"] == "bom.no_mpn")
-    );
+    let o = exec(&r, &mut s, "bom.export", json!({"path": "out/pcbway.csv", "format": "pcbway"}));
+    assert!(o["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "bom.no_mpn"));
     let csv = std::fs::read_to_string(d.path().join("p/out/pcbway.csv")).unwrap();
     assert!(csv.contains(",Samsung,CL05B104KO5NNNC,"), "{csv}");
     assert!(!csv.contains("R2"), "DNP components are not in fab BOMs");
@@ -196,12 +153,7 @@ fn bom_lines_dnp_approve_replace_export() {
         "part.create",
         json!({"category": "resistor", "mpn": "RC0402FR-0710KL", "manufacturer": "Yageo", "package": "0402", "params": {"resistance": "10k", "tolerance": "1%"}}),
     );
-    let o = exec(
-        &r,
-        &mut s,
-        "bom.replace",
-        json!({"from": "R_10k_0402", "to": "RC0402FR-0710KL"}),
-    );
+    let o = exec(&r, &mut s, "bom.replace", json!({"from": "R_10k_0402", "to": "RC0402FR-0710KL"}));
     assert_eq!(o["output"]["refdes"], json!(["R1", "R2"]));
     let o = exec(&r, &mut s, "bom.list", json!({}));
     assert_eq!(o["output"]["unsourced"], json!([]));
@@ -220,12 +172,7 @@ fn footprint_generate_command() {
     assert_eq!(o["output"]["status"], "created");
     let o = exec(&r, &mut s, "footprint.generate", json!({"package": "SOIC-8"}));
     assert_eq!(o["output"]["status"], "unchanged");
-    let o = exec(
-        &r,
-        &mut s,
-        "footprint.generate",
-        json!({"package": "SOIC-8", "density": "most"}),
-    );
+    let o = exec(&r, &mut s, "footprint.generate", json!({"package": "SOIC-8", "density": "most"}));
     assert_eq!(o["output"]["name"], "SOIC127P600X175-8M");
     // From datasheet dimensions.
     let o = exec(

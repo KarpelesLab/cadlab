@@ -71,10 +71,7 @@ impl PartSummary {
     fn line(&self) -> String {
         let mut s = format!("{}  {}", self.id, self.description);
         if let Some(m) = &self.mpn {
-            s += &format!(
-                " [{}{m}]",
-                self.manufacturer.as_ref().map(|x| format!("{x} ")).unwrap_or_default()
-            );
+            s += &format!(" [{}{m}]", self.manufacturer.as_ref().map(|x| format!("{x} ")).unwrap_or_default());
         }
         if let Some(f) = &self.footprint {
             s += &format!("  ({f})");
@@ -115,10 +112,8 @@ fn check_new_id(p: &Project, id: &str) -> Result<(), CommandError> {
         ));
     }
     if let Some(existing) = p.library().find_part_id_ci(id) {
-        return Err(
-            CommandError::conflict("part.exists", format!("part `{existing}` already exists"))
-                .with_hint("pick another id, change it with `part.set`, or remove it with `part.remove`"),
-        );
+        return Err(CommandError::conflict("part.exists", format!("part `{existing}` already exists"))
+            .with_hint("pick another id, change it with `part.set`, or remove it with `part.remove`"));
     }
     Ok(())
 }
@@ -152,9 +147,7 @@ pub(crate) fn add_generic(ctx: &mut Context<'_>, spec: &str) -> Result<(String, 
     if let Some(existing) = ctx.project()?.library().find_part_id_ci(&id) {
         return Ok((existing.to_string(), false));
     }
-    let (part, fp) = s
-        .build(&GenOptions::default())
-        .map_err(|e| CommandError::invalid_args("part.invalid_spec", e))?;
+    let (part, fp) = s.build(&GenOptions::default()).map_err(|e| CommandError::invalid_args("part.invalid_spec", e))?;
     let p = ctx.project_mut()?;
     let note = ensure_footprint(p, fp);
     p.library_mut().parts.insert(id.clone(), part);
@@ -174,10 +167,7 @@ impl Command for Generic {
     fn run(self, ctx: &mut Context<'_>) -> Result<GenericResult, CommandError> {
         let (id, created) = add_generic(ctx, &self.spec)?;
         let p = ctx.project()?;
-        Ok(GenericResult {
-            part: PartSummary::of(p, &p.library().parts[&id]),
-            created,
-        })
+        Ok(GenericResult { part: PartSummary::of(p, &p.library().parts[&id]), created })
     }
 
     fn summarize(o: &GenericResult) -> String {
@@ -264,10 +254,8 @@ fn fill_from_suppliers(ctx: &mut Context<'_>, create: &mut Create) -> Result<(),
     report_provider_errors(ctx, &r.errors);
     crate::supplier::SearchQuery::default().rank(&mut r.candidates);
     let Some(c) = r.candidates.into_iter().next() else {
-        return Err(
-            CommandError::not_found("supplier.mpn_not_found", format!("no supplier lists `{mpn}`"))
-                .with_hint("check the MPN, or create the part without `fill_from_suppliers`"),
-        );
+        return Err(CommandError::not_found("supplier.mpn_not_found", format!("no supplier lists `{mpn}`"))
+            .with_hint("check the MPN, or create the part without `fill_from_suppliers`"));
     };
     create.manufacturer = create.manufacturer.take().or(c.manufacturer);
     if create.description.is_none() && !c.description.is_empty() {
@@ -279,10 +267,7 @@ fn fill_from_suppliers(ctx: &mut Context<'_>, create: &mut Create) -> Result<(),
     }
     if create.package.is_none() && create.package_spec.is_none() && create.footprint.is_none() {
         // Use the supplier's package name if the generator knows it.
-        if let Some(p) = c
-            .package
-            .filter(|p| landpattern::packages::parse(p, chip_kind(create.category)).is_ok())
-        {
+        if let Some(p) = c.package.filter(|p| landpattern::packages::parse(p, chip_kind(create.category)).is_ok()) {
             create.package = Some(p);
         }
     }
@@ -314,10 +299,7 @@ impl Command for Create {
             (Some(id), _) => id.clone(),
             (None, Some(mpn)) => slugify(mpn),
             (None, None) => {
-                return Err(CommandError::invalid_args(
-                    "part.missing_id",
-                    "give an `id` or an `mpn`",
-                ));
+                return Err(CommandError::invalid_args("part.missing_id", "give an `id` or an `mpn`"));
             }
         };
         check_new_id(ctx.project()?, &id)?;
@@ -330,21 +312,14 @@ impl Command for Create {
         }
 
         // Footprint: existing, generated from a name, or from explicit dimensions.
-        let sources = [
-            self.footprint.is_some(),
-            self.package.is_some(),
-            self.package_spec.is_some(),
-        ];
+        let sources = [self.footprint.is_some(), self.package.is_some(), self.package_spec.is_some()];
         if sources.iter().filter(|s| **s).count() > 1 {
             return Err(CommandError::invalid_args(
                 "part.footprint_ambiguous",
                 "give only one of `footprint`, `package`, `package_spec`",
             ));
         }
-        let opts = GenOptions {
-            density: self.density.unwrap_or_default(),
-            ..Default::default()
-        };
+        let opts = GenOptions { density: self.density.unwrap_or_default(), ..Default::default() };
         let generated = match (&self.package, &self.package_spec) {
             (Some(name), _) => {
                 let spec = landpattern::packages::parse(name, chip_kind(self.category))
@@ -383,21 +358,13 @@ impl Command for Create {
             let two_terminal = symbolgen::style_for(self.category, 2) != crate::model::part::SymbolStyle::Box;
             if two_terminal {
                 pins = symbolgen::two_terminal_pins(self.category);
-            } else if matches!(
-                self.category,
-                Category::Connector | Category::TestPoint | Category::Mechanical
-            ) && let Some(fp) = &footprint
+            } else if matches!(self.category, Category::Connector | Category::TestPoint | Category::Mechanical)
+                && let Some(fp) = &footprint
             {
-                pins = fp
-                    .pad_numbers()
-                    .into_iter()
-                    .map(|n| Pin::new(n, "", PinKind::Passive))
-                    .collect();
+                pins = fp.pad_numbers().into_iter().map(|n| Pin::new(n, "", PinKind::Passive)).collect();
             } else {
-                return Err(
-                    CommandError::invalid_args("part.missing_pins", "this part needs a `pins` list")
-                        .with_hint("give each pin's number, name and kind, as in the datasheet pinout table"),
-                );
+                return Err(CommandError::invalid_args("part.missing_pins", "this part needs a `pins` list")
+                    .with_hint("give each pin's number, name and kind, as in the datasheet pinout table"));
             }
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -411,10 +378,8 @@ impl Command for Create {
         }
 
         // Pin ↔ pad consistency.
-        let fref = footprint.as_ref().map(|fp| FootprintRef {
-            footprint: fp.name.clone(),
-            pin_map: self.pin_map.clone(),
-        });
+        let fref =
+            footprint.as_ref().map(|fp| FootprintRef { footprint: fp.name.clone(), pin_map: self.pin_map.clone() });
         if let (Some(fp), Some(fr)) = (&footprint, &fref) {
             let pads = fp.pad_numbers();
             for k in fr.pin_map.keys() {
@@ -436,10 +401,7 @@ impl Command for Create {
                                 p.number, fp.name
                             ),
                         )
-                        .with_hint(format!(
-                            "footprint pads: {}; use `pin_map` to map pins to pads",
-                            pads.join(", ")
-                        )));
+                        .with_hint(format!("footprint pads: {}; use `pin_map` to map pins to pads", pads.join(", "))));
                     }
                     used.insert(pad);
                 }
@@ -451,10 +413,7 @@ impl Command for Create {
                             "part.unconnected_pad",
                             format!("pad {pad} of `{}` is not mapped to any pin", fp.name),
                         )
-                        .with_subject(ObjectRef::Part {
-                            scheme: "local".into(),
-                            id: id.clone(),
-                        })
+                        .with_subject(ObjectRef::Part { scheme: "local".into(), id: id.clone() })
                         .with_hint(
                             "map it with `pin_map` (an exposed pad usually belongs to GND), or ignore if intentional",
                         ),
@@ -464,13 +423,10 @@ impl Command for Create {
         }
 
         let symbol = symbolgen::generate(self.category, pins);
-        let description = self
-            .description
-            .clone()
-            .unwrap_or_else(|| match (&self.manufacturer, &self.mpn) {
-                (_, Some(m)) => format!("{} {m}", self.category.label()),
-                _ => self.category.label().to_string(),
-            });
+        let description = self.description.clone().unwrap_or_else(|| match (&self.manufacturer, &self.mpn) {
+            (_, Some(m)) => format!("{} {m}", self.category.label()),
+            _ => self.category.label().to_string(),
+        });
         let part = Part {
             id: id.clone(),
             category: self.category,
@@ -481,11 +437,7 @@ impl Command for Create {
             symbol,
             footprints: fref.into_iter().collect(),
             datasheet: self.datasheet.clone(),
-            provenance: Provenance {
-                origin: Origin::Manual,
-                detail: None,
-                license: None,
-            },
+            provenance: Provenance { origin: Origin::Manual, detail: None, license: None },
         };
         let p = ctx.project_mut()?;
         let note = match (generated, footprint) {
@@ -541,15 +493,10 @@ impl Command for List {
             .filter(|part| self.category.is_none_or(|c| part.category == c))
             .filter(|part| {
                 q.as_ref().is_none_or(|q| {
-                    [
-                        Some(&part.id),
-                        Some(&part.description),
-                        part.manufacturer.as_ref(),
-                        part.mpn.as_ref(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .any(|s| s.to_lowercase().contains(q))
+                    [Some(&part.id), Some(&part.description), part.manufacturer.as_ref(), part.mpn.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|s| s.to_lowercase().contains(q))
                 })
             })
             .map(|part| PartSummary::of(p, part))
@@ -592,20 +539,14 @@ impl Command for Show {
     fn run(self, ctx: &mut Context<'_>) -> Result<PartDetail, CommandError> {
         let p = ctx.project()?;
         let part = util::part(p, &self.id)?;
-        Ok(PartDetail {
-            used_by: PartSummary::of(p, part).used_by,
-            part: part.clone(),
-        })
+        Ok(PartDetail { used_by: PartSummary::of(p, part).used_by, part: part.clone() })
     }
 
     fn summarize(o: &PartDetail) -> String {
         let p = &o.part;
         let mut s = format!("{} ({:?}): {}", p.id, p.category, p.description);
         if let Some(m) = &p.mpn {
-            s += &format!(
-                "\n  mpn: {}{m}",
-                p.manufacturer.as_ref().map(|x| format!("{x} ")).unwrap_or_default()
-            );
+            s += &format!("\n  mpn: {}{m}", p.manufacturer.as_ref().map(|x| format!("{x} ")).unwrap_or_default());
         }
         for (k, v) in &p.params.0 {
             s += &format!("\n  {k}: {v}");
@@ -669,12 +610,7 @@ impl Command for Set {
                     if !pads.contains(&pin.number.as_str()) {
                         return Err(CommandError::invalid_args(
                             "part.pin_without_pad",
-                            format!(
-                                "footprint `{}` has no pad `{}` for pin {}",
-                                fp.name,
-                                pin.number,
-                                pin.label()
-                            ),
+                            format!("footprint `{}` has no pad `{}` for pin {}", fp.name, pin.number, pin.label()),
                         ));
                     }
                 }
@@ -691,12 +627,7 @@ impl Command for Set {
                 .map_err(|e| CommandError::invalid_args("part.invalid_param", format!("parameter `{k}`: {e}")))?;
             parsed.push((k.clone(), v));
         }
-        let part = ctx
-            .project_mut()?
-            .library_mut()
-            .parts
-            .get_mut(&id)
-            .expect("found above");
+        let part = ctx.project_mut()?.library_mut().parts.get_mut(&id).expect("found above");
         let opt = |s: String| (!s.is_empty()).then_some(s);
         if let Some(d) = self.description {
             part.description = d;
@@ -759,12 +690,10 @@ impl Command for Remove {
         let id = part.id.clone();
         let users = PartSummary::of(p, part).used_by;
         if !users.is_empty() {
-            return Err(
-                CommandError::conflict("part.in_use", format!("part `{id}` is used by {}", users.join(", ")))
-                    .with_hint(
-                        "remove those components (`circuit.remove`) or switch them to another part (`bom.replace`)",
-                    ),
-            );
+            return Err(CommandError::conflict("part.in_use", format!("part `{id}` is used by {}", users.join(", ")))
+                .with_hint(
+                    "remove those components (`circuit.remove`) or switch them to another part (`bom.replace`)",
+                ));
         }
         let p = ctx.project_mut()?;
         p.library_mut().parts.remove(&id);
@@ -886,10 +815,7 @@ impl Command for Search {
         };
         let r = ctx.session.suppliers.search(&q, &self.providers);
         report_provider_errors(ctx, &r.errors);
-        Ok(SearchResults {
-            quantity: q.quantity,
-            candidates: r.candidates,
-        })
+        Ok(SearchResults { quantity: q.quantity, candidates: r.candidates })
     }
 
     fn summarize(o: &SearchResults) -> String {

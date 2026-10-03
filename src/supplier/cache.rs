@@ -90,11 +90,7 @@ impl Cache {
         if let Some(d) = path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let e = Entry {
-            key: key.to_string(),
-            fetched_at,
-            body: body.to_string(),
-        };
+        let e = Entry { key: key.to_string(), fetched_at, body: body.to_string() };
         if let Ok(text) = serde_json::to_string(&e) {
             let tmp = path.with_extension("tmp");
             if std::fs::write(&tmp, text).is_ok() {

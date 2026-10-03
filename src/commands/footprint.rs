@@ -13,10 +13,7 @@ use crate::model::part::valid_id;
 use crate::units::Nm;
 
 pub(crate) fn register(r: &mut Registry) {
-    r.register::<Generate>()
-        .register::<List>()
-        .register::<Show>()
-        .register::<Remove>();
+    r.register::<Generate>().register::<List>().register::<Show>().register::<Remove>();
 }
 
 /// Short description of a footprint.
@@ -118,16 +115,10 @@ impl Command for Generate {
                 .map_err(|e| CommandError::invalid_args("footprint.unknown_package", e))?,
             (None, Some(spec)) => spec,
             _ => {
-                return Err(CommandError::invalid_args(
-                    "footprint.missing_package",
-                    "give either `package` or `spec`",
-                ));
+                return Err(CommandError::invalid_args("footprint.missing_package", "give either `package` or `spec`"));
             }
         };
-        let opts = GenOptions {
-            density: self.density.unwrap_or_default(),
-            ..Default::default()
-        };
+        let opts = GenOptions { density: self.density.unwrap_or_default(), ..Default::default() };
         let mut fp = landpattern::generate(&spec, &opts)
             .map_err(|e| CommandError::invalid_args("footprint.invalid", e.to_string()))?;
         if let Some(n) = self.name {
@@ -192,25 +183,14 @@ impl Command for List {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<FootprintList, CommandError> {
         let p = ctx.project()?;
-        Ok(FootprintList {
-            footprints: p
-                .library()
-                .footprints
-                .values()
-                .map(|f| FootprintSummary::of(p, f))
-                .collect(),
-        })
+        Ok(FootprintList { footprints: p.library().footprints.values().map(|f| FootprintSummary::of(p, f)).collect() })
     }
 
     fn summarize(o: &FootprintList) -> String {
         if o.footprints.is_empty() {
             return "no footprints".into();
         }
-        o.footprints
-            .iter()
-            .map(FootprintSummary::line)
-            .collect::<Vec<_>>()
-            .join("\n")
+        o.footprints.iter().map(FootprintSummary::line).collect::<Vec<_>>().join("\n")
     }
 }
 

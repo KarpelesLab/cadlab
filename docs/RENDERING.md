@@ -5,20 +5,25 @@ cadlab has no UI. Rendering lets humans review a design, and lets multimodal age
 ## Pipeline
 
 ```
-model ──► Scene (2D primitives, layers, styles) ──► SVG (vector, exact) ──► PNG (resvg / tiny-skia)
+model ──► Scene (lines, polygons, circles; text as strokes) ──► SVG writer (mm units, exact)
+                                                           └──► PNG rasterizer (tiny-skia)
 ```
 
-- One scene builder per view. SVG is the canonical vector output and PNG is a rasterization of it, so both stay
-  pixel-consistent.
-- Fonts are embedded in the binary (a permissively licensed stroke font, e.g. Hershey-derived, for silkscreen, plus one sans-serif for
-  labels), so renders are identical on every machine.
-- Output size by pixel dimensions or DPI. Region crop by bounding box or object (`--around U3 --margin 5mm`).
+- One scene builder per view (`schematic::draw`, footprint view, later board views). SVG and PNG are drawn from
+  the same primitives, so they match; neither needs fonts installed.
+- Text uses the Hershey Simplex stroke font, embedded (`src/render/font/`, see its `NOTICE`), turned into
+  polylines when added to the scene.
+- PNG resolution is set in pixels per millimeter (`--px-per-mm`, default 10 for sheets, 80 for footprints).
+- PNG support is the default `png` feature (tiny-skia); SVG has no extra dependency.
+- Over MCP, a rendered PNG is returned as image content in the tool result.
 
 ## Views
 
 | View | Contents |
 |---|---|
-| `schematic` | auto-laid-out symbols, wires, labels, refdes/values; one image per sheet/block or combined |
+| `schematic` | auto-laid-out symbols, wires, labels, power symbols, refdes/values (`render.schematic`) |
+| `symbol` | one part's symbol (`render.symbol`) |
+| `footprint` | pads, paste windows, courtyard, silkscreen, fab outline (`render.footprint`) |
 | `board` | selected layers with standard colors, outline, drill holes |
 | `board --realistic` | soldermask color, silkscreen, exposed copper finish, as the fab would produce |
 | `ratsnest` overlay | unrouted connections as straight lines |

@@ -29,23 +29,15 @@ enum ArgKind {
 impl ArgKind {
     fn of(schema: &Value) -> ArgKind {
         // Option<T> is `{"type": [T, "null"]}` or `{"anyOf": [T, {"type": "null"}]}`.
-        if let Some(variants) = schema
-            .get("anyOf")
-            .or_else(|| schema.get("oneOf"))
-            .and_then(Value::as_array)
-        {
-            let non_null: Vec<&Value> = variants
-                .iter()
-                .filter(|v| v.get("type") != Some(&Value::from("null")))
-                .collect();
+        if let Some(variants) = schema.get("anyOf").or_else(|| schema.get("oneOf")).and_then(Value::as_array) {
+            let non_null: Vec<&Value> =
+                variants.iter().filter(|v| v.get("type") != Some(&Value::from("null"))).collect();
             if let [one] = non_null.as_slice() {
                 return ArgKind::of(one);
             }
             // Enums of string constants.
-            let consts: Option<Vec<String>> = non_null
-                .iter()
-                .map(|v| v.get("const").and_then(Value::as_str).map(String::from))
-                .collect();
+            let consts: Option<Vec<String>> =
+                non_null.iter().map(|v| v.get("const").and_then(Value::as_str).map(String::from)).collect();
             return match consts {
                 Some(choices) => ArgKind::String { choices },
                 None => ArgKind::Json,
@@ -72,11 +64,7 @@ impl ArgKind {
                     k => ArgKind::Array(Box::new(k)),
                 }
             }
-            ["object"]
-                if schema
-                    .get("additionalProperties")
-                    .is_some_and(|a| ArgKind::of(a).is_scalar()) =>
-            {
+            ["object"] if schema.get("additionalProperties").is_some_and(|a| ArgKind::of(a).is_scalar()) => {
                 ArgKind::Map
             }
             // Strings-or-numbers (angles) are passed as strings; commands parse them.
@@ -86,22 +74,17 @@ impl ArgKind {
     }
 
     fn is_scalar(&self) -> bool {
-        matches!(
-            self,
-            ArgKind::Bool | ArgKind::Integer | ArgKind::Number | ArgKind::String { .. }
-        )
+        matches!(self, ArgKind::Bool | ArgKind::Integer | ArgKind::Number | ArgKind::String { .. })
     }
 
     fn convert(&self, raw: &str) -> Result<Value, String> {
         match self {
-            ArgKind::Bool => raw
-                .parse::<bool>()
-                .map(Value::from)
-                .map_err(|_| format!("expected true or false, got `{raw}`")),
-            ArgKind::Integer => raw
-                .parse::<i64>()
-                .map(Value::from)
-                .map_err(|_| format!("expected an integer, got `{raw}`")),
+            ArgKind::Bool => {
+                raw.parse::<bool>().map(Value::from).map_err(|_| format!("expected true or false, got `{raw}`"))
+            }
+            ArgKind::Integer => {
+                raw.parse::<i64>().map(Value::from).map_err(|_| format!("expected an integer, got `{raw}`"))
+            }
             ArgKind::Number => raw
                 .parse::<f64>()
                 .ok()
@@ -119,18 +102,11 @@ fn kebab(s: &str) -> String {
 }
 
 fn properties(e: &Entry) -> Vec<(String, Value, bool)> {
-    let required: Vec<&str> = e.input_schema["required"]
-        .as_array()
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    let required: Vec<&str> =
+        e.input_schema["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     e.input_schema["properties"]
         .as_object()
-        .map(|props| {
-            props
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone(), required.contains(&k.as_str())))
-                .collect()
-        })
+        .map(|props| props.iter().map(|(k, v)| (k.clone(), v.clone(), required.contains(&k.as_str()))).collect())
         .unwrap_or_default()
 }
 
@@ -142,11 +118,7 @@ fn entry_command(e: &Entry) -> ClapCommand {
     }
     for (name, schema, required) in properties(e) {
         let kind = ArgKind::of(&schema);
-        let help = schema
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let help = schema.get("description").and_then(Value::as_str).unwrap_or("").to_string();
         let mut arg = Arg::new(name.clone()).help(help).required(required);
         let positional = e.positional.iter().position(|p| *p == name);
         match positional {
@@ -192,14 +164,7 @@ pub fn global_args(cmd: ClapCommand) -> ClapCommand {
             .action(ArgAction::SetTrue)
             .help("Run, report the result, then roll back"),
     )
-    .arg(
-        Arg::new("quiet")
-            .short('q')
-            .long("quiet")
-            .global(true)
-            .action(ArgAction::SetTrue)
-            .help("Only print errors"),
-    )
+    .arg(Arg::new("quiet").short('q').long("quiet").global(true).action(ArgAction::SetTrue).help("Only print errors"))
 }
 
 /// The full clap tree.
@@ -260,10 +225,7 @@ pub fn build(registry: &Registry) -> ClapCommand {
 }
 
 fn steps_arg() -> Arg {
-    Arg::new("steps")
-        .long("steps")
-        .value_parser(clap::value_parser!(u32))
-        .help("Number of steps")
+    Arg::new("steps").long("steps").value_parser(clap::value_parser!(u32)).help("Number of steps")
 }
 
 /// Converts the matches of a generated subcommand back to JSON arguments.
@@ -275,23 +237,15 @@ pub fn to_args(e: &Entry, m: &ArgMatches) -> Result<Value, String> {
             continue;
         };
         let raw: Vec<&String> = raw.collect();
-        let flag = if e.positional.contains(&name.as_str()) {
-            name.to_uppercase()
-        } else {
-            format!("--{}", kebab(&name))
-        };
+        let flag =
+            if e.positional.contains(&name.as_str()) { name.to_uppercase() } else { format!("--{}", kebab(&name)) };
         let err = |msg: String| format!("{flag}: {msg}");
         let v = match &kind {
             ArgKind::Array(item) => {
                 if raw.len() == 1 && raw[0].is_empty() {
                     Value::Array(vec![])
                 } else {
-                    Value::Array(
-                        raw.iter()
-                            .map(|r| item.convert(r))
-                            .collect::<Result<_, _>>()
-                            .map_err(err)?,
-                    )
+                    Value::Array(raw.iter().map(|r| item.convert(r)).collect::<Result<_, _>>().map_err(err)?)
                 }
             }
             ArgKind::Map => {
@@ -305,14 +259,8 @@ pub fn to_args(e: &Entry, m: &ArgMatches) -> Result<Value, String> {
                         map.extend(o);
                         continue;
                     }
-                    let (k, v) = r
-                        .split_once('=')
-                        .ok_or_else(|| err(format!("expected KEY=VALUE, got `{r}`")))?;
-                    let v = if v.is_empty() {
-                        Value::Null
-                    } else {
-                        item.convert(v).map_err(err)?
-                    };
+                    let (k, v) = r.split_once('=').ok_or_else(|| err(format!("expected KEY=VALUE, got `{r}`")))?;
+                    let v = if v.is_empty() { Value::Null } else { item.convert(v).map_err(err)? };
                     map.insert(k.to_string(), v);
                 }
                 Value::Object(map)
@@ -332,19 +280,14 @@ mod tests {
     #[test]
     fn kinds() {
         assert_eq!(ArgKind::of(&json!({"type": "boolean"})), ArgKind::Bool);
-        assert_eq!(
-            ArgKind::of(&json!({"type": ["string", "null"]})),
-            ArgKind::String { choices: vec![] }
-        );
+        assert_eq!(ArgKind::of(&json!({"type": ["string", "null"]})), ArgKind::String { choices: vec![] });
         assert_eq!(
             ArgKind::of(&json!({"type": ["array", "null"], "items": {"type": "string"}})),
             ArgKind::Array(Box::new(ArgKind::String { choices: vec![] }))
         );
         assert_eq!(
             ArgKind::of(&json!({"anyOf": [{"type": "string", "enum": ["mm", "mil"]}, {"type": "null"}]})),
-            ArgKind::String {
-                choices: vec!["mm".into(), "mil".into()]
-            }
+            ArgKind::String { choices: vec!["mm".into(), "mil".into()] }
         );
         assert_eq!(
             ArgKind::of(&json!({"type": "object", "additionalProperties": {"type": ["string", "null"]}})),

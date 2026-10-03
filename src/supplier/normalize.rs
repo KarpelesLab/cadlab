@@ -22,19 +22,9 @@ pub fn clean_value(s: &str) -> String {
     if let Some(i) = v.find('(') {
         v.truncate(i);
     }
-    let v = v
-        .replace('±', "")
-        .replace("Ohms", "Ω")
-        .replace("Ohm", "Ω")
-        .replace(" ~ ", "..")
-        .replace('~', "..");
+    let v = v.replace('±', "").replace("Ohms", "Ω").replace("Ohm", "Ω").replace(" ~ ", "..").replace('~', "..");
     // Drop spaces between number and unit, but keep range separators.
-    v.split("..")
-        .map(|p| p.split_whitespace().collect::<String>())
-        .collect::<Vec<_>>()
-        .join("..")
-        .trim()
-        .to_string()
+    v.split("..").map(|p| p.split_whitespace().collect::<String>()).collect::<Vec<_>>().join("..").trim().to_string()
 }
 
 /// Maps a distributor parameter name to a cadlab key, for the names that matter for selection.
@@ -105,10 +95,7 @@ pub fn package(s: &str) -> Option<String> {
 /// Category from distributor category names (most specific last).
 pub fn category(names: &[&str]) -> Option<Category> {
     let text = names.join(" / ").to_ascii_lowercase();
-    let words: Vec<&str> = text
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .collect();
+    let words: Vec<&str> = text.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
     // Short tokens must match whole words ("led" is in "isolated").
     let has = |s: &str| {
         if s.len() <= 4 && !s.contains(' ') {
@@ -201,11 +188,7 @@ mod tests {
         assert_eq!(p.get("power_rating").unwrap().to_string(), "63mW");
         assert_eq!(p.get("temperature").unwrap().to_string(), "-55°C..155°C");
         assert_eq!(p.get("tempco").unwrap().to_string(), "100ppm");
-        let p = params([
-            ("Capacitance", "0.1 µF"),
-            ("Voltage - Rated", "16V"),
-            ("Temperature Coefficient", "X7R"),
-        ]);
+        let p = params([("Capacitance", "0.1 µF"), ("Voltage - Rated", "16V"), ("Temperature Coefficient", "X7R")]);
         assert_eq!(p.get("capacitance").unwrap().to_string(), "100nF");
         assert_eq!(p.get("dielectric").unwrap().to_string(), "X7R");
         let p = params([("Voltage - Output (Min/Fixed)", "3.3V"), ("Current - Output", "600mA")]);
@@ -218,25 +201,13 @@ mod tests {
         assert_eq!(package("0402 (1005 Metric)").as_deref(), Some("0402"));
         assert_eq!(package("SOT-23-5 Thin, TSOT-23-5").as_deref(), Some("SOT-23-5"));
         assert_eq!(
-            category(&[
-                "Integrated Circuits (ICs)",
-                "Voltage Regulators - Linear, Low Drop Out (LDO) Regulators"
-            ]),
+            category(&["Integrated Circuits (ICs)", "Voltage Regulators - Linear, Low Drop Out (LDO) Regulators"]),
             Some(Category::Ldo)
         );
-        assert_eq!(
-            category(&["Resistors", "Chip Resistor - Surface Mount"]),
-            Some(Category::Resistor)
-        );
-        assert_eq!(
-            category(&["Capacitors", "Ceramic Capacitors"]),
-            Some(Category::Capacitor)
-        );
+        assert_eq!(category(&["Resistors", "Chip Resistor - Surface Mount"]), Some(Category::Resistor));
+        assert_eq!(category(&["Capacitors", "Ceramic Capacitors"]), Some(Category::Capacitor));
         assert_eq!(category(&["Isolators", "Digital Isolators"]), None);
-        assert_eq!(
-            category(&["Optoelectronics", "LED Indication - Discrete"]),
-            Some(Category::Led)
-        );
+        assert_eq!(category(&["Optoelectronics", "LED Indication - Discrete"]), Some(Category::Led));
         assert_eq!(lifecycle("Not For New Designs"), Lifecycle::Nrnd);
         assert_eq!(lifecycle("Active"), Lifecycle::Active);
     }

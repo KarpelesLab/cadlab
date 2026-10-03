@@ -67,17 +67,13 @@ pub mod oracle {
 
     fn find_in_path(name: &str) -> Option<PathBuf> {
         let paths = std::env::var_os("PATH")?;
-        std::env::split_paths(&paths)
-            .map(|d| d.join(name))
-            .find(|p| p.is_file())
+        std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file())
     }
 
     /// Runs an oracle and returns stdout, panicking with stderr on failure.
     pub fn run(program: &std::path::Path, args: &[&str]) -> String {
-        let out = Command::new(program)
-            .args(args)
-            .output()
-            .unwrap_or_else(|e| panic!("running {}: {e}", program.display()));
+        let out =
+            Command::new(program).args(args).output().unwrap_or_else(|e| panic!("running {}: {e}", program.display()));
         assert!(
             out.status.success(),
             "{} {:?} failed:\n{}",

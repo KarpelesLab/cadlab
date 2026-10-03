@@ -23,18 +23,12 @@ pub struct Library {
 impl Library {
     /// Finds a part ID case-insensitively (IDs are file names; some filesystems ignore case).
     pub fn find_part_id_ci(&self, id: &str) -> Option<&str> {
-        self.parts
-            .keys()
-            .find(|k| k.eq_ignore_ascii_case(id))
-            .map(String::as_str)
+        self.parts.keys().find(|k| k.eq_ignore_ascii_case(id)).map(String::as_str)
     }
 
     /// Finds a footprint name case-insensitively.
     pub fn find_footprint_ci(&self, name: &str) -> Option<&str> {
-        self.footprints
-            .keys()
-            .find(|k| k.eq_ignore_ascii_case(name))
-            .map(String::as_str)
+        self.footprints.keys().find(|k| k.eq_ignore_ascii_case(name)).map(String::as_str)
     }
 }
 
@@ -75,10 +69,26 @@ pub struct Bom {
     pub dnp: BTreeSet<String>,
 }
 
-/// Optional schematic presentation hints (`schematic.json`).
+/// Where a schematic symbol sits: origin and rotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolPlacement {
+    /// Symbol origin on the sheet (Y up, origin at the bottom-left corner).
+    pub at: crate::geom::Point,
+    /// Counter-clockwise quarter turns (0..3).
+    #[serde(default)]
+    pub rot: u8,
+}
+
+/// Optional schematic presentation hints (`schematic.json`). The drawing is generated; hints
+/// only pin components to chosen positions.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Schematic {}
+pub struct Schematic {
+    /// Fixed symbol positions, by designator.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub placements: std::collections::BTreeMap<String, SymbolPlacement>,
+}
 
 /// Physical board: stackup, outline, placement, copper (`board.json`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -140,12 +150,7 @@ mod tests {
         for r in ["R1", "R7", "RN3"] {
             c.components.insert(
                 r.into(),
-                Component {
-                    id: crate::id::ObjectId(1),
-                    part: "x".into(),
-                    block: None,
-                    properties: Default::default(),
-                },
+                Component { id: crate::id::ObjectId(1), part: "x".into(), block: None, properties: Default::default() },
             );
         }
         assert_eq!(c.next_refdes("R"), "R8");

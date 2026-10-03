@@ -122,11 +122,7 @@ pub fn schema_of<T: JsonSchema>() -> Value {
 }
 
 fn run_erased<C: Command>(ctx: &mut Context<'_>, args: Value) -> Result<(Value, String), CommandError> {
-    let args = if args.is_null() {
-        Value::Object(Default::default())
-    } else {
-        args
-    };
+    let args = if args.is_null() { Value::Object(Default::default()) } else { args };
     let cmd: C = serde_json::from_value(args).map_err(|e| {
         CommandError::invalid_args("args.invalid", format!("invalid arguments for `{}`: {e}", C::NAME))
             .with_hint(format!("see `describe {}` for the expected arguments", C::NAME))
@@ -165,11 +161,7 @@ impl Registry {
             output_schema: schema_of::<C::Output>(),
             run: run_erased::<C>,
         };
-        assert!(
-            self.entries.insert(C::NAME, e).is_none(),
-            "duplicate command {}",
-            C::NAME
-        );
+        assert!(self.entries.insert(C::NAME, e).is_none(), "duplicate command {}", C::NAME);
         self
     }
 
@@ -220,29 +212,19 @@ impl Registry {
         progress: &dyn Progress,
         cancel: &CancelToken,
     ) -> Result<Outcome, Failure> {
-        let fail = |error, diagnostics| Failure {
-            command: name.to_string(),
-            step: None,
-            error,
-            diagnostics,
-        };
+        let fail = |error, diagnostics| Failure { command: name.to_string(), step: None, error, diagnostics };
         let entry = self.lookup(name).map_err(|e| fail(e, vec![]))?;
-        let step = Step {
-            cmd: name.to_string(),
-            args: args.clone(),
-        };
+        let step = Step { cmd: name.to_string(), args: args.clone() };
         let run = entry.run;
-        transact(session, entry.kind, name, vec![step], opts, progress, cancel, |ctx| {
-            run(ctx, args)
-        })
-        .map(|(output, summary, diagnostics, changed)| Outcome {
-            command: name.to_string(),
-            output,
-            summary,
-            diagnostics,
-            changed,
-        })
-        .map_err(|(e, d)| fail(e, d))
+        transact(session, entry.kind, name, vec![step], opts, progress, cancel, |ctx| run(ctx, args))
+            .map(|(output, summary, diagnostics, changed)| Outcome {
+                command: name.to_string(),
+                output,
+                summary,
+                diagnostics,
+                changed,
+            })
+            .map_err(|(e, d)| fail(e, d))
     }
 
     /// Runs several commands as one transaction: all succeed, or nothing changes. Session
@@ -255,12 +237,7 @@ impl Registry {
     ) -> Result<Vec<Outcome>, Failure> {
         let mut entries = Vec::with_capacity(steps.len());
         for (i, s) in steps.iter().enumerate() {
-            let fail = |error| Failure {
-                command: "batch".into(),
-                step: Some(i),
-                error,
-                diagnostics: vec![],
-            };
+            let fail = |error| Failure { command: "batch".into(), step: Some(i), error, diagnostics: vec![] };
             let e = self.lookup(&s.cmd).map_err(fail)?;
             if e.kind == CommandKind::Session {
                 return Err(fail(
@@ -274,11 +251,7 @@ impl Registry {
             entries.push(e);
         }
         let mutating = entries.iter().any(|e| e.kind == CommandKind::Mutation);
-        let kind = if mutating {
-            CommandKind::Mutation
-        } else {
-            CommandKind::Query
-        };
+        let kind = if mutating { CommandKind::Mutation } else { CommandKind::Query };
         let label = format!("batch ({} commands)", steps.len());
         let mut failed_at = None;
         let logged: Vec<Step> = steps
@@ -287,38 +260,23 @@ impl Registry {
             .filter(|(_, e)| e.kind == CommandKind::Mutation)
             .map(|(s, _)| s.clone())
             .collect();
-        let res = transact(
-            session,
-            kind,
-            &label,
-            logged,
-            opts,
-            &NoProgress,
-            &CancelToken::new(),
-            |ctx| {
-                let mut outs = Vec::with_capacity(steps.len());
-                for (i, (s, e)) in steps.iter().zip(&entries).enumerate() {
-                    let before = ctx.diagnostics.len();
-                    match (e.run)(ctx, s.args.clone()) {
-                        Ok((output, summary)) => {
-                            let diagnostics = ctx.diagnostics[before..].to_vec();
-                            outs.push(Outcome {
-                                command: s.cmd.clone(),
-                                output,
-                                summary,
-                                diagnostics,
-                                changed: false,
-                            });
-                        }
-                        Err(err) => {
-                            failed_at = Some(i);
-                            return Err(err);
-                        }
+        let res = transact(session, kind, &label, logged, opts, &NoProgress, &CancelToken::new(), |ctx| {
+            let mut outs = Vec::with_capacity(steps.len());
+            for (i, (s, e)) in steps.iter().zip(&entries).enumerate() {
+                let before = ctx.diagnostics.len();
+                match (e.run)(ctx, s.args.clone()) {
+                    Ok((output, summary)) => {
+                        let diagnostics = ctx.diagnostics[before..].to_vec();
+                        outs.push(Outcome { command: s.cmd.clone(), output, summary, diagnostics, changed: false });
+                    }
+                    Err(err) => {
+                        failed_at = Some(i);
+                        return Err(err);
                     }
                 }
-                Ok((outs, String::new()))
-            },
-        );
+            }
+            Ok((outs, String::new()))
+        });
         match res {
             Ok((mut outs, _, _, changed)) => {
                 for o in &mut outs {
@@ -326,12 +284,7 @@ impl Registry {
                 }
                 Ok(outs)
             }
-            Err((error, diagnostics)) => Err(Failure {
-                command: "batch".into(),
-                step: failed_at,
-                error,
-                diagnostics,
-            }),
+            Err((error, diagnostics)) => Err(Failure { command: "batch".into(), step: failed_at, error, diagnostics }),
         }
     }
 }
@@ -424,20 +377,10 @@ pub fn run<C: Command>(
     cmd: C,
     opts: RunOptions,
 ) -> Result<(C::Output, Vec<Diagnostic>), CommandError> {
-    let step = Step {
-        cmd: C::NAME.to_string(),
-        args: serde_json::to_value(&cmd).unwrap_or(Value::Null),
-    };
-    transact(
-        session,
-        C::KIND,
-        C::NAME,
-        vec![step],
-        opts,
-        &NoProgress,
-        &CancelToken::new(),
-        |ctx| cmd.run(ctx).map(|o| (o, String::new())),
-    )
+    let step = Step { cmd: C::NAME.to_string(), args: serde_json::to_value(&cmd).unwrap_or(Value::Null) };
+    transact(session, C::KIND, C::NAME, vec![step], opts, &NoProgress, &CancelToken::new(), |ctx| {
+        cmd.run(ctx).map(|o| (o, String::new()))
+    })
     .map(|(o, _, d, _)| (o, d))
     .map_err(|(e, _)| e)
 }

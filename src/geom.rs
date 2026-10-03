@@ -48,10 +48,7 @@ impl Point {
             _ => {
                 let (s, c) = a.to_rad_f64().sin_cos();
                 let (xf, yf) = (x as f64, y as f64);
-                Point::new(
-                    Nm((xf * c - yf * s).round() as i64),
-                    Nm((xf * s + yf * c).round() as i64),
-                )
+                Point::new(Nm((xf * c - yf * s).round() as i64), Nm((xf * s + yf * c).round() as i64))
             }
         }
     }
@@ -135,10 +132,7 @@ pub struct BBox {
 impl BBox {
     /// Box spanning two corners in any order.
     pub fn new(a: Point, b: Point) -> Self {
-        BBox {
-            min: Point::new(a.x.min(b.x), a.y.min(b.y)),
-            max: Point::new(a.x.max(b.x), a.y.max(b.y)),
-        }
+        BBox { min: Point::new(a.x.min(b.x), a.y.min(b.y)), max: Point::new(a.x.max(b.x), a.y.max(b.y)) }
     }
 
     /// Smallest box containing all points, or `None` if there are none.
@@ -189,11 +183,7 @@ pub struct Transform {
 
 impl Transform {
     /// Identity.
-    pub const IDENTITY: Transform = Transform {
-        offset: Point::ORIGIN,
-        rotation: Angle::ZERO,
-        mirror: false,
-    };
+    pub const IDENTITY: Transform = Transform { offset: Point::ORIGIN, rotation: Angle::ZERO, mirror: false };
 
     /// Applies the transform to a point.
     pub fn apply(&self, p: Point) -> Point {
@@ -219,11 +209,7 @@ mod tests {
 
     #[test]
     fn transform_order() {
-        let t = Transform {
-            offset: Point::new(mm(10), mm(0)),
-            rotation: Angle::DEG_90,
-            mirror: true,
-        };
+        let t = Transform { offset: Point::new(mm(10), mm(0)), rotation: Angle::DEG_90, mirror: true };
         // mirror (1,0) -> (-1,0); rotate 90 -> (0,-1); translate -> (10,-1)
         assert_eq!(t.apply(Point::new(mm(1), Nm(0))), Point::new(mm(10), mm(-1)));
     }

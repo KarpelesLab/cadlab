@@ -66,10 +66,7 @@ impl Command for Add {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Added, CommandError> {
         if self.count == 0 || self.count > 1000 {
-            return Err(CommandError::invalid_args(
-                "circuit.invalid_count",
-                "count must be between 1 and 1000",
-            ));
+            return Err(CommandError::invalid_args("circuit.invalid_count", "count must be between 1 and 1000"));
         }
         if self.refdes.is_some() && self.count != 1 {
             return Err(CommandError::invalid_args(
@@ -102,10 +99,8 @@ impl Command for Add {
                         ));
                     }
                     if p.circuit().components.contains_key(&r) {
-                        return Err(
-                            CommandError::conflict("circuit.refdes_taken", format!("`{r}` already exists"))
-                                .with_hint(format!("next free: {}", p.circuit().next_refdes(prefix))),
-                        );
+                        return Err(CommandError::conflict("circuit.refdes_taken", format!("`{r}` already exists"))
+                            .with_hint(format!("next free: {}", p.circuit().next_refdes(prefix))));
                     }
                     r
                 }
@@ -114,29 +109,15 @@ impl Command for Add {
             let id_obj = p.alloc_id();
             p.circuit_mut().components.insert(
                 refdes.clone(),
-                Component {
-                    id: id_obj,
-                    part: id.clone(),
-                    block: None,
-                    properties: self.properties.clone(),
-                },
+                Component { id: id_obj, part: id.clone(), block: None, properties: self.properties.clone() },
             );
             added.push(refdes);
         }
-        Ok(Added {
-            refdes: added,
-            part: id,
-            part_created: created,
-        })
+        Ok(Added { refdes: added, part: id, part_created: created })
     }
 
     fn summarize(o: &Added) -> String {
-        format!(
-            "added {} ({}){}",
-            o.refdes.join(", "),
-            o.part,
-            if o.part_created { ", new part" } else { "" }
-        )
+        format!("added {} ({}){}", o.refdes.join(", "), o.part, if o.part_created { ", new part" } else { "" })
     }
 }
 
@@ -305,10 +286,7 @@ impl Command for Rename {
             return Ok(Removed { refdes: vec![to] });
         }
         if ctx.project()?.circuit().components.contains_key(&to) {
-            return Err(CommandError::conflict(
-                "circuit.refdes_taken",
-                format!("`{to}` already exists"),
-            ));
+            return Err(CommandError::conflict("circuit.refdes_taken", format!("`{to}` already exists")));
         }
         let p = ctx.project_mut()?;
         p.circuit_mut().rename_component(&from, &to);
@@ -342,9 +320,7 @@ impl Command for Summary {
     type Output = SummaryText;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<SummaryText, CommandError> {
-        Ok(SummaryText {
-            text: crate::netlist::summary(ctx.project()?),
-        })
+        Ok(SummaryText { text: crate::netlist::summary(ctx.project()?) })
     }
 
     fn summarize(o: &SummaryText) -> String {
@@ -374,14 +350,8 @@ impl Command for Erc {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<ErcReport, CommandError> {
         let diags = crate::erc::check(ctx.project()?);
-        let errors = diags
-            .iter()
-            .filter(|d| d.severity == crate::diag::Severity::Error)
-            .count();
-        let warnings = diags
-            .iter()
-            .filter(|d| d.severity == crate::diag::Severity::Warning)
-            .count();
+        let errors = diags.iter().filter(|d| d.severity == crate::diag::Severity::Error).count();
+        let warnings = diags.iter().filter(|d| d.severity == crate::diag::Severity::Warning).count();
         for d in diags {
             ctx.report(d);
         }
@@ -452,21 +422,12 @@ impl Command for Export {
             Some(root) if self.path.is_relative() => root.join(&self.path),
             _ => self.path.clone(),
         };
-        let io = |e| {
-            CommandError::from(crate::model::ModelError::Io {
-                path: path.clone(),
-                source: e,
-            })
-        };
+        let io = |e| CommandError::from(crate::model::ModelError::Io { path: path.clone(), source: e });
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
         }
         std::fs::write(&path, text).map_err(io)?;
-        Ok(Exported {
-            path: path.display().to_string(),
-            components,
-            nets,
-        })
+        Ok(Exported { path: path.display().to_string(), components, nets })
     }
 
     fn summarize(o: &Exported) -> String {

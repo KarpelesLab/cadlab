@@ -10,11 +10,13 @@ keywords = ["eda", "pcb", "cad", "electronics", "mcp"]
 categories = ["science", "command-line-utilities"]
 
 [features]
-default = ["cli", "net"]
+default = ["cli", "net", "png"]
 # The `cadlab` binary (CLI + MCP server). Library users can disable it to avoid the CLI dependencies.
 cli = ["dep:clap", "dep:rpassword"]
 # Network part research providers (DigiKey, ...).
 net = ["dep:ureq"]
+# PNG rendering (SVG needs no extra dependency).
+png = ["dep:tiny-skia"]
 
 [[bin]]
 name = "cadlab"
@@ -36,6 +38,7 @@ toml = "1.1"
 
 clap = { version = "4.6", features = ["derive", "string"], optional = true }
 rpassword = { version = "7.5", optional = true }
+tiny-skia = { version = "0.12", optional = true }
 ureq = { version = "3.4", optional = true }
 
 [dev-dependencies]

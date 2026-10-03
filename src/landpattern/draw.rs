@@ -16,11 +16,7 @@ fn rect(min: Point, max: Point) -> Vec<Point> {
 
 fn pad_box(p: &Pad, grow: Nm) -> BBox {
     let (w, h) = p.shape.size();
-    let (w, h) = if p.rotation.quarter_turns().is_some_and(|q| q % 2 == 1) {
-        (h, w)
-    } else {
-        (w, h)
-    };
+    let (w, h) = if p.rotation.quarter_turns().is_some_and(|q| q % 2 == 1) { (h, w) } else { (w, h) };
     BBox {
         min: Point::new(p.at.x - Nm(w.0 / 2) - grow, p.at.y - Nm(h.0 / 2) - grow),
         max: Point::new(p.at.x + Nm(w.0 / 2) + grow, p.at.y + Nm(h.0 / 2) + grow),
@@ -38,17 +34,11 @@ fn snap_out(b: BBox, grid: Nm) -> BBox {
     let g = grid.0.max(1);
     let down = |v: Nm| Nm(v.0.div_euclid(g) * g);
     let up = |v: Nm| Nm(-(-v.0).div_euclid(g) * g);
-    BBox {
-        min: Point::new(down(b.min.x), down(b.min.y)),
-        max: Point::new(up(b.max.x), up(b.max.y)),
-    }
+    BBox { min: Point::new(down(b.min.x), down(b.min.y)), max: Point::new(up(b.max.x), up(b.max.y)) }
 }
 
 fn grow(b: BBox, d: Nm) -> BBox {
-    BBox {
-        min: Point::new(b.min.x - d, b.min.y - d),
-        max: Point::new(b.max.x + d, b.max.y + d),
-    }
+    BBox { min: Point::new(b.min.x - d, b.min.y - d), max: Point::new(b.max.x + d, b.max.y + d) }
 }
 
 fn union(a: BBox, b: BBox) -> BBox {
@@ -143,11 +133,7 @@ pub(super) fn finish(
         graphics.push(Graphic {
             layer: GraphicLayer::Silk,
             width: Nm::ZERO,
-            geometry: GraphicGeometry::Circle {
-                center,
-                radius: r,
-                filled: true,
-            },
+            geometry: GraphicGeometry::Circle { center, radius: r, filled: true },
         });
     }
 

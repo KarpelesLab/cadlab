@@ -21,10 +21,7 @@ fn um(v: i64) -> Nm {
 }
 
 fn range(min_um: i64, max_um: i64) -> Dim {
-    Dim {
-        min: um(min_um),
-        max: um(max_um),
-    }
+    Dim { min: um(min_um), max: um(max_um) }
 }
 
 fn pm(nom_um: i64, tol_um: i64) -> Dim {
@@ -56,19 +53,13 @@ const ALIASES: &[&[&str]] = &[
 ];
 
 fn alnum_key(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_uppercase())
-        .collect()
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
 
 /// Canonical name of a package: `SOT-25` → `SOT-23-5`. Unknown names are returned as given.
 pub fn canonical(name: &str) -> &str {
     let k = alnum_key(name);
-    ALIASES
-        .iter()
-        .find(|g| g.iter().any(|a| alnum_key(a) == k))
-        .map_or(name, |g| g[0])
+    ALIASES.iter().find(|g| g.iter().any(|a| alnum_key(a) == k)).map_or(name, |g| g[0])
 }
 
 /// Comparison key for package names: aliases and spelling variants compare equal
@@ -116,11 +107,7 @@ pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
     };
 
     // Chips: imperial, or metric with an M/METRIC suffix.
-    let chip_code = n
-        .strip_prefix('R')
-        .or_else(|| n.strip_prefix('C'))
-        .or_else(|| n.strip_prefix('L'))
-        .unwrap_or(&n);
+    let chip_code = n.strip_prefix('R').or_else(|| n.strip_prefix('C')).or_else(|| n.strip_prefix('L')).unwrap_or(&n);
     let metric = chip_code
         .strip_suffix("-METRIC")
         .or_else(|| chip_code.strip_suffix("METRIC"))
@@ -142,24 +129,10 @@ pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
 
     match norm(canonical(name)).as_str() {
         "SOT-23" => {
-            return Ok(sot23(
-                3,
-                range(2100, 2640),
-                range(1200, 1400),
-                um(1120),
-                Some(3),
-                vec![2, 4, 6],
-            ));
+            return Ok(sot23(3, range(2100, 2640), range(1200, 1400), um(1120), Some(3), vec![2, 4, 6]));
         }
         "SOT-23-5" => {
-            return Ok(sot23(
-                5,
-                range(2600, 3000),
-                range(1500, 1700),
-                um(1450),
-                Some(3),
-                vec![5],
-            ));
+            return Ok(sot23(5, range(2600, 3000), range(1500, 1700), um(1450), Some(3), vec![5]));
         }
         "SOT-23-6" => {
             return Ok(sot23(6, range(2600, 3000), range(1500, 1700), um(1450), None, vec![]));
@@ -282,10 +255,8 @@ pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
         return parametric_nolead(name, &n).map_err(|e| format!("{e}; example: `QFN-32 5x5mm P0.5mm EP3.1mm`"));
     }
 
-    if let Some(rest) = n
-        .strip_prefix("PINHEADER-")
-        .or_else(|| n.strip_prefix("HEADER-"))
-        .or_else(|| n.strip_prefix("PINSOCKET-"))
+    if let Some(rest) =
+        n.strip_prefix("PINHEADER-").or_else(|| n.strip_prefix("HEADER-")).or_else(|| n.strip_prefix("PINSOCKET-"))
     {
         let mut parts = rest.split('-');
         let geometry = parts.next().unwrap_or("");
@@ -298,19 +269,8 @@ pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
                 pitch = v;
             }
         }
-        let (drill, pad) = if pitch < um(2000) {
-            (um(700), um(1200))
-        } else {
-            (um(1000), um(1700))
-        };
-        return Ok(PackageSpec::PinHeader {
-            rows,
-            pins_per_row,
-            pitch,
-            drill,
-            pad,
-            height: um(2500),
-        });
+        let (drill, pad) = if pitch < um(2000) { (um(700), um(1200)) } else { (um(1000), um(1700)) };
+        return Ok(PackageSpec::PinHeader { rows, pins_per_row, pitch, drill, pad, height: um(2500) });
     }
 
     Err(unknown())
@@ -337,10 +297,7 @@ fn sot23(pins: u32, span: Dim, body_width: Dim, height: Nm, slots: Option<u32>, 
 fn parametric_nolead(orig: &str, n: &str) -> Result<PackageSpec, String> {
     let mut tokens = n.split('-');
     let family = tokens.next().unwrap_or("");
-    let pins: u32 = tokens
-        .next()
-        .and_then(|t| t.parse().ok())
-        .ok_or_else(|| format!("`{orig}`: missing pin count"))?;
+    let pins: u32 = tokens.next().and_then(|t| t.parse().ok()).ok_or_else(|| format!("`{orig}`: missing pin count"))?;
     let (mut body, mut pitch, mut ep, mut terminal, mut lead_width, mut height) = (None, None, None, None, None, None);
     for t in tokens {
         if let Some(v) = t.strip_prefix("EP") {
@@ -374,11 +331,7 @@ fn parametric_nolead(orig: &str, n: &str) -> Result<PackageSpec, String> {
         }
     });
     let height = height.unwrap_or(um(900));
-    let exposed_pad = ep.map(|(w, l)| ExposedPad {
-        width: w,
-        length: l,
-        number: None,
-    });
+    let exposed_pad = ep.map(|(w, l)| ExposedPad { width: w, length: l, number: None });
     Ok(if family == "QFN" {
         PackageSpec::Qfn {
             pins,

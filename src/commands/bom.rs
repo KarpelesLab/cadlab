@@ -43,16 +43,9 @@ pub struct BomList {
 fn bom_list(ctx: &Context<'_>) -> Result<BomList, CommandError> {
     let lines = bom::rows(ctx.project()?);
     let placements = lines.iter().map(|l| l.quantity).sum();
-    let unsourced = lines
-        .iter()
-        .filter(|l| l.quantity > 0 && l.order_mpn().is_none())
-        .map(|l| l.part.clone())
-        .collect();
-    Ok(BomList {
-        lines,
-        placements,
-        unsourced,
-    })
+    let unsourced =
+        lines.iter().filter(|l| l.quantity > 0 && l.order_mpn().is_none()).map(|l| l.part.clone()).collect();
+    Ok(BomList { lines, placements, unsourced })
 }
 
 impl Command for List {
@@ -75,13 +68,7 @@ impl Command for List {
                 Some((m, p)) => format!("{}{p}", m.map(|m| format!("{m} ")).unwrap_or_default()),
                 None => "(generic, no MPN yet)".into(),
             };
-            s += &format!(
-                "{:>3} x {:<10} {:<28} {}",
-                l.quantity,
-                l.value,
-                l.refdes.join(","),
-                order
-            );
+            s += &format!("{:>3} x {:<10} {:<28} {}", l.quantity, l.value, l.refdes.join(","), order);
             if !l.dnp.is_empty() {
                 s += &format!("  DNP: {}", l.dnp.join(","));
             }
@@ -140,10 +127,7 @@ impl Command for Approve {
             if m.is_empty() || line.approved.iter().any(|a| a.mpn.eq_ignore_ascii_case(m)) {
                 continue;
             }
-            line.approved.push(ApprovedPart {
-                manufacturer: self.manufacturer.clone(),
-                mpn: m.to_string(),
-            });
+            line.approved.push(ApprovedPart { manufacturer: self.manufacturer.clone(), mpn: m.to_string() });
         }
         let approved = line.approved.clone();
         prune_line(ctx, &id)?;
@@ -162,11 +146,7 @@ impl Command for Approve {
 /// Drops an empty overlay line so `bom.json` only holds meaningful data.
 fn prune_line(ctx: &mut Context<'_>, id: &str) -> Result<(), CommandError> {
     let bom = ctx.project_mut()?.bom_mut();
-    if bom
-        .lines
-        .get(id)
-        .is_some_and(|l| l.approved.is_empty() && l.notes.is_none())
-    {
+    if bom.lines.get(id).is_some_and(|l| l.approved.is_empty() && l.notes.is_none()) {
         bom.lines.remove(id);
     }
     Ok(())
@@ -220,11 +200,7 @@ impl Command for Dnp {
     }
 
     fn summarize(o: &DnpList) -> String {
-        if o.dnp.is_empty() {
-            "no DNP components".into()
-        } else {
-            format!("DNP: {}", o.dnp.join(", "))
-        }
+        if o.dnp.is_empty() { "no DNP components".into() } else { format!("DNP: {}", o.dnp.join(", ")) }
     }
 }
 
@@ -308,10 +284,7 @@ impl Command for Replace {
             for r in &self.refdes {
                 let k = util::refdes_key(p, r)?;
                 if p.circuit().components[&k].part != from {
-                    return Err(CommandError::invalid_args(
-                        "bom.not_using_part",
-                        format!("{k} does not use `{from}`"),
-                    ));
+                    return Err(CommandError::invalid_args("bom.not_using_part", format!("{k} does not use `{from}`")));
                 }
                 v.push(k);
             }
@@ -340,10 +313,7 @@ impl Command for Replace {
                     "bom.pins_differ",
                     format!("`{to}` lacks pins of `{from}`: {}", missing.join(", ")),
                 )
-                .with_subject(ObjectRef::Part {
-                    scheme: "local".into(),
-                    id: to.clone(),
-                })
+                .with_subject(ObjectRef::Part { scheme: "local".into(), id: to.clone() })
                 .with_hint("connections to those pins were dropped; check the pinouts and reconnect"),
             );
         }
@@ -360,9 +330,7 @@ impl Command for Replace {
                 .cloned()
                 .collect();
             crate::connect::disconnect(p.circuit_mut(), &gone);
-            p.circuit_mut()
-                .no_connect
-                .retain(|pin| pin.refdes != *r || new_pins.contains(&pin.pin));
+            p.circuit_mut().no_connect.retain(|pin| pin.refdes != *r || new_pins.contains(&pin.pin));
         }
         let mut refdes = targets;
         refdes.sort_by(|a, b| crate::model::sections::natural_cmp(a, b));
@@ -416,18 +384,12 @@ impl Command for Export {
             for id in &list.unsourced {
                 ctx.report(
                     Diagnostic::warning("bom.no_mpn", format!("`{id}` has no MPN; the fab will need one"))
-                        .with_subject(ObjectRef::Part {
-                            scheme: "local".into(),
-                            id: id.clone(),
-                        })
+                        .with_subject(ObjectRef::Part { scheme: "local".into(), id: id.clone() })
                         .with_hint("approve one with `bom.approve`, or switch to a concrete part with `bom.replace`"),
                 );
             }
         }
-        Ok(Exported {
-            path: path.display().to_string(),
-            lines: csv.lines().count().saturating_sub(1),
-        })
+        Ok(Exported { path: path.display().to_string(), lines: csv.lines().count().saturating_sub(1) })
     }
 
     fn summarize(o: &Exported) -> String {
@@ -436,11 +398,7 @@ impl Command for Export {
 }
 
 fn io(path: &std::path::Path, e: std::io::Error) -> CommandError {
-    crate::model::ModelError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    }
-    .into()
+    crate::model::ModelError::Io { path: path.to_path_buf(), source: e }.into()
 }
 
 fn boards_default() -> u64 {
@@ -501,10 +459,8 @@ impl Command for Resolve {
     fn run(self, ctx: &mut Context<'_>) -> Result<Resolution, CommandError> {
         part::require_suppliers(ctx)?;
         let p = ctx.project()?;
-        let rows: Vec<BomRow> = bom::rows(p)
-            .into_iter()
-            .filter(|r| r.mpn.is_none() && (self.all || r.approved.is_empty()))
-            .collect();
+        let rows: Vec<BomRow> =
+            bom::rows(p).into_iter().filter(|r| r.mpn.is_none() && (self.all || r.approved.is_empty())).collect();
         let mut lines = Vec::new();
         let mut errors = Vec::new();
         for row in rows {
@@ -513,11 +469,7 @@ impl Command for Resolve {
             q.limit = self.candidates.clamp(1, 20);
             let r = ctx.session.suppliers.search(&q, &self.providers);
             errors.extend(r.errors);
-            lines.push(Proposal {
-                part: row.part,
-                candidates: r.candidates,
-                applied: false,
-            });
+            lines.push(Proposal { part: row.part, candidates: r.candidates, applied: false });
         }
         errors.sort();
         errors.dedup();
@@ -527,23 +479,14 @@ impl Command for Resolve {
                 if let Some(c) = l.candidates.first() {
                     let line = ctx.project_mut()?.bom_mut().lines.entry(l.part.clone()).or_default();
                     if !line.approved.iter().any(|a| a.mpn.eq_ignore_ascii_case(&c.mpn)) {
-                        line.approved.insert(
-                            0,
-                            ApprovedPart {
-                                manufacturer: c.manufacturer.clone(),
-                                mpn: c.mpn.clone(),
-                            },
-                        );
+                        line.approved
+                            .insert(0, ApprovedPart { manufacturer: c.manufacturer.clone(), mpn: c.mpn.clone() });
                     }
                     l.applied = true;
                 }
             }
         }
-        let unresolved = lines
-            .iter()
-            .filter(|l| l.candidates.is_empty())
-            .map(|l| l.part.clone())
-            .collect::<Vec<_>>();
+        let unresolved = lines.iter().filter(|l| l.candidates.is_empty()).map(|l| l.part.clone()).collect::<Vec<_>>();
         for u in &unresolved {
             ctx.report(
                 Diagnostic::warning("bom.unresolved", format!("no in-stock candidate for `{u}`"))
@@ -570,11 +513,7 @@ impl Command for Resolve {
                     if l.applied { "approved " } else { "" },
                     c.manufacturer.as_deref().unwrap_or("?"),
                     c.mpn,
-                    if l.candidates.len() > 1 {
-                        format!(" (+{} more)", l.candidates.len() - 1)
-                    } else {
-                        String::new()
-                    }
+                    if l.candidates.len() > 1 { format!(" (+{} more)", l.candidates.len() - 1) } else { String::new() }
                 ),
                 None => format!("{}: no candidate", l.part),
             })
@@ -608,10 +547,7 @@ pub struct Sourcing {
 
 fn source_all(ctx: &mut Context<'_>, boards: u64, providers: &[String]) -> Result<Sourcing, CommandError> {
     part::require_suppliers(ctx)?;
-    let rows: Vec<BomRow> = bom::rows(ctx.project()?)
-        .into_iter()
-        .filter(|r| r.quantity > 0)
-        .collect();
+    let rows: Vec<BomRow> = bom::rows(ctx.project()?).into_iter().filter(|r| r.quantity > 0).collect();
     let mut errors = Vec::new();
     let lines: Vec<_> = rows
         .iter()
@@ -619,11 +555,7 @@ fn source_all(ctx: &mut Context<'_>, boards: u64, providers: &[String]) -> Resul
         .collect();
     part::report_provider_errors(ctx, &errors);
     let totals = crate::sourcing::totals(&lines);
-    Ok(Sourcing {
-        boards: boards.max(1),
-        lines,
-        totals,
-    })
+    Ok(Sourcing { boards: boards.max(1), lines, totals })
 }
 
 impl Command for Check {
@@ -636,10 +568,7 @@ impl Command for Check {
         use crate::sourcing::Availability as A;
         let s = source_all(ctx, self.boards, &self.providers)?;
         for l in &s.lines {
-            let subject = ObjectRef::Part {
-                scheme: "local".into(),
-                id: l.part.clone(),
-            };
+            let subject = ObjectRef::Part { scheme: "local".into(), id: l.part.clone() };
             let d = match l.status {
                 A::Ok => continue,
                 A::LowStock => Diagnostic::error(
@@ -669,11 +598,7 @@ impl Command for Check {
     }
 
     fn summarize(o: &Sourcing) -> String {
-        let bad = o
-            .lines
-            .iter()
-            .filter(|l| l.status != crate::sourcing::Availability::Ok)
-            .count();
+        let bad = o.lines.iter().filter(|l| l.status != crate::sourcing::Availability::Ok).count();
         let mut s: String = o
             .lines
             .iter()
@@ -691,12 +616,7 @@ impl Command for Check {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        s += &format!(
-            "\n{} line(s) checked for {} board(s), {} problem(s)",
-            o.lines.len(),
-            o.boards,
-            bad
-        );
+        s += &format!("\n{} line(s) checked for {} board(s), {} problem(s)", o.lines.len(), o.boards, bad);
         s
     }
 }
@@ -721,12 +641,7 @@ impl Command for Cost {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Sourcing, CommandError> {
         let s = source_all(ctx, self.boards, &self.providers)?;
-        let missing: Vec<&str> = s
-            .lines
-            .iter()
-            .filter(|l| l.extended.is_none())
-            .map(|l| l.part.as_str())
-            .collect();
+        let missing: Vec<&str> = s.lines.iter().filter(|l| l.extended.is_none()).map(|l| l.part.as_str()).collect();
         if !missing.is_empty() {
             ctx.report(
                 Diagnostic::warning("bom.incomplete_cost", format!("no price for: {}", missing.join(", ")))
@@ -760,11 +675,7 @@ impl Command for Cost {
         s += &format!(
             "\ntotal for {} board(s): {}",
             o.boards,
-            if totals.is_empty() {
-                "-".into()
-            } else {
-                totals.join(" + ")
-            }
+            if totals.is_empty() { "-".into() } else { totals.join(" + ") }
         );
         s
     }

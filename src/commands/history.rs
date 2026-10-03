@@ -46,11 +46,7 @@ fn step(ctx: &mut Context<'_>, steps: u32, forward: bool) -> Result<StepResult, 
     let mut done = Vec::new();
     for _ in 0..steps.max(1) {
         let current = ctx.project()?.clone();
-        let r = if forward {
-            ctx.session.history.redo(current)
-        } else {
-            ctx.session.history.undo(current)
-        };
+        let r = if forward { ctx.session.history.redo(current) } else { ctx.session.history.undo(current) };
         match r? {
             Some((label, project)) => {
                 ctx.session.project = Some(project);
@@ -72,12 +68,7 @@ fn step(ctx: &mut Context<'_>, steps: u32, forward: bool) -> Result<StepResult, 
 }
 
 fn text(verb: &str, o: &StepResult) -> String {
-    format!(
-        "{verb}: {} (undo: {}, redo: {})",
-        o.steps.join(", "),
-        o.undo_depth,
-        o.redo_depth
-    )
+    format!("{verb}: {} (undo: {}, redo: {})", o.steps.join(", "), o.undo_depth, o.redo_depth)
 }
 
 impl Command for Undo {
@@ -132,10 +123,7 @@ impl Command for List {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<HistoryList, CommandError> {
         ctx.project()?;
-        Ok(HistoryList {
-            undo: ctx.session.history.undo_items(),
-            redo: ctx.session.history.redo_items(),
-        })
+        Ok(HistoryList { undo: ctx.session.history.undo_items(), redo: ctx.session.history.redo_items() })
     }
 
     fn summarize(o: &HistoryList) -> String {

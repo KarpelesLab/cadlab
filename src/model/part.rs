@@ -197,111 +197,27 @@ pub struct KnownParam {
 
 /// Parameters with standard meaning. Others are allowed and parsed without a fixed unit.
 pub const KNOWN_PARAMS: &[KnownParam] = &[
-    KnownParam {
-        key: "resistance",
-        unit: Some(Unit::Ohm),
-        description: "Resistance",
-    },
-    KnownParam {
-        key: "capacitance",
-        unit: Some(Unit::Farad),
-        description: "Capacitance",
-    },
-    KnownParam {
-        key: "inductance",
-        unit: Some(Unit::Henry),
-        description: "Inductance",
-    },
-    KnownParam {
-        key: "impedance",
-        unit: Some(Unit::Ohm),
-        description: "Impedance (e.g. ferrite bead at 100 MHz)",
-    },
-    KnownParam {
-        key: "tolerance",
-        unit: Some(Unit::Percent),
-        description: "Value tolerance",
-    },
-    KnownParam {
-        key: "voltage_rating",
-        unit: Some(Unit::Volt),
-        description: "Maximum voltage",
-    },
-    KnownParam {
-        key: "current_rating",
-        unit: Some(Unit::Ampere),
-        description: "Maximum continuous current",
-    },
-    KnownParam {
-        key: "power_rating",
-        unit: Some(Unit::Watt),
-        description: "Maximum power dissipation",
-    },
-    KnownParam {
-        key: "voltage_in",
-        unit: Some(Unit::Volt),
-        description: "Input voltage (or range)",
-    },
-    KnownParam {
-        key: "voltage_out",
-        unit: Some(Unit::Volt),
-        description: "Output voltage",
-    },
-    KnownParam {
-        key: "current_out",
-        unit: Some(Unit::Ampere),
-        description: "Maximum output current",
-    },
-    KnownParam {
-        key: "dropout",
-        unit: Some(Unit::Volt),
-        description: "Dropout voltage",
-    },
-    KnownParam {
-        key: "forward_voltage",
-        unit: Some(Unit::Volt),
-        description: "Forward voltage",
-    },
-    KnownParam {
-        key: "frequency",
-        unit: Some(Unit::Hertz),
-        description: "Frequency",
-    },
-    KnownParam {
-        key: "load_capacitance",
-        unit: Some(Unit::Farad),
-        description: "Crystal load capacitance",
-    },
-    KnownParam {
-        key: "temperature",
-        unit: Some(Unit::Celsius),
-        description: "Operating temperature range",
-    },
-    KnownParam {
-        key: "tempco",
-        unit: Some(Unit::Ppm),
-        description: "Temperature coefficient (ppm/°C)",
-    },
-    KnownParam {
-        key: "dielectric",
-        unit: None,
-        description: "Capacitor dielectric (X7R, X5R, C0G, ...)",
-    },
-    KnownParam {
-        key: "color",
-        unit: None,
-        description: "LED color",
-    },
-    KnownParam {
-        key: "package",
-        unit: None,
-        description: "Package name (0402, SOT-23-5, QFN-32, ...)",
-    },
-    KnownParam {
-        key: "pitch",
-        unit: None,
-        description: "Pin pitch, with unit (\"2.54mm\")",
-    },
+    KnownParam { key: "resistance", unit: Some(Unit::Ohm), description: "Resistance" },
+    KnownParam { key: "capacitance", unit: Some(Unit::Farad), description: "Capacitance" },
+    KnownParam { key: "inductance", unit: Some(Unit::Henry), description: "Inductance" },
+    KnownParam { key: "impedance", unit: Some(Unit::Ohm), description: "Impedance (e.g. ferrite bead at 100 MHz)" },
+    KnownParam { key: "tolerance", unit: Some(Unit::Percent), description: "Value tolerance" },
+    KnownParam { key: "voltage_rating", unit: Some(Unit::Volt), description: "Maximum voltage" },
+    KnownParam { key: "current_rating", unit: Some(Unit::Ampere), description: "Maximum continuous current" },
+    KnownParam { key: "power_rating", unit: Some(Unit::Watt), description: "Maximum power dissipation" },
+    KnownParam { key: "voltage_in", unit: Some(Unit::Volt), description: "Input voltage (or range)" },
+    KnownParam { key: "voltage_out", unit: Some(Unit::Volt), description: "Output voltage" },
+    KnownParam { key: "current_out", unit: Some(Unit::Ampere), description: "Maximum output current" },
+    KnownParam { key: "dropout", unit: Some(Unit::Volt), description: "Dropout voltage" },
+    KnownParam { key: "forward_voltage", unit: Some(Unit::Volt), description: "Forward voltage" },
+    KnownParam { key: "frequency", unit: Some(Unit::Hertz), description: "Frequency" },
+    KnownParam { key: "load_capacitance", unit: Some(Unit::Farad), description: "Crystal load capacitance" },
+    KnownParam { key: "temperature", unit: Some(Unit::Celsius), description: "Operating temperature range" },
+    KnownParam { key: "tempco", unit: Some(Unit::Ppm), description: "Temperature coefficient (ppm/°C)" },
+    KnownParam { key: "dielectric", unit: None, description: "Capacitor dielectric (X7R, X5R, C0G, ...)" },
+    KnownParam { key: "color", unit: None, description: "LED color" },
+    KnownParam { key: "package", unit: None, description: "Package name (0402, SOT-23-5, QFN-32, ...)" },
+    KnownParam { key: "pitch", unit: None, description: "Pin pitch, with unit (\"2.54mm\")" },
 ];
 
 /// Looks up a known parameter.
@@ -438,14 +354,7 @@ pub struct Pin {
 impl Pin {
     /// A pin with the given number, name and kind.
     pub fn new(number: impl Into<String>, name: impl Into<String>, kind: PinKind) -> Self {
-        Pin {
-            number: number.into(),
-            name: name.into(),
-            kind,
-            group: None,
-            side: None,
-            at: None,
-        }
+        Pin { number: number.into(), name: name.into(), kind, group: None, side: None, at: None }
     }
 
     /// The name, or the number when there is no name.
@@ -500,10 +409,7 @@ pub struct Symbol {
 impl Symbol {
     /// Finds a pin by number, then by name (case-sensitive).
     pub fn pin(&self, key: &str) -> Option<&Pin> {
-        self.pins
-            .iter()
-            .find(|p| p.number == key)
-            .or_else(|| self.pins.iter().find(|p| p.name == key))
+        self.pins.iter().find(|p| p.number == key).or_else(|| self.pins.iter().find(|p| p.name == key))
     }
 }
 
@@ -521,10 +427,7 @@ pub struct FootprintRef {
 impl FootprintRef {
     /// Reference with the identity pin map.
     pub fn new(footprint: impl Into<String>) -> Self {
-        FootprintRef {
-            footprint: footprint.into(),
-            pin_map: BTreeMap::new(),
-        }
+        FootprintRef { footprint: footprint.into(), pin_map: BTreeMap::new() }
     }
 
     /// Pads a pin connects to.
@@ -621,14 +524,7 @@ impl Part {
         if !passive {
             return self.mpn.clone().unwrap_or_else(|| self.id.clone());
         }
-        for k in [
-            "resistance",
-            "capacitance",
-            "inductance",
-            "impedance",
-            "frequency",
-            "color",
-        ] {
+        for k in ["resistance", "capacitance", "inductance", "impedance", "frequency", "color"] {
             if let Some(v) = self.params.get(k) {
                 return match v {
                     ParamValue::Quantity(q) if q.unit == Unit::Ohm => q.display_bare(),
@@ -650,9 +546,7 @@ pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 100
         && !id.starts_with('.')
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
 }
 
 /// Turns arbitrary text into a valid ID: `R 10k 1% 0402` → `R_10k_1pct_0402`.
@@ -673,11 +567,7 @@ pub fn slugify(s: &str) -> String {
         }
     }
     let out = out.trim_matches('_').trim_start_matches('.').to_string();
-    if out.is_empty() {
-        "part".into()
-    } else {
-        out.chars().take(100).collect()
-    }
+    if out.is_empty() { "part".into() } else { out.chars().take(100).collect() }
 }
 
 #[cfg(test)]
@@ -688,31 +578,13 @@ mod tests {
     fn param_parsing() {
         assert_eq!(ParamValue::parse("resistance", "10k").unwrap().to_string(), "10kΩ");
         assert!(ParamValue::parse("resistance", "10uF").is_err());
-        assert_eq!(
-            ParamValue::parse("dielectric", "X7R").unwrap(),
-            ParamValue::Text("X7R".into())
-        );
-        assert_eq!(
-            ParamValue::parse("temperature", "-40..85°C").unwrap().to_string(),
-            "-40°C..85°C"
-        );
-        assert_eq!(
-            ParamValue::parse("temperature", "-40..85").unwrap().to_string(),
-            "-40°C..85°C"
-        );
-        assert_eq!(
-            ParamValue::parse("voltage_in", "2.5V..6V").unwrap().to_string(),
-            "2.5V..6V"
-        );
-        assert_eq!(
-            ParamValue::parse("custom", "hello").unwrap(),
-            ParamValue::Text("hello".into())
-        );
+        assert_eq!(ParamValue::parse("dielectric", "X7R").unwrap(), ParamValue::Text("X7R".into()));
+        assert_eq!(ParamValue::parse("temperature", "-40..85°C").unwrap().to_string(), "-40°C..85°C");
+        assert_eq!(ParamValue::parse("temperature", "-40..85").unwrap().to_string(), "-40°C..85°C");
+        assert_eq!(ParamValue::parse("voltage_in", "2.5V..6V").unwrap().to_string(), "2.5V..6V");
+        assert_eq!(ParamValue::parse("custom", "hello").unwrap(), ParamValue::Text("hello".into()));
         assert_eq!(ParamValue::parse("custom", "12mA").unwrap().to_string(), "12mA");
-        assert_eq!(
-            ParamValue::parse("package", "0402").unwrap(),
-            ParamValue::Text("0402".into())
-        );
+        assert_eq!(ParamValue::parse("package", "0402").unwrap(), ParamValue::Text("0402".into()));
     }
 
     #[test]

@@ -11,13 +11,7 @@ use crate::supplier::{Candidate, Lifecycle, Money, ParamFilter, SearchQuery, Sup
 /// The query a generic part translates to: same category and package, same main value,
 /// ratings at least as good (tolerance at most, voltage/current/power at least).
 pub fn query_for(part: &Part, quantity: u64) -> SearchQuery {
-    let mut q = SearchQuery {
-        category: Some(part.category),
-        quantity,
-        in_stock: true,
-        limit: 5,
-        ..Default::default()
-    };
+    let mut q = SearchQuery { category: Some(part.category), quantity, in_stock: true, limit: 5, ..Default::default() };
     for (k, v) in &part.params.0 {
         let op = match k.as_str() {
             "package" => {
@@ -28,11 +22,7 @@ pub fn query_for(part: &Part, quantity: u64) -> SearchQuery {
             "voltage_rating" | "current_rating" | "power_rating" | "current_out" => Op::Ge,
             _ => Op::Eq,
         };
-        q.filters.push(ParamFilter {
-            key: k.clone(),
-            op,
-            value: v.clone(),
-        });
+        q.filters.push(ParamFilter { key: k.clone(), op, value: v.clone() });
     }
     q
 }
@@ -127,11 +117,7 @@ pub fn source_line(
         out.status = Availability::NotFound;
         return out;
     }
-    let q = SearchQuery {
-        quantity: needed.max(1),
-        include_obsolete: true,
-        ..Default::default()
-    };
+    let q = SearchQuery { quantity: needed.max(1), include_obsolete: true, ..Default::default() };
     q.rank(&mut offers);
     let best = offers.remove(0);
     out.status = if best.stock < needed.max(1) {

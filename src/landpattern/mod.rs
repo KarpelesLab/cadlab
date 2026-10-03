@@ -75,10 +75,7 @@ impl Dim {
 
     /// From nominal and symmetric tolerance.
     pub fn plus_minus(nominal: Nm, tol: Nm) -> Self {
-        Dim {
-            min: nominal - tol,
-            max: nominal + tol,
-        }
+        Dim { min: nominal - tol, max: nominal + tol }
     }
 
     /// Parses `1.0±0.05mm`, `1.0+-0.05mm`, `0.15..0.35mm`, `1.0mm`. A unit on one side applies to
@@ -106,10 +103,7 @@ impl Dim {
         }
         if let Some((a, b)) = s.split_once("..") {
             let (a, b) = with_unit(a, b)?;
-            return Ok(Dim {
-                min: a.min(b),
-                max: a.max(b),
-            });
+            return Ok(Dim { min: a.min(b), max: a.max(b) });
         }
         Ok(Dim::exact(Nm::parse(s)?))
     }
@@ -117,11 +111,7 @@ impl Dim {
 
 impl fmt::Display for Dim {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.min == self.max {
-            write!(f, "{}", self.min)
-        } else {
-            write!(f, "{}..{}", self.min, self.max)
-        }
+        if self.min == self.max { write!(f, "{}", self.min) } else { write!(f, "{}..{}", self.min, self.max) }
     }
 }
 
@@ -437,48 +427,14 @@ impl PackageSpec {
     pub fn ipc_name(&self, density: Density) -> String {
         let d = density.suffix();
         match self {
-            PackageSpec::Chip {
-                kind,
-                length,
-                width,
-                height,
-                ..
-            } => {
-                format!(
-                    "{}{:02}{:02}X{}{d}",
-                    kind.prefix(),
-                    tmm(length.nominal()),
-                    tmm(width.nominal()),
-                    hmm(*height)
-                )
+            PackageSpec::Chip { kind, length, width, height, .. } => {
+                format!("{}{:02}{:02}X{}{d}", kind.prefix(), tmm(length.nominal()), tmm(width.nominal()), hmm(*height))
             }
-            PackageSpec::GullWing {
-                name,
-                pins,
-                pitch,
-                span,
-                height,
-                exposed_pad,
-                ..
-            } => {
+            PackageSpec::GullWing { name, pins, pitch, span, height, exposed_pad, .. } => {
                 let ep = u32::from(exposed_pad.is_some());
-                format!(
-                    "{name}{}P{}X{}-{}{d}",
-                    hmm(*pitch),
-                    hmm(span.nominal()),
-                    hmm(*height),
-                    pins + ep
-                )
+                format!("{name}{}P{}X{}-{}{d}", hmm(*pitch), hmm(span.nominal()), hmm(*height), pins + ep)
             }
-            PackageSpec::Qfp {
-                pins,
-                pitch,
-                span_x,
-                span_y,
-                height,
-                exposed_pad,
-                ..
-            } => {
+            PackageSpec::Qfp { pins, pitch, span_x, span_y, height, exposed_pad, .. } => {
                 let ep = u32::from(exposed_pad.is_some());
                 format!(
                     "QFP{}P{}X{}X{}-{}{d}",
@@ -489,15 +445,7 @@ impl PackageSpec {
                     pins + ep
                 )
             }
-            PackageSpec::Dfn {
-                pins,
-                pitch,
-                body_width,
-                body_length,
-                height,
-                exposed_pad,
-                ..
-            } => {
+            PackageSpec::Dfn { pins, pitch, body_width, body_length, height, exposed_pad, .. } => {
                 let ep = u32::from(exposed_pad.is_some());
                 format!(
                     "SON{}P{}X{}X{}-{}{d}",
@@ -508,15 +456,7 @@ impl PackageSpec {
                     pins + ep
                 )
             }
-            PackageSpec::Qfn {
-                pins,
-                pitch,
-                body_x,
-                body_y,
-                height,
-                exposed_pad,
-                ..
-            } => {
+            PackageSpec::Qfn { pins, pitch, body_x, body_y, height, exposed_pad, .. } => {
                 let ep = u32::from(exposed_pad.is_some());
                 format!(
                     "QFN{}P{}X{}X{}-{}{d}",
@@ -527,12 +467,7 @@ impl PackageSpec {
                     pins + ep
                 )
             }
-            PackageSpec::PinHeader {
-                rows,
-                pins_per_row,
-                pitch,
-                ..
-            } => {
+            PackageSpec::PinHeader { rows, pins_per_row, pitch, .. } => {
                 format!(
                     "PinHeader_{rows}x{pins_per_row:02}_P{}mm",
                     pitch.display_in(crate::units::LengthUnit::Mm).trim_end_matches("mm")
@@ -558,38 +493,16 @@ impl PackageSpec {
 pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenError> {
     let name = spec.ipc_name(opts.density);
     let mut fp = match spec {
-        PackageSpec::Chip {
-            kind,
-            length,
-            width,
-            terminal,
-            height,
-        } => {
-            let f = if length.nominal() < Nm::from_um(1500) {
-                &ipc::CHIP_SMALL
-            } else {
-                &ipc::CHIP
-            };
+        PackageSpec::Chip { kind, length, width, terminal, height } => {
+            let f = if length.nominal() < Nm::from_um(1500) { &ipc::CHIP_SMALL } else { &ipc::CHIP };
             check_dims(&[("length", length), ("width", width), ("terminal", terminal)])?;
             let row = ipc::row_pads(*length, *terminal, *width, f, opts);
             let pads = vec![
                 smd_pad("1", Point::new(-row.center, Nm::ZERO), row.length, row.width, opts),
                 smd_pad("2", Point::new(row.center, Nm::ZERO), row.length, row.width, opts),
             ];
-            let body = Body {
-                width: length.nominal(),
-                length: width.nominal(),
-                height: *height,
-            };
-            draw::finish(
-                name,
-                Mount::Smd,
-                pads,
-                body,
-                f.courtyard(opts.density),
-                kind.polarized(),
-                opts,
-            )
+            let body = Body { width: length.nominal(), length: width.nominal(), height: *height };
+            draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), kind.polarized(), opts)
         }
         PackageSpec::GullWing {
             pins,
@@ -611,20 +524,14 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                 ("terminal", terminal),
                 ("lead_width", lead_width),
             ])?;
-            let f = if *pitch <= Nm::from_um(625) {
-                &ipc::GULLWING_FINE
-            } else {
-                &ipc::GULLWING
-            };
+            let f = if *pitch <= Nm::from_um(625) { &ipc::GULLWING_FINE } else { &ipc::GULLWING };
             let row = ipc::row_pads(*span, *terminal, *lead_width, f, opts);
             let width = ipc::clamp_to_pitch(row.width, *pitch, opts.min_pad_gap);
             let per_side = match slots_per_side {
                 Some(n) => *n,
                 None => {
                     if !pins.is_multiple_of(2) {
-                        return Err(invalid(
-                            "a two-row package needs an even pin count, or `slots_per_side`",
-                        ));
+                        return Err(invalid("a two-row package needs an even pin count, or `slots_per_side`"));
                     }
                     pins / 2
                 }
@@ -639,28 +546,11 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body {
-                width: body_width.nominal(),
-                length: body_length.nominal(),
-                height: *height,
-            };
+            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
-        PackageSpec::Dfn {
-            pins,
-            pitch,
-            body_width,
-            body_length,
-            terminal,
-            lead_width,
-            height,
-            exposed_pad,
-        } => {
-            check_dims(&[
-                ("body_width", body_width),
-                ("terminal", terminal),
-                ("lead_width", lead_width),
-            ])?;
+        PackageSpec::Dfn { pins, pitch, body_width, body_length, terminal, lead_width, height, exposed_pad } => {
+            check_dims(&[("body_width", body_width), ("terminal", terminal), ("lead_width", lead_width)])?;
             if !pins.is_multiple_of(2) {
                 return Err(invalid("a DFN needs an even pin count"));
             }
@@ -671,65 +561,23 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body {
-                width: body_width.nominal(),
-                length: body_length.nominal(),
-                height: *height,
-            };
+            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
-        PackageSpec::Qfp {
-            pins,
-            pitch,
-            span_x,
-            span_y,
-            body_x,
-            body_y,
-            terminal,
-            lead_width,
-            height,
-            exposed_pad,
-        } => {
-            check_dims(&[
-                ("span_x", span_x),
-                ("span_y", span_y),
-                ("terminal", terminal),
-                ("lead_width", lead_width),
-            ])?;
-            let f = if *pitch <= Nm::from_um(625) {
-                &ipc::GULLWING_FINE
-            } else {
-                &ipc::GULLWING
-            };
+        PackageSpec::Qfp { pins, pitch, span_x, span_y, body_x, body_y, terminal, lead_width, height, exposed_pad } => {
+            check_dims(&[("span_x", span_x), ("span_y", span_y), ("terminal", terminal), ("lead_width", lead_width)])?;
+            let f = if *pitch <= Nm::from_um(625) { &ipc::GULLWING_FINE } else { &ipc::GULLWING };
             let rx = ipc::row_pads(*span_x, *terminal, *lead_width, f, opts);
             let ry = ipc::row_pads(*span_y, *terminal, *lead_width, f, opts);
             let mut pads = quad(*pins, *pitch, rx, ry, opts)?;
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body {
-                width: body_x.nominal(),
-                length: body_y.nominal(),
-                height: *height,
-            };
+            let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
-        PackageSpec::Qfn {
-            pins,
-            pitch,
-            body_x,
-            body_y,
-            terminal,
-            lead_width,
-            height,
-            exposed_pad,
-        } => {
-            check_dims(&[
-                ("body_x", body_x),
-                ("body_y", body_y),
-                ("terminal", terminal),
-                ("lead_width", lead_width),
-            ])?;
+        PackageSpec::Qfn { pins, pitch, body_x, body_y, terminal, lead_width, height, exposed_pad } => {
+            check_dims(&[("body_x", body_x), ("body_y", body_y), ("terminal", terminal), ("lead_width", lead_width)])?;
             let f = &ipc::NOLEAD;
             let rx = ipc::row_pads(*body_x, *terminal, *lead_width, f, opts);
             let ry = ipc::row_pads(*body_y, *terminal, *lead_width, f, opts);
@@ -737,21 +585,10 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body {
-                width: body_x.nominal(),
-                length: body_y.nominal(),
-                height: *height,
-            };
+            let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
-        PackageSpec::PinHeader {
-            rows,
-            pins_per_row,
-            pitch,
-            drill,
-            pad,
-            height,
-        } => {
+        PackageSpec::PinHeader { rows, pins_per_row, pitch, drill, pad, height } => {
             if !(1..=2).contains(rows) || *pins_per_row == 0 {
                 return Err(invalid("pin headers have 1 or 2 rows and at least one pin per row"));
             }
@@ -765,11 +602,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                 for r in 0..*rows {
                     let n = i * rows + r + 1;
                     let at = Point::new(x0 + *pitch * r as i64, y0 - *pitch * i as i64);
-                    let shape = if n == 1 {
-                        PadShape::Rect { w: *pad, h: *pad }
-                    } else {
-                        PadShape::Circle { d: *pad }
-                    };
+                    let shape = if n == 1 { PadShape::Rect { w: *pad, h: *pad } } else { PadShape::Circle { d: *pad } };
                     pads.push(Pad {
                         number: n.to_string(),
                         at,
@@ -780,11 +613,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                     });
                 }
             }
-            let body = Body {
-                width: *pitch * *rows as i64,
-                length: *pitch * *pins_per_row as i64,
-                height: *height,
-            };
+            let body = Body { width: *pitch * *rows as i64, length: *pitch * *pins_per_row as i64, height: *height };
             draw::finish(name, Mount::Tht, pads, body, Nm::from_um(250), false, opts)
         }
     }?;
@@ -800,9 +629,7 @@ fn describe(spec: &PackageSpec, density: Density) -> String {
         Density::Least => "least",
     };
     let what = match spec {
-        PackageSpec::Chip {
-            kind, length, width, ..
-        } => {
+        PackageSpec::Chip { kind, length, width, .. } => {
             let k = match kind {
                 ChipKind::Resistor => "Resistor",
                 ChipKind::Capacitor => "Capacitor",
@@ -817,12 +644,9 @@ fn describe(spec: &PackageSpec, density: Density) -> String {
         PackageSpec::Qfp { pins, pitch, .. } => format!("QFP {pins} pins, pitch {pitch}"),
         PackageSpec::Dfn { pins, pitch, .. } => format!("DFN/SON {pins} pins, pitch {pitch}"),
         PackageSpec::Qfn { pins, pitch, .. } => format!("QFN {pins} pins, pitch {pitch}"),
-        PackageSpec::PinHeader {
-            rows,
-            pins_per_row,
-            pitch,
-            ..
-        } => format!("pin header {rows}x{pins_per_row}, pitch {pitch}"),
+        PackageSpec::PinHeader { rows, pins_per_row, pitch, .. } => {
+            format!("pin header {rows}x{pins_per_row}, pitch {pitch}")
+        }
     };
     format!("{what}; IPC-7351B {level} density, generated by cadlab")
 }
@@ -846,20 +670,9 @@ fn smd_pad(number: &str, at: Point, len: Nm, width: Nm, opts: &GenOptions) -> Pa
     let shape = if opts.corner_ratio_pct == 0 {
         PadShape::Rect { w: len, h: width }
     } else {
-        PadShape::RoundRect {
-            w: len,
-            h: width,
-            r: corner(len, width, opts),
-        }
+        PadShape::RoundRect { w: len, h: width, r: corner(len, width, opts) }
     };
-    Pad {
-        number: number.to_string(),
-        at,
-        rotation: Default::default(),
-        shape,
-        kind: PadKind::Smd,
-        paste: None,
-    }
+    Pad { number: number.to_string(), at, rotation: Default::default(), shape, kind: PadKind::Smd, paste: None }
 }
 
 /// Two rows: pins along Y, left row top to bottom then right row bottom to top.
@@ -872,11 +685,7 @@ fn dual_row(per_side: u32, pitch: Nm, center: Nm, len: Nm, width: Nm, missing: &
             continue;
         }
         n += 1;
-        let (x, i) = if slot <= per_side {
-            (-center, slot - 1)
-        } else {
-            (center, per_side * 2 - slot)
-        };
+        let (x, i) = if slot <= per_side { (-center, slot - 1) } else { (center, per_side * 2 - slot) };
         let at = Point::new(x, y0 - pitch * i as i64);
         pads.push(smd_pad(&n.to_string(), at, len, width, opts));
     }
@@ -903,10 +712,7 @@ fn quad(pins: u32, pitch: Nm, rx: ipc::RowPads, ry: ipc::RowPads, opts: &GenOpti
             2 => smd_pad("", Point::new(rx.center, -off + step), rx.length, wx, opts),
             _ => smd_pad("", Point::new(off - step, ry.center), wy, ry.length, opts),
         };
-        pads.push(Pad {
-            number: (i + 1).to_string(),
-            ..pad
-        });
+        pads.push(Pad { number: (i + 1).to_string(), ..pad });
     }
     Ok(pads)
 }
@@ -920,10 +726,7 @@ fn exposed(ep: &ExposedPad, default_number: u32, opts: &GenOptions) -> Pad {
     let (nx, ny) = (cells(ep.width), cells(ep.length));
     let scale = (opts.ep_paste_pct.min(100) as f64 / 100.0).sqrt();
     let (cw, ch) = (ep.width.0 / nx, ep.length.0 / ny);
-    let size = (
-        Nm((cw as f64 * scale) as i64 / 10_000 * 10_000),
-        Nm((ch as f64 * scale) as i64 / 10_000 * 10_000),
-    );
+    let size = (Nm((cw as f64 * scale) as i64 / 10_000 * 10_000), Nm((ch as f64 * scale) as i64 / 10_000 * 10_000));
     let mut at = Vec::new();
     for j in 0..ny {
         for i in 0..nx {

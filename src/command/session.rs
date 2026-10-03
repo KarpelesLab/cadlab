@@ -104,11 +104,7 @@ impl Session {
     /// Writes the project, its history and the operation log.
     pub fn save(&mut self) -> Result<SaveReport, CommandError> {
         let (Some(project), Some(root)) = (&self.project, &self.root) else {
-            return Err(CommandError::new(
-                super::ErrorKind::NoProject,
-                "project.none",
-                "no project is open",
-            ));
+            return Err(CommandError::new(super::ErrorKind::NoProject, "project.none", "no project is open"));
         };
         let report = project.save(root)?;
         let cache = root.join(CACHE_DIR);
@@ -132,11 +128,7 @@ impl Session {
             return Ok(());
         }
         let path = root.join(CACHE_DIR).join("oplog.jsonl");
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| io_err(&path, e))?;
+        let mut f = OpenOptions::new().create(true).append(true).open(&path).map_err(|e| io_err(&path, e))?;
         for s in self.pending_log.drain(..) {
             let line = serde_json::to_string(&s).expect("step serializes");
             writeln!(f, "{line}").map_err(|e| io_err(&path, e))?;
@@ -154,9 +146,5 @@ fn absolute(p: &Path) -> PathBuf {
 }
 
 fn io_err(path: &Path, e: std::io::Error) -> CommandError {
-    crate::model::ModelError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    }
-    .into()
+    crate::model::ModelError::Io { path: path.to_path_buf(), source: e }.into()
 }

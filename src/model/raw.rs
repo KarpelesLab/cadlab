@@ -24,10 +24,7 @@ pub struct RawProject {
 impl RawProject {
     /// A raw project with only a manifest.
     pub fn from_manifest(manifest: Value) -> Self {
-        RawProject {
-            manifest,
-            ..Default::default()
-        }
+        RawProject { manifest, ..Default::default() }
     }
 
     /// The manifest's `schema_version`.
@@ -66,19 +63,14 @@ impl RawProject {
         let Value::Object(mut m) = v else {
             return Err(ModelError::invalid("<packed>", "expected a JSON object"));
         };
-        let manifest = m
-            .remove("manifest")
-            .ok_or_else(|| ModelError::invalid("<packed>", "missing `manifest`"))?;
+        let manifest = m.remove("manifest").ok_or_else(|| ModelError::invalid("<packed>", "missing `manifest`"))?;
         let mut raw = RawProject::from_manifest(manifest);
         if let Some(lib) = m.remove("library") {
             let take = |key: &str| -> Result<BTreeMap<String, Value>, ModelError> {
                 match lib.get(key) {
                     None => Ok(BTreeMap::new()),
                     Some(Value::Object(o)) => Ok(o.clone().into_iter().collect()),
-                    Some(_) => Err(ModelError::invalid(
-                        "<packed>",
-                        format!("`library.{key}` must be an object"),
-                    )),
+                    Some(_) => Err(ModelError::invalid("<packed>", format!("`library.{key}` must be an object"))),
                 }
             };
             raw.parts = take("parts")?;

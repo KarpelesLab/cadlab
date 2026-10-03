@@ -38,10 +38,7 @@ pub struct CommandError {
 impl CommandError {
     /// New error.
     pub fn new(kind: ErrorKind, code: &'static str, message: impl Into<String>) -> Self {
-        CommandError {
-            kind,
-            diagnostic: Box::new(Diagnostic::error(code, message)),
-        }
+        CommandError { kind, diagnostic: Box::new(Diagnostic::error(code, message)) }
     }
 
     /// Invalid arguments.
@@ -73,11 +70,7 @@ impl CommandError {
 
     /// Sets the hint only if none was set (e.g. by suggestions).
     pub fn with_hint_if_none(self, hint: impl Into<String>) -> Self {
-        if self.diagnostic.hint.is_some() {
-            self
-        } else {
-            self.with_hint(hint)
-        }
+        if self.diagnostic.hint.is_some() { self } else { self.with_hint(hint) }
     }
 
     /// Adds a subject.

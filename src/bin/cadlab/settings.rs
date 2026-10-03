@@ -29,30 +29,15 @@ pub fn command() -> Command {
                         .value_name("ID")
                         .help("OAuth client ID of your DigiKey app"),
                 )
-                .arg(
-                    Arg::new("site")
-                        .long("site")
-                        .value_name("SITE")
-                        .help("Locale site: US, DE, UK, ... (default US)"),
-                )
+                .arg(Arg::new("site").long("site").value_name("SITE").help("Locale site: US, DE, UK, ... (default US)"))
                 .arg(
                     Arg::new("currency")
                         .long("currency")
                         .value_name("CUR")
                         .help("Price currency: USD, EUR, ... (default USD)"),
                 )
-                .arg(
-                    Arg::new("language")
-                        .long("language")
-                        .value_name("LANG")
-                        .help("Language (default en)"),
-                )
-                .arg(
-                    Arg::new("sandbox")
-                        .long("sandbox")
-                        .action(ArgAction::SetTrue)
-                        .help("Use DigiKey's sandbox API"),
-                )
+                .arg(Arg::new("language").long("language").value_name("LANG").help("Language (default en)"))
+                .arg(Arg::new("sandbox").long("sandbox").action(ArgAction::SetTrue).help("Use DigiKey's sandbox API"))
                 .arg(
                     Arg::new("no_verify")
                         .long("no-verify")
@@ -61,21 +46,15 @@ pub fn command() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("remove").about("Remove stored credentials").arg(
-                Arg::new("section")
-                    .required(true)
-                    .value_parser(["digikey"])
-                    .help("What to remove"),
-            ),
+            Command::new("remove")
+                .about("Remove stored credentials")
+                .arg(Arg::new("section").required(true).value_parser(["digikey"]).help("What to remove")),
         )
 }
 
 fn fail(json_out: bool, msg: &str) -> u8 {
     if json_out {
-        println!(
-            "{}",
-            json!({"ok": false, "error": {"code": "config.error", "message": msg}})
-        );
+        println!("{}", json!({"ok": false, "error": {"code": "config.error", "message": msg}}));
     } else {
         eprintln!("error: {msg}");
     }
@@ -114,28 +93,19 @@ pub fn run(m: &ArgMatches, json_out: bool) -> u8 {
             if json_out {
                 println!("{}", json!({"ok": true, "path": config::path(), "digikey": dk}));
             } else {
-                println!(
-                    "settings: {}",
-                    config::path().map(|p| p.display().to_string()).unwrap_or_default()
-                );
+                println!("settings: {}", config::path().map(|p| p.display().to_string()).unwrap_or_default());
                 match &cfg.digikey {
                     Some(d) => println!(
                         "digikey: client id {}, secret {}{}{}{}",
                         d.client_id,
                         mask(&d.client_secret),
                         d.site.as_ref().map(|s| format!(", site {s}")).unwrap_or_default(),
-                        d.currency
-                            .as_ref()
-                            .map(|s| format!(", currency {s}"))
-                            .unwrap_or_default(),
+                        d.currency.as_ref().map(|s| format!(", currency {s}")).unwrap_or_default(),
                         if d.sandbox { ", sandbox" } else { "" }
                     ),
                     None => println!("digikey: not configured (`cadlab config digikey`)"),
                 }
-                for (var, what) in [
-                    ("DIGIKEY_CLIENT_ID", "client id"),
-                    ("DIGIKEY_CLIENT_SECRET", "client secret"),
-                ] {
+                for (var, what) in [("DIGIKEY_CLIENT_ID", "client id"), ("DIGIKEY_CLIENT_SECRET", "client secret")] {
                     if std::env::var_os(var).is_some() {
                         println!("note: {var} is set and overrides the stored {what}");
                     }
@@ -196,10 +166,7 @@ fn digikey(m: &ArgMatches, mut cfg: UserConfig, json_out: bool) -> u8 {
         None => {}
     }
     if d.client_id.is_empty() {
-        return fail(
-            json_out,
-            "a client ID is required (--client-id, or run in a terminal to be prompted)",
-        );
+        return fail(json_out, "a client ID is required (--client-id, or run in a terminal to be prompted)");
     }
 
     // Secret: hidden prompt, or the first line of stdin when not interactive.
@@ -247,10 +214,7 @@ fn digikey(m: &ArgMatches, mut cfg: UserConfig, json_out: bool) -> u8 {
                 }
             }
             Err(e) => {
-                return fail(
-                    json_out,
-                    &format!("{e} (nothing saved; use --no-verify to save anyway)"),
-                );
+                return fail(json_out, &format!("{e} (nothing saved; use --no-verify to save anyway)"));
             }
         }
     }
@@ -277,11 +241,7 @@ fn verify(d: &DigiKeySettings) -> Result<(), String> {
     let dk = cadlab::supplier::digikey::DigiKey::new(
         d.client_id.clone(),
         d.client_secret.clone(),
-        if d.sandbox {
-            "https://sandbox-api.digikey.com"
-        } else {
-            "https://api.digikey.com"
-        },
+        if d.sandbox { "https://sandbox-api.digikey.com" } else { "https://api.digikey.com" },
         d.site.as_deref().unwrap_or("US"),
         d.language.as_deref().unwrap_or("en"),
         d.currency.as_deref().unwrap_or("USD"),

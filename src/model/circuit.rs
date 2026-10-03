@@ -39,10 +39,7 @@ pub struct PinRef {
 impl PinRef {
     /// New pin reference.
     pub fn new(refdes: impl Into<String>, pin: impl Into<String>) -> Self {
-        PinRef {
-            refdes: refdes.into(),
-            pin: pin.into(),
-        }
+        PinRef { refdes: refdes.into(), pin: pin.into() }
     }
 
     /// Parses `U1.4`.
@@ -225,18 +222,12 @@ impl Circuit {
 
     /// The net a pin is on.
     pub fn net_of(&self, pin: &PinRef) -> Option<&str> {
-        self.nets
-            .iter()
-            .find(|(_, n)| n.pins.contains(pin))
-            .map(|(k, _)| k.as_str())
+        self.nets.iter().find(|(_, n)| n.pins.contains(pin)).map(|(k, _)| k.as_str())
     }
 
     /// Pin → net index.
     pub fn pin_index(&self) -> BTreeMap<&PinRef, &str> {
-        self.nets
-            .iter()
-            .flat_map(|(name, n)| n.pins.iter().map(move |p| (p, name.as_str())))
-            .collect()
+        self.nets.iter().flat_map(|(name, n)| n.pins.iter().map(move |p| (p, name.as_str()))).collect()
     }
 
     /// Removes every pin of `refdes` from nets and no-connect marks; drops nets left empty.
@@ -273,12 +264,7 @@ mod tests {
 
     #[test]
     fn pinref_order_and_serde() {
-        let mut v = [
-            PinRef::new("U1", "10"),
-            PinRef::new("R10", "1"),
-            PinRef::new("U1", "2"),
-            PinRef::new("R2", "1"),
-        ];
+        let mut v = [PinRef::new("U1", "10"), PinRef::new("R10", "1"), PinRef::new("U1", "2"), PinRef::new("R2", "1")];
         v.sort();
         let s: Vec<String> = v.iter().map(ToString::to_string).collect();
         assert_eq!(s, ["R2.1", "R10.1", "U1.2", "U1.10"]);
@@ -291,12 +277,7 @@ mod tests {
         let mut c = Circuit::default();
         c.components.insert(
             "R1".into(),
-            Component {
-                id: ObjectId(1),
-                part: "r".into(),
-                block: None,
-                properties: Default::default(),
-            },
+            Component { id: ObjectId(1), part: "r".into(), block: None, properties: Default::default() },
         );
         c.nets.insert(
             "A".into(),

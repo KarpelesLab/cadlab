@@ -51,6 +51,11 @@ expression: names
   "bom.resolve",
   "bom.check",
   "bom.cost",
+  "render.schematic",
+  "render.symbol",
+  "render.footprint",
+  "schematic.place",
+  "schematic.unplace",
   "history.undo",
   "history.redo",
   "history.list"

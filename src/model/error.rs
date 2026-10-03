@@ -38,16 +38,10 @@ pub enum ModelError {
 
 impl ModelError {
     pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        ModelError::Io {
-            path: path.into(),
-            source,
-        }
+        ModelError::Io { path: path.into(), source }
     }
 
     pub(crate) fn invalid(path: impl Into<PathBuf>, message: impl ToString) -> Self {
-        ModelError::Invalid {
-            path: path.into(),
-            message: message.to_string(),
-        }
+        ModelError::Invalid { path: path.into(), message: message.to_string() }
     }
 }

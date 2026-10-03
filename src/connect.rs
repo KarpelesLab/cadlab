@@ -24,11 +24,7 @@ pub struct ConnectError {
 }
 
 fn e(code: &'static str, message: impl Into<String>) -> ConnectError {
-    ConnectError {
-        code,
-        message: message.into(),
-        hint: None,
-    }
+    ConnectError { code, message: message.into(), hint: None }
 }
 
 impl ConnectError {
@@ -93,9 +89,7 @@ pub fn expand_net(name: &str) -> Result<Vec<String>, ConnectError> {
         if n > 1024 {
             return Err(e("net.invalid_bus", format!("`{name}`: bus too wide")));
         }
-        return Ok((0..n)
-            .map(|i| format!("{base}{}", if nb >= na { na + i } else { na - i }))
-            .collect());
+        return Ok((0..n).map(|i| format!("{base}{}", if nb >= na { na + i } else { na - i })).collect());
     }
     if name.contains(['[', ']']) || name.contains("..") {
         return Err(e("net.invalid_name", format!("invalid net name `{name}`")).hint("buses are written NAME[0..7]"));
@@ -117,10 +111,7 @@ fn part_of<'a>(p: &'a Project, refdes: &str) -> Result<(&'a str, &'a Part), Conn
         })?,
     };
     let part = p.library().parts.get(&comp.part).ok_or_else(|| {
-        e(
-            "part.not_found",
-            format!("{key} uses part `{}`, which is missing from the library", comp.part),
-        )
+        e("part.not_found", format!("{key} uses part `{}`, which is missing from the library", comp.part))
     })?;
     Ok((key.as_str(), part))
 }
@@ -130,22 +121,11 @@ fn match_pins(part: &Part, key: &str) -> Vec<String> {
     if let Some(p) = part.symbol.pins.iter().find(|p| p.number == key) {
         return vec![p.number.clone()];
     }
-    let by_name: Vec<String> = part
-        .symbol
-        .pins
-        .iter()
-        .filter(|p| p.name == key)
-        .map(|p| p.number.clone())
-        .collect();
+    let by_name: Vec<String> = part.symbol.pins.iter().filter(|p| p.name == key).map(|p| p.number.clone()).collect();
     if !by_name.is_empty() {
         return by_name;
     }
-    part.symbol
-        .pins
-        .iter()
-        .filter(|p| p.name.eq_ignore_ascii_case(key))
-        .map(|p| p.number.clone())
-        .collect()
+    part.symbol.pins.iter().filter(|p| p.name.eq_ignore_ascii_case(key)).map(|p| p.number.clone()).collect()
 }
 
 /// Resolves a pin expression to pins, in order.
@@ -154,39 +134,23 @@ pub fn resolve_pins(p: &Project, expr: &str) -> Result<Vec<PinRef>, ConnectError
     let (refdes, pin) = expr
         .split_once('.')
         .filter(|(r, q)| !r.is_empty() && !q.is_empty())
-        .ok_or_else(|| {
-            e(
-                "pin.invalid",
-                format!("`{expr}` is not a pin (write REFDES.PIN, e.g. U1.4 or U1.VIN)"),
-            )
-        })?;
+        .ok_or_else(|| e("pin.invalid", format!("`{expr}` is not a pin (write REFDES.PIN, e.g. U1.4 or U1.VIN)")))?;
     let (key, part) = part_of(p, refdes)?;
     let keys: Vec<String> = match pin.split_once("..") {
-        Some((a, b)) => expand_range(a, b).ok_or_else(|| {
-            e(
-                "pin.invalid_range",
-                format!("`{expr}`: ranges look like U1.PA0..PA7 or U1.1..8"),
-            )
-        })?,
+        Some((a, b)) => expand_range(a, b)
+            .ok_or_else(|| e("pin.invalid_range", format!("`{expr}`: ranges look like U1.PA0..PA7 or U1.1..8")))?,
         None => vec![pin.to_string()],
     };
     let mut out = Vec::new();
     for k in keys {
         let found = match_pins(part, &k);
         if found.is_empty() {
-            let names = part
-                .symbol
-                .pins
-                .iter()
-                .flat_map(|p| [p.number.as_str(), p.name.as_str()])
-                .filter(|s| !s.is_empty());
+            let names =
+                part.symbol.pins.iter().flat_map(|p| [p.number.as_str(), p.name.as_str()]).filter(|s| !s.is_empty());
             let s = did_you_mean(&k, names, 3);
             let mut err = e("pin.not_found", format!("{key} ({}) has no pin `{k}`", part.id));
             err = match s.first() {
-                Some(f) => err.hint(format!(
-                    "did you mean `{key}.{f}`? `part.show {}` lists the pins",
-                    part.id
-                )),
+                Some(f) => err.hint(format!("did you mean `{key}.{f}`? `part.show {}` lists the pins", part.id)),
                 None => err.hint(format!("`part.show {}` lists the pins", part.id)),
             };
             return Err(err);
@@ -219,31 +183,19 @@ pub fn connect(
     report: &mut ConnectReport,
 ) -> Result<(), ConnectError> {
     // Check first, then mutate (the command layer also rolls back on error).
-    let index: Vec<(PinRef, String)> = pins
-        .iter()
-        .filter_map(|pin| p.circuit().net_of(pin).map(|n| (pin.clone(), n.to_string())))
-        .collect();
+    let index: Vec<(PinRef, String)> =
+        pins.iter().filter_map(|pin| p.circuit().net_of(pin).map(|n| (pin.clone(), n.to_string()))).collect();
     let others: Vec<&(PinRef, String)> = index.iter().filter(|(_, n)| n != net).collect();
     if !merge && let Some((pin, other)) = others.first() {
         return Err(e(
             "net.would_merge",
             format!("{pin} is already on net `{other}`; connecting it to `{net}` would merge the nets"),
         )
-        .hint(format!(
-            "pass `merge: true` to merge `{other}` into `{net}`, or `net.disconnect {pin}` first"
-        )));
+        .hint(format!("pass `merge: true` to merge `{other}` into `{net}`, or `net.disconnect {pin}` first")));
     }
     if !p.circuit().nets.contains_key(net) {
         let id = p.alloc_id();
-        p.circuit_mut().nets.insert(
-            net.to_string(),
-            Net {
-                id,
-                pins: Default::default(),
-                class: None,
-                driven: false,
-            },
-        );
+        p.circuit_mut().nets.insert(net.to_string(), Net { id, pins: Default::default(), class: None, driven: false });
         report.created.push(net.to_string());
     }
     let c: &mut Circuit = p.circuit_mut();

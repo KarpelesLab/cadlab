@@ -156,12 +156,9 @@ impl Nm {
             unit: unit.to_string(),
             known: KNOWN_LENGTH_UNITS,
         })?;
-        let v = num
-            .scale_rounded(unit.nm_per_unit() as i128)
-            .ok_or_else(|| UnitError::OutOfRange(s.trim().to_string()))?;
-        i64::try_from(v)
-            .map(Nm)
-            .map_err(|_| UnitError::OutOfRange(s.trim().to_string()))
+        let v =
+            num.scale_rounded(unit.nm_per_unit() as i128).ok_or_else(|| UnitError::OutOfRange(s.trim().to_string()))?;
+        i64::try_from(v).map(Nm).map_err(|_| UnitError::OutOfRange(s.trim().to_string()))
     }
 
     /// Formats in the given unit. Millimeters and smaller metric units are exact; mil and inch
@@ -330,11 +327,7 @@ impl Angle {
     /// Number of quarter turns if this is a multiple of 90°, in `0..4`.
     pub const fn quarter_turns(self) -> Option<u8> {
         let n = self.normalized().0;
-        if n % 90_000 == 0 {
-            Some((n / 90_000) as u8)
-        } else {
-            None
-        }
+        if n % 90_000 == 0 { Some((n / 90_000) as u8) } else { None }
     }
 
     /// Parses an angle. A bare number is in degrees; `deg` and `°` suffixes are accepted.
@@ -351,12 +344,8 @@ impl Angle {
                 });
             }
         }
-        let v = num
-            .scale_rounded(1000)
-            .ok_or_else(|| UnitError::OutOfRange(s.trim().into()))?;
-        i32::try_from(v)
-            .map(Angle)
-            .map_err(|_| UnitError::OutOfRange(s.trim().into()))
+        let v = num.scale_rounded(1000).ok_or_else(|| UnitError::OutOfRange(s.trim().into()))?;
+        i32::try_from(v).map(Angle).map_err(|_| UnitError::OutOfRange(s.trim().into()))
     }
 }
 
@@ -499,11 +488,7 @@ fn parse_decimal(s: &str) -> Result<(Decimal, &str), UnitError> {
 fn div_round(num: i128, den: i128) -> i128 {
     let q = num / den;
     let r = num % den;
-    if 2 * r.abs() >= den.abs() {
-        q + num.signum() * den.signum()
-    } else {
-        q
-    }
+    if 2 * r.abs() >= den.abs() { q + num.signum() * den.signum() } else { q }
 }
 
 /// Formats `q / 10^frac_digits` with trailing fractional zeros trimmed.

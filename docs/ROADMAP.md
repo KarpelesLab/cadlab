@@ -71,11 +71,12 @@ symbol and footprint attached.
 
 Details in [RENDERING.md](RENDERING.md).
 
-- [ ] Renderer core: scene → SVG; SVG → PNG (resvg/tiny-skia)
-- [ ] Symbol rendering from part definitions
-- [ ] Schematic auto-layout: group by block, place symbols, route wires orthogonally, use net labels for long or
-      global nets
-- [ ] Optional manual hints (place symbol here, group these) persisted in schematic layer
+- [x] Renderer core: scene → SVG and → PNG (tiny-skia), embedded Hershey stroke font
+- [x] Symbol rendering from part definitions; footprint rendering
+- [x] Schematic auto-layout: anchors (ICs/connectors), passives inline on their pin with chains, decoupling rows,
+      net labels and power/ground symbols elsewhere; papers A4..A0
+- [ ] Layout improvements: group by block instance, denser packing, multi-sheet
+- [x] Optional manual hints (`schematic.place/unplace`) persisted in `schematic.json`
 - [ ] KiCad `.kicad_sch` export: lets `kicad-cli` run ERC as an oracle, and lets humans open it if they want
 
 **Exit:** `cadlab render schematic -o sch.png` produces a readable schematic of the M2 board.

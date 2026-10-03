@@ -18,24 +18,10 @@ fn digikey_live_lookup_and_search() {
     eprintln!("{c:#?}");
     assert_eq!(c.manufacturer.as_deref().map(|m| m.contains("Diodes")), Some(true));
     assert!(!c.prices.is_empty(), "price breaks parsed");
-    assert!(
-        c.params.get("voltage_out").is_some(),
-        "parameters normalized: {:?}",
-        c.params
-    );
+    assert!(c.params.get("voltage_out").is_some(), "parameters normalized: {:?}", c.params);
 
-    let q = SearchQuery {
-        text: "LDO".into(),
-        package: Some("SOT-23-5".into()),
-        in_stock: true,
-        ..Default::default()
-    };
-    let results: Vec<_> = dk
-        .search(&q)
-        .expect("search")
-        .into_iter()
-        .filter(|c| q.matches(c))
-        .collect();
+    let q = SearchQuery { text: "LDO".into(), package: Some("SOT-23-5".into()), in_stock: true, ..Default::default() };
+    let results: Vec<_> = dk.search(&q).expect("search").into_iter().filter(|c| q.matches(c)).collect();
     eprintln!("{} matching candidates", results.len());
     assert!(!results.is_empty(), "keyword search returns usable candidates");
 }

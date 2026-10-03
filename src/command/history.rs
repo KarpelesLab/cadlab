@@ -57,10 +57,7 @@ pub struct History {
 impl History {
     /// Empty history, persisted under `dir` when saved.
     pub fn new(dir: Option<PathBuf>) -> Self {
-        History {
-            dir,
-            ..Default::default()
-        }
+        History { dir, ..Default::default() }
     }
 
     /// Loads the index from `dir`; snapshots are read lazily on undo/redo.
@@ -72,31 +69,15 @@ impl History {
                 return Ok(History::new(Some(dir)));
             }
             Err(e) => {
-                return Err(ModelError::Io {
-                    path: index_path,
-                    source: e,
-                });
+                return Err(ModelError::Io { path: index_path, source: e });
             }
         };
-        let index: Index = serde_json::from_str(&text).map_err(|e| ModelError::Invalid {
-            path: index_path.clone(),
-            message: e.to_string(),
-        })?;
+        let index: Index = serde_json::from_str(&text)
+            .map_err(|e| ModelError::Invalid { path: index_path.clone(), message: e.to_string() })?;
         let conv = |v: Vec<IndexEntry>| {
-            v.into_iter()
-                .map(|e| Entry {
-                    seq: e.seq,
-                    label: e.label,
-                    snapshot: Snapshot::OnDisk,
-                })
-                .collect()
+            v.into_iter().map(|e| Entry { seq: e.seq, label: e.label, snapshot: Snapshot::OnDisk }).collect()
         };
-        Ok(History {
-            undo: conv(index.undo),
-            redo: conv(index.redo),
-            next_seq: index.next_seq,
-            dir: Some(dir),
-        })
+        Ok(History { undo: conv(index.undo), redo: conv(index.redo), next_seq: index.next_seq, dir: Some(dir) })
     }
 
     /// Records `before` as the state to return to when undoing `label`. Clears redo.
@@ -127,18 +108,12 @@ impl History {
 
     /// Undo entries, most recent last.
     pub fn undo_items(&self) -> Vec<HistoryItem> {
-        self.undo
-            .iter()
-            .map(|e| HistoryItem { label: e.label.clone() })
-            .collect()
+        self.undo.iter().map(|e| HistoryItem { label: e.label.clone() }).collect()
     }
 
     /// Redo entries, next to redo last.
     pub fn redo_items(&self) -> Vec<HistoryItem> {
-        self.redo
-            .iter()
-            .map(|e| HistoryItem { label: e.label.clone() })
-            .collect()
+        self.redo.iter().map(|e| HistoryItem { label: e.label.clone() }).collect()
     }
 
     /// Steps back: returns the previous state and its label, saving `current` for redo.
@@ -168,10 +143,7 @@ impl History {
         let Some(dir) = self.dir.clone() else {
             return Ok(());
         };
-        fs::create_dir_all(&dir).map_err(|e| ModelError::Io {
-            path: dir.clone(),
-            source: e,
-        })?;
+        fs::create_dir_all(&dir).map_err(|e| ModelError::Io { path: dir.clone(), source: e })?;
         for e in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             if let Snapshot::Loaded(p) = &e.snapshot {
                 let path = snapshot_path(&dir, e.seq);
@@ -182,22 +154,8 @@ impl History {
         }
         let index = Index {
             next_seq: self.next_seq,
-            undo: self
-                .undo
-                .iter()
-                .map(|e| IndexEntry {
-                    seq: e.seq,
-                    label: e.label.clone(),
-                })
-                .collect(),
-            redo: self
-                .redo
-                .iter()
-                .map(|e| IndexEntry {
-                    seq: e.seq,
-                    label: e.label.clone(),
-                })
-                .collect(),
+            undo: self.undo.iter().map(|e| IndexEntry { seq: e.seq, label: e.label.clone() }).collect(),
+            redo: self.redo.iter().map(|e| IndexEntry { seq: e.seq, label: e.label.clone() }).collect(),
         };
         let text = serde_json::to_string_pretty(&index).expect("index serializes");
         write(&dir.join(INDEX_FILE), &text)?;
@@ -220,11 +178,7 @@ impl History {
     fn entry(&mut self, label: String, p: Project) -> Entry {
         let seq = self.next_seq;
         self.next_seq += 1;
-        Entry {
-            seq,
-            label,
-            snapshot: Snapshot::Loaded(p),
-        }
+        Entry { seq, label, snapshot: Snapshot::Loaded(p) }
     }
 
     fn materialize(&self, e: &Entry) -> Result<Project, ModelError> {
@@ -233,10 +187,8 @@ impl History {
             Snapshot::OnDisk => {
                 let dir = self.dir.as_ref().expect("on-disk snapshot implies a directory");
                 let path = snapshot_path(dir, e.seq);
-                let text = fs::read_to_string(&path).map_err(|err| ModelError::Io {
-                    path: path.clone(),
-                    source: err,
-                })?;
+                let text =
+                    fs::read_to_string(&path).map_err(|err| ModelError::Io { path: path.clone(), source: err })?;
                 Project::from_packed_str(&text)
             }
         }
@@ -248,8 +200,5 @@ fn snapshot_path(dir: &Path, seq: u64) -> PathBuf {
 }
 
 fn write(path: &Path, content: &str) -> Result<(), ModelError> {
-    fs::write(path, content).map_err(|e| ModelError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })
+    fs::write(path, content).map_err(|e| ModelError::Io { path: path.to_path_buf(), source: e })
 }

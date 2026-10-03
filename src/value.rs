@@ -162,11 +162,7 @@ impl Quantity {
             m /= 10;
             e += 1;
         }
-        Quantity {
-            mantissa: m,
-            exp: e,
-            unit,
-        }
+        Quantity { mantissa: m, exp: e, unit }
     }
 
     /// Integer value in `unit`.
@@ -263,17 +259,12 @@ impl Quantity {
         let (mut exp, mut unit) = (rkm_exp.unwrap_or(0), rkm_unit.unwrap_or(Unit::None));
         if rkm_exp.is_some() || rkm_unit.is_some() {
             // 4k7F, 2R2 (rest empty), 4n7F.
-            let u = Unit::parse(rest).ok_or_else(|| ValueError::UnknownUnit {
-                input: t.to_string(),
-                unit: rest.to_string(),
-            })?;
+            let u = Unit::parse(rest)
+                .ok_or_else(|| ValueError::UnknownUnit { input: t.to_string(), unit: rest.to_string() })?;
             if rkm_unit.is_none() {
                 unit = u;
             } else if u != Unit::None && u != unit {
-                return Err(ValueError::UnknownUnit {
-                    input: t.to_string(),
-                    unit: rest.to_string(),
-                });
+                return Err(ValueError::UnknownUnit { input: t.to_string(), unit: rest.to_string() });
             }
         } else if let Some(u) = Unit::parse(rest) {
             unit = u;
@@ -287,10 +278,7 @@ impl Quantity {
                     unit = u;
                 }
                 _ => {
-                    return Err(ValueError::UnknownUnit {
-                        input: t.to_string(),
-                        unit: rest.to_string(),
-                    });
+                    return Err(ValueError::UnknownUnit { input: t.to_string(), unit: rest.to_string() });
                 }
             }
         }
@@ -299,11 +287,7 @@ impl Quantity {
         if digits.len() > MAX_DIGITS {
             return Err(ValueError::TooPrecise(t.to_string()));
         }
-        let m: i64 = if digits.is_empty() {
-            0
-        } else {
-            digits.parse().map_err(|_| err())?
-        };
+        let m: i64 = if digits.is_empty() { 0 } else { digits.parse().map_err(|_| err())? };
         let e = exp as i32 - frac_digits.len() as i32;
         let e = i8::try_from(e).map_err(|_| ValueError::TooPrecise(t.to_string()))?;
         Ok(Quantity::new(if neg { -m } else { m }, e, unit))
@@ -315,11 +299,7 @@ impl Quantity {
         match q.unit {
             Unit::None => Ok(q.with_unit(expected)),
             u if u == expected => Ok(q),
-            found => Err(ValueError::WrongUnit {
-                input: s.trim().to_string(),
-                found,
-                expected,
-            }),
+            found => Err(ValueError::WrongUnit { input: s.trim().to_string(), found, expected }),
         }
     }
 
@@ -328,11 +308,7 @@ impl Quantity {
         if !self.unit.takes_prefix() {
             return format_decimal(self.mantissa, self.exp as i32);
         }
-        let digits = if self.mantissa == 0 {
-            1
-        } else {
-            self.mantissa.unsigned_abs().ilog10() as i32 + 1
-        };
+        let digits = if self.mantissa == 0 { 1 } else { self.mantissa.unsigned_abs().ilog10() as i32 + 1 };
         let order = digits - 1 + self.exp as i32; // power of ten of the leading digit
         let eng = order.div_euclid(3) * 3;
         let eng = eng.clamp(-15, 12);
@@ -497,9 +473,7 @@ mod tests {
 
     #[test]
     fn roundtrips_through_display() {
-        for s in [
-            "10k", "100nF", "4.7uF", "2.2Ω", "3.3V", "500mA", "1%", "12MHz", "33pF", "0.5W", "-40°C",
-        ] {
+        for s in ["10k", "100nF", "4.7uF", "2.2Ω", "3.3V", "500mA", "1%", "12MHz", "33pF", "0.5W", "-40°C"] {
             assert_eq!(q(&q(s).to_string()), q(s), "{s}");
         }
     }
@@ -516,9 +490,6 @@ mod tests {
     #[test]
     fn parse_as_unit() {
         assert_eq!(Quantity::parse_as("10k", Unit::Ohm).unwrap(), q("10kΩ"));
-        assert!(matches!(
-            Quantity::parse_as("10uF", Unit::Ohm),
-            Err(ValueError::WrongUnit { .. })
-        ));
+        assert!(matches!(Quantity::parse_as("10uF", Unit::Ohm), Err(ValueError::WrongUnit { .. })));
     }
 }

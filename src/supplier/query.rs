@@ -40,23 +40,12 @@ impl ParamFilter {
     /// Parses `key` and `">=500mA"`, `"<=1.2V"`, `"3.3V"`, `"X7R"`.
     pub fn parse(key: &str, expr: &str) -> Result<ParamFilter, ValueError> {
         let e = expr.trim();
-        let (op, rest) = [
-            (">=", Op::Ge),
-            ("≥", Op::Ge),
-            ("<=", Op::Le),
-            ("≤", Op::Le),
-            (">", Op::Gt),
-            ("<", Op::Lt),
-            ("=", Op::Eq),
-        ]
-        .iter()
-        .find_map(|(p, op)| e.strip_prefix(p).map(|r| (*op, r)))
-        .unwrap_or((Op::Eq, e));
-        Ok(ParamFilter {
-            key: key.to_string(),
-            op,
-            value: ParamValue::parse(key, rest)?,
-        })
+        let (op, rest) =
+            [(">=", Op::Ge), ("≥", Op::Ge), ("<=", Op::Le), ("≤", Op::Le), (">", Op::Gt), ("<", Op::Lt), ("=", Op::Eq)]
+                .iter()
+                .find_map(|(p, op)| e.strip_prefix(p).map(|r| (*op, r)))
+                .unwrap_or((Op::Eq, e));
+        Ok(ParamFilter { key: key.to_string(), op, value: ParamValue::parse(key, rest)? })
     }
 
     /// Whether a candidate's value passes.
@@ -194,15 +183,11 @@ impl SearchQuery {
                 (
                     c.stock < q,
                     c.lifecycle != Lifecycle::Active,
-                    c.unit_price(q)
-                        .map_or(i64::MAX, |p| p.micros.saturating_mul(c.order_qty(q) as i64)),
+                    c.unit_price(q).map_or(i64::MAX, |p| p.micros.saturating_mul(c.order_qty(q) as i64)),
                     std::cmp::Reverse(c.stock),
                 )
             };
-            key(a)
-                .cmp(&key(b))
-                .then_with(|| a.mpn.cmp(&b.mpn))
-                .then_with(|| a.provider.cmp(&b.provider))
+            key(a).cmp(&key(b)).then_with(|| a.mpn.cmp(&b.mpn)).then_with(|| a.provider.cmp(&b.provider))
         });
     }
 }

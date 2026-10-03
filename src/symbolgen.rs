@@ -43,10 +43,7 @@ pub fn style_for(category: Category, pins: usize) -> SymbolStyle {
 pub fn two_terminal_pins(category: Category) -> Vec<Pin> {
     match category {
         Category::Diode | Category::Led => {
-            vec![
-                Pin::new("1", "K", PinKind::Passive),
-                Pin::new("2", "A", PinKind::Passive),
-            ]
+            vec![Pin::new("1", "K", PinKind::Passive), Pin::new("2", "A", PinKind::Passive)]
         }
         _ => vec![Pin::new("1", "", PinKind::Passive), Pin::new("2", "", PinKind::Passive)],
     }
@@ -57,21 +54,13 @@ pub fn generate(category: Category, mut pins: Vec<Pin>) -> Symbol {
     let style = style_for(category, pins.len());
     if style != SymbolStyle::Box {
         // Horizontal two-terminal symbol. Diodes: anode left, cathode right.
-        let (left, right) = if matches!(style, SymbolStyle::Diode | SymbolStyle::Led) {
-            (1, 0)
-        } else {
-            (0, 1)
-        };
+        let (left, right) = if matches!(style, SymbolStyle::Diode | SymbolStyle::Led) { (1, 0) } else { (0, 1) };
         let x = GRID + Nm(GRID.0 / 2);
         pins[left].side = Some(Side::Left);
         pins[left].at = Some(Point::new(-x, Nm::ZERO));
         pins[right].side = Some(Side::Right);
         pins[right].at = Some(Point::new(x, Nm::ZERO));
-        return Symbol {
-            style,
-            body: None,
-            pins,
-        };
+        return Symbol { style, body: None, pins };
     }
 
     // Assign sides.
@@ -108,9 +97,7 @@ pub fn generate(category: Category, mut pins: Vec<Pin>) -> Symbol {
 
     let count = |s: Side| by_side.get(&s).map_or(0, Vec::len) as i64;
     let longest = |s: Side| {
-        by_side.get(&s).map_or(0, |v| {
-            v.iter().map(|&i| pins[i].label().chars().count()).max().unwrap_or(0)
-        }) as i64
+        by_side.get(&s).map_or(0, |v| v.iter().map(|&i| pins[i].label().chars().count()).max().unwrap_or(0)) as i64
     };
 
     // Body size on the grid: room for labels on both sides, and for the top/bottom pins.
@@ -122,11 +109,7 @@ pub fn generate(category: Category, mut pins: Vec<Pin>) -> Symbol {
     let height = round_up_even(
         Nm(GRID.0 * (rows + 1))
             + label_h
-            + if count(Side::Top) > 0 || count(Side::Bottom) > 0 {
-                GRID
-            } else {
-                Nm::ZERO
-            },
+            + if count(Side::Top) > 0 || count(Side::Bottom) > 0 { GRID } else { Nm::ZERO },
     );
     let (hw, hh) = (Nm(width.0 / 2), Nm(height.0 / 2));
 
@@ -148,11 +131,7 @@ pub fn generate(category: Category, mut pins: Vec<Pin>) -> Symbol {
     }
     // Keep pins in datasheet (pin number) order in the stored symbol.
     pins.sort_by(|a, b| natural_cmp(&a.number, &b.number));
-    Symbol {
-        style,
-        body: Some((width, height)),
-        pins,
-    }
+    Symbol { style, body: Some((width, height)), pins }
 }
 
 /// Rounds up to an even number of grid steps, so the half-size (pin positions) stays on grid.
@@ -205,11 +184,7 @@ fn balance(pins: &mut [Pin]) {
     loop {
         let count = |s: Side| pins.iter().filter(|p| p.side == Some(s)).count() as i64;
         let (l, r) = (count(Side::Left), count(Side::Right));
-        let (from, to) = if l > r {
-            (Side::Left, Side::Right)
-        } else {
-            (Side::Right, Side::Left)
-        };
+        let (from, to) = if l > r { (Side::Left, Side::Right) } else { (Side::Right, Side::Left) };
         let diff = (l - r).abs();
         // Candidate groups on the fuller side, largest first that still improves balance.
         let mut groups: BTreeMap<String, i64> = BTreeMap::new();
@@ -220,10 +195,8 @@ fn balance(pins: &mut [Pin]) {
             }
             *groups.entry(g).or_default() += 1;
         }
-        let best = groups
-            .iter()
-            .filter(|(_, n)| 2 * **n <= diff)
-            .max_by_key(|(g, n)| (**n, std::cmp::Reverse((*g).clone())));
+        let best =
+            groups.iter().filter(|(_, n)| 2 * **n <= diff).max_by_key(|(g, n)| (**n, std::cmp::Reverse((*g).clone())));
         let Some((g, _)) = best else { return };
         let g = g.clone();
         for p in pins.iter_mut().filter(|p| p.side == Some(from)) {
@@ -303,9 +276,7 @@ mod tests {
 
     #[test]
     fn connector_in_number_order() {
-        let pins = (1..=4)
-            .map(|i| pin(&i.to_string(), &format!("P{i}"), PinKind::Passive))
-            .collect();
+        let pins = (1..=4).map(|i| pin(&i.to_string(), &format!("P{i}"), PinKind::Passive)).collect();
         let s = generate(Category::Connector, pins);
         let y = |n: &str| s.pin(n).unwrap().at.unwrap().y;
         assert!(y("1") > y("2") && y("2") > y("3") && y("3") > y("4"));

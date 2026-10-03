@@ -29,44 +29,24 @@ pub(crate) struct Fillets {
 }
 
 /// Rectangular / square-end chip components, 0603 (1608 metric) and larger.
-pub(crate) const CHIP: Fillets = Fillets {
-    toe: [550, 350, 150],
-    heel: [0, 0, 0],
-    side: [50, 0, -50],
-    courtyard: [500, 250, 100],
-};
+pub(crate) const CHIP: Fillets =
+    Fillets { toe: [550, 350, 150], heel: [0, 0, 0], side: [50, 0, -50], courtyard: [500, 250, 100] };
 
 /// Chip components smaller than 0603 (0402, 0201, 01005).
-pub(crate) const CHIP_SMALL: Fillets = Fillets {
-    toe: [300, 200, 100],
-    heel: [0, 0, 0],
-    side: [50, 0, -50],
-    courtyard: [200, 150, 100],
-};
+pub(crate) const CHIP_SMALL: Fillets =
+    Fillets { toe: [300, 200, 100], heel: [0, 0, 0], side: [50, 0, -50], courtyard: [200, 150, 100] };
 
 /// Gull-wing leads, pitch > 0.625 mm.
-pub(crate) const GULLWING: Fillets = Fillets {
-    toe: [550, 350, 150],
-    heel: [450, 350, 250],
-    side: [50, 30, 10],
-    courtyard: [500, 250, 100],
-};
+pub(crate) const GULLWING: Fillets =
+    Fillets { toe: [550, 350, 150], heel: [450, 350, 250], side: [50, 30, 10], courtyard: [500, 250, 100] };
 
 /// Gull-wing leads, pitch ≤ 0.625 mm.
-pub(crate) const GULLWING_FINE: Fillets = Fillets {
-    toe: [550, 350, 150],
-    heel: [450, 350, 250],
-    side: [10, -20, -40],
-    courtyard: [500, 250, 100],
-};
+pub(crate) const GULLWING_FINE: Fillets =
+    Fillets { toe: [550, 350, 150], heel: [450, 350, 250], side: [10, -20, -40], courtyard: [500, 250, 100] };
 
 /// No-lead packages (QFN, DFN/SON): terminals flush with the body edge.
-pub(crate) const NOLEAD: Fillets = Fillets {
-    toe: [400, 300, 200],
-    heel: [0, 0, 0],
-    side: [-40, -40, -40],
-    courtyard: [500, 250, 100],
-};
+pub(crate) const NOLEAD: Fillets =
+    Fillets { toe: [400, 300, 200], heel: [0, 0, 0], side: [-40, -40, -40], courtyard: [500, 250, 100] };
 
 impl Fillets {
     fn pick(v: [i64; 3], d: Density) -> Nm {
@@ -109,11 +89,7 @@ fn round_down(v: Nm, grid: Nm) -> Nm {
 /// Computes the pads of a lead row.
 pub(crate) fn row_pads(span: Dim, terminal: Dim, width: Dim, f: &Fillets, opts: &GenOptions) -> RowPads {
     let d = opts.density;
-    let (jt, jh, js) = (
-        Fillets::pick(f.toe, d),
-        Fillets::pick(f.heel, d),
-        Fillets::pick(f.side, d),
-    );
+    let (jt, jh, js) = (Fillets::pick(f.toe, d), Fillets::pick(f.heel, d), Fillets::pick(f.side, d));
     let (fab, place) = (opts.fab_tolerance, opts.placement_tolerance);
 
     let cl = span.tol();
@@ -138,11 +114,7 @@ pub(crate) fn row_pads(span: Dim, terminal: Dim, width: Dim, f: &Fillets, opts: 
     let x = round_up(x, opts.rounding);
     let length = Nm((z.0 - g.0) / 2);
     let center = Nm((z.0 + g.0) / 4);
-    RowPads {
-        length,
-        width: x,
-        center,
-    }
+    RowPads { length, width: x, center }
 }
 
 /// Limits a pad width so neighbouring pads in a row keep `min_gap` between them.
@@ -160,50 +132,21 @@ mod tests {
     }
 
     fn dim(min: f64, max: f64) -> Dim {
-        Dim {
-            min: mm(min),
-            max: mm(max),
-        }
+        Dim { min: mm(min), max: mm(max) }
     }
 
     #[test]
     fn soic8_nominal() {
         // JEDEC MS-012: span 5.80–6.20, terminal 0.40–1.27, lead width 0.31–0.51.
-        let r = row_pads(
-            dim(5.8, 6.2),
-            dim(0.4, 1.27),
-            dim(0.31, 0.51),
-            &GULLWING,
-            &GenOptions::default(),
-        );
+        let r = row_pads(dim(5.8, 6.2), dim(0.4, 1.27), dim(0.31, 0.51), &GULLWING, &GenOptions::default());
         // Z = 6.91 (rounded up), G = 2.98 (rounded down): the center falls between grid steps.
-        assert_eq!(
-            r,
-            RowPads {
-                length: mm(1.965),
-                width: mm(0.58),
-                center: mm(2.4725)
-            }
-        );
+        assert_eq!(r, RowPads { length: mm(1.965), width: mm(0.58), center: mm(2.4725) });
     }
 
     #[test]
     fn chip_0402_nominal() {
-        let r = row_pads(
-            dim(0.95, 1.05),
-            dim(0.15, 0.35),
-            dim(0.45, 0.55),
-            &CHIP_SMALL,
-            &GenOptions::default(),
-        );
-        assert_eq!(
-            r,
-            RowPads {
-                length: mm(0.565),
-                width: mm(0.57),
-                center: mm(0.4525)
-            }
-        );
+        let r = row_pads(dim(0.95, 1.05), dim(0.15, 0.35), dim(0.45, 0.55), &CHIP_SMALL, &GenOptions::default());
+        assert_eq!(r, RowPads { length: mm(0.565), width: mm(0.57), center: mm(0.4525) });
     }
 
     #[test]

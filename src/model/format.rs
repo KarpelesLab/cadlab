@@ -113,10 +113,8 @@ fn compact(v: &Value) -> String {
             format!("[{}]", parts.join(", "))
         }
         Value::Object(map) => {
-            let parts: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", Value::String(k.clone()), compact(v)))
-                .collect();
+            let parts: Vec<String> =
+                map.iter().map(|(k, v)| format!("{}: {}", Value::String(k.clone()), compact(v))).collect();
             format!("{{{}}}", parts.join(", "))
         }
         other => other.to_string(),

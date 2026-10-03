@@ -22,10 +22,7 @@ use crate::model::part::{Category, PinKind};
 use crate::refs::ObjectRef;
 
 fn pin_ref(p: &PinRef) -> ObjectRef {
-    ObjectRef::Pin {
-        component: p.refdes.clone(),
-        pin: p.pin.clone(),
-    }
+    ObjectRef::Pin { component: p.refdes.clone(), pin: p.pin.clone() }
 }
 
 fn net_ref(n: &str) -> ObjectRef {
@@ -46,12 +43,9 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     let kind_of = |pin: &PinRef| -> Result<(PinKind, Category), Box<Diagnostic>> {
         let comp = c.components.get(&pin.refdes).ok_or_else(|| {
             Box::new(
-                Diagnostic::error(
-                    "erc.missing_component",
-                    format!("{pin} refers to a component that does not exist"),
-                )
-                .with_subject(pin_ref(pin))
-                .with_hint("remove it with `net.disconnect`"),
+                Diagnostic::error("erc.missing_component", format!("{pin} refers to a component that does not exist"))
+                    .with_subject(pin_ref(pin))
+                    .with_hint("remove it with `net.disconnect`"),
             )
         })?;
         let part = lib.parts.get(&comp.part).ok_or_else(|| {
@@ -65,12 +59,9 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
         })?;
         let sp = part.symbol.pins.iter().find(|s| s.number == pin.pin).ok_or_else(|| {
             Box::new(
-                Diagnostic::error(
-                    "erc.missing_pin",
-                    format!("{pin}: part `{}` has no pin {}", part.id, pin.pin),
-                )
-                .with_subject(pin_ref(pin))
-                .with_hint("the part changed (e.g. `bom.replace`); reconnect the net to an existing pin"),
+                Diagnostic::error("erc.missing_pin", format!("{pin}: part `{}` has no pin {}", part.id, pin.pin))
+                    .with_subject(pin_ref(pin))
+                    .with_hint("the part changed (e.g. `bom.replace`); reconnect the net to an existing pin"),
             )
         })?;
         Ok((sp.kind, part.category))
@@ -89,11 +80,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
             }
         }
         let get = |k: PinKind| kinds.get(&k).map(Vec::as_slice).unwrap_or(&[]);
-        let outputs: Vec<&PinRef> = get(PinKind::Output)
-            .iter()
-            .chain(get(PinKind::PowerOut))
-            .copied()
-            .collect();
+        let outputs: Vec<&PinRef> = get(PinKind::Output).iter().chain(get(PinKind::PowerOut)).copied().collect();
         if outputs.len() >= 2 {
             let mut d = Diagnostic::error(
                 "erc.output_conflict",
@@ -148,10 +135,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
             };
             let mut d = Diagnostic::error(
                 "erc.power_not_driven",
-                format!(
-                    "power input(s) {} on net `{name}` are not driven by any power output",
-                    list(power_in)
-                ),
+                format!("power input(s) {} on net `{name}` are not driven by any power output", list(power_in)),
             )
             .with_subject(net_ref(name))
             .with_hint(hint);
@@ -184,13 +168,10 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
         }
         for pin in get(PinKind::NoConnect) {
             out.push(
-                Diagnostic::warning(
-                    "erc.nc_connected",
-                    format!("{pin} is a no-connect pin but is on net `{name}`"),
-                )
-                .with_subject(pin_ref(pin))
-                .with_subject(net_ref(name))
-                .with_hint("check the datasheet; NC pins are usually left open"),
+                Diagnostic::warning("erc.nc_connected", format!("{pin} is a no-connect pin but is on net `{name}`"))
+                    .with_subject(pin_ref(pin))
+                    .with_subject(net_ref(name))
+                    .with_hint("check the datasheet; NC pins are usually left open"),
             );
         }
         if net.pins.len() == 1 && !net.driven {
@@ -239,19 +220,11 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
         if !floating.is_empty() {
             let names: Vec<String> = floating
                 .iter()
-                .map(|(p, l, _)| {
-                    if l == &p.pin {
-                        p.to_string()
-                    } else {
-                        format!("{p} ({l})")
-                    }
-                })
+                .map(|(p, l, _)| if l == &p.pin { p.to_string() } else { format!("{p} ({l})") })
                 .collect();
-            let mut d = Diagnostic::warning(
-                "erc.unconnected",
-                format!("{refdes}: unconnected pin(s) {}", names.join(", ")),
-            )
-            .with_hint("connect them, or mark intentionally open pins with `net.no_connect`");
+            let mut d =
+                Diagnostic::warning("erc.unconnected", format!("{refdes}: unconnected pin(s) {}", names.join(", ")))
+                    .with_hint("connect them, or mark intentionally open pins with `net.no_connect`");
             for (p, _, _) in &floating {
                 d = d.with_subject(pin_ref(p));
             }

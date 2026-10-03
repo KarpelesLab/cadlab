@@ -78,13 +78,7 @@ pub fn kicad(p: &Project) -> String {
             let _ = write!(s, "\n      (datasheet {})", q(ds));
         }
         let desc = part.map(|p| p.description.as_str()).unwrap_or("");
-        let _ = write!(
-            s,
-            "\n      (libsource (lib {}) (part {}) (description {}))",
-            q(LIB),
-            q(&comp.part),
-            q(desc)
-        );
+        let _ = write!(s, "\n      (libsource (lib {}) (part {}) (description {}))", q(LIB), q(&comp.part), q(desc));
         if let Some(p) = part {
             if let Some(m) = &p.manufacturer {
                 let _ = write!(s, "\n      (property (name \"Manufacturer\") (value {}))", q(m));
@@ -106,13 +100,8 @@ pub fn kicad(p: &Project) -> String {
     used.dedup();
     for id in used {
         let Some(part) = lib.parts.get(id) else { continue };
-        let _ = write!(
-            s,
-            "\n    (libpart (lib {}) (part {})\n      (description {})",
-            q(LIB),
-            q(id),
-            q(&part.description)
-        );
+        let _ =
+            write!(s, "\n    (libpart (lib {}) (part {})\n      (description {})", q(LIB), q(id), q(&part.description));
         let _ = write!(
             s,
             "\n      (fields\n        (field (name \"Reference\") {})\n        (field (name \"Value\") {}))",
@@ -234,23 +223,14 @@ pub fn json(p: &Project) -> JsonNetlist {
                 .collect(),
         })
         .collect();
-    JsonNetlist {
-        components,
-        nets,
-        no_connect: c.no_connect.iter().map(ToString::to_string).collect(),
-    }
+    JsonNetlist { components, nets, no_connect: c.no_connect.iter().map(ToString::to_string).collect() }
 }
 
 /// Compact text summary for humans and LLM context: components grouped by part, then nets.
 pub fn summary(p: &Project) -> String {
     let c = p.circuit();
     let lib = p.library();
-    let mut s = format!(
-        "{}: {} components, {} nets\n",
-        p.manifest().name,
-        c.components.len(),
-        c.nets.len()
-    );
+    let mut s = format!("{}: {} components, {} nets\n", p.manifest().name, c.components.len(), c.nets.len());
     s += "components:\n";
     for refdes in c.refdes_sorted() {
         let comp = &c.components[refdes];
@@ -262,10 +242,7 @@ pub fn summary(p: &Project) -> String {
             },
             None => format!("missing part {}", comp.part),
         };
-        let fp = part
-            .and_then(Part::footprint)
-            .map(|f| format!(" [{}]", f.footprint))
-            .unwrap_or_default();
+        let fp = part.and_then(Part::footprint).map(|f| format!(" [{}]", f.footprint)).unwrap_or_default();
         let _ = writeln!(s, "  {refdes}: {what}{fp}");
     }
     s += "nets:\n";
@@ -276,11 +253,7 @@ pub fn summary(p: &Project) -> String {
             .map(|pin| {
                 let part = c.components.get(&pin.refdes).and_then(|x| lib.parts.get(&x.part));
                 let (n, _) = pin_info(part, &pin.pin);
-                if n.is_empty() || n == pin.pin {
-                    pin.to_string()
-                } else {
-                    format!("{pin}({n})")
-                }
+                if n.is_empty() || n == pin.pin { pin.to_string() } else { format!("{pin}({n})") }
             })
             .collect();
         let mut flags = String::new();

@@ -226,11 +226,8 @@ impl Suppliers {
         if let Some(dir) = config_dir().map(|d| d.join("catalogs"))
             && let Ok(rd) = std::fs::read_dir(dir)
         {
-            let mut files: Vec<_> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
-                .collect();
+            let mut files: Vec<_> =
+                rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
             files.sort();
             paths.extend(files);
         }
@@ -257,9 +254,7 @@ impl Suppliers {
     }
 
     fn selected<'a>(&'a self, only: &'a [String]) -> impl Iterator<Item = &'a Arc<dyn Provider>> + 'a {
-        self.providers
-            .iter()
-            .filter(move |p| only.is_empty() || only.iter().any(|o| o == p.id()))
+        self.providers.iter().filter(move |p| only.is_empty() || only.iter().any(|o| o == p.id()))
     }
 
     /// Searches every (selected) provider, filters, ranks and truncates to `q.limit`.
@@ -285,12 +280,10 @@ impl Suppliers {
         let mut r = Results::default();
         for p in self.selected(only) {
             match p.lookup(mpn) {
-                Ok(c) => r
-                    .candidates
-                    .extend(c.into_iter().filter(|c| c.mpn.eq_ignore_ascii_case(mpn)).map(|mut c| {
-                        c.provider = p.id().to_string();
-                        c
-                    })),
+                Ok(c) => r.candidates.extend(c.into_iter().filter(|c| c.mpn.eq_ignore_ascii_case(mpn)).map(|mut c| {
+                    c.provider = p.id().to_string();
+                    c
+                })),
                 Err(e) => r.errors.push(e.to_string()),
             }
         }

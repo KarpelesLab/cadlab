@@ -158,11 +158,8 @@ fn run_batch(registry: &Registry, g: &Globals, steps: Vec<Step>) -> u8 {
             if let Err(f) = autosave(&mut session, "batch") {
                 return report_failure(g, &f);
             }
-            let has_errors = outs
-                .iter()
-                .flat_map(|o| &o.diagnostics)
-                .chain(&warnings)
-                .any(|d| d.severity == Severity::Error);
+            let has_errors =
+                outs.iter().flat_map(|o| &o.diagnostics).chain(&warnings).any(|d| d.severity == Severity::Error);
             if g.json {
                 println!("{}", json!({ "ok": true, "results": outs, "diagnostics": warnings }));
             } else {
@@ -182,33 +179,21 @@ fn run_batch(registry: &Registry, g: &Globals, steps: Vec<Step>) -> u8 {
 
 fn autosave(session: &mut Session, command: &str) -> Result<(), Failure> {
     if session.is_dirty() {
-        session.save().map_err(|error| Failure {
-            command: command.into(),
-            step: None,
-            error,
-            diagnostics: vec![],
-        })?;
+        session.save().map_err(|error| Failure { command: command.into(), step: None, error, diagnostics: vec![] })?;
     }
     Ok(())
 }
 
 fn report_outcome(g: &Globals, o: &Outcome) -> u8 {
     if g.json {
-        println!(
-            "{}",
-            json!({ "ok": true, "command": o.command, "output": o.output, "diagnostics": o.diagnostics })
-        );
+        println!("{}", json!({ "ok": true, "command": o.command, "output": o.output, "diagnostics": o.diagnostics }));
     } else {
         if !g.quiet {
             println!("{}", o.summary);
         }
         print_diagnostics(&o.diagnostics);
     }
-    if o.diagnostics.iter().any(|d| d.severity == Severity::Error) {
-        exit::CHECKS_FAILED
-    } else {
-        exit::OK
-    }
+    if o.diagnostics.iter().any(|d| d.severity == Severity::Error) { exit::CHECKS_FAILED } else { exit::OK }
 }
 
 fn report_failure(g: &Globals, f: &Failure) -> u8 {
@@ -273,10 +258,8 @@ fn parse_batch(text: &str) -> Result<Vec<Step>, String> {
 
 fn describe(registry: &Registry, g: &Globals, name: Option<&str>) -> u8 {
     let Some(name) = name else {
-        let list: Vec<Value> = registry
-            .iter()
-            .map(|e| json!({"name": e.name, "kind": e.kind, "summary": e.summary}))
-            .collect();
+        let list: Vec<Value> =
+            registry.iter().map(|e| json!({"name": e.name, "kind": e.kind, "summary": e.summary})).collect();
         if g.json {
             println!("{}", Value::Array(list));
         } else {
@@ -292,11 +275,7 @@ fn describe(registry: &Registry, g: &Globals, name: Option<&str>) -> u8 {
         None => registry.iter().filter(|e| e.group() == name).collect(),
     };
     if entries.is_empty() {
-        let names: Vec<&str> = registry
-            .iter()
-            .map(|e| e.name)
-            .chain(registry.groups().keys().copied())
-            .collect();
+        let names: Vec<&str> = registry.iter().map(|e| e.name).chain(registry.groups().keys().copied()).collect();
         let s = cadlab::suggest::did_you_mean(name, names, 3);
         let d = Diagnostic::error("command.unknown", format!("unknown command or group `{name}`")).with_suggestions(&s);
         if g.json {
@@ -319,31 +298,18 @@ fn describe(registry: &Registry, g: &Globals, name: Option<&str>) -> u8 {
 
 /// Human-readable description of a command's arguments.
 pub fn describe_text(e: &cadlab::command::Entry) -> String {
-    let mut s = format!(
-        "{} ({:?}): {}\n  cli: cadlab {} {}",
-        e.name,
-        e.kind,
-        e.summary,
-        e.group(),
-        e.action()
-    );
+    let mut s = format!("{} ({:?}): {}\n  cli: cadlab {} {}", e.name, e.kind, e.summary, e.group(), e.action());
     for p in e.positional {
         s += &format!(" <{p}>");
     }
-    let required: Vec<&str> = e.input_schema["required"]
-        .as_array()
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    let required: Vec<&str> =
+        e.input_schema["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     if let Some(props) = e.input_schema["properties"].as_object() {
         if !props.is_empty() {
             s += "\n  arguments:";
         }
         for (k, v) in props {
-            let req = if required.contains(&k.as_str()) {
-                " (required)"
-            } else {
-                ""
-            };
+            let req = if required.contains(&k.as_str()) { " (required)" } else { "" };
             let desc = v.get("description").and_then(Value::as_str).unwrap_or("");
             s += &format!("\n    {k}: {}{req}  {desc}", type_label(v));
         }
@@ -354,29 +320,14 @@ pub fn describe_text(e: &cadlab::command::Entry) -> String {
 /// Compact type label for a property schema: `string`, `string[]`, `mm|mil|...`.
 pub fn type_label(v: &Value) -> String {
     if let Some(variants) = v.get("anyOf").or_else(|| v.get("oneOf")).and_then(Value::as_array) {
-        let variants: Vec<&Value> = variants
-            .iter()
-            .filter(|x| x.get("type") != Some(&json!("null")))
-            .collect();
+        let variants: Vec<&Value> = variants.iter().filter(|x| x.get("type") != Some(&json!("null"))).collect();
         // Tagged unions: name the tag and its values (`{family: chip|qfn|..., ...}`).
-        let tag = variants
-            .first()
-            .and_then(|f| f["properties"].as_object())
-            .and_then(|props| {
-                props
-                    .keys()
-                    .find(|k| {
-                        variants
-                            .iter()
-                            .all(|x| x["properties"][k.as_str()].get("const").is_some())
-                    })
-                    .cloned()
-            });
+        let tag = variants.first().and_then(|f| f["properties"].as_object()).and_then(|props| {
+            props.keys().find(|k| variants.iter().all(|x| x["properties"][k.as_str()].get("const").is_some())).cloned()
+        });
         if let Some(tag) = tag.filter(|_| variants.len() > 1) {
-            let values: Vec<&str> = variants
-                .iter()
-                .filter_map(|x| x["properties"][tag.as_str()]["const"].as_str())
-                .collect();
+            let values: Vec<&str> =
+                variants.iter().filter_map(|x| x["properties"][tag.as_str()]["const"].as_str()).collect();
             return format!("{{{tag}: {}, ...}}", values.join("|"));
         }
         let parts: Vec<String> = variants.into_iter().map(type_label).collect();
@@ -398,19 +349,11 @@ pub fn type_label(v: &Value) -> String {
         ["object"] => match (v.get("additionalProperties"), v["properties"].as_object()) {
             (Some(a), _) if a.is_object() => format!("map<string, {}>", type_label(a)),
             (_, Some(props)) if !props.is_empty() => {
-                let required: Vec<&str> = v["required"]
-                    .as_array()
-                    .map(|r| r.iter().filter_map(Value::as_str).collect())
-                    .unwrap_or_default();
+                let required: Vec<&str> =
+                    v["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
                 let fields: Vec<String> = props
                     .keys()
-                    .map(|k| {
-                        if required.contains(&k.as_str()) {
-                            k.clone()
-                        } else {
-                            format!("{k}?")
-                        }
-                    })
+                    .map(|k| if required.contains(&k.as_str()) { k.clone() } else { format!("{k}?") })
                     .collect();
                 format!("{{{}}}", fields.join(", "))
             }

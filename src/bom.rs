@@ -62,9 +62,7 @@ impl BomRow {
         if let Some(m) = &self.mpn {
             return Some((self.manufacturer.as_deref(), m));
         }
-        self.approved
-            .first()
-            .map(|a| (a.manufacturer.as_deref(), a.mpn.as_str()))
+        self.approved.first().map(|a| (a.manufacturer.as_deref(), a.mpn.as_str()))
     }
 }
 
@@ -126,11 +124,7 @@ pub enum CsvFormat {
 }
 
 fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
+    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
 }
 
 fn csv_line(fields: &[String]) -> String {
@@ -212,9 +206,8 @@ pub fn to_csv(rows: &[BomRow], format: CsvFormat) -> String {
                 .map(s),
             );
             for (i, r) in rows.iter().filter(|r| r.quantity > 0).enumerate() {
-                let (mfr, mpn) = r.order_mpn().map_or((String::new(), String::new()), |(m, p)| {
-                    (m.unwrap_or("").into(), p.into())
-                });
+                let (mfr, mpn) =
+                    r.order_mpn().map_or((String::new(), String::new()), |(m, p)| (m.unwrap_or("").into(), p.into()));
                 let kind = match r.mount {
                     Some(Mount::Tht) => "THT",
                     Some(Mount::Smd) => "SMD",

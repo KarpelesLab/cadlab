@@ -45,6 +45,8 @@ pub mod model;
 pub mod netlist;
 pub mod partspec;
 pub mod refs;
+pub mod render;
+pub mod schematic;
 pub mod sourcing;
 pub mod suggest;
 pub mod supplier;
