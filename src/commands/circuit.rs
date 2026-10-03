@@ -173,6 +173,10 @@ impl Command for Remove {
             p.circuit_mut().detach_component(k);
             p.bom_mut().dnp.remove(k);
         }
+        // Forget block instances with no components left.
+        let c = p.circuit_mut();
+        let live: std::collections::BTreeSet<String> = c.components.values().filter_map(|x| x.block.clone()).collect();
+        c.instances.retain(|i, _| live.contains(i));
         Ok(Removed { refdes: keys })
     }
 

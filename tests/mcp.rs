@@ -100,6 +100,7 @@ fn mcp_session() {
             "circuit",
             "net",
             "netclass",
+            "block",
             "bom",
             "history",
             "describe",

@@ -1,5 +1,6 @@
 //! Built-in commands, by group.
 
+pub mod block;
 pub mod bom;
 pub mod circuit;
 pub mod footprint;
@@ -18,6 +19,7 @@ pub fn register_all(r: &mut Registry) {
     footprint::register(r);
     circuit::register(r);
     net::register(r);
+    block::register(r);
     bom::register(r);
     history::register(r);
 }

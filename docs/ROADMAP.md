@@ -57,13 +57,15 @@ symbol and footprint attached.
 
 - [x] Components (instances of parts, refdes auto-assignment, rename), nets, pins, externally driven power nets
 - [x] Connect/disconnect/merge, no-connect marks; pin ranges and buses (`net.connect DATA[0..7] U1.PA0..PA7`)
-- [ ] Hierarchy: reusable blocks/subcircuits (e.g. "USB-C power input"), instantiated with prefixes
+- [x] Hierarchy: reusable blocks captured from existing components, instantiated with port mapping (D18)
+- [ ] Block library shared across projects (with shared user libraries)
 - [x] Net classes (width, clearance, via size, diff pair) attached at circuit level
 - [x] ERC: unconnected pins, conflicting drivers, undriven power inputs (ground exempt), single-pin nets, pin-type rules
 - [x] Netlist export (KiCad netlist, JSON); oracle comparison comes with KiCad schematic export (M3)
 - [x] Text summaries designed for LLM context (`cadlab circuit summary`)
 
-**Exit:** a full MCU board circuit described via commands, ERC clean, netlist exported.
+**Exit:** a full MCU board circuit described via commands, ERC clean, netlist exported. **Done 2026-10-04**
+(`tests/circuit.rs`, ATtiny85 board).
 
 ## M3 — Schematic view and rendering (M)
 

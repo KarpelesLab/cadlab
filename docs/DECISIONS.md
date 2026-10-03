@@ -96,6 +96,15 @@ environment variables. There is deliberately no registry/MCP command to set them
 secrets.
 *Why:* secrets must not pass through an agent's context or land in projects, logs or the operation log.
 
+### D18. Blocks are templates; the circuit stays one flat netlist (2026-10-04)
+Hierarchy is provided by blocks: a block is captured from existing components (parts, internal nets,
+ports). Instantiating copies the components with fresh designators, names internal nets
+`<instance>/<net>` and connects ports to circuit nets; components remember their instance. There are no
+nested sheets in the data model.
+*Why:* every other feature (ERC, netlists, placement, routing, BOM) works on one flat netlist without
+special cases, and agents can address any pin as `REFDES.PIN`. Schematic rendering can still group a block's
+components (M3). Editing a block does not update existing instances; re-instantiating is explicit.
+
 ## Open questions
 
 None currently.

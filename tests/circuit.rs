@@ -328,3 +328,104 @@ fn erc_output_conflicts() {
     let o = exec(&r, &mut s, "net.show", json!({"net": "Y"}));
     assert_eq!(o["output"]["pins"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn blocks_capture_and_instantiate() {
+    let r = Registry::with_builtins();
+    let (_d, mut s) = new_project(&r);
+    build_board(&r, &mut s);
+    exec(&r, &mut s, "net.set", json!({"nets": ["VBUS"], "driven": true}));
+    exec(&r, &mut s, "net.no_connect", json!({"pins": ["U2.PB4"]}));
+
+    // LED + resistor: LED_A is internal, LED_DRIVE and GND leave the block.
+    let o = exec(
+        &r,
+        &mut s,
+        "block.create",
+        json!({"name": "status_led", "components": ["R2", "D1"], "description": "LED with series resistor"}),
+    );
+    assert_eq!(o["output"]["ports"], json!(["GND", "LED_DRIVE"]));
+    assert_eq!(o["output"]["internal_nets"], json!(["LED_A"]));
+
+    let o = exec(
+        &r,
+        &mut s,
+        "block.instantiate",
+        json!({"block": "status_led", "instance": "LED2", "connect": {"LED_DRIVE": "LED2_DRIVE"}}),
+    );
+    assert_eq!(o["output"]["components"], json!({"D1": "D2", "R2": "R3"}));
+    assert_eq!(
+        o["output"]["nets"],
+        json!({"GND": "GND", "LED_A": "LED2/LED_A", "LED_DRIVE": "LED2_DRIVE"})
+    );
+    let o = exec(&r, &mut s, "net.show", json!({"net": "LED2/LED_A"}));
+    let p: Vec<&str> = o["output"]["pins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["pin"].as_str().unwrap())
+        .collect();
+    assert_eq!(p, ["D2.2", "R3.2"]);
+
+    // Drive it from the spare pin (its no-connect mark is cleared, with a note).
+    let o = exec(
+        &r,
+        &mut s,
+        "net.connect",
+        json!({"net": "LED2_DRIVE", "pins": ["U2.PB4"]}),
+    );
+    assert!(codes(&o).contains(&"net.nc_cleared".to_string()));
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert_eq!(
+        o["output"],
+        json!({"errors": 0, "warnings": 0}),
+        "{:?}",
+        o["diagnostics"]
+    );
+
+    // Errors.
+    let f = fail(
+        &r,
+        &mut s,
+        "block.instantiate",
+        json!({"block": "status_led", "instance": "LED2"}),
+    );
+    assert_eq!(f.error.diagnostic.code, "block.instance_exists");
+    let f = fail(
+        &r,
+        &mut s,
+        "block.instantiate",
+        json!({"block": "status_led", "instance": "X", "connect": {"LED_DRIV": "N"}}),
+    );
+    assert_eq!(f.error.diagnostic.hint.as_deref(), Some("did you mean `LED_DRIVE`?"));
+    let f = fail(
+        &r,
+        &mut s,
+        "block.instantiate",
+        json!({"block": "status_lde", "instance": "X"}),
+    );
+    assert_eq!(f.error.diagnostic.code, "block.not_found");
+
+    // A block with instances cannot be removed until they are gone.
+    let f = fail(&r, &mut s, "block.remove", json!({"name": "status_led"}));
+    assert_eq!(f.error.diagnostic.code, "block.in_use");
+    exec(&r, &mut s, "circuit.remove", json!({"refdes": ["R3", "D2"]}));
+    let o = exec(&r, &mut s, "block.list", json!({}));
+    assert_eq!(o["output"]["blocks"][0]["instances"], json!([]));
+    exec(&r, &mut s, "block.remove", json!({"name": "status_led"}));
+
+    // CLI-style alias works through the registry name; the block survives a save/load.
+    exec(
+        &r,
+        &mut s,
+        "block.create",
+        json!({"name": "ldo", "components": ["U1", "C1", "C2"]}),
+    );
+    s.save().unwrap();
+    let root = s.root().unwrap().to_path_buf();
+    let (s2, _) = Session::open(&root).unwrap();
+    assert_eq!(
+        s2.project.as_ref().unwrap().circuit().blocks["ldo"].ports,
+        ["3V3", "GND", "VBUS"]
+    );
+}

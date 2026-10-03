@@ -158,6 +158,9 @@ pub struct Block {
     /// Nets connected outside the block when instantiated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<String>,
+    /// Pins intentionally left unconnected (local designators).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub no_connect: BTreeSet<PinRef>,
 }
 
 /// A component inside a block.
@@ -190,6 +193,9 @@ pub struct Circuit {
     /// Reusable blocks by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub blocks: BTreeMap<String, Block>,
+    /// Block instances: instance name → block name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub instances: BTreeMap<String, String>,
 }
 
 impl Circuit {

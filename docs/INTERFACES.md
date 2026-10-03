@@ -53,8 +53,10 @@ GLOBAL OPTS
   -q / -v               verbosity
 ```
 
-Groups follow the registry namespaces: `project`, `part`, `lib`, `bom`, `circuit`, `net`, `erc`, `schematic`,
-`board`, `place`, `track`, `zone`, `drc`, `route`, `render`, `fab`, `export`, `import`.
+Groups follow the registry namespaces. Today: `project`, `part`, `footprint`, `circuit` (components, ERC,
+netlist export, summary), `net`, `netclass`, `block`, `bom`, `history`. Planned: `schematic`, `board`, `place`,
+`track`, `zone`, `drc`, `route`, `render`, `fab`, `import`. Actions with underscores also accept dashes on the
+CLI (`net no-connect`).
 
 Examples:
 
