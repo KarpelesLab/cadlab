@@ -72,7 +72,8 @@ impl FootprintSummary {
 #[serde(deny_unknown_fields)]
 pub struct Generate {
     /// Package name: "0402", "SOT-23-5", "SOIC-8", "TSSOP-20", "LQFP-48",
-    /// "QFN-32 5x5mm P0.5mm EP3.1mm", "PinHeader 1x04".
+    /// "QFN-32 5x5mm P0.5mm EP3.1mm", "PinHeader 1x04", "SOT-223", "DPAK", "SOD-123", "SMA", "MINIMELF",
+    /// "DIP-8", "BGA-64 8x8 P0.8mm 6x6mm".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     /// Explicit dimensions from the datasheet, instead of `package`.
