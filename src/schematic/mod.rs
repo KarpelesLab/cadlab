@@ -6,7 +6,7 @@
 //! decoupling capacitors line up under their IC, and every other connection is shown with net
 //! labels and power/ground symbols. Placement hints in `schematic.json` override the automatic
 //! position of a component. [`draw`] turns a layout into a [`crate::render::Scene`];
-//! [`kicad`] writes it as a KiCad schematic.
+//! The KiCad writer exports it as a KiCad schematic.
 
 mod draw;
 mod layout;

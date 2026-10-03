@@ -19,10 +19,15 @@ fn setup() -> (tempfile::TempDir, Registry, Session) {
     let r = Registry::with_builtins();
     let mut s = Session::new();
     exec(&r, &mut s, "project.new", json!({"path": dir.path().join("p")}));
-    exec(&r, &mut s, "part.create", json!({"category": "ldo", "mpn": "AP2112K-3.3TRG1", "package": "SOT-23-5",
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"category": "ldo", "mpn": "AP2112K-3.3TRG1", "package": "SOT-23-5",
         "pins": [{"number": "1", "name": "VIN", "kind": "power_in"}, {"number": "2", "name": "GND", "kind": "power_in"},
                  {"number": "3", "name": "EN", "kind": "input"}, {"number": "4", "name": "NC", "kind": "no_connect"},
-                 {"number": "5", "name": "VOUT", "kind": "power_out"}]}));
+                 {"number": "5", "name": "VOUT", "kind": "power_out"}]}),
+    );
     exec(&r, &mut s, "circuit.add", json!({"part": "AP2112K-3.3TRG1"}));
     exec(&r, &mut s, "circuit.add", json!({"part": "C 1uF 16V X5R 0402", "count": 2}));
     exec(&r, &mut s, "net.connect", json!({"net": "VIN", "pins": ["U1.VIN", "U1.EN", "C1.1"]}));
@@ -64,11 +69,21 @@ fn outline_place_route_ratsnest() {
     assert_eq!(f.error.diagnostic.code, "track.invalid_layer");
 
     // Vias: defaults from rules; net class overrides widths.
-    exec(&r, &mut s, "netclass.set", json!({"name": "power", "track_width": "0.5mm", "via_drill": "0.4mm", "via_diameter": "0.8mm"}));
+    exec(
+        &r,
+        &mut s,
+        "netclass.set",
+        json!({"name": "power", "track_width": "0.5mm", "via_drill": "0.4mm", "via_diameter": "0.8mm"}),
+    );
     exec(&r, &mut s, "net.set", json!({"nets": ["GND"], "class": "power"}));
     let o = exec(&r, &mut s, "via.add", json!({"at": ["5mm", "5mm"], "net": "GND"}));
     assert_eq!(o["output"]["vias"][0]["diameter"], "0.8mm");
-    let o = exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "points": [["5mm", "5mm"], ["8mm", "5mm"]], "net": "GND"}));
+    let o = exec(
+        &r,
+        &mut s,
+        "track.add",
+        json!({"layer": "B.Cu", "points": [["5mm", "5mm"], ["8mm", "5mm"]], "net": "GND"}),
+    );
     assert_eq!(o["output"]["tracks"][0]["width"], "0.5mm");
     let id = o["output"]["tracks"][0]["id"].as_u64().unwrap();
     exec(&r, &mut s, "track.remove", json!({"ids": [format!("track#{id}")]}));

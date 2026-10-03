@@ -138,7 +138,7 @@ impl Command for Schematic {
 pub struct Symbol {
     /// Part ID or MPN.
     pub part: String,
-    /// Output file, .png or .svg (default out/symbol-<part>.png).
+    /// Output file, .png or .svg (default `out/symbol-<part>.png`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     /// PNG resolution in pixels per millimeter.
@@ -175,7 +175,7 @@ impl Command for Symbol {
 pub struct Footprint {
     /// Footprint name, or a part ID (its preferred footprint).
     pub name: String,
-    /// Output file, .png or .svg (default out/footprint-<name>.png).
+    /// Output file, .png or .svg (default `out/footprint-<name>.png`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     /// PNG resolution in pixels per millimeter.
