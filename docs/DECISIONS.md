@@ -153,6 +153,18 @@ and reported, never returned silently. Results are deterministic for a given inp
 cuts a run short trades that for a best-so-far legal result.
 *Why:* correctness first (agents act on the output), with simple data structures that are easy to test; the
 gridless push-and-shove router of M6 can reuse the model, index, checks and reports.
+### D23. Large-board speedups never change results (2026-10-04)
+Performance work on shared geometry (connectivity, ratsnest, DRC, zone fill, rendering) must produce
+byte-identical outputs: indexes and shortcuts only skip work whose answer is known, and exact queries still
+run on `polyclip`'s own predicates (`board::prepared` hands `polyclip` a windowed view of a large shape).
+Equivalence tests keep the straightforward versions as references, and the synthetic 500-component board
+(`tests/common/bigboard.rs`) is compared output for output before and after. Multi-threaded booleans come from
+`polyclip`'s `rayon` feature behind cadlab's default `parallel` feature, since its results do not depend on the
+thread count.
+*Why:* fills, DRC reports, Gerbers and renders are compared by golden files and oracles, and an agent must get
+the same answer from the same design on any machine. Approximate speedups (tiling a pour, clipping keep-aways
+to a window) would move vertices by snap rounding and are not taken, so the remaining zone fill time is spent
+in `polyclip`'s offsets (docs/BOARD.md, "Performance").
 
 ## Open questions
 

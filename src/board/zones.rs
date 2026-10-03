@@ -21,6 +21,7 @@
 //! when every input is identical ([`fill_zones`]). Timings in `docs/BOARD.md`.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use crate::board::{CopperItem, ItemRef, contour_ring, placed_pads};
 use crate::geom::poly::{self, ArcTol, Boolean, Circle, FillRule, Geometry, Join, Op, Polygon, PolygonSet, Ring, Side};
@@ -357,6 +358,13 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     fills
 }
 
+/// Forgets the fills kept in process by [`fill_zones`] (benchmarks measure cold runs with it).
+pub fn clear_fill_cache() {
+    if let Ok(mut m) = MEMO.lock() {
+        m.clear();
+    }
+}
+
 /// [`fill_zones`] without the in-process reuse.
 pub fn fill_zones_uncached(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     fill_with(p, base, &npth_holes(p))
@@ -403,6 +411,9 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
             .map(|it| (it, class_c[&it.net.as_deref()]))
             .collect();
         let mut done: Vec<(usize, usize, ZoneFill)> = Vec::new();
+        // Earlier fills grown by a keep-away distance, by (index in `done`, distance): later
+        // zones of the layer often need the same ones.
+        let mut grown: BTreeMap<(usize, i64), PolygonSet> = BTreeMap::new();
         for &(zi, li) in jobs {
             let z = &board.zones[zi];
             let prm = zone_params(p, z);
@@ -425,10 +436,14 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
                     let ring = Circle::new(c, r + prm.clearance.0 + SAFETY).to_ring(OBSTACLE_TOL)?;
                     keepaway.push(Polygon::new(ring, vec![]));
                 }
-                for (_, _, f) in &done {
+                for (k, (_, _, f)) in done.iter().enumerate() {
                     if !same_net(f.net.as_deref(), z.net.as_deref()) && !f.fill.is_empty() {
                         let c = prm.clearance.max(f.clearance).0 + SAFETY;
-                        keepaway.extend(poly::offset(&f.fill, c, Join::Round, OBSTACLE_TOL)?);
+                        let g = match grown.entry((k, c)) {
+                            Entry::Occupied(e) => e.into_mut(),
+                            Entry::Vacant(e) => e.insert(poly::offset(&f.fill, c, Join::Round, OBSTACLE_TOL)?),
+                        };
+                        keepaway.extend(g.iter().cloned());
                     }
                 }
                 for k in &board.keepouts {

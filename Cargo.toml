@@ -10,13 +10,16 @@ keywords = ["eda", "pcb", "cad", "electronics", "mcp"]
 categories = ["science", "command-line-utilities"]
 
 [features]
-default = ["cli", "net", "png"]
+default = ["cli", "net", "png", "parallel"]
 # The `cadlab` binary (CLI + MCP server). Library users can disable it to avoid the CLI dependencies.
 cli = ["dep:clap", "dep:rpassword"]
 # Network part research providers (DigiKey, ...).
 net = ["dep:ureq"]
 # PNG rendering (SVG needs no extra dependency).
 png = ["dep:tiny-skia"]
+# Multi-threaded polygon booleans (polyclip's rayon feature; results are identical for any
+# thread count). Zone fills of large boards are about a quarter faster.
+parallel = ["polyclip/rayon"]
 
 [[bin]]
 name = "cadlab"

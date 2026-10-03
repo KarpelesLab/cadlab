@@ -6,7 +6,7 @@
 //! the fab outputs use). Copper of one layer is unioned before drawing, so a semi-transparent
 //! layer has a uniform color where items overlap.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::board::{self as geo, ItemRef};
 use crate::geom::Point;
@@ -377,14 +377,15 @@ fn holes(p: &Project, pads: &[geo::PlacedPad]) -> Vec<((f64, f64), f64, bool)> {
 
 /// Builds the scene for a board view.
 pub fn draw(p: &Project, v: &BoardView) -> Scene {
+    let items = geo::copper_items(p);
     let mut s = match v.realistic {
-        Some(side) => realistic(p, side),
-        None => layers(p, v),
+        Some(side) => realistic(p, side, &items),
+        None => layers(p, v, &items),
     };
     let hair = (1.5 / v.px_per_mm.max(0.1)).max(0.03);
     let lit = Lit { set: v.highlight.iter().map(String::as_str).collect() };
     if v.ratsnest && v.realistic.is_none() {
-        for r in geo::ratsnest(p) {
+        for r in geo::ratsnest_items(&items) {
             let on = lit.net(Some(&r.net)) || lit.label(&r.from) || lit.label(&r.to);
             s.line(vec![mp(r.from_at), mp(r.to_at)], hair, dim(Color::hex(0xd8e4ff).alpha(220), on));
         }
@@ -424,30 +425,41 @@ fn mirror_scene(s: &mut Scene) {
 }
 
 /// The layer view.
-fn layers(p: &Project, v: &BoardView) -> Scene {
+fn layers(p: &Project, v: &BoardView, items: &[geo::CopperItem]) -> Scene {
     let mut s = Scene { background: BACKGROUND, prims: Vec::new() };
     let want: Vec<String> = v.layers.clone().unwrap_or_else(|| default_layers(p));
     let lit = Lit { set: v.highlight.iter().map(String::as_str).collect() };
     let board = p.board();
     let copper = board.stackup.copper_names();
-    let items = geo::copper_items(p);
     let pads = geo::placed_pads(p);
     let fps = placed(p);
     let hair = (1.5 / v.px_per_mm.max(0.1)).max(0.03);
     let any_copper = want.iter().any(|l| copper.contains(l));
-    for layer in layer_order(p).iter().filter(|l| want.contains(l)) {
+    let order = layer_order(p);
+    // Copper of each shown layer, dimmed and lit, unioned (layers in parallel).
+    let shown: Vec<&String> = order.iter().filter(|l| want.contains(l) && copper.contains(l)).collect();
+    let unions: BTreeMap<&str, (PolygonSet, PolygonSet)> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = shown
+            .iter()
+            .map(|layer| {
+                let (mut on, mut off) = (Vec::new(), Vec::new());
+                for it in items.iter().filter(|it| it.layers.contains(layer)) {
+                    let is_lit = match &it.item {
+                        ItemRef::Pad(r, _) => lit.refdes(r) || lit.net(it.net.as_deref()),
+                        _ => lit.net(it.net.as_deref()),
+                    };
+                    if is_lit { &mut on } else { &mut off }.extend(it.shape.iter().cloned());
+                }
+                (layer.as_str(), sc.spawn(move || (union(off), union(on))))
+            })
+            .collect();
+        jobs.into_iter().map(|(l, h)| (l, h.join().expect("layer union thread"))).collect()
+    });
+    for layer in order.iter().filter(|l| want.contains(l)) {
         let color = layer_color(layer);
-        if copper.contains(layer) {
-            let (mut on, mut off) = (Vec::new(), Vec::new());
-            for it in items.iter().filter(|it| it.layers.contains(layer)) {
-                let is_lit = match &it.item {
-                    ItemRef::Pad(r, _) => lit.refdes(r) || lit.net(it.net.as_deref()),
-                    _ => lit.net(it.net.as_deref()),
-                };
-                if is_lit { &mut on } else { &mut off }.extend(it.shape.iter().cloned());
-            }
-            fill_set(&mut s, &union(off), dim(color.alpha(175), false));
-            fill_set(&mut s, &union(on), color.alpha(175));
+        if let Some((off, on)) = unions.get(layer.as_str()) {
+            fill_set(&mut s, off, dim(color.alpha(175), false));
+            fill_set(&mut s, on, color.alpha(175));
             if layer == "F.Cu" && any_copper {
                 draw_holes(&mut s, p, &pads, hair);
             }
@@ -575,7 +587,7 @@ fn look(p: &Project) -> Look {
 }
 
 /// The realistic view of one side, in board coordinates (the caller mirrors the bottom view).
-fn realistic(p: &Project, side: BoardSide) -> Scene {
+fn realistic(p: &Project, side: BoardSide, items: &[geo::CopperItem]) -> Scene {
     let mut s = Scene { background: REALISTIC_BG, prims: Vec::new() };
     let lk = look(p);
     let cu = if side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
@@ -585,7 +597,6 @@ fn realistic(p: &Project, side: BoardSide) -> Scene {
         // Masked laminate.
         s.region(rings.clone(), lk.substrate);
     }
-    let items = geo::copper_items(p);
     let covered: Vec<Polygon> =
         items.iter().filter(|it| it.layers.iter().any(|l| l == cu)).flat_map(|it| it.shape.iter().cloned()).collect();
     fill_set(&mut s, &union(covered), lk.mask_copper);

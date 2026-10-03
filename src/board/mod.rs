@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 pub mod holes;
 pub mod place;
+pub mod prepared;
 pub mod zones;
 
 use polyclip::{ArcTol, Circle, Curve, EndCap, Join, Path, Polygon, PolygonSet, Shape, Side};
@@ -13,7 +14,6 @@ use crate::geom::Point;
 use crate::id::ObjectId;
 use crate::model::Project;
 use crate::model::board::{BoardSide, Contour, PlacedFootprint, Segment, Track, Via};
-use crate::model::circuit::PinRef;
 use crate::model::footprint::{Footprint, Pad, PadKind, PadShape};
 use crate::units::{Angle, Nm};
 
@@ -114,12 +114,31 @@ fn pad_shape_local(shape: &PadShape) -> Result<Polygon, polyclip::Error> {
 
 /// Pad number → net for a component, through its part's footprint pin map.
 pub fn pad_nets(p: &Project, refdes: &str) -> BTreeMap<String, String> {
+    let index = pin_nets(p, Some(refdes));
+    pad_nets_in(p, refdes, index.get(refdes))
+}
+
+/// Pin number → net per component (the first net in name order holding the pin, as
+/// [`Circuit::net_of`](crate::model::circuit::Circuit::net_of)), for one component or all.
+fn pin_nets<'a>(p: &'a Project, only: Option<&str>) -> BTreeMap<&'a str, BTreeMap<&'a str, &'a str>> {
+    let mut out: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for (name, net) in &p.circuit().nets {
+        for pin in &net.pins {
+            if only.is_none_or(|r| r == pin.refdes) {
+                out.entry(pin.refdes.as_str()).or_default().entry(pin.pin.as_str()).or_insert(name.as_str());
+            }
+        }
+    }
+    out
+}
+
+fn pad_nets_in(p: &Project, refdes: &str, pins: Option<&BTreeMap<&str, &str>>) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let Some(comp) = p.circuit().components.get(refdes) else { return out };
     let Some(part) = p.library().parts.get(&comp.part) else { return out };
     let fref = part.footprint();
     for pin in &part.symbol.pins {
-        let Some(net) = p.circuit().net_of(&PinRef::new(refdes, &pin.number)) else { continue };
+        let Some(net) = pins.and_then(|m| m.get(pin.number.as_str())) else { continue };
         let pads = fref.map(|f| f.pads_for(&pin.number)).unwrap_or_else(|| vec![pin.number.clone()]);
         for pad in pads {
             out.insert(pad, net.to_string());
@@ -133,10 +152,11 @@ pub fn pad_nets(p: &Project, refdes: &str) -> BTreeMap<String, String> {
 pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
     let board = p.board();
     let copper = board.stackup.copper_names();
+    let index = pin_nets(p, None);
     let mut out = Vec::new();
     for (refdes, pf) in &board.footprints {
         let Some(fp) = footprint_for(p, refdes) else { continue };
-        let nets = pad_nets(p, refdes);
+        let nets = pad_nets_in(p, refdes, index.get(refdes.as_str()));
         let tf = transform(pf);
         for pad in &fp.pads {
             let Ok(local) = pad_shape_local(&pad.shape) else { continue };
@@ -310,17 +330,15 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
     out
 }
 
-fn touches(a: &CopperItem, b: &CopperItem) -> bool {
-    a.layers.iter().any(|l| b.layers.contains(l)) && polyclip::intersects(&a.shape, &b.shape)
-}
+/// Union-find whose roots are the lowest index of their set.
+struct MinRootSets(Vec<usize>);
 
-/// Copper islands: groups of items that touch (same layer, overlapping shapes; vias and
-/// through-hole pads join layers). Returns the island index of every item: the lowest index
-/// of the items in its island.
-pub fn islands(items: &[CopperItem]) -> Vec<usize> {
-    let n = items.len();
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn find(p: &mut [usize], i: usize) -> usize {
+impl MinRootSets {
+    fn new(n: usize) -> Self {
+        MinRootSets((0..n).collect())
+    }
+    fn find(&mut self, i: usize) -> usize {
+        let p = &mut self.0;
         let mut r = i;
         while p[r] != r {
             r = p[r];
@@ -333,25 +351,81 @@ pub fn islands(items: &[CopperItem]) -> Vec<usize> {
         }
         r
     }
-    // Sweep over bounding boxes sorted by their left edge.
+    /// Joins the sets of `a` and `b` (roots, already found).
+    fn join_roots(&mut self, a: usize, b: usize) {
+        if a != b {
+            self.0[a.max(b)] = a.min(b);
+        }
+    }
+}
+
+/// Layer sets of items as bit masks (`None` past 128 distinct layer names).
+fn layer_masks(items: &[CopperItem]) -> Option<Vec<u128>> {
+    let mut names: BTreeMap<&str, u32> = BTreeMap::new();
+    for it in items {
+        for l in &it.layers {
+            let k = names.len() as u32;
+            names.entry(l.as_str()).or_insert(k);
+        }
+    }
+    if names.len() > 128 {
+        return None;
+    }
+    Some(items.iter().map(|it| it.layers.iter().fold(0u128, |m, l| m | (1u128 << names[l.as_str()]))).collect())
+}
+
+/// Copper islands: groups of items that touch (same layer, overlapping shapes; vias and
+/// through-hole pads join layers). Returns the island index of every item: the lowest index
+/// of the items in its island.
+///
+/// Candidate pairs come from a sweep over bounding boxes; pairs already known to be connected
+/// skip the shape test, and large shapes (zone fills) are indexed once ([`prepared::Prepared`])
+/// so each item is tested against the pour's nearby edges only. The result is exactly that of
+/// testing every pair with `polyclip::intersects`.
+pub fn islands(items: &[CopperItem]) -> Vec<usize> {
+    let n = items.len();
+    let mut sets = MinRootSets::new(n);
+    let masks = layer_masks(items);
+    let share = |i: usize, j: usize| match &masks {
+        Some(m) => m[i] & m[j] != 0,
+        None => items[i].layers.iter().any(|l| items[j].layers.contains(l)),
+    };
     let boxes: Vec<Option<polyclip::Rect>> = items.iter().map(|it| polyclip::Geometry::bbox(&it.shape)).collect();
+    let big: Vec<bool> =
+        items.iter().map(|it| prepared::segment_count(&it.shape) >= prepared::PREPARE_MIN_SEGMENTS).collect();
+    // Small items: sweep over bounding boxes sorted by their left edge.
     let mut order: Vec<(polyclip::Rect, usize)> =
-        boxes.iter().enumerate().filter_map(|(i, b)| b.map(|b| (b, i))).collect();
+        boxes.iter().enumerate().filter(|(i, _)| !big[*i]).filter_map(|(i, b)| b.map(|b| (b, i))).collect();
     order.sort_by_key(|(b, i)| (b.min.x, *i));
     for (k, (bi, i)) in order.iter().enumerate() {
         for (bj, j) in &order[k + 1..] {
             if bj.min.x > bi.max.x {
                 break;
             }
-            if bi.intersects(bj) && touches(&items[*i], &items[*j]) {
-                let (a, b) = (find(&mut parent, *i), find(&mut parent, *j));
-                if a != b {
-                    parent[a.max(b)] = a.min(b);
-                }
+            if !bi.intersects(bj) || !share(*i, *j) {
+                continue;
+            }
+            let (a, b) = (sets.find(*i), sets.find(*j));
+            if a != b && polyclip::intersects(&items[*i].shape, &items[*j].shape) {
+                sets.join_roots(a, b);
             }
         }
     }
-    (0..n).map(|i| find(&mut parent, i)).collect()
+    // Large items against everything else.
+    for b in (0..n).filter(|&b| big[b]) {
+        let Some(bb) = boxes[b] else { continue };
+        let prep = prepared::Prepared::new(&items[b].shape);
+        for j in 0..n {
+            if j == b || (big[j] && j < b) || !boxes[j].is_some_and(|bj| bj.intersects(&bb)) || !share(b, j) {
+                continue;
+            }
+            let (x, y) = (sets.find(b), sets.find(j));
+            if x != y && prep.intersects(&items[j].shape) {
+                sets.join_roots(x, y);
+            }
+        }
+    }
+    (0..n).map(|i| sets.find(i)).collect()
 }
 
 /// An unrouted connection.
@@ -379,8 +453,23 @@ fn dist(a: Point, b: Point) -> i64 {
 /// Unrouted connections: for each net, the shortest links joining its copper islands
 /// (minimum spanning tree between islands, measured between pad/via anchors).
 pub fn ratsnest(p: &Project) -> Vec<RatLine> {
-    let items = copper_items(p);
-    let isl = islands(&items);
+    ratsnest_items(&copper_items(p))
+}
+
+/// [`ratsnest`] from copper items already computed (e.g. [`copper_items`]), for callers that
+/// also use the items.
+pub fn ratsnest_items(items: &[CopperItem]) -> Vec<RatLine> {
+    ratsnest_from(items, &islands(items))
+}
+
+/// [`ratsnest`] from copper items and their [`islands`].
+///
+/// Per net, Prim's algorithm over islands, where the link between two islands is their closest
+/// pair of anchors (pads and vias; tracks and zone fills are never endpoints). Ties go to the
+/// lowest (length, tree island, new island, tree item, new item), islands ordered by island
+/// index and items by index. Each out-of-tree anchor keeps its best link to the tree, so a net
+/// with `k` anchors costs O(k²).
+pub fn ratsnest_from(items: &[CopperItem], isl: &[usize]) -> Vec<RatLine> {
     let mut by_net: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
         if let Some(n) = &it.net
@@ -391,35 +480,64 @@ pub fn ratsnest(p: &Project) -> Vec<RatLine> {
     }
     let mut out = Vec::new();
     for (net, idx) in by_net {
-        // Islands of this net.
+        // Islands of this net, in island order; anchors by item index within each.
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for i in idx {
             groups.entry(isl[i]).or_default().push(i);
         }
-        let groups: Vec<Vec<usize>> = groups.into_values().collect();
         if groups.len() < 2 {
             continue;
         }
-        // Prim's algorithm over islands; edge weight = closest anchor pair.
+        let groups: Vec<Vec<usize>> = groups.into_values().collect();
+        let mut group_of: Vec<usize> = Vec::new();
+        let mut anchors: Vec<usize> = Vec::new();
+        for (g, members) in groups.iter().enumerate() {
+            for &i in members {
+                group_of.push(g);
+                anchors.push(i);
+            }
+        }
+        let starts: Vec<usize> = groups
+            .iter()
+            .scan(0usize, |acc, g| {
+                let s = *acc;
+                *acc += g.len();
+                Some(s)
+            })
+            .collect();
         let mut in_tree = vec![false; groups.len()];
-        in_tree[0] = true;
-        for _ in 1..groups.len() {
-            let mut best: Option<(i64, usize, usize, usize)> = None;
-            for (gi, g) in groups.iter().enumerate().filter(|(gi, _)| in_tree[*gi]) {
-                let _ = gi;
-                for (hj, h) in groups.iter().enumerate().filter(|(hj, _)| !in_tree[*hj]) {
-                    for &a in g {
-                        for &b in h {
-                            let d = dist(items[a].anchor, items[b].anchor);
-                            if best.is_none_or(|x| d < x.0) {
-                                best = Some((d, a, b, hj));
-                            }
-                        }
+        // Best link of each anchor to the tree: (length, tree group, tree anchor).
+        let mut best: Vec<Option<(i64, usize, usize)>> = vec![None; anchors.len()];
+        let add = |g: usize, in_tree: &mut [bool], best: &mut [Option<(i64, usize, usize)>]| {
+            in_tree[g] = true;
+            for ka in starts[g]..starts[g] + groups[g].len() {
+                let a = anchors[ka];
+                for (kb, &b) in anchors.iter().enumerate() {
+                    if in_tree[group_of[kb]] {
+                        continue;
+                    }
+                    let cand = (dist(items[a].anchor, items[b].anchor), g, a);
+                    if best[kb].is_none_or(|x| cand < x) {
+                        best[kb] = Some(cand);
                     }
                 }
             }
-            let Some((d, a, b, hj)) = best else { break };
-            in_tree[hj] = true;
+        };
+        add(0, &mut in_tree, &mut best);
+        for _ in 1..groups.len() {
+            let mut pick: Option<(i64, usize, usize, usize, usize)> = None;
+            for (kb, &b) in anchors.iter().enumerate() {
+                let gb = group_of[kb];
+                if in_tree[gb] {
+                    continue;
+                }
+                let Some((d, ga, a)) = best[kb] else { continue };
+                let key = (d, ga, gb, a, b);
+                if pick.is_none_or(|k| key < k) {
+                    pick = Some(key);
+                }
+            }
+            let Some((d, _, gb, a, b)) = pick else { break };
             out.push(RatLine {
                 net: net.to_string(),
                 from: items[a].item.to_string(),
@@ -428,6 +546,7 @@ pub fn ratsnest(p: &Project) -> Vec<RatLine> {
                 to_at: items[b].anchor,
                 length: Nm(d),
             });
+            add(gb, &mut in_tree, &mut best);
         }
     }
     out
@@ -461,3 +580,6 @@ pub fn contour_ring(c: &Contour, tol: ArcTol) -> Vec<polyclip::Point> {
 pub fn norm(a: Angle) -> Angle {
     a.normalized()
 }
+
+#[cfg(test)]
+mod tests;

@@ -177,27 +177,23 @@ impl Gerber {
         let _ = writeln!(self.body, "G04 {t}*");
     }
 
-    fn xy(p: Xy) -> String {
-        format!("X{}Y{}", p.0, p.1)
-    }
-
     /// Flashes aperture `d` at `p` (D03).
     pub fn flash(&mut self, d: usize, p: Xy) {
         self.select(d);
-        let _ = writeln!(self.body, "{}D03*", Self::xy(p));
+        let _ = writeln!(self.body, "X{}Y{}D03*", p.0, p.1);
         self.pos = Some(p);
     }
 
     fn move_to(&mut self, p: Xy) {
         if self.pos != Some(p) {
-            let _ = writeln!(self.body, "{}D02*", Self::xy(p));
+            let _ = writeln!(self.body, "X{}Y{}D02*", p.0, p.1);
             self.pos = Some(p);
         }
     }
 
     fn line_to(&mut self, p: Xy) {
         self.set_mode(Mode::Linear);
-        let _ = writeln!(self.body, "{}D01*", Self::xy(p));
+        let _ = writeln!(self.body, "X{}Y{}D01*", p.0, p.1);
         self.pos = Some(p);
     }
 
@@ -241,7 +237,7 @@ impl Gerber {
             return;
         }
         self.set_mode(if ccw { Mode::Ccw } else { Mode::Cw });
-        let _ = writeln!(self.body, "{}I{}J{}D01*", Self::xy(end), center.0 - start.0, center.1 - start.1);
+        let _ = writeln!(self.body, "X{}Y{}I{}J{}D01*", end.0, end.1, center.0 - start.0, center.1 - start.1);
         self.pos = Some(end);
     }
 
@@ -257,7 +253,7 @@ impl Gerber {
         }
         self.body.push_str("G36*\n");
         for c in contours {
-            let _ = writeln!(self.body, "{}D02*", Self::xy(c[0]));
+            let _ = writeln!(self.body, "X{}Y{}D02*", c[0].0, c[0].1);
             self.pos = Some(c[0]);
             for &p in &c[1..] {
                 self.line_to(p);
