@@ -217,7 +217,10 @@ fn export_commands() {
     assert_eq!(o["output"]["files"][0]["function"], "PickPlace");
     assert!(root.join("assembly/pos.csv").is_file());
     let o = exec(&r, &mut s, "export.ipc356", json!({}));
-    assert!(o["output"]["files"][0]["path"].as_str().unwrap().ends_with("out/fab/tiny.d356"));
+    assert!(
+        Path::new(o["output"]["files"][0]["path"].as_str().unwrap())
+            .ends_with(Path::new("out").join("fab").join("tiny.d356"))
+    );
     let o = exec(&r, &mut s, "export.gerber", json!({"dir": "g", "mask_expansion": "0.05mm"}));
     assert_eq!(o["output"]["files"].as_array().unwrap().len(), 11);
     let mask = std::fs::read_to_string(root.join("g/tiny-F_Mask.gbr")).unwrap();
