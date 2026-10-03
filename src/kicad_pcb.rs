@@ -15,7 +15,13 @@
 //!   cadlab's transform. Pad and text angles are absolute. Bottom-side footprints get orientation
 //!   `rotation + 180°` (KiCad's left/right flip) and `B.*` layers.
 //! - UUIDs are derived from stable data (designators, pad indices, object IDs), so the output is
-//!   byte-for-byte deterministic.
+//!   byte-for-byte deterministic. [`KicadExport::uuids`] maps each back to its cadlab object, to
+//!   read KiCad reports (the DRC cross-check, `tests/drc_crosscheck.rs`).
+//! - What KiCad recomputes is written as cadlab computes it, so both tools agree
+//!   (`tests/gerber_crosscheck.rs`): zones carry cadlab's effective fill settings (clearance,
+//!   minimum width, thermal gap and spoke with defaults resolved), and each footprint's
+//!   Reference field sits where cadlab's legend prints the designator ([`crate::fabout::refdes_text`]).
+//!   The rules set no minimum via diameter: cadlab checks via drill and annular ring only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -32,8 +38,6 @@ use crate::units::{Angle, Nm};
 /// Board file format version written (KiCad 8).
 pub const FORMAT_VERSION: u32 = 20240108;
 
-/// Default thermal relief gap and spoke width when a zone does not set them (KiCad's defaults).
-const THERMAL_DEFAULT: Nm = Nm(500_000);
 /// Edge.Cuts line width.
 const EDGE_WIDTH: Nm = Nm(50_000);
 /// Courtyard line width.
@@ -52,6 +56,11 @@ pub struct KicadExport {
     pub warnings: Vec<String>,
     /// Footprints written.
     pub footprints: usize,
+    /// UUID of every written object → the cadlab object it comes from (`track#4`, `via#2`,
+    /// `U1.3` for a pad, `U1` for a footprint and its graphics, `zone#7`, `keepout:name`, `edge`
+    /// for the board outline, `text:U1/Reference` for footprint fields, `graphic#9`), to map
+    /// KiCad reports back to cadlab objects.
+    pub uuids: BTreeMap<String, String>,
 }
 
 /// Mapping from cadlab coordinates (Y up) to KiCad coordinates (Y down).
@@ -209,9 +218,17 @@ struct Writer<'a> {
     nets: BTreeMap<String, usize>,
     layers: BTreeSet<String>,
     warnings: Vec<String>,
+    uuids: std::cell::RefCell<BTreeMap<String, String>>,
 }
 
 impl Writer<'_> {
+    /// Quoted UUID for `key`, recorded as coming from the cadlab object `label`.
+    fn id(&self, key: &str, label: impl Into<String>) -> String {
+        let u = uuid(key);
+        self.uuids.borrow_mut().insert(u.clone(), label.into());
+        q(&u)
+    }
+
     fn xy(&self, p: Point) -> String {
         let (x, y) = self.frame.to_kicad(p);
         format!("{} {}", mm(x), mm(y))
@@ -249,7 +266,11 @@ impl FpFrame<'_> {
 
     /// KiCad footprint-local coordinates of a cadlab footprint-local point.
     fn local(&self, q: Point) -> String {
-        let abs = geo::transform(self.pf)(q);
+        self.local_abs(geo::transform(self.pf)(q))
+    }
+
+    /// KiCad footprint-local coordinates of a cadlab board point.
+    fn local_abs(&self, abs: Point) -> String {
         let d = (abs - self.pf.at).rotated(-self.orient);
         format!("{} {}", mm(d.x), mm(-d.y))
     }
@@ -280,6 +301,7 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
         nets: net_numbers(p),
         layers: layer_table(&copper).into_iter().map(|l| l.1).collect(),
         warnings: Vec::new(),
+        uuids: Default::default(),
     };
 
     let _ = writeln!(
@@ -333,7 +355,7 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
     let project = to_kicad_pro(p, name);
     let (rules, rule_warnings) = dru(p);
     w.warnings.extend(rule_warnings);
-    KicadExport { pcb: w.s, project, rules, warnings: w.warnings, footprints }
+    KicadExport { pcb: w.s, project, rules, warnings: w.warnings, footprints, uuids: w.uuids.into_inner() }
 }
 
 /// The `.kicad_pcb` board text.
@@ -373,7 +395,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
     let at = w.xy(pf.at);
 
     w.line(1, &format!("(footprint {} (layer {})", q(&format!("{LIB}:{}", fp.name)), q(&f.layer("F.Cu"))));
-    w.line(2, &format!("(uuid {})", q(&uuid(&key))));
+    w.line(2, &format!("(uuid {})", w.id(&key, refdes)));
     w.line(2, &format!("(at {at} {})", deg(f.orient)));
     if pf.locked {
         w.line(2, "(locked yes)");
@@ -382,41 +404,43 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
         w.line(2, &format!("(descr {})", q(&fp.description)));
     }
 
-    // Texts: reference above the courtyard, value at the center on the fab layer.
-    let cy = BBox::of_points(fp.courtyard.iter().copied().chain(fp.pads.iter().map(|x| x.at)));
-    let top = cy.map(|b| b.max.y).unwrap_or(Nm::ZERO) + Nm::from_um(1000);
+    // Texts: the reference where cadlab's legend prints it (upright, above the courtyard), the
+    // value and other fields at the origin on the fab layer.
     let text_angle = deg(pf.rotation);
     let size = Nm::from_um(1000);
-    let mut props: Vec<(&str, String, Point, &str, bool)> = vec![
-        ("Reference", refdes.to_string(), Point::new(Nm::ZERO, top), "F.SilkS", false),
-        ("Value", value, Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", false),
-        ("Footprint", format!("{LIB}:{}", fp.name), Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true),
-    ];
+    let origin = f.local(Point::new(Nm::ZERO, Nm::ZERO));
+    let field =
+        |k: &'static str, v: String, hide: bool| (k, v, origin.clone(), text_angle.clone(), "F.Fab", hide, size);
+    let reference = match crate::fabout::refdes_text(p, refdes) {
+        Some(t) => ("Reference", refdes.to_string(), f.local_abs(t.at), "0".to_string(), "F.SilkS", false, t.size),
+        None => ("Reference", refdes.to_string(), origin.clone(), text_angle.clone(), "F.SilkS", false, size),
+    };
+    let mut props =
+        vec![reference, field("Value", value, false), field("Footprint", format!("{LIB}:{}", fp.name), true)];
     if let Some(part) = part {
         if let Some(ds) = &part.datasheet {
-            props.push(("Datasheet", ds.clone(), Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true));
+            props.push(field("Datasheet", ds.clone(), true));
         }
         if !part.description.is_empty() {
-            props.push(("Description", part.description.clone(), Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true));
+            props.push(field("Description", part.description.clone(), true));
         }
         if let Some(m) = &part.manufacturer {
-            props.push(("Manufacturer", m.clone(), Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true));
+            props.push(field("Manufacturer", m.clone(), true));
         }
         if let Some(m) = &part.mpn {
-            props.push(("MPN", m.clone(), Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true));
+            props.push(field("MPN", m.clone(), true));
         }
     }
-    for (k, v, pos, layer, hide) in props {
+    for (k, v, pos, angle, layer, hide, size) in props {
         w.line(
             2,
             &format!(
-                "(property {} {} (at {} {text_angle}) (layer {}){} (uuid {})",
+                "(property {} {} (at {pos} {angle}) (layer {}){} (uuid {})",
                 q(k),
                 q(&v),
-                f.local(pos),
                 q(&f.layer(layer)),
                 if hide { " (hide yes)" } else { "" },
-                q(&uuid(&format!("{key}/prop/{k}")))
+                w.id(&format!("{key}/prop/{k}"), format!("text:{refdes}/{k}"))
             ),
         );
         w.line(3, &format!("{})", text_effects(size, bottom)));
@@ -449,7 +473,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
                             "(fp_line (start {}) (end {}) {stroke} (layer {layer}) (uuid {}))",
                             f.local(s[0]),
                             f.local(s[1]),
-                            q(&uuid(&format!("{gk}/{si}")))
+                            w.id(&format!("{gk}/{si}"), refdes)
                         ),
                     );
                 }
@@ -461,7 +485,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
                     &format!(
                         "(fp_poly (pts {}) {stroke} (fill none) (layer {layer}) (uuid {}))",
                         pts.join(" "),
-                        q(&uuid(&gk))
+                        w.id(&gk, refdes)
                     ),
                 );
             }
@@ -473,7 +497,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
                         f.local(*center),
                         f.local(*center + Point::new(*radius, Nm::ZERO)),
                         if *filled { "solid" } else { "none" },
-                        q(&uuid(&gk))
+                        w.id(&gk, refdes)
                     ),
                 );
             }
@@ -488,7 +512,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
                 pts.join(" "),
                 mm(COURTYARD_WIDTH),
                 q(&f.layer("F.CrtYd")),
-                q(&uuid(&format!("{key}/courtyard")))
+                w.id(&format!("{key}/courtyard"), refdes)
             ),
         );
     }
@@ -497,7 +521,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
     let nets = geo::pad_nets(p, refdes);
     let pins = pad_pins(p, refdes);
     for (pi, pad) in fp.pads.iter().enumerate() {
-        write_pad(w, &f, &format!("{key}/pad{pi}"), pad, &nets, &pins);
+        write_pad(w, &f, refdes, &format!("{key}/pad{pi}"), pad, &nets, &pins);
     }
     w.line(1, ")");
 }
@@ -505,6 +529,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
 fn write_pad(
     w: &mut Writer<'_>,
     f: &FpFrame<'_>,
+    refdes: &str,
     key: &str,
     pad: &Pad,
     nets: &BTreeMap<String, String>,
@@ -561,7 +586,8 @@ fn write_pad(
             let _ = write!(s, " (pintype {})", q(kicad_pin_type(*kind)));
         }
     }
-    let _ = write!(s, " (uuid {}))", q(&uuid(key)));
+    let label = if pad.number.is_empty() { refdes.to_string() } else { format!("{refdes}.{}", pad.number) };
+    let _ = write!(s, " (uuid {}))", w.id(key, label.clone()));
     w.line(2, &s);
 
     // Paste windows become paste-only aperture pads.
@@ -576,7 +602,7 @@ fn write_pad(
                     mm(size.0),
                     mm(size.1),
                     q(&f.layer("F.Paste")),
-                    q(&uuid(&format!("{key}/paste{i}")))
+                    w.id(&format!("{key}/paste{i}"), label.clone())
                 ),
             );
         }
@@ -589,7 +615,7 @@ fn write_graphics(w: &mut Writer<'_>) {
     for (ci, c) in board.outline.contours.iter().enumerate() {
         let mut from = c.start;
         for (si, s) in c.segments.iter().enumerate() {
-            let id = q(&uuid(&format!("outline/{ci}/{si}")));
+            let id = w.id(&format!("outline/{ci}/{si}"), "edge");
             let stroke = format!("(stroke (width {}) (type solid))", mm(EDGE_WIDTH));
             match *s {
                 Segment::Line { to } => {
@@ -616,7 +642,7 @@ fn write_graphics(w: &mut Writer<'_>) {
             }
         }
         if from != c.start {
-            let id = q(&uuid(&format!("outline/{ci}/close")));
+            let id = w.id(&format!("outline/{ci}/close"), "edge");
             let t = format!(
                 "(gr_line (start {}) (end {}) (stroke (width {}) (type solid)) (layer \"Edge.Cuts\") (uuid {id}))",
                 w.xy(from),
@@ -641,7 +667,7 @@ fn write_graphics(w: &mut Writer<'_>) {
                         w.xy(s[0]),
                         w.xy(s[1]),
                         mm(*width),
-                        q(&uuid(&format!("{key}/{i}")))
+                        w.id(&format!("{key}/{i}"), format!("graphic#{}", g.id.0))
                     );
                     w.line(1, &t);
                 }
@@ -652,7 +678,7 @@ fn write_graphics(w: &mut Writer<'_>) {
                     q(text),
                     w.xy(*at),
                     deg(*rotation),
-                    q(&uuid(&key))
+                    w.id(&key, format!("graphic#{}", g.id.0))
                 );
                 w.line(1, &t);
                 w.line(2, &format!("{})", text_effects(*size, g.layer.starts_with("B."))));
@@ -665,7 +691,7 @@ fn write_copper(w: &mut Writer<'_>) {
     let p = w.p;
     let board = p.board();
     for t in &board.tracks {
-        let key = q(&uuid(&format!("track/{}", t.id.0)));
+        let key = w.id(&format!("track/{}", t.id.0), format!("track#{}", t.id.0));
         let net = w.net(t.net.as_deref());
         let lock = if t.locked { " (locked yes)" } else { "" };
         let s = match t.mid {
@@ -701,11 +727,10 @@ fn write_copper(w: &mut Writer<'_>) {
             q(&v.from),
             q(&v.to),
             w.net(v.net.as_deref()),
-            q(&uuid(&format!("via/{}", v.id.0)))
+            w.id(&format!("via/{}", v.id.0), format!("via#{}", v.id.0))
         );
         w.line(1, &s);
     }
-    let rules = &board.rules;
     for z in &board.zones {
         let net = w.net(z.net.as_deref());
         let layers = z.layers.iter().filter(|l| board.is_copper(l)).map(|l| q(l)).collect::<Vec<_>>();
@@ -720,31 +745,26 @@ fn write_copper(w: &mut Writer<'_>) {
             &format!(
                 "(zone (net {net}) (net_name {}) {layer_tok} (uuid {}) (name {}) (hatch edge 0.5)",
                 q(z.net.as_deref().unwrap_or("")),
-                q(&uuid(&format!("zone/{}", z.id.0))),
+                w.id(&format!("zone/{}", z.id.0), format!("zone#{}", z.id.0)),
                 q(&z.name)
             ),
         );
         if z.priority > 0 {
             w.line(2, &format!("(priority {})", z.priority));
         }
-        let clearance = mm(z.clearance.unwrap_or(rules.clearance));
+        // The settings cadlab fills with (defaults resolved), so KiCad's refill is comparable.
+        let prm = geo::zones::zone_params(p, z);
+        let clearance = mm(prm.clearance);
         let connect = match z.pads {
             PadConnection::Thermal => String::new(),
             PadConnection::Solid => "yes ".into(),
             PadConnection::None => "no ".into(),
         };
         w.line(2, &format!("(connect_pads {connect}(clearance {clearance}))"));
+        w.line(2, &format!("(min_thickness {}) (filled_areas_thickness no)", mm(prm.min_width)));
         w.line(
             2,
-            &format!("(min_thickness {}) (filled_areas_thickness no)", mm(z.min_width.unwrap_or(rules.zone_min_width))),
-        );
-        w.line(
-            2,
-            &format!(
-                "(fill (thermal_gap {}) (thermal_bridge_width {}))",
-                mm(z.thermal_gap.unwrap_or(THERMAL_DEFAULT)),
-                mm(z.thermal_spoke.unwrap_or(THERMAL_DEFAULT))
-            ),
+            &format!("(fill (thermal_gap {}) (thermal_bridge_width {}))", mm(prm.thermal_gap), mm(prm.thermal_spoke)),
         );
         let pts: Vec<String> = z.outline.iter().map(|x| format!("(xy {})", w.xy(*x))).collect();
         w.line(2, &format!("(polygon (pts {}))", pts.join(" ")));
@@ -766,7 +786,7 @@ fn write_copper(w: &mut Writer<'_>) {
             &format!(
                 "(zone (net 0) (net_name \"\") (layers {}) (uuid {}) (name {}) (hatch edge 0.5)",
                 layers.join(" "),
-                q(&uuid(&format!("keepout/{}", k.id.0))),
+                w.id(&format!("keepout/{}", k.id.0), format!("keepout:{}", k.name)),
                 q(&k.name)
             ),
         );
@@ -832,7 +852,6 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
         .filter_map(|(n, net)| net.class.as_ref().filter(|c| c.as_str() != "Default").map(|c| (n, c)))
         .map(|(n, c)| json!({"netclass": c, "pattern": n}))
         .collect();
-    let min_via = r.min_drill + r.min_annular_ring * 2;
     let pro = json!({
         "board": {
             "design_settings": {
@@ -856,7 +875,9 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
                     "min_through_hole_diameter": mmf(r.min_drill),
                     "min_track_width": mmf(r.min_track_width),
                     "min_via_annular_width": mmf(r.min_annular_ring),
-                    "min_via_diameter": mmf(min_via),
+                    // cadlab checks via drill and annular ring, not the diameter itself: no
+                    // derived diameter rule that would report one defect twice.
+                    "min_via_diameter": 0.0,
                     "solder_mask_to_copper_clearance": 0.0,
                     "use_height_for_length_calcs": true,
                 },

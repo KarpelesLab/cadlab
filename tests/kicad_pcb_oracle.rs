@@ -4,10 +4,8 @@
 //! `CADLAB_ORACLE_KICAD_CLI` or `PATH`) loads the exported boards and runs DRC, IPC-D-356 and
 //! Gerber export on them.
 //!
-//! TODO: once cadlab's own `drc.run` lands, compare its violation set with KiCad's on the same
-//! boards (type + objects + location within tolerance, allowlist for known semantic differences).
-//! TODO: once cadlab's Gerber writer lands, rasterize and XOR against the KiCad Gerbers kept in
-//! `$CARGO_TARGET_TMPDIR/kicad_pcb_oracle/`.
+//! The violation-by-violation comparison with cadlab's own DRC is in `tests/drc_crosscheck.rs`,
+//! the raster comparison of both tools' Gerbers in `tests/gerber_crosscheck.rs`.
 
 mod common;
 
@@ -245,10 +243,26 @@ fn export_is_deterministic_and_well_formed() {
     ] {
         assert!(a.pcb.contains(section), "missing `{section}`:\n{}", a.pcb);
     }
-    // UUIDs are unique.
+    // UUIDs are unique, and each maps back to the cadlab object it was written for.
     let uuids: Vec<&str> = a.pcb.match_indices("(uuid \"").map(|(i, _)| &a.pcb[i + 7..i + 43]).collect();
     let set: BTreeSet<&str> = uuids.iter().copied().collect();
     assert_eq!(set.len(), uuids.len(), "duplicate uuid");
+    assert_eq!(set, a.uuids.keys().map(String::as_str).collect::<BTreeSet<_>>(), "every uuid is labelled");
+    let labels: BTreeSet<&str> = a.uuids.values().map(String::as_str).collect();
+    for l in ["U1", "U1.5", "C2.1", "track#13", "edge", "text:U1/Reference"] {
+        assert!(labels.contains(l), "no uuid for {l}: {labels:?}");
+    }
+    assert!(labels.iter().any(|l| l.starts_with("via#")) && labels.iter().any(|l| l.starts_with("zone#")));
+    // Cross-check regressions (tests/gerber_crosscheck.rs, tests/drc_crosscheck.rs):
+    // the zone carries the thermal settings cadlab fills with (gap = clearance 0.2 mm, spoke =
+    // the GND class width 0.4 mm), not KiCad's 0.5 mm defaults;
+    assert!(a.pcb.contains("(fill (thermal_gap 0.2) (thermal_bridge_width 0.4))"), "zone thermal settings");
+    // the reference sits where cadlab's legend prints it: upright, 0.3 mm above the courtyard
+    // (U1: courtyard 1.71 mm above the origin, text 1 mm tall);
+    assert!(a.pcb.contains("(property \"Reference\" \"U1\" (at 0 -2.51 0) (layer \"F.SilkS\")"), "U1 reference");
+    // no derived minimum via diameter (cadlab checks drill and annular ring only).
+    let pro: Value = serde_json::from_str(&a.project).unwrap();
+    assert_eq!(pro["board"]["design_settings"]["rules"]["min_via_diameter"], 0.0);
 
     // Project file: valid JSON with the net class and its pattern; width rule in the .kicad_dru.
     let pro: Value = serde_json::from_str(&a.project).unwrap();
