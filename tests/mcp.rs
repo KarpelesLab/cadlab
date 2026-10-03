@@ -99,6 +99,7 @@ fn mcp_session() {
             "via",
             "render",
             "schematic",
+            "export",
             "history",
             "describe",
             "call",

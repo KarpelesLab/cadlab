@@ -1,0 +1,20 @@
+M48
+; #@! TF.GenerationSoftware,cadlab,cadlab,test
+; #@! TF.SameCoordinates
+; #@! TF.FileFunction,Plated,1,2,PTH,Drill
+; #@! TF.FilePolarity,Positive
+; #@! TF.Part,Single
+METRIC
+; #@! TA.AperFunction,ViaDrill
+T01C0.3
+; #@! TA.AperFunction,ComponentDrill
+T02C1.0
+%
+G05
+T01
+X15.5Y9.0
+X6.0Y3.0
+T02
+X1.73Y6.0
+X4.27Y6.0
+M30

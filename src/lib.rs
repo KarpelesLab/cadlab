@@ -39,6 +39,7 @@ pub mod config;
 pub mod connect;
 pub mod diag;
 pub mod erc;
+pub mod fabout;
 pub mod geom;
 pub mod id;
 pub mod landpattern;

@@ -1,0 +1,4 @@
+Designator,Value,Package,Footprint,X (mm),Y (mm),Rotation,Side
+C2,1uF,0402,CAPC1005X55N,18,9,90,bottom
+J1,PWR_HDR,PinHeader 1x02,PinHeader_1x02_P2.54mm,3,6,90,top
+U1,AP2112K-3.3TRG1,SOT-23-5,SOT95P280X145-5N,12,7.5,0,top

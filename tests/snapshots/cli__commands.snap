@@ -74,6 +74,11 @@ expression: names
   "render.footprint",
   "schematic.place",
   "schematic.unplace",
+  "export.gerber",
+  "export.drill",
+  "export.pnp",
+  "export.ipc356",
+  "export.all",
   "history.undo",
   "history.redo",
   "history.list"
