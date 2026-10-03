@@ -4,6 +4,7 @@ pub mod block;
 pub mod board;
 pub mod bom;
 pub mod circuit;
+pub mod drc;
 pub mod footprint;
 pub mod history;
 pub mod net;
@@ -24,6 +25,7 @@ pub fn register_all(r: &mut Registry) {
     block::register(r);
     bom::register(r);
     board::register(r);
+    drc::register(r);
     render::register(r);
     history::register(r);
 }

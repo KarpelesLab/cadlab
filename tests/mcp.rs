@@ -97,6 +97,7 @@ fn mcp_session() {
             "place",
             "track",
             "via",
+            "drc",
             "render",
             "schematic",
             "history",

@@ -69,6 +69,7 @@ expression: names
   "track.list",
   "via.add",
   "via.remove",
+  "drc.run",
   "render.schematic",
   "render.symbol",
   "render.footprint",

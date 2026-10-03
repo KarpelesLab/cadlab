@@ -98,8 +98,9 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Manual routing commands: tracks through coordinates or pins (net inferred, shorts refused), vias; net
       class widths and via sizes
 - [ ] Copper zones with fill (thermal reliefs, clearances, islands removal)
-- [ ] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
-      silk over pads, zone min width
+- [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
+      silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper once zone fill
+      lands; zone min width is left to the zone filler
 - [ ] Board rendering (per layer, composite, realistic top/bottom)
 - [ ] Outputs: Gerber X2 (+ X3 component data), Excellon/XNC drill, pick-and-place CSV, BOM CSV, IPC-D-356A,
       archive per fab profile
