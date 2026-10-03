@@ -137,6 +137,14 @@ const ALLOW: &[Allow] = &[
         reason: "cadlab has no silkscreen-to-silkscreen clearance rule",
     },
     Allow {
+        case: None,
+        side: Side::Cadlab,
+        rule: "drc.via_size_class",
+        when: None,
+        reason: "KiCad uses net class via sizes only as defaults for new vias and never checks existing ones; cadlab \
+                 warns when a via is smaller than its class asks for (D26)",
+    },
+    Allow {
         case: Some("netless_track"),
         side: Side::Cadlab,
         rule: "drc.short",
