@@ -54,6 +54,7 @@ pub mod render;
 pub mod router;
 pub mod schematic;
 pub mod sourcing;
+pub mod specctra;
 pub mod suggest;
 pub mod supplier;
 pub mod symbolgen;

@@ -126,6 +126,17 @@ Running locally (KiCad 10.0.6 and gerbv from Homebrew on macOS):
 --test drc_crosscheck --test gerber_crosscheck -- --nocapture` (the log lists every matched pair and the
 per-layer areas).
 
+### freerouting oracle (`tests/specctra.rs`)
+
+Two boards are exported with `export.dsn`, routed by freerouting headless (`-mp 20 -mt 1`, a separate `java`
+process) and imported with `route.import_ses`; cadlab DRC must then report no error, unrouted connections
+included. This checks the DSN geometry end to end (a wrong back-side transform shows up as shorts and opens) and
+the exact unit conversion of the session. `CADLAB_ORACLE_FREEROUTING` points at the jar (run with `java -jar`)
+or a launcher; `CADLAB_SPECCTRA_KEEP=<dir>` keeps the DSN, SES and a render. Tested with freerouting 2.1.0, which
+sometimes drops wiring from its session while reporting a complete route; those runs are retried (details in
+ROUTER.md). Not in the CI oracle job, which installs no Java. Example:
+`CADLAB_ORACLES=1 CADLAB_ORACLE_FREEROUTING=$HOME/freerouting.jar cargo test --test specctra -- --nocapture`.
+
 ### Oracle availability
 
 - Oracle tests are behind an env flag (`CADLAB_ORACLES=1`). Without it they skip with a message; with it, a

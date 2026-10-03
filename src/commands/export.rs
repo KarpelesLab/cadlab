@@ -1,5 +1,5 @@
 //! `export.*`: generic manufacturing outputs (Gerber X2/X3, XNC drill, pick-and-place,
-//! IPC-D-356A). Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
+//! IPC-D-356A) and the Specctra DSN design for external autorouters. Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,12 @@ use crate::refs::ObjectRef;
 use crate::units::Nm;
 
 pub(crate) fn register(r: &mut Registry) {
-    r.register::<Gerber>().register::<Drill>().register::<Pnp>().register::<Ipc356>().register::<All>();
+    r.register::<Gerber>()
+        .register::<Drill>()
+        .register::<Pnp>()
+        .register::<Ipc356>()
+        .register::<All>()
+        .register::<ExportDsn>();
 }
 
 /// Default output directory, relative to the project.
@@ -270,5 +275,103 @@ impl Command for All {
 
     fn summarize(o: &Exported) -> String {
         summary(o)
+    }
+}
+
+/// Write the board as a Specctra DSN design for an external autorouter (freerouting and
+/// others); route it there, then apply the session with `route.import_ses`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExportDsn {
+    /// Output file (default `out/route/<project>.dsn`, relative to the project; `.dsn` is
+    /// appended if missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Mark all existing tracks and vias as protected, so the router keeps them (default: only
+    /// locked ones are protected).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protect_existing: bool,
+    /// Router resolution in steps per micrometer (default 10: 0.1 µm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<u32>,
+}
+
+/// Result of `export.dsn`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DsnExported {
+    /// File written.
+    pub path: String,
+    /// Components (footprints and mounting holes) written.
+    pub components: usize,
+    /// Nets written.
+    pub nets: usize,
+    /// Net classes written.
+    pub classes: usize,
+    /// Padstacks written.
+    pub padstacks: usize,
+    /// Existing wires written.
+    pub wires: usize,
+    /// Existing vias written.
+    pub vias: usize,
+    /// Wires and vias marked protected.
+    pub protected: usize,
+}
+
+impl Command for ExportDsn {
+    const NAME: &'static str = "export.dsn";
+    const SUMMARY: &'static str = "Write the board as a Specctra DSN design for an external autorouter";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = DsnExported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<DsnExported, CommandError> {
+        if self.resolution == Some(0) {
+            return Err(CommandError::invalid_args("export.dsn_resolution", "the resolution must be at least 1")
+                .with_hint("use the default (10 steps per micrometer), or 1000 for 1 nm"));
+        }
+        let p = ctx.project()?;
+        if p.board().outline.contours.is_empty() {
+            return Err(CommandError::conflict("board.no_outline", "the board has no outline")
+                .with_hint("set one with `board.outline` before exporting for routing"));
+        }
+        let name = p.manifest().name.clone();
+        let opts = crate::specctra::export::Options {
+            resolution: self.resolution.unwrap_or(10),
+            protect_all: self.protect_existing,
+        };
+        let out = crate::specctra::export::export(p, &name, &opts);
+        let mut path = resolve(ctx, self.path.as_deref(), Path::new("out/route").join(format!("{name}.dsn")));
+        if path.extension().is_none_or(|e| e != "dsn") {
+            let mut s = path.into_os_string();
+            s.push(".dsn");
+            path = PathBuf::from(s);
+        }
+        let d = &out.dsn;
+        let result = DsnExported {
+            path: path.display().to_string(),
+            components: d.places.len(),
+            nets: d.nets.len(),
+            classes: d.classes.len(),
+            padstacks: d.padstacks.len(),
+            wires: d.wires.len(),
+            vias: d.wire_vias.len(),
+            protected: d.wires.iter().filter(|w| w.protect).count() + d.wire_vias.iter().filter(|v| v.protect).count(),
+        };
+        let file = OutFile { name: String::new(), function: "SpecctraDesign".into(), content: d.write() };
+        write(vec![(path, file)])?;
+        for w in out.warnings {
+            ctx.report(
+                Diagnostic::warning("export.dsn_incomplete", w)
+                    .with_hint("the router does not see these items; check the imported routing with `drc.run`"),
+            );
+        }
+        Ok(result)
+    }
+
+    fn summarize(o: &DsnExported) -> String {
+        format!(
+            "wrote {} ({} components, {} nets, {} classes, {} padstacks, {} wires, {} vias, {} protected)",
+            o.path, o.components, o.nets, o.classes, o.padstacks, o.wires, o.vias, o.protected
+        )
     }
 }

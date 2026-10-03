@@ -99,7 +99,7 @@ or batch session cost ~1.5 ms.
 | `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given), `remove`, `list` |
 | `drc` | `run` (plus `fab.check` warnings for the manifest `targets`) |
 | `render` | `board` (layers, realistic) (M4 rendering workstream) |
-| `export` | `gerber`, `drill`, `pnp`, `ipc356`, `all` (generic outputs) |
+| `export` | `gerber`, `drill`, `pnp`, `ipc356`, `all` (generic outputs), `dsn` (Specctra design for external routers) |
 | `fab` | `list`, `show`, `check`, `compare`, `export` (fab profiles, [MANUFACTURING.md](MANUFACTURING.md)) |
 
 ## Placement (`src/board/place.rs`)
