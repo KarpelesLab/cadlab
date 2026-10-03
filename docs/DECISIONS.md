@@ -105,6 +105,19 @@ nested sheets in the data model.
 special cases, and agents can address any pin as `REFDES.PIN`. Schematic rendering can still group a block's
 components (M3). Editing a block does not update existing instances; re-instantiating is explicit.
 
+### D19. Shared libraries are copied in and out explicitly; block files are self-contained (2026-10-04)
+Parts, footprints and blocks can live in shared libraries outside projects: the user library in
+`$XDG_DATA_HOME/cadlab/library` (default `~/.local/share/cadlab/library`, `%APPDATA%\cadlab\library` on Windows),
+then the directories listed as `libraries = [...]` in the user settings, searched in that order. A library has
+the project library's layout (`parts/`, `footprints/`, canonical JSON) plus `blocks/` and a `library.toml` with
+a schema version. Projects never resolve anything from a shared library: `lib.import` copies items into the
+project and `lib.publish` copies them out; a missing part only gets an import hint. A block file embeds copies
+of the parts and footprints it uses instead of referencing library items.
+*Why:* a project must build identically when a library changes or is absent (projects are shared and archived
+on their own). Self-contained block files cannot break when a referenced part is edited or removed in the
+library, at the cost of duplicated part data. Conflicts are reported, never merged silently. Library data,
+unlike credentials, is not secret, so it lives in the data directory rather than the config directory.
+
 ## Open questions
 
 None currently.

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::Diagnostic;
 use crate::model::Project;
+use crate::userlib::{LibError, Libraries};
 
 use super::{CommandError, ErrorKind, Session};
 
@@ -47,11 +48,32 @@ pub struct Context<'a> {
     pub(crate) diagnostics: Vec<Diagnostic>,
     progress: &'a dyn Progress,
     cancel: &'a CancelToken,
+    dry_run: bool,
 }
 
 impl<'a> Context<'a> {
-    pub(crate) fn new(session: &'a mut Session, progress: &'a dyn Progress, cancel: &'a CancelToken) -> Self {
-        Context { session, diagnostics: Vec::new(), progress, cancel }
+    pub(crate) fn new(
+        session: &'a mut Session,
+        progress: &'a dyn Progress,
+        cancel: &'a CancelToken,
+        dry_run: bool,
+    ) -> Self {
+        Context { session, diagnostics: Vec::new(), progress, cancel, dry_run }
+    }
+
+    /// Whether this is a dry run. Project changes are rolled back automatically; commands with
+    /// effects outside the project (e.g. writing to a shared library) must skip them.
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// The shared libraries: the session's override, else the user library and the directories
+    /// from the user settings.
+    pub fn libraries(&self) -> Result<Libraries, LibError> {
+        match &self.session.libraries {
+            Some(l) => Ok(l.clone()),
+            None => Libraries::from_settings(),
+        }
     }
 
     /// The open project, or a `project.none` error.

@@ -19,6 +19,7 @@ impl Client {
             .current_dir(cwd)
             .env("XDG_CONFIG_HOME", cwd.join(".no-config"))
             .env("XDG_CACHE_HOME", cwd.join(".no-cache"))
+            .env("XDG_DATA_HOME", cwd.join(".no-data"))
             .env_remove("CADLAB_CATALOGS")
             .env_remove("DIGIKEY_CLIENT_ID")
             .env_remove("DIGIKEY_CLIENT_SECRET")
@@ -93,6 +94,7 @@ fn mcp_session() {
             "netclass",
             "block",
             "bom",
+            "lib",
             "render",
             "schematic",
             "history",

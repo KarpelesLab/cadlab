@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::Diagnostic;
 use crate::model::{Project, SaveReport};
 use crate::supplier::Suppliers;
+use crate::userlib::Libraries;
 
 use super::history::History;
 use super::{CommandError, Step};
@@ -28,6 +29,9 @@ pub struct Session {
     pending_log: Vec<Step>,
     /// Part research providers. Empty by default; frontends set them (e.g. from the environment).
     pub suppliers: Suppliers,
+    /// Shared libraries for `lib.*` commands. `None` (the default) means the user library and
+    /// the directories from the user settings; set it to use other directories (tests, embedding).
+    pub libraries: Option<Libraries>,
 }
 
 impl Session {
@@ -61,6 +65,7 @@ impl Session {
                 changes: 0,
                 pending_log: Vec::new(),
                 suppliers: Suppliers::default(),
+                libraries: None,
             },
             warnings,
         ))

@@ -38,7 +38,7 @@ Details in [PARTS.md](PARTS.md).
       footprint(s), pin↔pad map
 - [x] Generic parts (`R 10k 1% 0402`) vs concrete parts (MPN); manual resolution (`bom.approve`, `bom.replace`)
 - [x] Project-local library (one file per part/footprint)
-- [ ] Shared user libraries
+- [x] Shared user libraries: user library + configured directories, `lib.list/show/publish/import/remove` (D19)
 - [x] Own base library: footprint generator (IPC-7351B: chip, SOIC/SOP/TSSOP/MSOP/SOT-23, QFP, DFN, QFN, pin
       headers) and symbol generator from pin tables (no KiCad library content, see D7)
 - [ ] More footprint families: SOT-223/DPAK, SOD/MELF, SMA/SMB, BGA, DIP
@@ -58,7 +58,7 @@ symbol and footprint attached.
 - [x] Components (instances of parts, refdes auto-assignment, rename), nets, pins, externally driven power nets
 - [x] Connect/disconnect/merge, no-connect marks; pin ranges and buses (`net.connect DATA[0..7] U1.PA0..PA7`)
 - [x] Hierarchy: reusable blocks captured from existing components, instantiated with port mapping (D18)
-- [ ] Block library shared across projects (with shared user libraries)
+- [x] Block library shared across projects: self-contained block files in shared libraries (D19)
 - [x] Net classes (width, clearance, via size, diff pair) attached at circuit level
 - [x] ERC: unconnected pins, conflicting drivers, undriven power inputs (ground exempt), single-pin nets, pin-type rules
 - [x] Netlist export (KiCad netlist, JSON); oracle comparison comes with KiCad schematic export (M3)

@@ -18,6 +18,7 @@ fn cadlab_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", cwd.join(".no-config"))
         .env("XDG_CACHE_HOME", cwd.join(".no-cache"))
+        .env("XDG_DATA_HOME", cwd.join(".no-data"))
         .env_remove("CADLAB_CATALOGS")
         .env_remove("DIGIKEY_CLIENT_ID")
         .env_remove("DIGIKEY_CLIENT_SECRET")

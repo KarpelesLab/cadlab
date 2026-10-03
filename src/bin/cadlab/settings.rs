@@ -91,7 +91,11 @@ pub fn run(m: &ArgMatches, json_out: bool) -> u8 {
                 })
             });
             if json_out {
-                println!("{}", json!({"ok": true, "path": config::path(), "digikey": dk}));
+                println!(
+                    "{}",
+                    json!({"ok": true, "path": config::path(), "digikey": dk,
+                           "user_library": cadlab::userlib::user_library_dir(), "libraries": cfg.library_paths()})
+                );
             } else {
                 println!("settings: {}", config::path().map(|p| p.display().to_string()).unwrap_or_default());
                 match &cfg.digikey {
@@ -104,6 +108,11 @@ pub fn run(m: &ArgMatches, json_out: bool) -> u8 {
                         if d.sandbox { ", sandbox" } else { "" }
                     ),
                     None => println!("digikey: not configured (`cadlab config digikey`)"),
+                }
+                let user = cadlab::userlib::user_library_dir().map(|p| p.display().to_string()).unwrap_or_default();
+                println!("user library: {user}");
+                for l in cfg.library_paths() {
+                    println!("library: {} (from `libraries` in the settings file)", l.display());
                 }
                 for (var, what) in [("DIGIKEY_CLIENT_ID", "client id"), ("DIGIKEY_CLIENT_SECRET", "client secret")] {
                     if std::env::var_os(var).is_some() {

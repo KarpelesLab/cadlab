@@ -154,7 +154,7 @@ impl Command for Symbol {
     type Output = Rendered;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Rendered, CommandError> {
-        let part = util::part(ctx.project()?, &self.part)?.clone();
+        let part = util::part_in(ctx, &self.part)?.clone();
         let sym = schematic::symbol::symbol_of(&part);
         let mut scene = Scene::default();
         let pl = Placement { at: Point::ORIGIN, rot: 0 };

@@ -5,6 +5,9 @@
 //! file is written with owner-only permissions on Unix. Environment variables override it.
 //!
 //! ```toml
+//! # Extra shared libraries, searched after the user library (DECISIONS D19).
+//! libraries = ["~/hw/team-library", "/opt/cadlab/library"]
+//!
 //! [digikey]
 //! client_id = "..."
 //! client_secret = "..."
@@ -42,6 +45,10 @@ pub struct DigiKeySettings {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserConfig {
+    /// Additional shared library directories, searched after the user library. `~/` expands to
+    /// the home directory. Kept before the tables so TOML serialization stays valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<PathBuf>,
     /// DigiKey credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digikey: Option<DigiKeySettings>,
@@ -84,6 +91,11 @@ impl UserConfig {
         }
     }
 
+    /// The configured library directories, with `~/` expanded.
+    pub fn library_paths(&self) -> Vec<PathBuf> {
+        self.libraries.iter().map(|p| expand_home(p)).collect()
+    }
+
     /// Saves to the settings file, creating its directory. Returns the path written.
     pub fn save(&self) -> Result<PathBuf, ConfigError> {
         let p = path().ok_or(ConfigError::NoConfigDir)?;
@@ -102,6 +114,17 @@ impl UserConfig {
         write_private(&tmp, &text).map_err(io)?;
         std::fs::rename(&tmp, p).map_err(io)
     }
+}
+
+/// Expands a leading `~/` (or a lone `~`) to the home directory.
+pub fn expand_home(p: &Path) -> PathBuf {
+    let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+    if let Ok(rest) = p.strip_prefix("~")
+        && let Some(h) = home()
+    {
+        return h.join(rest);
+    }
+    p.to_path_buf()
 }
 
 #[cfg(unix)]
@@ -139,6 +162,7 @@ mod tests {
         let p = dir.path().join("sub/config.toml");
         assert_eq!(UserConfig::load_from(&p).unwrap(), UserConfig::default());
         let c = UserConfig {
+            libraries: vec!["/a/lib".into(), "~/b".into()],
             digikey: Some(DigiKeySettings {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
@@ -148,6 +172,8 @@ mod tests {
         };
         c.save_to(&p).unwrap();
         assert_eq!(UserConfig::load_from(&p).unwrap(), c);
+        assert!(std::fs::read_to_string(&p).unwrap().starts_with("libraries = "));
+        assert_eq!(c.library_paths()[0], PathBuf::from("/a/lib"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

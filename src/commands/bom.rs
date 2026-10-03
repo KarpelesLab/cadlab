@@ -117,7 +117,7 @@ impl Command for Approve {
     type Output = Approved;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Approved, CommandError> {
-        let id = util::part(ctx.project()?, &self.part)?.id.clone();
+        let id = util::part_in(ctx, &self.part)?.id.clone();
         let line = ctx.project_mut()?.bom_mut().lines.entry(id.clone()).or_default();
         for m in &self.remove {
             line.approved.retain(|a| !a.mpn.eq_ignore_ascii_case(m));
@@ -222,7 +222,7 @@ impl Command for Note {
     type Output = Approved;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Approved, CommandError> {
-        let id = util::part(ctx.project()?, &self.part)?.id.clone();
+        let id = util::part_in(ctx, &self.part)?.id.clone();
         let line = ctx.project_mut()?.bom_mut().lines.entry(id.clone()).or_default();
         line.notes = (!self.note.trim().is_empty()).then(|| self.note.trim().to_string());
         let approved = line.approved.clone();
@@ -267,14 +267,14 @@ impl Command for Replace {
     type Output = Replaced;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Replaced, CommandError> {
-        let from = util::part(ctx.project()?, &self.from)?.id.clone();
+        let from = util::part_in(ctx, &self.from)?.id.clone();
         let to = match util::part(ctx.project()?, &self.to) {
             Ok(p) => p.id.clone(),
             Err(e) if crate::partspec::parse(&self.to).is_ok() => {
                 let _ = e;
                 part::add_generic(ctx, &self.to)?.0
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(util::with_library_hint(ctx, e, &self.to)),
         };
         let p = ctx.project()?;
         let targets: Vec<String> = if self.refdes.is_empty() {

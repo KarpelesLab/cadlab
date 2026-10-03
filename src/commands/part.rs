@@ -538,7 +538,7 @@ impl Command for Show {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<PartDetail, CommandError> {
         let p = ctx.project()?;
-        let part = util::part(p, &self.id)?;
+        let part = util::part(p, &self.id).map_err(|e| util::with_library_hint(ctx, e, &self.id))?;
         Ok(PartDetail { used_by: PartSummary::of(p, part).used_by, part: part.clone() })
     }
 
