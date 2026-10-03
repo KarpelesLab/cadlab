@@ -14,6 +14,7 @@ pub mod net;
 pub mod part;
 pub mod project;
 pub mod render;
+pub mod route;
 mod util;
 pub mod zone;
 
@@ -32,6 +33,7 @@ pub fn register_all(r: &mut Registry) {
     lib::register(r);
     drc::register(r);
     zone::register(r);
+    route::register(r);
     render::register(r);
     kicad_pcb::register(r);
     export::register(r);

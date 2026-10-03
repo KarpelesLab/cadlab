@@ -118,6 +118,17 @@ on their own). Self-contained block files cannot break when a referenced part is
 library, at the cost of duplicated part data. Conflicts are reported, never merged silently. Library data,
 unlike credentials, is not secret, so it lives in the data directory rather than the config directory.
 
+### D20. Router v1: exact sampled grid, PathFinder negotiation, DRC as the last word (2026-10-04)
+The M5 router is a grid maze router designed from published work only (Lee/A* maze routing, PathFinder by
+McMurchie and Ebeling 1995; D7). Legality is sampled on a half-pitch grid with obstacles inflated by
+`√(r² + s²/4) − r`, which makes "all samples legal" imply "the segment is legal", so grid routes are DRC-valid by
+construction; nets claim clearance halos per net-class profile and negotiate them. Post-processing only applies
+changes that pass exact clearance checks, and the output is verified with `drc::check`: anything flagged is ripped
+and reported, never returned silently. Results are deterministic for a given input and seed; a time budget that
+cuts a run short trades that for a best-so-far legal result.
+*Why:* correctness first (agents act on the output), with simple data structures that are easy to test; the
+gridless push-and-shove router of M6 can reuse the model, index, checks and reports.
+
 ## Open questions
 
 None currently.

@@ -119,12 +119,12 @@ Details in [ROUTER.md](ROUTER.md).
 
 - [ ] Specctra DSN import / SES export, implemented from the published Specctra spec (freerouting as benchmark
       oracle only)
-- [ ] Obstacle model, connection planning (per-net MST), ordering heuristics
-- [ ] Grid-based multi-layer A* maze router with vias, 45° moves
-- [ ] Negotiated-congestion rip-up and reroute
-- [ ] Post-processing: pull-tight, corner smoothing, via reduction
-- [ ] DRC-verified output, progress reporting, cancellation, time budget
-- [ ] `route` commands: whole board, net, net class, between two pads; keep or rip existing tracks
+- [x] Obstacle model, connection planning (per-net MST), ordering heuristics
+- [x] Grid-based multi-layer A* maze router with vias, 45° moves
+- [x] Negotiated-congestion rip-up and reroute
+- [x] Post-processing: pull-tight, corner smoothing, via reduction
+- [x] DRC-verified output, progress reporting, cancellation, time budget
+- [x] `route` commands: whole board, net, net class, between two pads; keep or rip existing tracks
 
 **Exit:** routes typical 2- and 4-layer hobby boards (≤ 200 nets) to 100% with zero DRC errors.
 
