@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cadlab::command::{Registry, RunOptions, Session};
-use common::boards::build_board;
+use common::boards::{build_board, build_stm32_board};
 use common::oracle::{self, Oracle};
 use serde_json::{Value, json};
 
@@ -30,6 +30,18 @@ fn board() -> (tempfile::TempDir, Registry, Session) {
     build_board(&r, &mut s);
     exec(&r, &mut s, "net.set", json!({"nets": ["VBUS"], "driven": true}));
     exec(&r, &mut s, "net.no_connect", json!({"pins": ["U2.PB4"]}));
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert_eq!(o["output"], json!({"errors": 0, "warnings": 0}), "{:?}", o["diagnostics"]);
+    (dir, r, s)
+}
+
+/// The larger STM32 board (block instances, crystal, multi-group layout), ERC clean.
+fn stm32_board() -> (tempfile::TempDir, Registry, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    exec(&r, &mut s, "project.new", json!({"path": dir.path().join("p"), "name": "stm32-board"}));
+    build_stm32_board(&r, &mut s);
     let o = exec(&r, &mut s, "circuit.erc", json!({}));
     assert_eq!(o["output"], json!({"errors": 0, "warnings": 0}), "{:?}", o["diagnostics"]);
     (dir, r, s)
@@ -223,10 +235,24 @@ const ERC_ALLOWED: &[(&str, &str)] = &[
 fn kicad_erc_clean() {
     let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
     let (dir, r, mut s) = board();
-    let (path, _) = export(&r, &mut s, dir.path());
-    let report = dir.path().join("erc.json");
+    check_erc(&cli, &r, &mut s, dir.path());
+    keep(dir);
+}
+
+/// Oracle: KiCad ERC on the larger STM32 board (block frames, crystal, rail buses).
+#[test]
+fn kicad_erc_clean_stm32() {
+    let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
+    let (dir, r, mut s) = stm32_board();
+    check_erc(&cli, &r, &mut s, dir.path());
+    keep(dir);
+}
+
+fn check_erc(cli: &Path, r: &Registry, s: &mut Session, root: &Path) {
+    let (path, _) = export(r, s, root);
+    let report = root.join("erc.json");
     oracle::run(
-        &cli,
+        cli,
         &["sch", "erc", "--format", "json", "--severity-all", "-o", report.to_str().unwrap(), path.to_str().unwrap()],
     );
     let erc: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
@@ -240,7 +266,6 @@ fn kicad_erc_clean() {
         }
     }
     assert!(problems.is_empty(), "KiCad ERC ({}):\n{}", erc["kicad_version"], problems.join("\n"));
-    keep(dir);
 }
 
 /// Oracle: the netlist KiCad extracts has exactly cadlab's nets.
@@ -248,6 +273,15 @@ fn kicad_erc_clean() {
 fn kicad_netlist_matches() {
     let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
     let (dir, r, mut s) = board();
+    check_netlist(&cli, &r, &mut s, dir.path());
+    keep(dir);
+}
+
+/// Oracle: the larger STM32 board's netlist, extracted by KiCad, matches cadlab's.
+#[test]
+fn kicad_netlist_matches_stm32() {
+    let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
+    let (dir, r, mut s) = stm32_board();
     check_netlist(&cli, &r, &mut s, dir.path());
     keep(dir);
 }
@@ -277,7 +311,8 @@ fn check_netlist(cli: &Path, r: &Registry, s: &mut Session, root: &Path) {
     for net in doc.get("nets").unwrap().all("net") {
         let name = net.get("name").and_then(Sx::value).unwrap();
         // Local labels on the root sheet get the sheet path prefix `/`.
-        let name = name.strip_prefix('/').unwrap_or(name).to_string();
+        // KiCad escapes `/` inside names (block nets: `led_act/LED_A` → `led_act{slash}LED_A`).
+        let name = name.strip_prefix('/').unwrap_or(name).replace("{slash}", "/");
         let nodes: BTreeSet<(String, String)> = net
             .all("node")
             .map(|n| {

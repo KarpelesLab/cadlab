@@ -390,6 +390,8 @@ pub enum SymbolStyle {
     Fuse,
     /// Test point.
     TestPoint,
+    /// Push button or switch (normally open).
+    Switch,
 }
 
 /// Schematic symbol: pins plus drawing style. Geometry is generated (`docs/PARTS.md`).

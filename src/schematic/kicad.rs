@@ -16,6 +16,7 @@
 //!   have no power output pin: KiCad requires a power output on every net with power inputs.
 //!   It sits on one of the net's power symbols, drawn as a small diamond;
 //! - a local label on wired nets that the layout left unnamed, so KiCad keeps cadlab's net names.
+//! - block instance frames as dashed rectangles with their title as text.
 //!
 //! Coordinates: cadlab sheets are Y up from the bottom-left corner; KiCad sheets are Y down from
 //! the top-left, so `y_kicad = height - y`. Library symbols are Y up in KiCad as in cadlab, so
@@ -25,12 +26,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::symbol::{pin_ends, rot, symbol_of};
+use super::shapes::frame_title;
+use super::symbol::{body_half, field_positions, pin_ends, symbol_of};
 use super::{Dir, GRID, LabelKind, SheetLayout};
 use crate::geom::Point;
 use crate::model::Project;
 use crate::model::circuit::PinRef;
 use crate::model::part::{Part, PinKind, Side, Symbol, SymbolStyle};
+use crate::render::{HAlign, VAlign};
 use crate::symbolgen::{self, is_ground};
 use crate::units::Nm;
 
@@ -294,17 +297,6 @@ fn pin_angle(side: Side) -> u32 {
     }
 }
 
-/// Half-length of the body of a two-terminal drawing along X (mm), as in `symbol::draw`.
-fn body_half(style: SymbolStyle) -> f64 {
-    match style {
-        SymbolStyle::Resistor | SymbolStyle::Fuse => 2.0,
-        SymbolStyle::Inductor | SymbolStyle::FerriteBead => 2.2,
-        SymbolStyle::Crystal => 1.2,
-        SymbolStyle::Capacitor | SymbolStyle::CapacitorPolarized => 0.5,
-        _ => 1.27,
-    }
-}
-
 /// Library symbol of a part.
 fn lib_symbol(part: &Part, sym: &Symbol) -> Sx {
     let name = &part.id;
@@ -411,6 +403,14 @@ fn two_terminal_graphics(g: &mut Sx, style: SymbolStyle, w: f64) {
             g.push(rectangle(-0.6, 1.2, 0.6, -1.2, w, "none"));
             g.push(polyline(&[(-1.2, -1.5), (-1.2, 1.5)], 1.5 * w, "none"));
             g.push(polyline(&[(1.2, -1.5), (1.2, 1.5)], 1.5 * w, "none"));
+        }
+        SymbolStyle::Switch => {
+            for cx in [-1.3, 1.3] {
+                g.push(sx!("circle", sx!("center", num(cx), "0"), sx!("radius", "0.35"), stroke(w), fill("none")));
+            }
+            g.push(polyline(&[(-1.9, 1.0), (1.9, 1.0)], w, "none"));
+            g.push(polyline(&[(0.0, 1.0), (0.0, 2.0)], w, "none"));
+            g.push(polyline(&[(-0.7, 2.0), (0.7, 2.0)], w, "none"));
         }
         _ => g.push(sx!("circle", sx!("center", "0", "0"), sx!("radius", "1"), stroke(w), fill("none"))),
     }
@@ -637,26 +637,8 @@ pub fn export(project: &Project, layout: &SheetLayout, options: &Options) -> Kic
     }
     doc.push(libs);
 
-    // Junctions: a wire end inside another wire, or three or more wire ends at one point.
-    let mut ends: BTreeMap<(i64, i64), usize> = BTreeMap::new();
-    for (p, q) in &layout.wires {
-        *ends.entry((p.x.0, p.y.0)).or_default() += 1;
-        *ends.entry((q.x.0, q.y.0)).or_default() += 1;
-    }
-    let inside = |pt: (i64, i64), w: &(Point, Point)| {
-        let (p, q) = w;
-        let (x0, x1) = (p.x.0.min(q.x.0), p.x.0.max(q.x.0));
-        let (y0, y1) = (p.y.0.min(q.y.0), p.y.0.max(q.y.0));
-        (x0 == x1 && pt.0 == x0 && pt.1 > y0 && pt.1 < y1) || (y0 == y1 && pt.1 == y0 && pt.0 > x0 && pt.0 < x1)
-    };
-    let junctions: Vec<(i64, i64)> = ends
-        .iter()
-        .filter(|(pt, n)| {
-            let extra = usize::from(pin_points.contains(pt));
-            **n + extra >= 3 || layout.wires.iter().any(|w| inside(**pt, w))
-        })
-        .map(|(pt, _)| *pt)
-        .collect();
+    // Junctions, as drawn.
+    let junctions: Vec<(i64, i64)> = super::junctions(project, layout).iter().map(|p| (p.x.0, p.y.0)).collect();
     for (x, y) in &junctions {
         let p = Point::new(Nm(*x), Nm(*y));
         doc.push(sx!(
@@ -754,28 +736,26 @@ pub fn export(project: &Project, layout: &SheetLayout, options: &Options) -> Kic
         );
         // Designator and value placed as cadlab draws them (sheet coordinates, Y up).
         let value = part.value();
-        let place = |lx: f64, ly: f64| {
-            let (dx, dy) = rot(((lx * 1e6).round() as i64, (ly * 1e6).round() as i64), pl.rot);
-            frame.pt(Point::new(Nm(pl.at.x.0 + dx), Nm(pl.at.y.0 + dy)))
+        let [rf, vf] = field_positions(sym, pl);
+        let justify = |fp: &super::symbol::FieldPos| {
+            let h = match fp.h {
+                HAlign::Left => "left",
+                HAlign::Right => "right",
+                HAlign::Center => "",
+            };
+            let v = match fp.v {
+                VAlign::Top => "top",
+                VAlign::Bottom => "bottom",
+                VAlign::Middle => "",
+            };
+            [h, v].iter().filter(|w| !w.is_empty()).copied().collect::<Vec<_>>().join(" ")
         };
-        let (ref_pos, val_pos, ref_just, val_just) = if sym.style == SymbolStyle::Box {
-            let (bw, bh) = sym.body.map_or((10.16, 10.16), |(bx, by)| (f(bx), f(by)));
-            let corners = [place(-bw / 2.0, -bh / 2.0), place(bw / 2.0, bh / 2.0)];
-            let x1 = corners[0].0.max(corners[1].0);
-            let y_top = corners[0].1.min(corners[1].1);
-            ((x1 + 0.6, y_top - 0.6 - 1.27 * 1.6), (x1 + 0.6, y_top - 0.6), "left bottom", "left bottom")
-        } else {
-            let (cx, cy) = frame.pt(pl.at);
-            if pl.rot % 2 == 1 {
-                ((cx + 2.2, cy - 0.3), (cx + 2.2, cy + 0.3), "left bottom", "left top")
-            } else {
-                let up = if sym.style == SymbolStyle::Led { 2.9 } else { 2.0 };
-                ((cx, cy - up), (cx, cy + up), "bottom", "top")
-            }
-        };
+        let kpt = |at: (f64, f64)| (at.0, frame.height as f64 / 1e6 - at.1);
+        let (ref_pos, val_pos) = (kpt(rf.at), kpt(vf.at));
+        let (ref_just, val_just) = (justify(&rf), justify(&vf));
         let fp = part.footprint().map(|r| format!("{PART_LIB}:{}", r.footprint)).unwrap_or_default();
-        inst.push(sheet_field("Reference", r, ref_pos.0, ref_pos.1, ref_just, pl.rot, false));
-        inst.push(sheet_field("Value", &value, val_pos.0, val_pos.1, val_just, pl.rot, false));
+        inst.push(sheet_field("Reference", r, ref_pos.0, ref_pos.1, &ref_just, pl.rot, false));
+        inst.push(sheet_field("Value", &value, val_pos.0, val_pos.1, &val_just, pl.rot, false));
         inst.push(property("Footprint", &fp, x, y, "", true));
         inst.push(property("Datasheet", part.datasheet.as_deref().unwrap_or(""), x, y, "", true));
         inst.push(property("Description", &part.description, x, y, "", true));
@@ -834,6 +814,32 @@ pub fn export(project: &Project, layout: &SheetLayout, options: &Options) -> Kic
         if flagged.contains(l.net.as_str()) && flags_done.insert(l.net.as_str()) {
             emit(PowerKind::Flag, "PWR_FLAG", "PWR_FLAG", format!("#FLG{:02}", flags_done.len()));
         }
+    }
+
+    // Block instance frames: a dashed rectangle and its title.
+    for fr in &layout.frames {
+        let (x0, y0) = frame.pt(fr.min);
+        let (x1, y1) = frame.pt(fr.max);
+        doc.push(sx!(
+            "rectangle",
+            sx!("start", num(x0), num(y1)),
+            sx!("end", num(x1), num(y0)),
+            sx!("stroke", sx!("width", "0"), sx!("type", "dash")),
+            fill("none"),
+            sx!("uuid", s(uuid(seed, &format!("frame:{}", fr.title)))),
+        ));
+        let (title_at, size) = frame_title(fr);
+        let (tx, ty) = (title_at.0, frame.height as f64 / 1e6 - title_at.1);
+        let mut e = sx!("effects", sx!("font", sx!("size", num(size), num(size))));
+        e.push(sx!("justify", "left", "top"));
+        doc.push(sx!(
+            "text",
+            s(fr.title.as_str()),
+            sx!("exclude_from_sim", "no"),
+            at(tx, ty, 0),
+            e,
+            sx!("uuid", s(uuid(seed, &format!("frame-title:{}", fr.title)))),
+        ));
     }
 
     doc.push(sx!("sheet_instances", sx!("path", s("/"), sx!("page", s("1")))));
