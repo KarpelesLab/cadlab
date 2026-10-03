@@ -6,6 +6,7 @@ pub mod bom;
 pub mod circuit;
 pub mod footprint;
 pub mod history;
+pub mod kicad_pcb;
 pub mod net;
 pub mod part;
 pub mod project;
@@ -25,5 +26,6 @@ pub fn register_all(r: &mut Registry) {
     bom::register(r);
     board::register(r);
     render::register(r);
+    kicad_pcb::register(r);
     history::register(r);
 }

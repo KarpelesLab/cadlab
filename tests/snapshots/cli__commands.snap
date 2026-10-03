@@ -74,6 +74,7 @@ expression: names
   "render.footprint",
   "schematic.place",
   "schematic.unplace",
+  "board.export_kicad",
   "history.undo",
   "history.redo",
   "history.list"

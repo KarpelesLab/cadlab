@@ -41,6 +41,7 @@ pub mod diag;
 pub mod erc;
 pub mod geom;
 pub mod id;
+pub mod kicad_pcb;
 pub mod landpattern;
 pub mod model;
 pub mod netlist;
