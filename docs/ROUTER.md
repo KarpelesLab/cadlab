@@ -47,10 +47,11 @@ That keeps it independent and makes Specctra DSN/SES a natural second front end 
 
 `cadlab::router::route(project, scope, options, hooks)` returns new tracks and vias plus a report per
 connection, without touching the project; the `route.*` commands apply it. Modules: `model` (the router's view of
-the board), `grid` (grid and static maps), `fanout` (BGA dog bones and fine-pitch escapes), `engine` (A* and
-negotiation), `post` (optimization), `gridless` (visibility-graph refinement), `arcs` (arc corners), `shove`
-(push-and-shove), `index` (spatial index and exact clearance checks), `geo` (float geometry kernel). Algorithm
-modules only; nothing uses the command layer.
+the board), `grid` (grid and static maps), `fanout` (BGA dog bones, fine-pitch escapes, neck-downs), `engine`
+(grid A* and negotiation), `rooms` (free-space decomposition) and `expansion` (the gridless search over it), `post`
+(optimization), `gridless` (visibility-graph refinement), `arcs` (arc corners), `shove` (push-and-shove), `index`
+(spatial index and exact clearance checks), `geo` (float geometry kernel). Algorithm modules only; nothing uses
+the command layer.
 
 **Preprocess.** Copper items and islands come from `crate::board` (zone fills included, so pads joined by a pour
 count as connected). Every net's islands that hold a pad or via are joined by a minimum spanning tree (Prim, closest
@@ -144,6 +145,72 @@ restricted to a corridor. Tracks then hug obstacles at minimum clearance instead
 pull-tight and mitering run again on what changed. On the benchmark it shortens tracks by 0.3–2.3 % with fewer
 segments and no completion or DRC change, so it is the default.
 
+**Gridless search** (`router: grid | gridless | auto`, `rooms` and `expansion`; D39). A shape-based search over
+the free space of each layer instead of the grid:
+
+- *Rooms.* For the net being routed, every obstacle its centerline must keep away from (other nets' pads and
+  copper, keep-outs, NPTH holes, the board edge; for exact searches also the committed routing of every other
+  net) is grown into its clearance region: the shape widened by the required distance plus 0.5 µm, as outer
+  polygons (convex hulls widened by an octagon whose inradius is that distance; non-convex shapes per triangle, so
+  an L-shaped keep-out keeps its notch). The board within a search region minus their union is computed exactly
+  on integers by `polyclip`; a centerline anywhere in it keeps every clearance. A vertical (trapezoidal)
+  decomposition of it (`polyclip::trapezoids`), with trapezoids larger than six grid pitches cut into a lattice of
+  smaller ones so the search can choose its way through open areas, gives the *rooms*: convex pieces, joined by
+  *portals* where two touch along a segment. The net's own copper is not an obstacle, so its pads and tracks lie
+  in rooms. Via sites come from the same decomposition of the via-center free space (through vias: every layer,
+  hole-to-hole to every drilled hole, no via in a pad): the center of each piece (pieces at most two via pitches
+  wide), on every layer whose rooms hold it. Free-space cell decomposition for path planning (Chazelle 1987; de
+  Berg et al., *Computational Geometry*, ch. 6 and 13), as "expansion rooms" of shape-based routers.
+- *Search.* A* over points on the portals (one to three per portal), the via sites and the connection's ends
+  (pad centers and points inside large pads, points along the net's tracks and earlier wires, so a connection
+  can join a tree anywhere). Two points are joined when they lie in one room: every edge is a straight segment
+  inside a convex room, legal by construction. Costs follow the grid search: length in grid pitches, 1 along the
+  layer's preferred direction up to `wrong_way` across it, bends by angle (`bend45` at 45°, `bend90` at 90°),
+  `via` per via; in negotiation the PathFinder costs of the occupancy maps are sampled along each edge every half
+  pitch (present congestion and history, the maps the grid search uses), lazily: an edge is first priced by its
+  length and sampled only when its end comes off the queue; negotiation searches weight the heuristic by 1.5
+  (they cover whole net regions), exact searches are local and keep it at 1.
+- *Path.* The node sequence fixes a channel of rooms per layer; the funnel algorithm (string pulling over the
+  portals, as in navigation meshes; Lee and Preparata 1984) gives the shortest path through that channel, which
+  stays inside it. Segments that are not 0°/45°/90° are replaced by the octilinear two-segment path when that is
+  legal (exact checks), unless `any_angle`; the result is checked exactly (segments, vias, hole-to-hole with the
+  net's other vias) before it is kept.
+- *Negotiation.* A gridless wire is a polyline (slot per vertex). It claims its halo on the occupancy maps
+  like an off-grid stub (widened by the sampling margin), so grid wires negotiate with it; its own conflicts are
+  computed exactly against the committed routing in the engine's index (all wires of all nets), at the nearest
+  map point for history. Negotiation searches rooms built from the static obstacles only, kept per net between
+  iterations (region: the net's terminals plus margin); exact searches (`Mode::Hard`: legalization, retries) build
+  rooms that also keep away from every other net's committed routing, in a region around the connection (its ends
+  plus 2 mm and half its size, then the net's region), so what they find is legal as found.
+- *`gridless`* routes everything with this search (negotiation, legalization, retries, via minimization);
+  *`grid`* is the grid router alone; *`auto`* (the default) runs the grid router (negotiation, legalization,
+  retries) and then gives every connection it left unrouted (no grid path, no grid access, or no room) an exact
+  gridless search, then a *gridless rip-up and retry*: a probe search for the failed connection that keeps every static rule but may run through other nets' routing (present cost ×4) names
+  the nets in its way (exact checks); with at most 8 of them, they are ripped, the probe becomes the connection's
+  wire and they are routed again (grid, then gridless for their own failures); kept when fewer connections fail
+  (or, four times, when as many fail but this one is routed), else everything goes back. Running the gridless
+  search inside negotiation for what the grid cannot reach was tried and dropped: it slowed the large corpus
+  boards' iterations (6-layer glasgow-revD1 fell from 92.8 % to 74.3 % in the 60 s budget) for no completion gain.
+
+**Neck-down** (`neck`, on by default). A net whose width cannot leave one of its pads (no straight exit from the
+pad center out of the pad, in any of the eight directions on any routing layer, is legal against the other nets'
+pads and the static obstacles; typical of 0.4 mm QFNs and fine-pitch connectors with a 0.25 mm class width) is
+routed at the widest width that gets every such pad out, in 5 µm steps, not under the board's `min_track_width`,
+and at most the pad pitch minus the clearance so that two such tracks fit side by side out of neighboring pads.
+The net gets a profile of its own (its class profile with that width) for the whole run, so fanout, search and
+negotiation all work at it; at the end every straight segment of its new tracks is widened back to the class width
+wherever that keeps the clearance to everything else (exact checks, in route order). What stays narrower than the
+class shows as a `drc.track_width_class` warning; the board's `min_track_width` is never crossed. KiCad's net class
+widths are defaults, not rules, and designs at this pitch route them narrower the same way. Escapes are
+still planned for such parts (at the neck width): leaving their pads to the gridless search alone routed a 0.4 mm
+QFN-40 better (85 % instead of 75 %) but lost on the corpus boards (corne-cherry 92.8 % → 89.9 %,
+tinytapeout-demo 78.9 % → 72.0 %), where the escapes guide the grid out of the pad rows.
+
+**Small dog-bone vias.** When the net's via does not fit at a dog-bone site between four balls (0.6 mm vias under a
+0.8 mm-pitch BGA), the fanout tries the smallest via the rules allow: the minimum drill with the minimum annular
+ring (`min_drill`, `min_annular_ring`), checked exactly like any other (`drc.via_size_class` warns that it is
+smaller than the class via).
+
 **Arc corners** (`arcs`, off by default; `arc_radius`, default 1 mm). The last step: every bend that is not a via,
 junction or terminal becomes a circular arc tangent to both segments (stored as the track's `mid`). At a corner
 with interior angle φ an arc of radius r touches the segments at r / tan(φ/2) from the corner; it may use what the
@@ -169,7 +236,7 @@ stops at 75%, legalization at 100%) that returns the best legal partial result. 
 results may differ between runs.
 
 **Commands.** `route.all {budget_ms?, layers?, effort?, seed?, fanout?, any_angle?, gridless?, arcs?,
-arc_radius?}`, `route.nets {nets, ...}` (net or class names, `class:power`), `route.connection {from, to, shove?,
+arc_radius?, router?, neck?}`, `route.nets {nets, ...}` (net or class names, `class:power`), `route.connection {from, to, shove?,
 ...}` (pins), `route.track {layer, points, net?, width?, mode?}` (push-and-shove placement, below),
 `route.fanout {refdes?, layers?}`, `route.rip {nets? | all}` (unlocked items only), `route.status` (connections,
 unrouted, completion %, unrouted by net, problem areas in 5 mm tiles). Default budget 60 s. Commands report
@@ -333,10 +400,13 @@ its gap and skew. Results are identical for 1 and 4 threads.
 ### v1 limits
 
 - Through vias only; no blind/buried vias, no via-in-pad (dog bones only).
-- Tracks keep their class width everywhere: no neck-down into pads narrower than the track (pads whose
-  surroundings leave no room report "no legal way out of ...").
-- The search is on the grid: off-grid fine-pitch pads rely on escapes, and gridless refinement only shortens what
-  the grid search found (it never finds a path the grid missed). Arcs only as corner rounding (`arcs`).
+- Neck-down is per net: a necked net routes at its neck width everywhere and is widened afterwards where the
+  class width fits, so a long run between two fine-pitch parts can stay narrow. Only dog bones get smaller vias.
+- The gridless search is region-limited (its rooms cover the connection or the net with a margin, not the whole
+  board) and its probe-based rip-up is limited to 8 nets per failed connection; `gridless` alone negotiates less
+  well and much slower than the grid on grid-friendly boards (see the benchmarks), so `auto` is the default. Its
+  via sites are the centers of the via free space's pieces, not every legal position. Arcs only as corner
+  rounding (`arcs`).
 - Push-and-shove moves straight unlocked tracks and vias; arc tracks, lines of mixed widths and closed loops stay
   fixed, vias are pushed as through vias, lines are not split or merged, and a free end (a track ending on
   nothing) cannot move. A shoved line keeps its layer.
@@ -432,8 +502,9 @@ copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC
 ## v2: gridless (M6)
 
 - Free space represented by shapes instead of cells (polygon decomposition / expansion rooms, as in
-  Specctra/freerouting-class routers), with search over room boundaries. *Done so far:* gridless refinement of
-  grid routes (visibility graph over clearance hulls, above); the search itself is still the grid's.
+  Specctra/freerouting-class routers), with search over room boundaries. *Done:* gridless refinement of grid
+  routes (visibility graph over clearance hulls) and the gridless search over expansion rooms (`router`, above,
+  D39).
 - Exact DRC by construction, with no grid quantization errors, which matters for fine-pitch parts.
 - **Push-and-shove**: route a new track by moving existing ones out of the way while keeping them valid. Needed
   for incremental routing via API ("add this one net without destroying the rest"). *Done:* `route.track`,
@@ -496,10 +567,11 @@ prints the table; `cargo test --release --test route_bench -- --ignored --nocapt
 With `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar` (and `JAVA_HOME` for the Java it needs) every board but
 `big-4l` is also routed by freerouting (external process on the exported DSN, `-mp 20 -mt 1`; the time includes
 the JVM start and file exchange) and imported through `route.import_ses`, then measured the same way.
-`CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results.
+`CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results; `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search.
+`route_bench --corpus [names...]` re-routes the open-source corpus instead (below).
 
 **Results** (release build, 16-core macOS development machine, freerouting 2.4.1 on Java 25). *M5* is the router
-at the start of M6, *phase 1* the first M6 version (fanout, batches, rip-up and retry), *phase 2* this one (escape
+at the start of M6, *phase 1* the first M6 version (fanout, batches, rip-up and retry), *phase 2* the second (escape
 retries, via minimization, sideways retries, push-and-shove of leftovers, gridless refinement); freerouting's
 numbers are from the phase 1 run (same boards, unchanged).
 
@@ -550,9 +622,55 @@ one leftover connection (about 1.7 s, two softened routing runs). `big-4l` exhau
 track, and its completion is within one connection of phase 1; batches there hold about three nets on average,
 which bounds the parallel speedup: long single-connection nets across the board dominate the time.
 
+**Phase 3: the gridless search** (D39; same machine, `CADLAB_BENCH_ROUTER` picks the search). `grid` reproduces
+phase 2 exactly (neck-downs and small dog-bone vias never trigger on these boards), and so does `auto`, the default,
+except on stm32-4l, where the connection phase 2 left to push-and-shove is routed by the gridless pass instead
+(2 vias fewer, 0.4 % more track). `gridless` alone:
+
+| board | router | connections | completion | vias | length | segments | sharp corners | time |
+|---|---|---|---|---|---|---|---|---|
+| attiny-2l | gridless | 22 | 100% | 2 | 113.2 mm | 60 | 2 | 125 ms |
+| soic24-2l | gridless | 184 | 100% | 95 | 1990.5 mm | 682 | 0 | 2.8 s |
+| stm32-2l | gridless | 109 | 97.2% | 48 | 957.9 mm | 497 | 3 | 20.8 s |
+| stm32-4l | gridless | 109 | 99.1% | 51 | 923.6 mm | 468 | 5 | 31.3 s |
+| qfp-qfn-4l | gridless | 155 | 100% | 134 | 2137.3 mm | 879 | 4 | 105.8 s |
+| fine-4l | gridless | 100 | 99.0% | 99 | 893.3 mm | 536 | 3 | 27.5 s |
+| bga144-4l | gridless | 141 | 78.7% | 116 | 1524.9 mm | 726 | 3 | 40.6 s |
+
+On these generated boards, whose pads sit on or near the grid by construction, the gridless search alone routes
+less completely (most clearly bga144-4l, where it negotiates the escapes between the balls worse) and one to two
+orders of magnitude slower: its negotiation searches whole net regions over thousands of rooms with lazily
+sampled congestion, where the grid's A* steps are a few array reads. It uses 16–50 % fewer vias on the 2-layer
+boards, with more track and segments. This is why it is an option and `auto` the default.
+
+**Corpus re-route** (`cargo run --release --example route_bench -- --corpus`, D35's open-source boards; every
+track and via ripped, zones kept, routed again with the default options, 60 s budget, release build, same machine;
+*before* is phase 2 as measured by `tests/corpus.rs` at the start of phase 3, *after* this version). DRC errors
+other than unrouted connections: 0 everywhere, before and after.
+
+| board | layers | connections | before | after | main change |
+|---|---|---|---|---|---|
+| nrfmicro | 2 | 85 | 96.5% | 97.6% | gridless pass and retry (the USB-C D+/D− cross-over between the receptacle's two pad rows is left) |
+| buspirate-flash-sop | 2 | 47 | 100% | 100% | |
+| buspirate-rs232 | 2 | 43 | 100% | 100% | |
+| buspirate5-rev10 | 4 | 480 | 99.6% | 99.6% | |
+| lumenpnp-ringlight | 2 | 32 | 100% | 100% | |
+| lumenpnp-mobo | 4 | 490 | 98.0% | 99.2% | gridless pass and retry |
+| sweep-v2.2 | 2 | 43 | 93.0% | 93.0% | the 3 failures join the two halves of the split keyboard (also unrouted in the original) |
+| corne-cherry | 2 | 435 → 431 | 69.4% | **91.9%** | neck-down out of the two RP2040s (QFN-56, 0.4 mm, 0.25 mm class width), gridless retry |
+| glasgow-revC3 | 4 | 741 → 740 | 88.8% | **97.0%** | small dog-bone vias under the iCE40 BGA (0.6 mm class via does not fit between 0.8 mm balls) |
+| glasgow-revD1 | 6 | 1666 → 1660 | 92.4% | 94.5% | small dog-bone vias; budget-bound (the 60 s budget cuts negotiation short) |
+| cynthion | 4 | 748 → 745 | 95.6% | 95.4% | budget-bound; 8 resistor-array pads admit no track at the board's minimum width |
+| tinytapeout-demo | 4 | 404 → 399 | 57.2% | **78.7%** | neck-down out of the RP2040 and the fine-pitch connector J5; budget-bound |
+
+Connections count pads − 1 per net after fanout, so escapes and dog bones that join two pads of a net lower it
+slightly. What is left, by cause: budget (glasgow-revD1, cynthion and tinytapeout-demo end negotiation with
+overuse left), QFN pads boxed in by their neighbors' escapes and routes (corne, tinytapeout: the escapes are
+planned for the grid and a necked net still needs room beside each pad), pads no allowed width can leave
+(cynthion), and connections that the design does not route on the board (sweep).
+
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).
 
 The older `bench_generated_boards` in `tests/route.rs` (M5 table above) still runs the SOIC grids and the dense
-LQFP-32 board. Still to come: DSN files of open-source boards as a corpus, and a CI job that fails on a
-completion or DRC regression.
+LQFP-32 board. Still to come: a CI job that fails on a completion or DRC regression.

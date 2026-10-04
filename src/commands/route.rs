@@ -14,7 +14,7 @@ use crate::model::Project;
 use crate::refs::ObjectRef;
 use crate::router::{
     self, ConnStatus, ConnectionReport, Effort, GroupTuned, Hooks, MeanderStyle, PairReport, PairStatus, PlaceMode,
-    RouteError, RouteOptions, RouteStats, Scope, SkewTuned, TrackRequest, TuneOptions,
+    RouteError, RouteOptions, RouteStats, Scope, SearchKind, SkewTuned, TrackRequest, TuneOptions,
 };
 use crate::units::Nm;
 
@@ -404,6 +404,16 @@ pub struct RouteAll {
     /// obstacles, off the routing grid (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gridless: Option<bool>,
+    /// Path search: `grid` (A* on the routing grid), `gridless` (shape-based: expansion rooms
+    /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
+    /// then the gridless search for what it left unrouted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<SearchKind>,
+    /// Neck-down (default true): a net whose width cannot leave one of its pads between the
+    /// neighboring pads is routed narrower (down to the board's `min_track_width`) and widened
+    /// back to its class width wherever that fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neck: Option<bool>,
     /// Round every bend of the new tracks into a tangent arc (smooth / RF nets; default false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arcs: Option<bool>,
@@ -418,7 +428,8 @@ pub struct RouteAll {
 
 impl Command for RouteAll {
     const NAME: &'static str = "route.all";
-    const SUMMARY: &'static str = "Autoroute every unrouted connection (grid router, negotiated congestion)";
+    const SUMMARY: &'static str =
+        "Autoroute every unrouted connection (grid and gridless search, negotiated congestion)";
     const KIND: CommandKind = CommandKind::Mutation;
     type Output = Routed;
 
@@ -428,6 +439,8 @@ impl Command for RouteAll {
         opts.any_angle = self.any_angle.unwrap_or(false);
         opts.pairs = self.pairs;
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
+        opts.search = self.router;
+        opts.neck = self.neck;
         run_router(ctx, Scope::All, opts)
     }
 
@@ -466,6 +479,16 @@ pub struct RouteNets {
     /// obstacles, off the routing grid (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gridless: Option<bool>,
+    /// Path search: `grid` (A* on the routing grid), `gridless` (shape-based: expansion rooms
+    /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
+    /// then the gridless search for what it left unrouted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<SearchKind>,
+    /// Neck-down (default true): a net whose width cannot leave one of its pads between the
+    /// neighboring pads is routed narrower (down to the board's `min_track_width`) and widened
+    /// back to its class width wherever that fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neck: Option<bool>,
     /// Round every bend of the new tracks into a tangent arc (smooth / RF nets; default false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arcs: Option<bool>,
@@ -509,6 +532,8 @@ impl Command for RouteNets {
         opts.any_angle = self.any_angle.unwrap_or(false);
         opts.pairs = self.pairs;
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
+        opts.search = self.router;
+        opts.neck = self.neck;
         run_router(ctx, Scope::Nets(nets), opts)
     }
 
@@ -558,6 +583,16 @@ pub struct RouteConnection {
     /// obstacles, off the routing grid (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gridless: Option<bool>,
+    /// Path search: `grid` (A* on the routing grid), `gridless` (shape-based: expansion rooms
+    /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
+    /// then the gridless search for what it left unrouted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<SearchKind>,
+    /// Neck-down (default true): a net whose width cannot leave one of its pads between the
+    /// neighboring pads is routed narrower (down to the board's `min_track_width`) and widened
+    /// back to its class width wherever that fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neck: Option<bool>,
     /// Round every bend of the new tracks into a tangent arc (smooth / RF nets; default false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arcs: Option<bool>,
@@ -579,6 +614,8 @@ impl Command for RouteConnection {
         let mut opts = options(self.budget_ms, &self.layers, self.effort, None);
         opts.shove = self.shove.unwrap_or(true);
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
+        opts.search = self.router;
+        opts.neck = self.neck;
         run_router(ctx, Scope::Connection { from, to }, opts)
     }
 

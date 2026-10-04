@@ -498,11 +498,16 @@ pub fn measure(router: &str, r: &Registry, s: &mut Session, ms: u128, drc_before
 
 /// Routes a case with cadlab (`route.all`, seed 1, `budget_ms`), optionally rendering the result
 /// to `render/<name>.png`. `CADLAB_BENCH_VERBOSE` prints the router's stats and failures.
+/// `CADLAB_BENCH_ROUTER` (`grid`, `gridless`, `auto`) picks the search.
 pub fn run_cadlab(case: &Case, budget_ms: u64, render: Option<&Path>) -> Metrics {
     let (_d, r, mut s) = (case.build)();
     let before = drc_errors(s.project.as_ref().unwrap());
     let t = Instant::now();
-    let o = exec(&r, &mut s, "route.all", json!({"budget_ms": budget_ms, "seed": 1}));
+    let mut args = json!({"budget_ms": budget_ms, "seed": 1});
+    if let Ok(router) = std::env::var("CADLAB_BENCH_ROUTER") {
+        args["router"] = router.into();
+    }
+    let o = exec(&r, &mut s, "route.all", args);
     let ms = t.elapsed().as_millis();
     if std::env::var_os("CADLAB_BENCH_VERBOSE").is_some() {
         eprintln!("{}: {}", case.name, o["output"]["stats"]);

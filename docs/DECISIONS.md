@@ -485,6 +485,40 @@ closes length budgets with a report of what remains; a centerline router reuses 
 D22/D34 with little new machinery, and closed-form meanders make the residual error negligible instead of
 iterating on measured lengths.
 
+### D39. Router M6 phase 3: a gridless search beside the grid, `auto` by default; neck-downs and small dog-bone vias (2026-10-04)
+The last M6 item is a shape-based search (`router::rooms`, `router::expansion`), added beside the grid search
+(D22/D28/D34) rather than replacing it. Free space is decomposed per net, layer and search region: the
+clearance regions of the obstacles (outer polygons: octagon-widened convex hulls, per triangle for non-convex
+shapes) are subtracted from the board exactly on integers by `polyclip`, and the result is cut into trapezoids by
+its vertical decomposition (`polyclip::trapezoids`), larger ones into a lattice of at most six grid pitches. These
+convex rooms make every edge of the search (two points in one room) legal by construction, and the funnel
+algorithm pulls the found channel tight without leaving it, so the search needs no sampling margin and reaches
+any position and angle the rules allow (off-grid pads, rotated parts, gaps the grid cannot see). It plugs into the
+existing machinery instead of having its own: wires may be grid paths or polylines; a gridless wire claims its
+halo on the same occupancy maps (with the off-grid margin), samples the same PathFinder present and history costs
+along its edges (lazily), and its conflicts are computed exactly against an index of every committed wire; fanout
+copper, push-and-shove, pairs, tuning, post-processing and DRC verification see ordinary paths. Negotiation
+searches rooms of the static obstacles (cached per net); exact searches (legalization, retries) build rooms that
+also keep away from the other nets' routing in a region around the connection. `router: grid | gridless | auto`
+(an option of `route.all`, `route.nets` and `route.connection`); `auto`, the default, is the grid router followed by
+an exact gridless search for every connection it left unrouted, then a gridless rip-up and retry (a probe that keeps every static rule but may cross
+other nets' routing names at most 8 nets to rip and reroute; kept only when fewer connections fail). The
+benchmark decided it: `gridless` alone routes the generated boards less completely and much slower than the grid
+(their pads are grid-aligned by construction), while `auto` never does worse than the grid and closes real-board
+gaps the grid cannot; running the gridless search inside negotiation for what the grid could not reach slowed
+the large boards' iterations without a completion gain and was dropped. The open-source corpus showed the other root causes, fixed in the same way as rules the
+router now honors instead of failing: *neck-downs* (a net whose class width cannot leave a pad between its
+neighbors, e.g. a 0.25 mm class at a 0.4 mm QFN, routes at the widest width that can, at least the board's
+`min_track_width` and at most pitch minus clearance, then every segment is widened back to the class width where
+it fits; what stays narrow is a `drc.track_width_class` warning) and *small dog-bone vias* (the minimum drill and
+annular ring where the class via does not fit between BGA balls; `drc.via_size_class` warns). Everything stays
+sequential or batch-deterministic, independent of the thread count, and the DRC has the last word.
+*Why:* the grid's sampling is what made its results exact and simple (D22), and it still routes the generated
+boards fastest; real boards fail where geometry is off the grid or where the rules need a narrower track or via
+than the class gives. A gridless search used where the grid cannot go, sharing the negotiation, gets the
+completion without giving up the grid's speed or any guarantee, and keeping the two searches on one occupancy
+model, one index and one wire type is what lets them negotiate with each other.
+
 ### D40. Local pad settings, net ties, copper drawings, slots and scoped rules are design data (2026-10-04)
 The import gaps the open-source corpus measured (D35) are modeled in cadlab rather than approximated at
 import. Footprints and their pads carry optional local settings (`Overrides`: mask margin, paste margin
@@ -566,7 +600,6 @@ result, so culling them skips work whose answer is known, which D23 allows; clip
 add edges and move vertices by snap rounding, which it does not. The remaining zone fill time is inside
 `polyclip`'s offsets and booleans; what it would need is measured in docs/POLYGON_LIB.md §8 instead of being
 worked around in cadlab.
-
 
 ## Open questions
 

@@ -17,6 +17,9 @@ pub(crate) enum Item {
     Seg { net: u32, layer: u8, a: P, b: P },
     /// A routed (through) via.
     Via { net: u32, at: P },
+    /// A routed track centerline with its own half width (a neck-down net's track widened
+    /// back to its class width).
+    Sized { net: u32, layer: u8, a: P, b: P, hw: f64 },
 }
 
 /// What blocks a segment or via.
@@ -131,6 +134,26 @@ impl Checker<'_> {
     /// [`Checker::seg_margin`] that also ignores the copper of net `skip` (the other net of a
     /// differential pair, checked separately against the pair's gap).
     pub fn seg_ext(&self, layer: usize, a: P, b: P, net: u32, extra: f64, skip: Option<u32>) -> Option<Blocker> {
+        self.seg_impl(layer, a, b, net, extra, skip, false)
+    }
+
+    /// [`Checker::seg`] against the static obstacles only (routed copper in the index is
+    /// ignored).
+    pub fn seg_static(&self, layer: usize, a: P, b: P, net: u32) -> Option<Blocker> {
+        self.seg_impl(layer, a, b, net, 0.0, None, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seg_impl(
+        &self,
+        layer: usize,
+        a: P,
+        b: P,
+        net: u32,
+        extra: f64,
+        skip: Option<u32>,
+        statics: bool,
+    ) -> Option<Blocker> {
         let pr = self.rb.profile(net);
         if !self.rb.inside(a) || !self.rb.inside(b) {
             return Some(Blocker::Outside);
@@ -153,12 +176,22 @@ impl Checker<'_> {
                         return Some(Blocker::Obstacle(o));
                     }
                 }
+                _ if statics => {}
                 Item::Seg { net: m, layer: l, a: c, b: d } => {
                     if m == net || Some(m) == skip || l as usize != layer {
                         continue;
                     }
                     let po = self.rb.profile(m);
                     if seg_seg_dist(a, b, c, d) < pr.hw + po.hw + pr.c.max(po.c) + extra - TOL {
+                        return Some(Blocker::Net(m, Some(l)));
+                    }
+                }
+                Item::Sized { net: m, layer: l, a: c, b: d, hw } => {
+                    if m == net || Some(m) == skip || l as usize != layer {
+                        continue;
+                    }
+                    let po = self.rb.profile(m);
+                    if seg_seg_dist(a, b, c, d) < pr.hw + hw + pr.c.max(po.c) + extra - TOL {
                         return Some(Blocker::Net(m, Some(l)));
                     }
                 }
@@ -179,7 +212,35 @@ impl Checker<'_> {
     /// First thing a through via of `net` at `at` would violate. Vias of its own net are
     /// checked for hole-to-hole distance (`skip`: index id of the via itself).
     pub fn via(&self, at: P, net: u32, skip: Option<u32>) -> Option<Blocker> {
-        let pr = self.rb.profile(net);
+        self.via_impl(at, net, skip, false)
+    }
+
+    /// [`Checker::via`] against the static obstacles and holes only.
+    pub fn via_static(&self, at: P, net: u32) -> Option<Blocker> {
+        self.via_impl(at, net, None, true)
+    }
+
+    /// [`Checker::via`] for a via of pad radius `rv` and drill radius `dr` instead of the
+    /// net's.
+    pub fn via_sized(&self, at: P, net: u32, rv: f64, dr: f64) -> Option<Blocker> {
+        let mut pr = self.rb.profile(net).clone();
+        pr.rv = rv;
+        pr.dr = dr;
+        self.via_with(&pr, at, net, None, false)
+    }
+
+    fn via_impl(&self, at: P, net: u32, skip: Option<u32>, statics: bool) -> Option<Blocker> {
+        self.via_with(self.rb.profile(net), at, net, skip, statics)
+    }
+
+    fn via_with(
+        &self,
+        pr: &super::model::Profile,
+        at: P,
+        net: u32,
+        skip: Option<u32>,
+        statics: bool,
+    ) -> Option<Blocker> {
         if !self.rb.inside(at) {
             return Some(Blocker::Outside);
         }
@@ -210,12 +271,22 @@ impl Checker<'_> {
                         return Some(Blocker::Obstacle(o));
                     }
                 }
+                _ if statics => {}
                 Item::Seg { net: m, layer, a, b } => {
                     if m == net {
                         continue;
                     }
                     let po = self.rb.profile(m);
                     if point_seg_d2(at, a, b).sqrt() < pr.rv + po.hw + pr.c.max(po.c) - TOL {
+                        return Some(Blocker::Net(m, Some(layer)));
+                    }
+                }
+                Item::Sized { net: m, layer, a, b, hw } => {
+                    if m == net {
+                        continue;
+                    }
+                    let po = self.rb.profile(m);
+                    if point_seg_d2(at, a, b).sqrt() < pr.rv + hw + pr.c.max(po.c) - TOL {
                         return Some(Blocker::Net(m, Some(layer)));
                     }
                 }

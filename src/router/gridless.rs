@@ -124,6 +124,13 @@ fn stretch(pts: &[P], layer: usize, net: u32, ck: &Checker<'_>, grid: f64, any_a
                 let po = rb.profile(m);
                 push(octagon_hull(s, e, pr.hw + po.hw + pr.c.max(po.c) + MARGIN));
             }
+            Item::Sized { net: m, layer: l, a: s, b: e, hw } => {
+                if m == net || l as usize != layer {
+                    continue;
+                }
+                let po = rb.profile(m);
+                push(octagon_hull(s, e, pr.hw + hw + pr.c.max(po.c) + MARGIN));
+            }
             Item::Via { net: m, at } => {
                 if m == net {
                     continue;

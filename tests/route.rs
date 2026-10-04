@@ -6,6 +6,7 @@ mod common;
 use std::time::Instant;
 
 use cadlab::command::{Registry, RunOptions, Session};
+use cadlab::units::Nm;
 use serde_json::{Value, json};
 
 fn exec(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> Value {
@@ -432,20 +433,23 @@ fn completion(o: &Value) -> f64 {
 fn fine_pitch_escapes() {
     let r = Registry::with_builtins();
     let mut results = Vec::new();
-    for fanout in [false, true] {
+    // The grid search alone, without and with escapes; then the default (`auto`: the gridless
+    // search reaches the off-grid pads the grid cannot) without escapes.
+    for (fanout, router) in [(false, "grid"), (true, "grid"), (false, "auto")] {
         let mut s = Session::new();
         let _d = new_project(&r, &mut s);
         lqfp_board(&r, &mut s);
-        let o = exec(&r, &mut s, "route.all", json!({"fanout": fanout}));
-        report(&format!("lqfp48 fanout={fanout}"), &o, 0);
+        let o = exec(&r, &mut s, "route.all", json!({"fanout": fanout, "router": router}));
+        report(&format!("lqfp48 fanout={fanout} router={router}"), &o, 0);
         let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
         assert_eq!(errors, Vec::<String>::new());
         results.push((completion(&o), o["output"]["stats"]["escapes"].as_u64().unwrap()));
     }
     assert_eq!(results[0].1, 0);
     assert!(results[1].1 > 10, "{results:?}");
-    assert!(results[1].0 > results[0].0, "escapes help: {results:?}");
+    assert!(results[1].0 > results[0].0, "escapes help the grid: {results:?}");
     assert_eq!(results[1].0, 100.0);
+    assert_eq!(results[2].0, 100.0, "the gridless search needs no escapes: {results:?}");
 }
 
 /// A BGA-64 (8 × 8, 0.8 mm) with every ball on a net to a header pin, on 4 layers with
@@ -858,4 +862,111 @@ fn route_track_shoves_and_walks_around() {
     assert_eq!(o["output"]["walked"], true);
     drc_clean(&s);
     render(&r, &mut s, "route-track-walk");
+}
+
+/// The LQFP-48 board of [`lqfp_board`] with the MCU turned by `rotation` degrees: at 30° no pad
+/// lies on the routing grid or along a grid line.
+fn rotated_lqfp_board(r: &Registry, s: &mut Session, rotation: i32) {
+    lqfp_board(r, s);
+    exec(r, s, "place.set", json!({"refdes": "U1", "at": ["30mm", "30mm"], "rotation": rotation}));
+}
+
+#[test]
+fn gridless_search_reaches_a_rotated_part() {
+    let r = Registry::with_builtins();
+    let mut results = Vec::new();
+    for router in ["grid", "auto"] {
+        let mut s = Session::new();
+        let _d = new_project(&r, &mut s);
+        rotated_lqfp_board(&r, &mut s, 30);
+        let o = exec(&r, &mut s, "route.all", json!({"router": router, "seed": 1}));
+        report(&format!("lqfp48 at 30° router={router}"), &o, 0);
+        let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+        assert_eq!(errors, Vec::<String>::new(), "{router}");
+        results.push(completion(&o));
+    }
+    assert!(results[1] >= results[0], "auto is never worse than the grid: {results:?}");
+    assert_eq!(results[1], 100.0, "{results:?}");
+}
+
+#[test]
+fn gridless_search_is_identical_for_any_thread_count() {
+    let r = Registry::with_builtins();
+    let mut results = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let res = pool.install(|| {
+            let mut s = Session::new();
+            let _d = new_project(&r, &mut s);
+            generated_board(&r, &mut s, 3, 2, 2, 3);
+            let o = exec(&r, &mut s, "route.all", json!({"seed": 5, "router": "gridless"}));
+            report(&format!("gridless {threads} threads"), &o, 0);
+            let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+            assert_eq!(errors, Vec::<String>::new());
+            (copper(&s), o["output"].clone())
+        });
+        results.push(res);
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(results[0].1["stats"]["completion"], 100.0);
+}
+
+/// A QFN-40 (0.4 mm pitch) whose pins go to four 1x10 headers on 4 layers, with 0.25 mm tracks and
+/// 0.19 mm clearance: the class width does not fit between the pads (0.2 mm minimum width).
+fn qfn_neck_board(r: &Registry, s: &mut Session) {
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "Q40", "category": "ic", "package": "QFN-40 5x5mm P0.4mm EP3.5mm", "pins": numbered_pins(41)}),
+    );
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "HDR10", "category": "connector", "package": "PinHeader 1x10", "pins": numbered_pins(10)}),
+    );
+    exec(r, s, "board.rules", json!({"track_width": "0.25mm", "clearance": "0.19mm", "min_track_width": "0.2mm"}));
+    exec(r, s, "board.setup", json!({"layers": 4}));
+    exec(r, s, "circuit.add", json!({"part": "Q40", "refdes": "U1"}));
+    exec(r, s, "board.outline", json!({"width": "50mm", "height": "50mm"}));
+    exec(r, s, "place.set", json!({"refdes": "U1", "at": ["25mm", "25mm"]}));
+    for (k, (x, y, rot)) in [(6, 25, 0), (25, 6, 90), (44, 25, 0), (25, 44, 90)].iter().enumerate() {
+        let j = format!("J{}", k + 1);
+        exec(r, s, "circuit.add", json!({"part": "HDR10", "refdes": j}));
+        exec(r, s, "place.set", json!({"refdes": j, "at": [format!("{x}mm"), format!("{y}mm")], "rotation": rot}));
+        for i in 1..=10 {
+            let pin = k * 10 + i;
+            exec(
+                r,
+                s,
+                "net.connect",
+                json!({"net": format!("P{pin}"), "pins": [format!("U1.{pin}"), format!("{j}.{i}")]}),
+            );
+        }
+    }
+}
+
+#[test]
+fn neck_down_out_of_a_fine_pitch_qfn() {
+    let r = Registry::with_builtins();
+    let mut results = Vec::new();
+    for neck in [false, true] {
+        let mut s = Session::new();
+        let _d = new_project(&r, &mut s);
+        qfn_neck_board(&r, &mut s);
+        let o = exec(&r, &mut s, "route.all", json!({"neck": neck, "seed": 1}));
+        report(&format!("qfn40 neck={neck}"), &o, 0);
+        let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+        assert_eq!(errors, Vec::<String>::new());
+        let b = s.project.as_ref().unwrap().board();
+        let narrow = b.tracks.iter().filter(|t| t.width < Nm::from_um(250)).count();
+        let wide = b.tracks.iter().filter(|t| t.width == Nm::from_um(250)).count();
+        assert!(b.tracks.iter().all(|t| t.width >= Nm::from_um(200)), "never under min_track_width");
+        results.push((completion(&o), narrow, wide));
+    }
+    assert_eq!(results[0].1, 0, "no neck-downs when off: {results:?}");
+    assert!(results[0].0 < 50.0, "the class width does not leave the pads: {results:?}");
+    assert!(results[1].0 >= 70.0, "necked down, most pins get out: {results:?}");
+    assert!(results[1].1 > 0 && results[1].2 > 0, "necked near the QFN, widened elsewhere: {results:?}");
 }

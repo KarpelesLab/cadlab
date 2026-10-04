@@ -19,6 +19,9 @@ pub(crate) struct Path {
     pub wire: usize,
     /// Per segment, the midpoint of an arc (`arcs`); empty when every segment is straight.
     pub mids: Vec<Option<P>>,
+    /// Per segment, a half width other than the net's (a neck-down net widened back to its
+    /// class width where that fits, see [`widen`]); empty when every segment has the net's.
+    pub widths: Vec<Option<f64>>,
 }
 
 /// Final geometry of a net.
@@ -47,6 +50,11 @@ pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
         for &n in [w.nodes.first(), w.nodes.last()].into_iter().flatten() {
             *pins.entry(end_key(n)).or_default() += 1;
         }
+        if let Some(g) = &w.geo {
+            for &(s, p) in [g.first(), g.last()].into_iter().flatten() {
+                *pins.entry((e.slots[s], key(p))).or_default() += 1;
+            }
+        }
     }
     // A wire end with a stub is free to move unless another wire ends there too.
     let shared = |w: &super::engine::Wire, n: u32| {
@@ -56,6 +64,37 @@ pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
     };
     let mut g = NetGeom::default();
     for (wi, w) in nr.wires.iter().enumerate() {
+        if let Some(pts) = &w.geo {
+            let mut cur: Option<Path> = None;
+            for (k, &(s, p)) in pts.iter().enumerate() {
+                let layer = e.slots[s];
+                match &mut cur {
+                    Some(path) if path.layer == layer => {
+                        path.pts.push(p);
+                        path.pinned.push(pins.contains_key(&(layer, key(p))));
+                    }
+                    _ => {
+                        if let Some(done) = cur.take() {
+                            g.vias.push((p, wi));
+                            g.paths.push(done);
+                        }
+                        let first = k == 0 || pins.contains_key(&(layer, key(p)));
+                        cur = Some(Path {
+                            layer,
+                            pts: vec![p],
+                            pinned: vec![first],
+                            wire: wi,
+                            mids: vec![],
+                            widths: vec![],
+                        });
+                    }
+                }
+            }
+            if let Some(path) = cur.take() {
+                g.paths.push(path);
+            }
+            continue;
+        }
         let mut cur: Option<Path> = None;
         for (k, &n) in w.nodes.iter().enumerate() {
             let (s, _, _) = e.unpack(n);
@@ -71,7 +110,7 @@ pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
                         g.vias.push((p, wi));
                         g.paths.push(done);
                     }
-                    let mut path = Path { layer, pts: vec![], pinned: vec![], wire: wi, mids: vec![] };
+                    let mut path = Path { layer, pts: vec![], pinned: vec![], wire: wi, mids: vec![], widths: vec![] };
                     if k == 0
                         && let Some(st) = &w.start
                     {
@@ -169,8 +208,16 @@ pub(crate) fn insert(index: &mut Index, net: u32, g: &mut NetGeom, hw: f64, rv: 
                 g.ids.extend(super::arcs::insert_arc(index, net, p.layer, w[0], *m, w[1], hw));
                 continue;
             }
-            let id = index
-                .insert(Item::Seg { net, layer: p.layer as u8, a: w[0], b: w[1] }, BoxF::of2(w[0], w[1]).expand(hw));
+            let id = match p.widths.get(k).copied().flatten() {
+                Some(h) => index.insert(
+                    Item::Sized { net, layer: p.layer as u8, a: w[0], b: w[1], hw: h },
+                    BoxF::of2(w[0], w[1]).expand(h),
+                ),
+                None => index.insert(
+                    Item::Seg { net, layer: p.layer as u8, a: w[0], b: w[1] },
+                    BoxF::of2(w[0], w[1]).expand(hw),
+                ),
+            };
             g.ids.push(id);
         }
         if p.pts.len() == 1 {
@@ -197,9 +244,24 @@ pub(crate) fn remove(index: &mut Index, g: &mut NetGeom) {
 pub(crate) fn reduce_vias(e: &Engine<'_>, nr: &mut NetRoute, ck: &Checker<'_>) -> usize {
     let mut removed = 0;
     // Grid nodes other wires attach to (cannot move).
-    let ends: BTreeSet<u32> = nr.wires.iter().flat_map(|w| [w.nodes[0], *w.nodes.last().expect("node")]).collect();
+    let ends: BTreeSet<u32> = nr
+        .wires
+        .iter()
+        .filter(|w| w.geo.is_none())
+        .flat_map(|w| [w.nodes[0], *w.nodes.last().expect("node")])
+        .collect();
+    // Ends of gridless wires (which may attach to a grid wire anywhere along it).
+    let geo_ends: BTreeSet<(i64, i64)> = nr
+        .wires
+        .iter()
+        .filter_map(|w| w.geo.as_ref())
+        .flat_map(|g| [g.first(), g.last()].into_iter().flatten().map(|q| key(q.1)))
+        .collect();
     let cells = e.cells() as u32;
     for wi in 0..nr.wires.len() {
+        if nr.wires[wi].geo.is_some() {
+            continue;
+        }
         let mut changed = true;
         while changed {
             changed = false;
@@ -214,7 +276,8 @@ pub(crate) fn reduce_vias(e: &Engine<'_>, nr: &mut NetRoute, ck: &Checker<'_>) -
                     continue;
                 }
                 let section = &nodes[i + 1..=k];
-                let mut attached = section.iter().any(|n| ends.contains(n) && nr.wires.len() > 1);
+                let mut attached = section.iter().any(|n| ends.contains(n) && nr.wires.len() > 1)
+                    || section.iter().any(|n| geo_ends.contains(&key(e.node_pos(*n))));
                 // Other wires ending on the via cells (on any layer) keep them.
                 for o in [nodes[i], nodes[k + 1]] {
                     let c = o % cells;
@@ -222,7 +285,7 @@ pub(crate) fn reduce_vias(e: &Engine<'_>, nr: &mut NetRoute, ck: &Checker<'_>) -
                         .wires
                         .iter()
                         .enumerate()
-                        .filter(|(j, _)| *j != wi)
+                        .filter(|(j, w)| *j != wi && w.geo.is_none())
                         .any(|(_, w)| [w.nodes[0], *w.nodes.last().expect("node")].iter().any(|n| n % cells == c));
                 }
                 if attached {
@@ -432,4 +495,25 @@ pub(crate) fn optimize_path(p: &mut Path, free: SegOk<'_>, grid: f64, passes: us
             merge(p);
         }
     }
+}
+
+/// Widens the straight segments of a necked-down net's paths to the half width `full` (its
+/// class width) wherever that keeps the clearance to everything else in the checker's index;
+/// returns the number of segments widened. Arcs keep the neck width.
+pub(crate) fn widen(g: &mut NetGeom, net: u32, ck: &Checker<'_>, hw: f64, full: f64) -> usize {
+    let mut n = 0;
+    for p in &mut g.paths {
+        let segs = p.pts.len().saturating_sub(1);
+        p.widths.resize(segs, None);
+        for k in 0..segs {
+            if p.mids.get(k).copied().flatten().is_some() {
+                continue;
+            }
+            if ck.seg_margin(p.layer, p.pts[k], p.pts[k + 1], net, full - hw).is_none() {
+                p.widths[k] = Some(full);
+                n += 1;
+            }
+        }
+    }
+    n
 }

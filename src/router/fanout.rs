@@ -18,6 +18,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::units::Nm;
+
 use super::engine::NetRoute;
 use super::geo::{BoxF, P, point_seg_d2};
 use super::grid::{Grid, delta};
@@ -34,6 +36,9 @@ pub(crate) struct DogBone {
     pub via: P,
     /// Pad label (`U1.C3`).
     pub label: String,
+    /// A via smaller than the net's (diameter, drill): the smallest the rules allow, where the
+    /// net's via does not fit between the balls.
+    pub small: Option<(Nm, Nm)>,
 }
 
 /// Lattice of an area-array footprint.
@@ -149,15 +154,31 @@ pub(crate) fn plan(
             let sy = if 2 * j + 1 < arr.ny || (2 * j + 1 == arr.ny && i % 2 == 0) { -1.0 } else { 1.0 };
             let at = term.at;
             let ck = Checker { rb, index };
-            let found = [(sx, sy), (sx, -sy), (-sx, sy), (-sx, -sy)].into_iter().find_map(|(dx, dy)| {
-                let v = P::new(at.x + dx * arr.pitch.0 / 2.0, at.y + dy * arr.pitch.1 / 2.0);
-                let ok = ck.via(v, term.net, None).is_none() && ck.seg(layer, at, v, term.net).is_none();
-                ok.then_some(v)
-            });
-            let Some(v) = found else { continue };
+            let dirs = [(sx, sy), (sx, -sy), (-sx, sy), (-sx, -sy)];
+            let site = |dx: f64, dy: f64| P::new(at.x + dx * arr.pitch.0 / 2.0, at.y + dy * arr.pitch.1 / 2.0);
+            // The net's via, else the smallest via the rules allow (minimum drill and annular
+            // ring) when that is smaller.
+            let found = dirs
+                .into_iter()
+                .find_map(|(dx, dy)| {
+                    let v = site(dx, dy);
+                    let ok = ck.via(v, term.net, None).is_none() && ck.seg(layer, at, v, term.net).is_none();
+                    ok.then_some((v, None))
+                })
+                .or_else(|| {
+                    let (dia, drill) = small_via(rb, term.net)?;
+                    let (rv, dr) = (dia.0 as f64 / 2.0, drill.0 as f64 / 2.0);
+                    dirs.into_iter().find_map(|(dx, dy)| {
+                        let v = site(dx, dy);
+                        let ok =
+                            ck.via_sized(v, term.net, rv, dr).is_none() && ck.seg(layer, at, v, term.net).is_none();
+                        ok.then_some((v, Some((dia, drill))))
+                    })
+                });
+            let Some((v, small)) = found else { continue };
             index.insert(Item::Seg { net: term.net, layer: layer as u8, a: at, b: v }, BoxF::of2(at, v).expand(pr.hw));
             index.insert(Item::Via { net: term.net, at: v }, BoxF::of2(v, v).expand(pr.rv));
-            out.push(DogBone { net: term.net, layer, pad: at, via: v, label: term.label.clone() });
+            out.push(DogBone { net: term.net, layer, pad: at, via: v, label: term.label.clone(), small });
         }
     }
     out
@@ -403,4 +424,110 @@ fn wanted(rb: &RouterBoard, routes: &[NetRoute]) -> Vec<bool> {
         }
     }
     wanted
+}
+
+/// Width resolution of neck-downs (nm): neck widths are multiples of it.
+const NECK_STEP: f64 = 5_000.0;
+
+/// Neck-down widths: for every net with a pad that a track of the net's width cannot leave
+/// (no straight exit from the pad center out of the pad, in any of the eight directions on any
+/// routing layer, is legal against the other nets' pads and the static obstacles), the widest
+/// width, in `NECK_STEP` steps and not under the board's `min_track_width`, at which every such
+/// pad of the net has an exit, capped so that two such tracks fit side by side out of
+/// neighboring pads (pad pitch minus clearance). Nets whose pads fit, or that no allowed width
+/// gets out, are left out. `index` holds the static obstacles.
+pub(crate) fn necks(rb: &RouterBoard, index: &Index, slots: &[usize], nets: &[u32]) -> Vec<(u32, f64)> {
+    let ck = Checker { rb, index };
+    let min_w = rb.rules.min_track_width.0 as f64;
+    let mut by_comp: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (ti, t) in rb.terminals.iter().enumerate() {
+        if let Some((comp, _)) = t.label.split_once('.')
+            && t.pad
+        {
+            by_comp.entry(comp).or_default().push(ti);
+        }
+    }
+    let dirs: Vec<P> = (0..8)
+        .map(|k| {
+            let a = k as f64 * std::f64::consts::FRAC_PI_4;
+            P::new(a.cos(), a.sin())
+        })
+        .collect();
+    let mut out: BTreeMap<u32, f64> = BTreeMap::new();
+    for terms in by_comp.values() {
+        for &t in terms {
+            let term = &rb.terminals[t];
+            if nets.binary_search(&term.net).is_err() {
+                continue;
+            }
+            let pr = rb.profile(term.net);
+            let layers: Vec<usize> =
+                slots.iter().copied().filter(|&l| term.layers & (1u64 << l.min(63)) != 0).collect();
+            if layers.is_empty() {
+                continue;
+            }
+            let b = term.shape.bbox();
+            let at = term.at;
+            // Exits: from the center to where the ray leaves the pad's box.
+            let exits: Vec<P> = dirs
+                .iter()
+                .map(|d| {
+                    let tx = if d.x.abs() < 1e-9 {
+                        f64::MAX
+                    } else {
+                        ((if d.x > 0.0 { b.max.x } else { b.min.x }) - at.x) / d.x
+                    };
+                    let ty = if d.y.abs() < 1e-9 {
+                        f64::MAX
+                    } else {
+                        ((if d.y > 0.0 { b.max.y } else { b.min.y }) - at.y) / d.y
+                    };
+                    let s = tx.min(ty).max(0.0);
+                    P::new(at.x + d.x * s, at.y + d.y * s)
+                })
+                .collect();
+            let fits = |w: f64| {
+                layers
+                    .iter()
+                    .any(|&l| exits.iter().any(|&e| ck.seg_margin(l, at, e, term.net, w / 2.0 - pr.hw).is_none()))
+            };
+            if fits(2.0 * pr.hw) {
+                continue;
+            }
+            // Room for a neighbor's neck beside this one.
+            let pitch = terms
+                .iter()
+                .filter(|&&o| o != t && rb.terminals[o].net != term.net)
+                .map(|&o| rb.terminals[o].at.dist(at))
+                .fold(f64::MAX, f64::min);
+            let cap = (pitch - pr.c - 2.0 * TOL).min(2.0 * pr.hw).max(min_w);
+            let mut w = (cap / NECK_STEP).floor() * NECK_STEP;
+            if w >= 2.0 * pr.hw {
+                w -= NECK_STEP;
+            }
+            while w >= min_w && !fits(w) {
+                w -= NECK_STEP;
+            }
+            if w < min_w {
+                // The minimum width itself (when not a multiple of the step).
+                if min_w < 2.0 * pr.hw && fits(min_w) {
+                    w = min_w;
+                } else {
+                    continue; // nothing the rules allow gets out
+                }
+            }
+            let e = out.entry(term.net).or_insert(w);
+            *e = e.min(w);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The smallest via the rules allow (diameter, drill): the minimum drill with the minimum
+/// annular ring, when smaller than the net's via; `None` otherwise.
+fn small_via(rb: &RouterBoard, net: u32) -> Option<(Nm, Nm)> {
+    let key = rb.profile(net).key;
+    let drill = rb.rules.min_drill.max(Nm(1_000));
+    let dia = Nm(drill.0 + 2 * rb.rules.min_annular_ring.0);
+    (dia < key.via_dia && drill <= key.via_drill).then_some((dia, drill))
 }

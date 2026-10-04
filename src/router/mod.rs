@@ -1,4 +1,5 @@
-//! Autorouter v1: grid-based maze routing with negotiated congestion. See `docs/ROUTER.md`.
+//! Autorouter: grid-based maze routing and a gridless shape-based search, with negotiated congestion.
+//! See `docs/ROUTER.md`.
 //!
 //! [`route`] takes a project and returns new tracks and vias plus a report per connection; it
 //! never changes the project (the `route.*` commands apply the result). Pipeline:
@@ -21,7 +22,12 @@
 //!    failures by rerouting the nets in their way. Nets with disjoint regions are routed in
 //!    batches (on rayon threads with the `parallel` feature); the batches depend only on the
 //!    data, so results are identical for any thread count.
+//!    With `router: auto` (the default), what is still unrouted then gets the gridless search
+//!    (`rooms`: free-space decomposition into expansion rooms; `expansion`: A* over them, funnel
+//!    paths) and a gridless rip-up and retry; `router: gridless` uses that search throughout.
 //!    Then via minimization: nets with vias are routed again with dear vias, kept when better.
+//!    Nets whose width cannot leave a fine-pitch pad are routed necked down and widened back
+//!    where the class width fits; BGA dog bones fall back to the smallest via the rules allow.
 //! 5. **Post-processing** (`post`): via reduction, collinear merging, 45° pull-tight, mitered
 //!    corners and optional any-angle shortcuts; gridless refinement (`gridless`: shortest paths
 //!    over the clearance hulls of nearby obstacles); optional arc corners (`arcs`). Each step is
@@ -40,6 +46,7 @@
 
 mod arcs;
 mod engine;
+mod expansion;
 mod fanout;
 mod geo;
 mod grid;
@@ -48,6 +55,7 @@ mod index;
 mod model;
 mod pairs;
 mod post;
+mod rooms;
 mod shove;
 mod tune;
 
@@ -84,6 +92,21 @@ pub enum Effort {
     Normal,
     /// Many iterations, more post-processing.
     High,
+}
+
+/// Which search finds the paths (`router` option of the `route.*` commands).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchKind {
+    /// A* over the sampled routing grid (D22).
+    Grid,
+    /// Shape-based search over the free space of each layer: expansion rooms of a trapezoidal
+    /// decomposition of the clearance-inflated obstacles, with vias between layers (D39).
+    Gridless,
+    /// The grid search, then the gridless search for the connections it left unrouted (the
+    /// default).
+    #[default]
+    Auto,
 }
 
 /// Router options.
@@ -126,6 +149,12 @@ pub struct RouteOptions {
     pub pairs: Option<bool>,
     /// Compensate the skew of the pairs just routed with small bumps (default on).
     pub skew: Option<bool>,
+    /// The search (default [`SearchKind::Auto`]).
+    pub search: Option<SearchKind>,
+    /// Neck-down (default on): a net whose width cannot leave one of its pads between the
+    /// neighboring pads is routed at the widest width that can (not under the board's
+    /// `min_track_width`), and widened back to its class width wherever that fits afterwards.
+    pub neck: Option<bool>,
 }
 
 /// Result of [`fanout`].
@@ -240,6 +269,9 @@ pub struct RouteStats {
     /// Dog-bone fanout vias (included in `vias`).
     #[serde(default)]
     pub fanout_vias: usize,
+    /// Connections routed by the gridless search after the grid search left them (`auto`).
+    #[serde(default)]
+    pub gridless: usize,
     /// Fine-pitch pads routed through an escape (a straight track out of the pad row, then 45°
     /// onto the grid); part of `tracks`.
     #[serde(default)]
@@ -1238,6 +1270,9 @@ fn route_once(
     let mut rb = RouterBoard::build(p, &items, &isl);
     soften(&mut rb, soft);
     let mut routes = plan(&rb, scope)?;
+    if opts.neck != Some(false) {
+        apply_necks(&mut rb, &mut routes, &slots);
+    }
     if (hooks.cancelled)() {
         return Err(RouteError::Cancelled);
     }
@@ -1255,6 +1290,10 @@ fn route_once(
     let phase_end = std::sync::Mutex::new(negotiate_end);
     let stop = || phase_end.lock().expect("deadline").is_some_and(|d| Instant::now() > d);
     let mut eng = Engine::new(&rb, grid, slots.clone(), &active, costs(opts.effort), &stop);
+    let search = opts.search.unwrap_or_default();
+    eng.gridless = search == SearchKind::Gridless;
+    eng.search = search;
+    eng.any_angle = opts.any_angle;
     let mut sc = eng.scratch();
     let pool: std::sync::Mutex<Vec<Scratch>> = std::sync::Mutex::new(Vec::new());
 
@@ -1490,6 +1529,118 @@ fn route_once(
             break;
         }
     }
+    // ---- `auto`: what the grid left unrouted, by exact gridless searches ----
+    if search == SearchKind::Auto {
+        for r in routes.iter_mut() {
+            if (hooks.cancelled)() {
+                return Err(RouteError::Cancelled);
+            }
+            if stop() {
+                break;
+            }
+            if !r.failed.iter().any(expansion::retryable) {
+                continue;
+            }
+            (hooks.progress)(0, None, &format!("gridless: {}", rb.nets[r.net as usize]));
+            eng.uncommit(r);
+            let res = expansion::route_failed(&eng, &mut sc, r);
+            eng.commit(r);
+            match res {
+                Ok(n) => stats.gridless += n,
+                Err(_) => {
+                    exhausted = true;
+                    break;
+                }
+            }
+        }
+    }
+    // ---- gridless rip-up and retry: a failed connection takes a path that keeps every static
+    // rule but may run through the routing of a few other nets (a probe), and those nets are
+    // routed again around it; kept only when fewer connections fail ----
+    if search != SearchKind::Grid {
+        let by_net: BTreeMap<u32, usize> = routes.iter().enumerate().map(|(ri, r)| (r.net, ri)).collect();
+        let mut sideways = SIDEWAYS;
+        for _ in 0..RETRY_ROUNDS {
+            let mut improved = false;
+            let failing: Vec<(usize, usize)> = routes
+                .iter()
+                .enumerate()
+                .flat_map(|(ri, r)| {
+                    r.failed.iter().enumerate().filter(|(_, f)| expansion::retryable(f)).map(move |(ci, _)| (ri, ci))
+                })
+                .collect();
+            for (fi, ci) in failing {
+                if (hooks.cancelled)() {
+                    return Err(RouteError::Cancelled);
+                }
+                if stop() {
+                    break;
+                }
+                if !expansion::retryable(&routes[fi].failed[ci]) {
+                    continue;
+                }
+                let fails = |routes: &[NetRoute], group: &[usize]| -> usize {
+                    group.iter().map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count()).sum()
+                };
+                eng.uncommit(&mut routes[fi]);
+                let Ok(probe) = expansion::probe(&eng, &mut sc, &mut routes[fi], ci) else {
+                    eng.commit(&mut routes[fi]);
+                    break;
+                };
+                let Some(path) = probe else {
+                    eng.commit(&mut routes[fi]);
+                    continue;
+                };
+                let blockers: Vec<usize> = eng
+                    .geo_blockers(routes[fi].net, &engine::Wire::gridless(ci, path.clone()))
+                    .iter()
+                    .filter_map(|n| by_net.get(n).copied())
+                    .filter(|&j| j != fi)
+                    .collect();
+                if blockers.len() > 8 {
+                    eng.commit(&mut routes[fi]);
+                    continue;
+                }
+                let group: Vec<usize> = std::iter::once(fi).chain(blockers.iter().copied()).collect();
+                let before = fails(&routes, &group);
+                let saved: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)> =
+                    group.iter().map(|&j| (routes[j].wires.clone(), routes[j].failed.clone())).collect();
+                for &j in &blockers {
+                    eng.uncommit(&mut routes[j]);
+                }
+                expansion::add_probe(&eng, &mut sc, &mut routes[fi], ci, path);
+                eng.commit(&mut routes[fi]);
+                let mut ok = true;
+                for &j in &blockers {
+                    ok &= eng.route_net(&mut sc, &mut routes[j], Mode::Hard).is_ok();
+                    if ok && routes[j].failed.iter().any(expansion::retryable) {
+                        ok &= expansion::route_failed(&eng, &mut sc, &mut routes[j]).is_ok();
+                    }
+                    eng.commit(&mut routes[j]);
+                }
+                let after = fails(&routes, &group);
+                let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
+                if ok && (after < before || moved) {
+                    sideways -= usize::from(moved);
+                    stats.gridless += 1;
+                    improved = true;
+                    continue;
+                }
+                for (&j, (w, f)) in group.iter().zip(saved) {
+                    eng.uncommit(&mut routes[j]);
+                    routes[j].wires = w;
+                    routes[j].failed = f;
+                    eng.commit(&mut routes[j]);
+                }
+                if !ok {
+                    break;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+    }
     // ---- via minimization: nets with vias are routed again with dear vias ----
     if !stop() {
         stats.vias_removed += minimize_vias(&mut eng, &mut sc, &mut routes, &stop, hooks)?;
@@ -1595,6 +1746,21 @@ fn route_once(
             }
             post::insert(&mut index, routes[ri].net, &mut geoms[ri], pr.hw, pr.rv);
         }
+    }
+
+    // Neck-down nets get their class width back wherever it fits.
+    for ri in 0..routes.len() {
+        let net = routes[ri].net;
+        let (hw, full) = (rb.profile(net).hw, rb.class_of(net).hw);
+        if full <= hw {
+            continue;
+        }
+        post::remove(&mut index, &mut geoms[ri]);
+        {
+            let ck = Checker { rb: &rb, index: &index };
+            post::widen(&mut geoms[ri], net, &ck, hw, full);
+        }
+        post::insert(&mut index, net, &mut geoms[ri], hw, rb.profile(net).rv);
     }
 
     // ---- verification ----
@@ -1883,10 +2049,13 @@ fn fanout_items(
 ) -> Result<Vec<FanItem>, RouteError> {
     let items = geo_board::copper_items(p);
     let isl = geo_board::islands(&items);
-    let rb = RouterBoard::build(p, &items, &isl);
-    let routes = plan(&rb, scope)?;
+    let mut rb = RouterBoard::build(p, &items, &isl);
+    let mut routes = plan(&rb, scope)?;
     if routes.is_empty() {
         return Ok(vec![]);
+    }
+    if opts.neck != Some(false) {
+        apply_necks(&mut rb, &mut routes, slots);
     }
     let mut index = Index::new(rb.bbox.expand(1_000_000.0), 500_000.0, reach(&rb));
     for (i, ob) in rb.obstacles.iter().enumerate() {
@@ -1927,11 +2096,12 @@ fn fanout_items(
         .map(|b| {
             let key = rb.profile(b.net).key;
             let net = Some(rb.nets[b.net as usize].clone());
+            let (diameter, drill) = b.small.unwrap_or((key.via_dia, key.via_drill));
             let via = Via {
                 id: ObjectId(0),
                 at: b.via.to_point(),
-                drill: key.via_drill,
-                diameter: key.via_dia,
+                drill,
+                diameter,
                 net,
                 from: first.clone(),
                 to: last.clone(),
@@ -1990,8 +2160,31 @@ pub fn fanout(p: &Project, components: &[String], layers: &[String]) -> Result<F
     Ok(out)
 }
 
+/// Neck-downs (`RouteOptions::neck`): the nets of `routes` whose width cannot leave one of
+/// their pads (between the other pads) are routed at the widest width that can
+/// (`fanout::necks`).
+fn apply_necks(rb: &mut RouterBoard, routes: &mut [NetRoute], slots: &[usize]) {
+    let mut nets: Vec<u32> = routes.iter().map(|r| r.net).collect();
+    nets.sort_unstable();
+    let necks = {
+        // Pads and the board only (not tracks, vias or fanouts): the same answer before and
+        // after the fanout is planned.
+        let mut index = Index::new(rb.bbox.expand(1_000_000.0), 500_000.0, reach(rb));
+        for (i, ob) in rb.obstacles.iter().enumerate().filter(|(_, o)| o.kind != ObKind::Copper) {
+            index.insert(Item::Static(i as u32), ob.bbox);
+        }
+        fanout::necks(rb, &index, slots, &nets)
+    };
+    for (net, w) in necks {
+        rb.neck(net, Nm(w.round() as i64));
+    }
+    for r in routes.iter_mut() {
+        r.prof = rb.net_profile[r.net as usize];
+    }
+}
+
 /// Largest extra distance a check adds beyond an item's own extent.
-fn reach(rb: &RouterBoard) -> f64 {
+pub(crate) fn reach(rb: &RouterBoard) -> f64 {
     let mut r = rb.rules.copper_to_edge.0 as f64;
     for p in &rb.profiles {
         r = r.max(p.c + p.hw.max(p.rv)).max(rb.h2h + 2.0 * p.dr);
@@ -2151,6 +2344,8 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
             bbox: BoxF::EMPTY,
             length,
             region,
+            dyn_ids: vec![],
+            rooms: None,
         });
     }
     if let Scope::Connection { from, to } = scope
@@ -2194,12 +2389,13 @@ fn build_items(p: &Project, rb: &RouterBoard, routes: &[NetRoute], geoms: &[post
                     continue;
                 }
                 let mid = path.mids.get(k).copied().flatten().map(P::to_point);
+                let width = path.widths.get(k).copied().flatten().map_or(key.width, |h| Nm((2.0 * h).round() as i64));
                 let id: ObjectId = alloc.alloc_id();
                 out.owner.insert(("track".into(), id.0), (ri, path.wire));
                 out.tracks.push(Track {
                     id,
                     layer: rb.layer_names[path.layer].clone(),
-                    width: key.width,
+                    width,
                     net: net.clone(),
                     start: a,
                     end: b,
@@ -2340,6 +2536,9 @@ fn explain(
     let what = if kind == Some(FailKind::Congestion) { "no room left" } else { "no path" };
     rep.reason = Some(match rep.reason.take() {
         Some(b) => format!("{what} from {} to {}: blocked by {b}", c.from, c.to),
+        None if eng.search != SearchKind::Grid => {
+            format!("{what} from {} to {} (neither on the routing grid nor off it)", c.from, c.to)
+        }
         None => format!("{what} from {} to {} on the routing grid", c.from, c.to),
     });
     if rep.at.is_none() {

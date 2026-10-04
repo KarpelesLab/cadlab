@@ -209,7 +209,11 @@ Per project, on a copy of the checkout:
    hole at its middle would be counted apart); hole functions are not compared (KiCad's component drill for a stitching-via
    footprint is cadlab's via drill).
 6. **Re-route** (`CADLAB_CORPUS_ROUTE=1`, budget `CADLAB_CORPUS_ROUTE_BUDGET` seconds, default 60): tracks and
-   vias ripped up and routed again by cadlab's router; completion is reported, never a failure.
+   vias ripped up and routed again by cadlab's router; completion is reported, never a failure. Without KiCad,
+   `cargo run --release --example route_bench -- --corpus [names]` does the same re-route on the boards alone
+   (circuit built from the board) and prints completion, vias, length, time and DRC errors per board with the
+   failures grouped by reason (`CADLAB_BENCH_ROUTER`, `CADLAB_BENCH_BUDGET_MS`, `CADLAB_BENCH_VERBOSE`,
+   `CADLAB_ROUTE_RENDER`; docs/ROUTER.md, "Benchmarks").
 
 Allowances, each with its reason, on top of the cross-check's (`drc_compare::ALLOW`):
 

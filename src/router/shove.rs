@@ -473,6 +473,7 @@ impl<'a> World<'a> {
                         out.push((Hit::Line(*li), req));
                     }
                 }
+                Item::Sized { .. } => {} // widened tracks: final pass only
                 Item::Via { net: m, at } => {
                     if m == net {
                         continue;
@@ -540,6 +541,7 @@ impl<'a> World<'a> {
                         out.push((Hit::Line(*li), req));
                     }
                 }
+                Item::Sized { .. } => {} // widened tracks: final pass only
                 Item::Via { net: m, at: o } => {
                     let Some(Owner::Via(wj)) = self.owner.get(&id) else { continue };
                     let w = &self.vias[*wj];
@@ -653,7 +655,7 @@ pub(crate) fn octagon_hull(a: P, b: P, d: f64) -> Vec<P> {
     convex_hull(v)
 }
 
-fn octagon_hull_pts(pts: &[P], d: f64) -> Vec<P> {
+pub(crate) fn octagon_hull_pts(pts: &[P], d: f64) -> Vec<P> {
     convex_hull(pts.iter().flat_map(|&p| octagon(p, d)).collect())
 }
 
@@ -1150,6 +1152,7 @@ impl World<'_> {
                     pts: cur.clone(),
                     wire: 0,
                     mids: vec![],
+                    widths: vec![],
                 };
                 {
                     let w: &World<'_> = self;

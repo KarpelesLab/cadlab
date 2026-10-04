@@ -140,8 +140,12 @@ Details in [ROUTER.md](ROUTER.md).
 
 ## M6 — Autorouter v2: freerouting parity (XL)
 
-- [ ] Gridless, shape-based router (free-space decomposition, expansion rooms) (done: gridless refinement of
-      grid routes, a visibility graph over clearance hulls, on by default (DECISIONS D34); to do: a gridless search)
+- [x] Gridless, shape-based router (free-space decomposition, expansion rooms): gridless refinement of grid routes
+      (a visibility graph over clearance hulls, D34) and a gridless search over expansion rooms (trapezoidal
+      decomposition of the clearance-inflated obstacles per layer, vias between layers, funnel paths at 45°) that
+      shares the grid's negotiation; `router: grid | gridless | auto`, `auto` (grid, then gridless for what it
+      cannot route, gridless rip-up and retry) by default; neck-downs out of fine-pitch pads and small dog-bone vias
+      from the corpus (DECISIONS D39)
 - [x] Any-angle / 45° optimized output, arc support: 45° pull-tight over longer runs, mitered corners, a second
       optimization round, escape junctions smoothed, optional any-angle shortcuts, gridless refinement hugging
       minimum clearance, optional arc corners (`arcs`, exported as arcs)

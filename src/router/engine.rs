@@ -48,8 +48,8 @@ pub(crate) enum Mode {
 /// An overused point: (slot, double-grid index) or (`None`, via cell index).
 pub(crate) type Conflict = (Option<usize>, usize);
 
-/// Straight runs (slot, from, to) of a wire and its via cells.
-pub(crate) type WireGeometry = (Vec<(usize, P, P)>, Vec<(i32, i32)>);
+/// Straight runs (slot, from, to) of a wire and its via centers.
+pub(crate) type WireGeometry = (Vec<(usize, P, P)>, Vec<P>);
 
 /// Cancellation or budget exhaustion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +87,8 @@ pub(crate) struct Conn {
     pub to_at: P,
 }
 
-/// A routed path: grid nodes (`slot * cells + cell`), with optional stubs at both ends.
+/// A routed path: grid nodes (`slot * cells + cell`), with optional stubs at both ends; or,
+/// from the gridless search, a polyline with its slot per vertex (`geo`, `nodes` empty).
 #[derive(Clone, Debug)]
 pub(crate) struct Wire {
     pub conn: usize,
@@ -96,6 +97,16 @@ pub(crate) struct Wire {
     pub start: Option<Stub>,
     /// Stub from the last node to its copper.
     pub end: Option<Stub>,
+    /// Gridless polyline: (slot, point) per vertex; consecutive vertices at one point on two
+    /// slots are a via.
+    pub geo: Option<Vec<(usize, P)>>,
+}
+
+impl Wire {
+    /// A gridless wire.
+    pub fn gridless(conn: usize, pts: Vec<(usize, P)>) -> Wire {
+        Wire { conn, nodes: vec![], start: None, end: None, geo: Some(pts) }
+    }
 }
 
 /// Why a connection could not be routed.
@@ -130,6 +141,11 @@ pub(crate) struct NetRoute {
     /// Where the net is expected to route (its terminals with a margin): nets whose regions
     /// do not meet are routed in the same batch (see `batches`).
     pub region: BoxF,
+    /// Ids of the committed wires' items in `Engine::dynamic`.
+    pub dyn_ids: Vec<u32>,
+    /// The rooms of the gridless search for this net (static obstacles), kept between
+    /// iterations.
+    pub rooms: Option<std::sync::Arc<super::expansion::NetRooms>>,
 }
 
 impl Default for NetRoute {
@@ -145,6 +161,8 @@ impl Default for NetRoute {
             bbox: BoxF::EMPTY,
             length: 0.0,
             region: BoxF::EMPTY,
+            dyn_ids: vec![],
+            rooms: None,
         }
     }
 }
@@ -211,6 +229,17 @@ pub(crate) struct Engine<'a> {
     pub max_expansions: usize,
     /// Polled during searches (thread-safe: deadline and cancellation flag only).
     pub stop: &'a (dyn Fn() -> bool + Sync),
+    /// Whether `route_net` uses the gridless search (`expansion`) instead of the grid.
+    pub gridless: bool,
+    /// The search option of the run (for reports).
+    pub search: super::SearchKind,
+    /// Static obstacles and the committed routing (wire segments and vias of every net), for
+    /// the gridless search and its exact conflict checks.
+    pub dynamic: super::index::Index,
+    /// Clearance regions of the static obstacles (gridless search).
+    pub grown: super::rooms::Grown,
+    /// Any-angle segments in gridless paths (else 0°/45°/90° where they fit).
+    pub any_angle: bool,
 }
 
 /// Per-search working memory (one per thread).
@@ -223,6 +252,10 @@ pub(crate) struct Scratch {
     stamp: u32,
     /// Via cells of the net being routed (earlier wires): new vias keep hole-to-hole from them.
     pub own_vias: Vec<(i32, i32)>,
+    /// Via centers of the net being routed (gridless search).
+    pub own_via_pts: Vec<P>,
+    /// Gridless search memory.
+    pub gl: super::expansion::GScratch,
 }
 
 impl Scratch {
@@ -235,6 +268,8 @@ impl Scratch {
             tgt: vec![0; nodes],
             stamp: 0,
             own_vias: Vec::new(),
+            own_via_pts: Vec::new(),
+            gl: Default::default(),
         }
     }
 }
@@ -266,6 +301,11 @@ impl<'a> Engine<'a> {
         let cells = grid.cells();
         let ns = slots.len();
         let pref = if ns < 2 { vec![2; ns] } else { (0..ns).map(|s| (s % 2) as u8).collect() };
+        let mut dynamic =
+            super::index::Index::new(rb.bbox.expand(grid.g * 4.0), (grid.g * 8.0).max(500_000.0), super::reach(rb));
+        for (i, ob) in rb.obstacles.iter().enumerate() {
+            dynamic.insert(super::index::Item::Static(i as u32), ob.bbox);
+        }
         Engine {
             rb,
             grid,
@@ -282,6 +322,11 @@ impl<'a> Engine<'a> {
             pref,
             max_expansions: usize::MAX,
             stop,
+            gridless: false,
+            search: super::SearchKind::Grid,
+            dynamic,
+            grown: super::rooms::Grown::new(rb),
+            any_angle: false,
         }
     }
 
@@ -350,14 +395,18 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Halo keys of a through via of `net` at cell (x, y).
-    fn raster_via(&self, net: u32, x: i32, y: i32, out: &mut Vec<u64>) {
+    /// Halo keys of a through via of `net` at `at` (a cell center, or anywhere with `offgrid`,
+    /// which widens the track halo by the sampling margin).
+    fn raster_via(&self, net: u32, at: P, offgrid: bool, out: &mut Vec<u64>) {
         let pn = self.rb.profile(net);
-        let at = self.grid.cell(x, y);
+        let s_diag = self.grid.g * std::f64::consts::SQRT_2 / 2.0;
         for (ai, &pi) in self.active.iter().enumerate() {
             let pp = &self.rb.profiles[pi];
             let c = pn.c.max(pp.c);
-            let r = pn.rv + pp.hw + c - TOL;
+            let mut r = pn.rv + pp.hw + c - TOL;
+            if offgrid {
+                r += delta(r, s_diag);
+            }
             if let Some((i0, j0, i1, j1)) = self.grid.drange(&BoxF::of2(at, at).expand(r)) {
                 for j in j0..=j1 {
                     for i in i0..=i1 {
@@ -382,10 +431,24 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Straight runs of a wire: (slot, from, to) and via cells.
+    /// Straight runs of a wire: (slot, from, to) and via centers.
     pub fn wire_geometry(&self, w: &Wire) -> WireGeometry {
         let mut segs = Vec::new();
         let mut vias = Vec::new();
+        if let Some(g) = &w.geo {
+            for k in 1..g.len() {
+                let ((s0, a), (s1, b)) = (g[k - 1], g[k]);
+                if s0 != s1 {
+                    vias.push(a);
+                } else if a != b {
+                    segs.push((s0, a, b));
+                }
+            }
+            if g.len() == 1 {
+                segs.push((g[0].0, g[0].1, g[0].1));
+            }
+            return (segs, vias);
+        }
         let n = &w.nodes;
         if let (Some(st), Some(&first)) = (&w.start, n.first()) {
             let (sl, _, _) = self.unpack(first);
@@ -402,7 +465,7 @@ impl<'a> Engine<'a> {
             let (s0, x0, y0) = self.unpack(n[i]);
             let (s1, x1, y1) = self.unpack(n[i + 1]);
             if s0 != s1 {
-                vias.push((x0, y0));
+                vias.push(self.grid.cell(x0, y0));
                 i += 1;
                 continue;
             }
@@ -434,18 +497,25 @@ impl<'a> Engine<'a> {
     pub fn commit(&mut self, nr: &mut NetRoute) {
         let mut keys = Vec::new();
         let mut bbox = BoxF::EMPTY;
+        let pr = self.rb.profile(nr.net);
+        let (hw, rv) = (pr.hw, pr.rv);
         for w in &nr.wires {
             let (segs, vias) = self.wire_geometry(w);
             let n_start = w.start.as_ref().map_or(0, Vec::len);
             let n_end = w.end.as_ref().map_or(0, Vec::len);
+            let geo = w.geo.is_some();
             for (k, (s, a, b)) in segs.iter().enumerate() {
-                let off = k < n_start || k + n_end >= segs.len();
+                let off = geo || k < n_start || k + n_end >= segs.len();
                 self.raster_seg(nr.net, *s, *a, *b, off, &mut keys);
                 bbox.add(*a);
                 bbox.add(*b);
+                let item = super::index::Item::Seg { net: nr.net, layer: self.slots[*s] as u8, a: *a, b: *b };
+                nr.dyn_ids.push(self.dynamic.insert(item, BoxF::of2(*a, *b).expand(hw)));
             }
-            for (x, y) in vias {
-                self.raster_via(nr.net, x, y, &mut keys);
+            for at in vias {
+                self.raster_via(nr.net, at, geo, &mut keys);
+                let item = super::index::Item::Via { net: nr.net, at };
+                nr.dyn_ids.push(self.dynamic.insert(item, BoxF::of2(at, at).expand(rv)));
             }
             if w.nodes.len() == 1 {
                 // A single access cell joining two stubs: claim the cell itself.
@@ -483,6 +553,9 @@ impl<'a> Engine<'a> {
             }
         }
         nr.keys.clear();
+        for id in nr.dyn_ids.drain(..) {
+            self.dynamic.remove(id);
+        }
     }
 
     /// Points where a committed net overlaps another net's halo: (slot or `None` for via
@@ -491,6 +564,10 @@ impl<'a> Engine<'a> {
         let ai = self.act[nr.prof];
         let mut out = Vec::new();
         for w in &nr.wires {
+            if w.geo.is_some() {
+                self.geo_conflicts(nr.net, w, &mut out);
+                continue;
+            }
             for (k, &n) in w.nodes.iter().enumerate() {
                 let (s, x, y) = self.unpack(n);
                 if k == 0 {
@@ -519,6 +596,87 @@ impl<'a> Engine<'a> {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    /// Exact conflicts of a gridless wire with the committed routing of other nets: the
+    /// double-grid point (or via cell) nearest to each place where it comes too close.
+    fn geo_conflicts(&self, net: u32, w: &Wire, out: &mut Vec<Conflict>) {
+        let near_d = |q: P| -> usize {
+            let h = self.grid.g / 2.0;
+            let i = (((q.x - self.grid.ox) / h).round() as i32).clamp(0, self.grid.dw() - 1);
+            let j = (((q.y - self.grid.oy) / h).round() as i32).clamp(0, self.grid.dh() - 1);
+            self.grid.didx(i, j)
+        };
+        let near_c = |q: P| -> usize {
+            let g = self.grid.g;
+            let x = (((q.x - self.grid.ox) / g).round() as i32).clamp(0, self.grid.w - 1);
+            let y = (((q.y - self.grid.oy) / g).round() as i32).clamp(0, self.grid.h - 1);
+            self.grid.cidx(x, y)
+        };
+        self.geo_hits(net, w, &mut |slot, p, _| match slot {
+            Some(s) => out.push((Some(s), near_d(p))),
+            None => out.push((None, near_c(p))),
+        });
+    }
+
+    /// The nets whose committed routing a gridless wire of `net` comes too close to.
+    pub fn geo_blockers(&self, net: u32, w: &Wire) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.geo_hits(net, w, &mut |_, _, m| out.push(m));
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Calls `f(slot or None for a via, where, other net)` for every place where the gridless
+    /// wire `w` of `net` comes closer to the committed routing of another net than the rules
+    /// allow (exact).
+    fn geo_hits(&self, net: u32, w: &Wire, f: &mut dyn FnMut(Option<usize>, P, u32)) {
+        use super::index::Item;
+        let pr = self.rb.profile(net);
+        let (segs, vias) = self.wire_geometry(w);
+        for (s, a, b) in segs {
+            let layer = self.slots[s];
+            let q = BoxF::of2(a, b).expand(pr.hw + self.dynamic.reach);
+            for (_, it) in self.dynamic.query(&q) {
+                let hit = match it {
+                    Item::Seg { net: m, layer: l, a: c, b: d } if m != net && l as usize == layer => {
+                        let po = self.rb.profile(m);
+                        let req = pr.hw + po.hw + pr.c.max(po.c) - TOL;
+                        (super::geo::seg_seg_dist(a, b, c, d) < req).then(|| (closest_on(a, b, c, d), m))
+                    }
+                    Item::Via { net: m, at } if m != net => {
+                        let po = self.rb.profile(m);
+                        let req = pr.hw + po.rv + pr.c.max(po.c) - TOL;
+                        (point_seg_d2(at, a, b).sqrt() < req).then(|| (super::geo::project(at, a, b), m))
+                    }
+                    _ => None,
+                };
+                if let Some((p, m)) = hit {
+                    f(Some(s), p, m);
+                }
+            }
+        }
+        for at in vias {
+            let q = BoxF::of2(at, at).expand(pr.rv + self.dynamic.reach);
+            for (_, it) in self.dynamic.query(&q) {
+                let hit = match it {
+                    Item::Seg { net: m, a, b, .. } if m != net => {
+                        let po = self.rb.profile(m);
+                        (point_seg_d2(at, a, b).sqrt() < pr.rv + po.hw + pr.c.max(po.c) - TOL).then_some(m)
+                    }
+                    Item::Via { net: m, at: o } if m != net => {
+                        let po = self.rb.profile(m);
+                        let req = (pr.rv + po.rv + pr.c.max(po.c)).max(pr.dr + po.dr + self.rb.h2h);
+                        (at.dist(o) < req - TOL).then_some(m)
+                    }
+                    _ => None,
+                };
+                if let Some(m) = hit {
+                    f(None, at, m);
+                }
+            }
+        }
     }
 
     /// Position of a conflict point.
@@ -821,6 +979,9 @@ impl<'a> Engine<'a> {
     /// Routes every connection of a net (its wires are replaced). Connections whose islands
     /// are already joined by earlier wires are skipped.
     pub fn route_net(&self, sc: &mut Scratch, nr: &mut NetRoute, mode: Mode) -> Result<(), Stop> {
+        if self.gridless {
+            return super::expansion::route_net(self, sc, nr, mode);
+        }
         nr.wires.clear();
         sc.own_vias.clear();
         let n = nr.islands.len();
@@ -892,7 +1053,7 @@ impl<'a> Engine<'a> {
                             sc.own_vias.push((x, y));
                         }
                     }
-                    nr.wires.push(Wire { conn: ci, nodes: path, start, end });
+                    nr.wires.push(Wire { conn: ci, nodes: path, start, end, geo: None });
                 }
                 None => {
                     nr.failed[ci] = Some(match mode {
@@ -905,4 +1066,19 @@ impl<'a> Engine<'a> {
         }
         Ok(())
     }
+}
+
+/// The point of segment `a`–`b` closest to segment `c`–`d`.
+fn closest_on(a: P, b: P, c: P, d: P) -> P {
+    let cands = [a, b, super::geo::project(c, a, b), super::geo::project(d, a, b)];
+    let mut best = cands[0];
+    let mut bd = f64::MAX;
+    for q in cands {
+        let e = point_seg_d2(q, c, d);
+        if e < bd {
+            bd = e;
+            best = q;
+        }
+    }
+    best
 }

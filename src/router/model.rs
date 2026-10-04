@@ -130,6 +130,9 @@ pub(crate) struct RouterBoard {
     pub nets: Vec<String>,
     pub net_ids: BTreeMap<String, u32>,
     pub net_profile: Vec<usize>,
+    /// The profile of each net's class: differs from `net_profile` for a net routed at a
+    /// neck-down width (see [`RouterBoard::neck`]).
+    pub class_profile: Vec<usize>,
     pub profiles: Vec<Profile>,
     pub obstacles: Vec<Obstacle>,
     pub holes: Vec<Hole>,
@@ -360,6 +363,7 @@ impl RouterBoard {
             layer_names,
             nets,
             net_ids,
+            class_profile: net_profile.clone(),
             net_profile,
             profiles,
             obstacles,
@@ -376,6 +380,28 @@ impl RouterBoard {
     /// Whether `pt` lies inside the board (outer contour, outside every cutout).
     pub fn inside(&self, pt: P) -> bool {
         self.outer.as_ref().is_some_and(|o| o.contains(pt)) && !self.cutouts.iter().any(|c| c.contains(pt))
+    }
+
+    /// Routes `net` at `width` (a neck-down: narrower than its class width): its profile
+    /// becomes a copy of its class profile with that track width.
+    pub fn neck(&mut self, net: u32, width: Nm) {
+        let mut key = self.profiles[self.class_profile[net as usize]].key;
+        key.width = width;
+        let pi = match self.profiles.iter().position(|p| p.key == key) {
+            Some(i) => i,
+            None => {
+                let c = &self.profiles[self.class_profile[net as usize]];
+                let p = Profile { key, hw: width.0 as f64 / 2.0, c: c.c, rv: c.rv, dr: c.dr };
+                self.profiles.push(p);
+                self.profiles.len() - 1
+            }
+        };
+        self.net_profile[net as usize] = pi;
+    }
+
+    /// Profile of a net's class (its full width, when it is routed necked down).
+    pub fn class_of(&self, net: u32) -> &Profile {
+        &self.profiles[self.class_profile[net as usize]]
     }
 
     /// Profile of a net.
