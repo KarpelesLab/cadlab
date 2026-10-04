@@ -4,7 +4,8 @@
 use crate::model::part::{Category, ParamValue, Params};
 use crate::value::Quantity;
 
-use super::Lifecycle;
+use super::query::Op;
+use super::{Lifecycle, Money, SearchQuery};
 
 /// Cleans a distributor value string so [`ParamValue::parse`] understands it:
 /// `"10 kOhms"` → `"10kΩ"`, `"±1%"` → `"1%"`, `"0.063W, 1/16W"` → `"0.063W"`,
@@ -36,10 +37,12 @@ pub fn param_key(name: &str) -> Option<&'static str> {
         "inductance" => "inductance",
         "impedance @ frequency" => "impedance",
         "tolerance" => "tolerance",
-        "voltage - rated" | "voltage rating" | "voltage - rated dc" => "voltage_rating",
+        "voltage - rated" | "voltage rating" | "voltage - rated dc" | "voltage rating dc" | "voltage rating (dc)" => {
+            "voltage_rating"
+        }
         "power (watts)" | "power rating" => "power_rating",
-        "current rating (amps)" | "current - rated" => "current_rating",
-        "temperature coefficient" => "tempco_or_dielectric",
+        "current rating (amps)" | "current - rated" | "current rating" => "current_rating",
+        "temperature coefficient" | "dielectric" => "tempco_or_dielectric",
         "operating temperature" => "temperature",
         "voltage - output (min/fixed)" | "output voltage" => "voltage_out",
         "current - output" | "output current" => "current_out",
@@ -159,6 +162,61 @@ pub fn lifecycle(s: &str) -> Lifecycle {
     }
 }
 
+/// A price written for people (`"$0.40"`, `"0,40 €"`, `"1.234,56 €"`, `"0.0123"`) in
+/// `currency`. With both `.` and `,`, the last one is the decimal separator; a lone `,` is one
+/// unless it is followed by exactly three digits after a non-zero integer part (`1,234`).
+pub fn price_text(s: &str, currency: &str) -> Option<Money> {
+    let num: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect();
+    if !num.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let dec = match (num.rfind('.'), num.rfind(',')) {
+        (Some(d), Some(c)) => Some(d.max(c)),
+        (Some(d), None) => (num.matches('.').count() == 1).then_some(d),
+        (None, Some(c)) => {
+            let (int, frac) = (&num[..c], &num[c + 1..]);
+            let thousands = num.matches(',').count() > 1 || frac.len() == 3 && !int.trim_start_matches('0').is_empty();
+            (!thousands).then_some(c)
+        }
+        (None, None) => None,
+    };
+    let (int, frac) = match dec {
+        Some(i) => (&num[..i], &num[i + 1..]),
+        None => (num.as_str(), ""),
+    };
+    let int: String = int.chars().filter(char::is_ascii_digit).collect();
+    let frac: String = frac.chars().filter(char::is_ascii_digit).take(6).collect();
+    let int = if int.is_empty() { "0".to_string() } else { int };
+    let text = if frac.is_empty() { format!("{int} {currency}") } else { format!("{int}.{frac} {currency}") };
+    Money::parse(&text).ok()
+}
+
+/// Money from a JSON number, rounded to a millionth, without float formatting surprises.
+pub fn price_number(v: &serde_json::Value, currency: &str) -> Option<Money> {
+    let f = v.as_f64()?;
+    (f.is_finite() && f >= 0.0).then(|| Money::parse(&format!("{f:.6} {currency}")).ok())?
+}
+
+/// Search words for distributors whose keyword search matches descriptions: the query text,
+/// then the values of equality filters (`3.3V`, `X7R`, with `µ` written `u` and `Ω` dropped),
+/// then the category label when nothing else is given. The package is left to the caller.
+pub fn keywords(q: &SearchQuery) -> Vec<String> {
+    let mut w: Vec<String> = q.text.split_whitespace().map(String::from).collect();
+    for f in q.filters.iter().filter(|f| f.op == Op::Eq) {
+        match &f.value {
+            ParamValue::Quantity(v) => w.push(v.to_string().replace('Ω', "").replace('µ', "u")),
+            ParamValue::Text(t) if f.key != "package" => w.push(t.clone()),
+            _ => {}
+        }
+    }
+    if w.is_empty()
+        && let Some(c) = q.category
+    {
+        w.push(c.label().to_string());
+    }
+    w
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +252,20 @@ mod tests {
         let p = params([("Voltage - Output (Min/Fixed)", "3.3V"), ("Current - Output", "600mA")]);
         assert_eq!(p.get("voltage_out").unwrap().to_string(), "3.3V");
         assert_eq!(p.get("current_out").unwrap().to_string(), "600mA");
+    }
+
+    #[test]
+    fn prices() {
+        let p = |s: &str| price_text(s, "USD").map(|m| m.to_string());
+        assert_eq!(p("$0.40").as_deref(), Some("0.40 USD"));
+        assert_eq!(p("0,40 €").as_deref(), Some("0.40 USD"));
+        assert_eq!(p("1.234,56 €").as_deref(), Some("1234.56 USD"));
+        assert_eq!(p("$1,234.50").as_deref(), Some("1234.50 USD"));
+        assert_eq!(p("1,234").as_deref(), Some("1234.00 USD"));
+        assert_eq!(p("0,123").as_deref(), Some("0.123 USD"));
+        assert_eq!(p("0.0057").as_deref(), Some("0.0057 USD"));
+        assert_eq!(p("Quote"), None);
+        assert_eq!(price_number(&serde_json::json!(0.276), "EUR").unwrap().to_string(), "0.276 EUR");
     }
 
     #[test]

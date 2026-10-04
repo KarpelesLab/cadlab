@@ -758,7 +758,10 @@ pub(crate) fn require_suppliers(ctx: &Context<'_>) -> Result<(), CommandError> {
             "supplier.none",
             "no part suppliers or catalogs are configured",
         )
-        .with_hint("add catalog files to ~/.config/cadlab/catalogs/ or list them in CADLAB_CATALOGS (docs/PARTS.md)"));
+        .with_hint(
+            "import a parts list with `catalog.import`, add catalog files to ~/.config/cadlab/catalogs/ or \
+             CADLAB_CATALOGS, or configure DigiKey, Mouser or Nexar with `cadlab config` (docs/PARTS.md)",
+        ));
     }
     Ok(())
 }

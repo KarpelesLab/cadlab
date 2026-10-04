@@ -3,6 +3,7 @@
 pub mod block;
 pub mod board;
 pub mod bom;
+pub mod catalog;
 pub mod circuit;
 pub mod drc;
 pub mod export;
@@ -34,6 +35,7 @@ pub fn register_all(r: &mut Registry) {
     board::register(r);
     placement::register(r);
     lib::register(r);
+    catalog::register(r);
     drc::register(r);
     zone::register(r);
     route::register(r);

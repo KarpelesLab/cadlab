@@ -46,7 +46,9 @@ Details in [PARTS.md](PARTS.md).
 - [x] BOM commands: list (grouped), replace, DNP, approved alternates, notes; components via `circuit.add/remove`
 - [x] Supplier research provider trait, offline catalog provider, response cache with TTL and offline mode
 - [x] DigiKey provider (API v4)
-- [ ] More network providers: LCSC/JLCPCB, PCBWay, Mouser, Nexar/Octopart (see PARTS.md)
+- [x] More providers: Mouser (Search API) and Nexar/Octopart (GraphQL) network providers; LCSC/JLCPCB through
+      `catalog.import` of user-downloaded parts lists, since their APIs are partner-only; PCBWay has no parts
+      API (D33, PARTS.md)
 - [x] Search and filter by parameters, stock, price, lifecycle (`part.search`); `bom.resolve` for generic lines
 - [x] BOM CSV export (generic, JLCPCB, PCBWay layouts)
 - [x] BOM cost rollup at build quantity (`bom.cost`), availability check (`bom.check`)

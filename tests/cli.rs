@@ -22,6 +22,9 @@ fn cadlab_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         .env_remove("CADLAB_CATALOGS")
         .env_remove("DIGIKEY_CLIENT_ID")
         .env_remove("DIGIKEY_CLIENT_SECRET")
+        .env_remove("MOUSER_API_KEY")
+        .env_remove("NEXAR_CLIENT_ID")
+        .env_remove("NEXAR_CLIENT_SECRET")
         .envs(env.iter().copied())
         .args(args)
         .output()
@@ -254,4 +257,89 @@ fn user_settings_for_digikey() {
     let o = run(&["config", "remove", "digikey"], "");
     assert!(o.status.success());
     assert_eq!(json_of(&run(&["config", "show", "--json"], ""))["digikey"], Value::Null);
+}
+
+#[test]
+fn catalog_import_feeds_jlcpcb_substitutes() {
+    let dir = tempfile::tempdir().unwrap();
+    cadlab(dir.path(), &["project", "new", "p"]);
+    let p = dir.path().join("p");
+    let csv = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jlcpcb_parts.csv");
+    let csv = csv.to_str().unwrap();
+
+    // Dry run: nothing written.
+    let o = cadlab(&p, &["catalog", "import", csv, "--dry-run", "--json"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    let v = json_of(&o);
+    assert_eq!(v["output"]["parts"], 3);
+    assert_eq!(v["output"]["skipped"][0]["line"], 5);
+    let written = p.join(".no-config/cadlab/catalogs/lcsc.json");
+    assert!(!written.exists());
+
+    let o = cadlab(&p, &["catalog", "import", csv, "--json"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    assert!(written.exists());
+    assert_eq!(json_of(&o)["diagnostics"][0]["code"], "catalog.row_skipped");
+    // A second import needs `replace`.
+    let o = cadlab(&p, &["catalog", "import", csv, "--json"]);
+    assert_eq!(json_of(&o)["error"]["code"], "catalog.exists");
+    let o = cadlab(&p, &["catalog", "list", "--json"]);
+    assert_eq!(json_of(&o)["output"]["providers"], json!(["lcsc"]));
+
+    // JLCPCB orders by LCSC SKU: the imported catalog answers its substitutes.
+    cadlab(&p, &["circuit", "add", "R 10k 1% 0402"]);
+    let o = cadlab(&p, &["bom", "substitutes", "jlcpcb", "--json"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    let v = json_of(&o);
+    let offers: Vec<(&str, &str)> = v["output"]["lines"][0]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["offer"]["provider"].as_str().unwrap(), c["offer"]["sku"].as_str().unwrap()))
+        .collect();
+    assert_eq!(offers, [("lcsc", "C25744")], "the 5 % resistor does not qualify");
+}
+
+#[test]
+fn user_settings_for_mouser_and_nexar() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_home = dir.path().join("cfg");
+    let run = |args: &[&str], stdin: &str| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cadlab"))
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", &cfg_home)
+            .env_remove("MOUSER_API_KEY")
+            .env_remove("NEXAR_CLIENT_ID")
+            .env_remove("NEXAR_CLIENT_SECRET")
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let o = run(&["config", "mouser", "--no-verify", "--json"], "mouser-key-0123456789\n");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(json_of(&o)["api_key"], "mous…6789");
+    let o = run(
+        &["config", "nexar", "--client-id", "nx-id", "--country", "de", "--no-verify", "--json"],
+        "nexar-secret-value\n",
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let stored = std::fs::read_to_string(cfg_home.join("cadlab/config.toml")).unwrap();
+    assert!(stored.contains("api_key = \"mouser-key-0123456789\""));
+    assert!(stored.contains("client_secret = \"nexar-secret-value\"") && stored.contains("country = \"DE\""));
+    let v = json_of(&run(&["config", "show", "--json"], ""));
+    assert_eq!(v["mouser"]["api_key"], "mous…6789");
+    assert_eq!(v["nexar"]["client_secret"], "nexa…alue");
+    // No key on stdin and none stored: refused.
+    run(&["config", "remove", "mouser"], "");
+    let o = run(&["config", "mouser", "--no-verify"], "");
+    assert!(!o.status.success());
+    let v = json_of(&run(&["config", "show", "--json"], ""));
+    assert_eq!(v["mouser"], Value::Null);
+    assert_eq!(v["nexar"]["client_id"], "nx-id");
 }

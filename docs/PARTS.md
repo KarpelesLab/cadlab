@@ -173,11 +173,73 @@ at the needed quantity, most stock. A failing provider is reported as a warning;
   `DIGIKEY_LANGUAGE`, `DIGIKEY_CURRENCY`, `DIGIKEY_SANDBOX=1` override the file. One candidate per packaging (cut tape, tape & reel; Digi-Reel skipped), with
   parameters normalized to cadlab keys (`src/supplier/normalize.rs`). `cargo test --test digikey_live` checks
   the integration against the real API when credentials are set.
+- **Mouser** (Search API v1, API key; `src/supplier/mouser.rs`): request a Search API key at
+  <https://www.mouser.com/api-search/> (free, with a Mouser account), then run `cadlab config mouser`: it asks
+  for the key without echo, checks it with a one-record search and stores it. `MOUSER_API_KEY` overrides the
+  file. Uses `POST /api/v1/search/keyword` (keywords and MPN lookups; exact MPN matches are kept, since
+  `search/partnumber` takes Mouser part numbers). One candidate per Mouser part number: stock
+  (`AvailabilityInStock`), MOQ (`Min`), price breaks (in the key's account currency), lifecycle
+  (`LifecycleStatus`, `IsDiscontinued`; an empty status stays `unknown`), datasheet, category, and
+  `ProductAttributes` normalized like DigiKey's (`Package / Case` gives the package). Mouser allows 30 calls a
+  minute and 1000 a day. Source: Mouser's OpenAPI description <https://api.mouser.com/api/docs/V1> (UI:
+  <https://api.mouser.com/api/docs/ui/index>).
+- **Nexar / Octopart** (supply GraphQL API, client-credentials OAuth; `src/supplier/nexar.rs`): create an
+  application with the Supply scope at <https://portal.nexar.com> (plans and part quotas:
+  <https://nexar.com/compare-plans>; the free plan's quota is small and may not include pricing), then run
+  `cadlab config nexar` (client ID, secret without echo, optional `--country` (US), `--currency` (USD),
+  `--unauthorized`); it checks the credentials by requesting a token. `NEXAR_CLIENT_ID`,
+  `NEXAR_CLIENT_SECRET`, `NEXAR_COUNTRY`, `NEXAR_CURRENCY` override the file. Uses `supSearch` (keywords, 10
+  parts) and `supSearchMpn` (MPN, 5 parts). One candidate per seller offer, SKU `<seller>:<seller SKU>`
+  (`LCSC:C307331`), prices converted to the configured currency, unknown stock codes (negative
+  `inventoryLevel`) as 0; brokers are never listed, unauthorized sellers only with `--unauthorized`. Specs give
+  parameters (by attribute name), the package (`case_package`) and the lifecycle (`lifecyclestatus`).
+  `similarParts` is not used as drop-in data (D26). Sources: token and endpoint
+  <https://www.altium.com/documentation/altium-developer-center/octopart/api/authorization>, queries
+  <https://www.altium.com/documentation/altium-developer-center/octopart/api/search> and
+  <https://support.nexar.com/support/solutions/articles/101000494582>, field names from the GraphQL schema
+  published by `https://api.nexar.com/graphql` (introspection).
+- **LCSC / JLCPCB**: both have APIs (<https://www.lcsc.com/docs/index.html>, <https://api.jlcpcb.com>), but
+  only for approved partners (LCSC: business license, IP whitelist; JLCPCB: application reviewed on order
+  history), with endpoint documentation that is not public, and LCSC's terms forbid sharing technical aspects
+  of the API with third parties. cadlab therefore ships no client (D33). Instead, `catalog.import` turns a
+  parts list you download yourself (CSV) into an offline catalog with provider `lcsc`, the catalog the JLCPCB
+  fab profile orders by, so `fab.check`, `fab.export` and the substitutes get LCSC `C` numbers. cadlab never
+  scrapes websites.
+- **PCBWay**: its partner API (<https://api-partner.pcbway.com/Help>) covers PCB and SMT quotes and orders, not
+  parts search, stock or pricing; PCBWay sources assembly parts by MPN, which DigiKey, Mouser or Nexar answer.
 
-Network providers sit behind the default `net` feature (`ureq`, rustls). Credentials come from the environment,
-never from projects. Responses go through `supplier::cache` (user cache dir, 24 h TTL; `CADLAB_OFFLINE=1`
-answers from the cache only). Next candidates: Nexar/Octopart, Mouser, Farnell, LCSC/JLCPCB, PCBWay (terms and
-API access to check for each).
+Network providers sit behind the default `net` feature (`ureq`, rustls) and use a small transport trait
+(`supplier::http`), so tests run them against recorded or hand-written JSON through a mock transport, never the
+network. Credentials come from the user settings or the environment, never from projects, the cache or the MCP
+path (D17); API keys sent in URLs are redacted from errors. Responses go through `supplier::cache` (user cache
+dir, 24 h TTL; `CADLAB_OFFLINE=1` answers from the cache only). `cargo test --test suppliers_live` checks Mouser
+and Nexar against the real APIs when their environment variables are set. Not done: Farnell (element14).
+
+### Importing a parts list (`catalog.import`)
+
+`catalog.import <file.csv> [--provider lcsc] [--currency USD] [--columns {...}] [--output F] [--replace]` writes
+`<config dir>/catalogs/<provider>.json` (loaded automatically; `catalog.list` shows the providers). Excel files
+must be saved as CSV (UTF-8) first. Neither JLCPCB nor LCSC publishes a stable export format, so columns are
+recognized by header, ignoring case, spaces and punctuation:
+
+| Field | Headers recognized |
+|---|---|
+| `sku` (required) | `LCSC Part #`, `LCSC Part Number`, `LCSC Part`, `JLCPCB Part #` (JLCPCB's BOM headers), `Supplier Part`, `SKU` |
+| `mpn` (required) | `MFR.Part #`, `MFR.Part`, `Manufacturer Part Number`, `MPN` |
+| `manufacturer`, `description`, `package` | `Manufacturer` / `MFR` / `Brand`, `Description`, `Package` / `Package / Case` / `Footprint` |
+| `category` | `Category`, `First Category`, `Second Category`, `Subcategory` (all of them are used) |
+| `stock`, `moq` | `Stock` / `Stock Qty` / `Inventory` / `Quantity Available`, `MOQ` / `Min Order Qty` |
+| `price` | `Price` / `Unit Price`: one price (`0.0123`, `$0.0123`, `0,0123 €`) or breaks `1-199:0.0011,200-:0.0005` |
+| `datasheet`, `url`, `lifecycle` | `Datasheet`, `URL` / `Product URL`, `Lifecycle` / `Status` |
+| `class` | `Library Type` / `Part Type` (`Basic`, `Extended`), stored as the `part_class` parameter |
+| parameters | headers named like distributor parameters (`Resistance`, `Capacitance`, `Tolerance`, `Voltage - Rated`, ...) |
+
+Other headers are listed as `ignored`; `columns` maps them explicitly (`{"sku": "Code", "param:voltage_rating":
+"Rated V"}`). For passives (resistors, capacitors, inductors, ferrite beads, fuses), values in the description
+fill missing parameters (`10kΩ ±1% 62.5mW` → resistance, tolerance, power rating; `16V 100nF X7R` → voltage
+rating, capacitance, dielectric); nothing is inferred for other categories. Rows without a SKU or MPN, and
+repeated SKUs, are skipped with a `catalog.row_skipped` warning. An existing catalog needs `replace`
+(`catalog.exists`); dry runs write nothing.
 
 **Commands:**
 
@@ -188,6 +250,7 @@ API access to check for each).
 | `bom.resolve [--boards N] [--apply]` | candidates for generic lines: same category, package and value, tolerance at most and ratings at least the requirement, enough stock; `apply` approves the best |
 | `bom.check [--boards N]` | per line: ok, low stock, end of life, not found, no MPN; problems are error diagnostics (CLI exit code 3) |
 | `bom.cost [--boards N]` | cheapest in-stock offer per line (MOQ and price breaks applied), totals per currency |
+| `catalog.import <csv>` / `catalog.list` | import a downloaded parts list as an offline catalog (above); list the configured providers |
 | `bom.substitutes [fab] [--boards N] [--part P] [--candidates K]` | ranked substitute candidates for lines that are not found, short of stock, end of life or without an MPN (with `fab`: at its catalog providers, with its lock's substitutions applied); see "Substitutes" |
 
 Offers are never written into the project (D12). The library never judges or summarizes datasheets: it exposes
