@@ -4,6 +4,8 @@
 //! outputs come from exactly the same geometry. See `docs/RENDERING.md`.
 
 pub mod board;
+#[cfg(feature = "png")]
+pub mod board3d;
 pub mod font;
 #[cfg(feature = "png")]
 mod png;

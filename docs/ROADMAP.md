@@ -168,7 +168,8 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 
 ## M9 — 3D and advanced rendering (M)
 
-- [ ] Isometric 3D PNG render: board, layers, extruded package bodies generated from package dimensions
+- [x] Isometric 3D PNG render: board, layers, extruded package bodies generated from package dimensions
+  (`render.board3d`, D30)
 - [ ] STEP/VRML model import for accurate bodies
 - [ ] STEP export of the assembled board
 - [ ] IPC-2581 rev C output; ODB++ if spec terms allow

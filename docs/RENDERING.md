@@ -28,6 +28,7 @@ model ──► Scene (lines, polygons, circles; text as strokes) ──► SVG 
 | `board` | selected layers (`--layers`, default all copper + silk + outline) in viewer colors on a dark background: copper semi-transparent and unioned per layer (front red, back blue, inner amber/green/purple/...), silk white (front) / yellow (back), fab grey, courtyard magenta, mask/paste openings, outline yellow, drill holes; bottom-side footprints mirrored on `B.*` layers; refdes at the footprint origin on its silk layer, sized to the courtyard (`render.board`, `src/render/board.rs`) |
 | `board --around U1` | the same, cropped to a component's courtyard plus `--margin` (default 3 mm) |
 | `board --realistic top\|bottom` | solder mask over laminate and copper, silkscreen, exposed pads in the finish color (ENIG gold, HASL silver, OSP copper), colors from the `board.setup` preferences; the bottom view is mirrored as seen from below |
+| `board3d` | isometric / any-angle 3D view of the assembled board with component bodies (`render.board3d`, see "3D view") |
 | `ratsnest` overlay | unrouted connections as thin straight lines (on by default in `render.board`, `--ratsnest false` hides) |
 | `drc` overlay | markers + labels at given points (`render.board --markers '[{"at": ["5mm", "3mm"], "label": "clearance"}]'`) |
 | `highlight` | emphasize nets/components (`render.board --highlight GND,U1`), dim everything else |
@@ -70,13 +71,34 @@ height) around the title block, onto the smallest paper that holds them:
 - `schematic.export` (KiCad): one sheet, A4 to A0 or a custom size (DECISIONS D24); frames become dashed
   rectangles with their title.
 
-## Isometric 3D (M9)
+## 3D view (M9)
 
-Without a full 3D engine:
+`render.board3d` (`src/render/board3d/`) draws the assembled board as an orthographic 3D view, isometric by
+default. It is a small software renderer: no GPU, no 3D dependency (tiny-skia only rasterizes the face textures and
+encodes the PNG).
 
-- Board as extruded outline with layer thicknesses, mask and silk as textured top/bottom faces (2D render
-  projected).
-- Component bodies as simple solids generated from package dimensions (boxes, cylinders, pins), which are already
-  known from the footprint generator.
-- Isometric/orthographic projection, painter's algorithm or simple z-buffer software rasterizer, flat shading.
-- Later: load STEP/VRML models for accurate bodies (STEP needs a B-rep tessellator; evaluate crates then).
+- **Board**: the outline extruded to the stackup thickness, with walls for the outer edge, cutouts and every drill
+  hole (plated walls in the finish color, others in laminate color). The top and bottom faces are textured with the
+  realistic 2D render of that side (mask, exposed copper finish, silkscreen; `board --realistic`), rendered at about
+  1.5 times the output resolution; the texture's coverage (outline minus holes, anti-aliased) cuts the face, so holes
+  and cutouts are see-through. Only the visible face's texture is rendered.
+- **Components**: convex solids built from the footprint's generator spec (`PackageSpec`): chips (body + tinned
+  terminations, colored by kind), SOIC/SOP/SOT gull-wing and QFP leads (shoulder, leg, foot, toe at the lead span),
+  DFN/QFN terminals showing at the body edges, SOT-223/DPAK tabs, SOD, SMA/SMB molded bodies, MELF cylinders, DIP
+  (leads through the board), BGA (substrate + mold cap), pin headers (plastic body, gold pins 6 mm above the body and
+  3 mm below the board). Leads sit where the footprint's pads are, so missing pins follow the land pattern. Pin 1 is a
+  light dot on ICs (on pad 1's side), polarized two-terminal parts get a cathode band at pad 1. Footprints without a
+  spec get a box from their body size, or a 1 mm grey box over the courtyard. Bottom-side parts are mirrored under
+  the board.
+- **Camera**: `view top|bottom` (the bottom view turns the board over, mirrored like the realistic bottom view),
+  `azimuth` (degrees clockwise from the front edge; 45 = front-left, the default), `elevation` (5–90°, default
+  35.26° = isometric; 90 looks straight down, with the board turned by the azimuth). `size` (longer side, default
+  1600 px) or `px_per_mm`.
+- **Hidden surfaces**: a z-buffer with 3×3 supersampling (anti-aliasing by box filter), back faces culled. The image
+  is rendered in 32-row bands in parallel; triangles are drawn in a fixed order and a sample is replaced only by a
+  strictly closer one, so the bytes do not depend on thread count.
+- **Shading**: flat, one directional light fixed relative to the camera (upper left), 42 % ambient; background is a
+  dark vertical gradient. `highlight U1,R3` paints those parts orange.
+- **Speed**: the STM32 test board (60 × 45 mm, 40 parts) renders at 1600 px in well under 0.1 s (release).
+
+Later: STEP/VRML models for accurate bodies (STEP needs a B-rep tessellator; evaluate crates then).

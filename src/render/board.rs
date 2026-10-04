@@ -586,6 +586,12 @@ fn look(p: &Project) -> Look {
     }
 }
 
+/// The realistic view of one side in board coordinates, never mirrored (the 3D view uses it as
+/// the texture of the board faces).
+pub fn realistic_scene(p: &Project, side: BoardSide) -> Scene {
+    realistic(p, side, &geo::copper_items(p))
+}
+
 /// The realistic view of one side, in board coordinates (the caller mirrors the bottom view).
 fn realistic(p: &Project, side: BoardSide, items: &[geo::CopperItem]) -> Scene {
     let mut s = Scene { background: REALISTIC_BG, prims: Vec::new() };

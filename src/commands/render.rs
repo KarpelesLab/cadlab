@@ -21,6 +21,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Unplace>()
         .register::<Export>();
     r.register::<board::Board>(); // render.board
+    r.register::<board3d::Board3d>(); // render.board3d
 }
 
 /// Default resolution: 10 px/mm (about 254 dpi).
@@ -498,3 +499,4 @@ impl Command for Export {
 // ---- render.board (board rendering workstream, M4) ----
 
 mod board;
+mod board3d;

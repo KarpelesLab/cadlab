@@ -106,6 +106,7 @@ expression: names
   "schematic.unplace",
   "schematic.export",
   "render.board",
+  "render.board3d",
   "board.export_kicad",
   "export.gerber",
   "export.drill",

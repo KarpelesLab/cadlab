@@ -13,6 +13,11 @@ fn paint(c: Color) -> Paint<'static> {
 
 /// Renders the scene to PNG bytes.
 pub fn to_png(scene: &Scene, view: &View) -> Result<Vec<u8>, String> {
+    to_pixmap(scene, view)?.encode_png().map_err(|e| e.to_string())
+}
+
+/// Renders the scene to a pixmap (premultiplied RGBA).
+pub(crate) fn to_pixmap(scene: &Scene, view: &View) -> Result<Pixmap, String> {
     let (w, h) = view.pixels();
     if w as u64 * h as u64 > 400_000_000 {
         return Err(format!("image too large ({w} x {h} px); lower the resolution"));
@@ -84,7 +89,7 @@ pub fn to_png(scene: &Scene, view: &View) -> Result<Vec<u8>, String> {
             }
         }
     }
-    pm.encode_png().map_err(|e| e.to_string())
+    Ok(pm)
 }
 
 #[cfg(test)]

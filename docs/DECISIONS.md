@@ -237,6 +237,21 @@ replaced and board placements of components that come back are kept. `kicad-cli`
 placeholder is one `bom.replace` away from a real part. Matching only on exact IDs, MPNs and value plus
 footprint keeps the result deterministic and explainable.
 
+### D30. 3D view: own z-buffer rasterizer, bodies from package specs, realistic render as face texture (2026-10-04)
+`render.board3d` is a separate command (not a `render.board` option: none of its layer, ratsnest, marker or crop
+options apply). It renders an orthographic view (isometric by default, any azimuth/elevation, top or turned-over
+bottom) with a small software z-buffer rasterizer, 3×3 supersampled, flat-shaded with one camera-relative
+directional light. The board faces reuse the realistic 2D render as a texture, with coverage from the outline and
+drill holes so holes are see-through; walls are extruded from the outline, cutouts and holes. Component bodies are
+convex solids generated from the footprint's stored `PackageSpec` (leads placed at the pads), a body box, or a grey
+courtyard box when there is neither. Output is deterministic (fixed draw order, strict depth test, independent
+bands); tests check identical bytes for identical input and probe pixels at projected component positions instead of
+storing golden images, whose floating-point rounding could differ between platforms.
+*Why:* no GPU or 3D engine dependency, MIT-clean, fast (tens of ms for the STM32 test board), and agents get a
+recognizable picture of the assembly from data cadlab already has. A z-buffer is simpler and more robust than a
+painter's algorithm with polygon splitting; supersampling gives anti-aliasing for free. Accurate bodies from STEP/VRML
+remain a separate roadmap item.
+
 ## Open questions
 
 None currently.
