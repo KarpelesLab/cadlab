@@ -1,7 +1,7 @@
 (export (version "E")
   (design
     (source "attiny-blinky")
-    (tool "cadlab 0.0.1"))
+    (tool "cadlab VERSION"))
   (components
     (comp (ref "C1")
       (value "1uF")

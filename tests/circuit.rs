@@ -63,7 +63,10 @@ fn attiny_board_erc_clean_and_netlist() {
     exec(&r, &mut s, "circuit.export", json!({"path": "out/board.net"}));
     exec(&r, &mut s, "circuit.export", json!({"path": "out/board.json", "format": "json"}));
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/attiny85");
-    assert_golden(&golden.join("board.net"), &std::fs::read_to_string(dir.path().join("p/out/board.net")).unwrap());
+    // The tool line carries the crate version; the golden file is version-independent.
+    let net = std::fs::read_to_string(dir.path().join("p/out/board.net")).unwrap();
+    let net = net.replace(&format!("cadlab {}", env!("CARGO_PKG_VERSION")), "cadlab VERSION");
+    assert_golden(&golden.join("board.net"), &net);
     let summary = exec(&r, &mut s, "circuit.summary", json!({}));
     assert_golden(&golden.join("summary.txt"), summary["output"]["text"].as_str().unwrap());
     let j: Value =
