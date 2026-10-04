@@ -154,7 +154,7 @@ To confirm during M0. Listed so choices are deliberate, not accidental.
 | MCP | own minimal implementation, sync, std only (decided, D14) |
 | Errors | `thiserror` (libs), `anyhow` (binary only) |
 | Polygon booleans / offsetting | standalone MIT crate built to [POLYGON_LIB.md](POLYGON_LIB.md) (decided, D9) |
-| Spatial index | `rstar` |
+| Spatial index | own packed R-tree, `geom::RTree` (decided, D42) |
 | Graphs | `petgraph` |
 | Parallelism | `rayon` |
 | Rendering | own SVG writer, `resvg` + `tiny-skia` for PNG, `ab_glyph`/`fontdue` for text |

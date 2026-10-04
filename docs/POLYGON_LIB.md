@@ -173,3 +173,39 @@ let gerber_regions: Vec<Ring> = fill.polygons().map(fracture).collect();
 
 if distance_less_than(&track_a, &pad_b, rules.clearance) { /* DRC violation */ }
 ```
+
+## 8. Wishlist from cadlab (measured, D42)
+
+After D42, the cold zone fill of the synthetic large board (`tests/common/bigboard.rs`, 1.0 s) is almost all
+inside `polyclip` 0.0.4. Reproduction: `cargo run --release --example polyclip_opening [out.json]` builds the
+board, fills its GND pour up to the minimum-width opening, and times the `polyclip` calls on that input (one
+polygon, 2153 holes, 242 k vertices; with a path it writes the set in polyclip's serde format to replay with
+`polyclip` alone). Best of 3, Apple Silicon, 16 threads (`RAYON_NUM_THREADS=1` in parentheses):
+
+| Call | Time |
+|---|---|
+| `offset(set, -100 µm)` → 450 k vertices | 212 ms (252) |
+| … of which its first step, `union_all` of the already canonical input (output identical) | 54 ms (65) |
+| `offset(shrunk, +100 µm)` → 360 k vertices | 465 ms (665) |
+| … of which normalizing the already canonical `shrunk` | 111 ms (132) |
+| `opening(set, 100 µm)` = the two offsets | 673 ms (880) |
+| union of the result with 40 small rectangles (thermal spokes) | 94 ms (102) |
+
+Inside the grow offset (profiled with timers in a local copy): of ~980 k raw offset edges, snap rounding takes
+~45 %, the winding sweep ~40 %, assembly the rest. In order of expected gain:
+
+1. **Skip normalization of canonical input** in `offset`/`opening` (an `offset` over a `PolyTree` or a
+   `PolygonSet` the caller asserts canonical, or a cheap linear canonical-order check): ~165 ms of the 673 ms
+   opening (25 %), and the same share of every grow of an earlier fill. cadlab cannot do this from outside.
+2. **Fused `opening`**: grow the shrunk tree without assembling it into a canonical `PolygonSet` and
+   re-reading it (saves the intermediate assembly and conversions on top of item 1).
+3. **Locality in booleans with a small operand**: when one operand meets only a few rings of the other (spokes,
+   window clips, the difference with nearby obstacles), rings whose boxes meet no edge of the other operand
+   could pass through unchanged (they are canonical and nothing can snap them) and only the rest be noded
+   and swept: the 94 ms union above would take ~1 ms. cadlab drops rings far from every window itself before
+   its spoke clips (D42), which only works for an intersection; inside `polyclip` it would serve every op.
+4. **Parallel noding and sweep**: rayon brings 880 → 673 ms (1.3×) on 16 threads. Snap rounding and the sweep
+   over ~1 M edges could run in x-bands (or per cluster of raw rings with overlapping boxes, which do not
+   interact) with a deterministic merge; most raw offset rings (around 2153 holes) only meet their neighbours.
+5. Later: the incremental `ZoneFill` engine of 0.0.4 could serve refills after small edits, if it guarantees
+   output identical to a full recompute (D23); cadlab does not use it yet.

@@ -81,13 +81,20 @@ Fills join the shared geometry: `copper_items` = `base_copper_items` (pads, trac
 output see zone copper through it.
 
 Performance and caching: layers fill in parallel (zones interact only within a layer), and later zones of a
-layer reuse earlier fills grown by their keep-away distance. A 100 × 100 mm two-layer
+layer reuse earlier fills grown by their keep-away distance. Each zone only receives what can reach its outline
+(D42): the layer's items come from a packed R-tree (`geom::RTree`) queried with the outline's box grown by the
+largest keep-away distance, far NPTH holes and keep-outs are skipped, and earlier fills are grown only where
+they can matter (polygons too far away dropped, holes too far away filled first). Same-net pad gaps and
+thermal pads far from the area are skipped too, and rings of the pour meeting no thermal window are left out
+of the spoke clips. Shapes that far away cannot change the fill, so the result is the same polygons (checked
+against the previous algorithm, kept in `tests/common/fill_reference.rs`). A 100 × 100 mm two-layer
 board with ~550 copper items (120 pads, 200 tracks, 240 vias) fills both GND layers in ~110–140 ms (release);
 large boards: see "Performance".
 Fills are not stored on disk: `copper_items` has no project directory, and a recompute is cheap. Instead
-`fill_zones` keeps the last 4 results in process, keyed by the exact input bytes (board, base copper, NPTH holes,
-net classes; FNV-1a for lookup, full comparison for equality), so repeated queries on the same state in one MCP
-or batch session cost ~1.5 ms.
+`fill_zones` keeps the last 4 results in process with their inputs (board, net classes and net assignments,
+base copper, NPTH holes) and reuses one only when every input compares equal (the board first by pointer: an
+unchanged project shares it), so repeated queries on the same state in one MCP or batch session cost a few
+milliseconds (5 ms on the synthetic board below, the NPTH list included).
 
 ## Commands
 
@@ -295,8 +302,12 @@ courtyards) count an overlap only where it is wider than 2 µm.
 
 Candidate pairs come from a uniform grid over bounding boxes (no extra dependency), so a board with a few
 thousand items checks in well under a second in release builds (3000 tracks + 200 vias: about 75 ms). Zone
-fills are tested through `board::prepared`, a convex outline is checked vertex by vertex (falling back to
-`polyclip::contains`), and the ratsnest reuses the copper items (timings in "Performance").
+fills are tested through `board::prepared`, a convex outline is checked vertex by vertex, and the ratsnest
+reuses the copper items (timings in "Performance"). Other outlines have their segments in R-trees: an item no
+outline segment comes near is inside exactly when one of its points is (even-odd parity, as `polyclip`
+locates), an item no edge segment comes within `copper_to_edge` of passes the edge rule, and only the rest
+asks `polyclip::contains` / `distance_less_than` on the whole contour (D42). The pair grid stays: on the corpus
+it lists candidate pairs in 1.4–3.9 ms where an R-tree self-join takes 3.3–5.7 ms.
 
 ## Performance
 
@@ -305,23 +316,25 @@ components (20 LQFP-100/LQFP-64/QFN-48 ICs, ~490 0402/0603 passives on both side
 nets, 2674 pads, 3040 tracks, 2434 vias, GND pour on In1.Cu and 3V3/1V8/5V pours on In2.Cu (routes cross, so
 DRC has violations to report). `cargo run --release --example bigboard` times every heavy step (best of 3,
 zone fill cache cleared before each run, i.e. what a fresh CLI process sees); `tests/perf.rs` has the same as an
-`#[ignore]`d test plus equivalence checks against the previous algorithms. Apple Silicon laptop, release:
+`#[ignore]`d test plus equivalence checks against the previous algorithms. Apple Silicon laptop, release
+(the D42 column was measured on a loaded machine, so small differences are noise):
 
-| Step | Before | After |
-|---|---|---|
-| `project.save` / `Project::load` | 16 / 7 ms | 17 / 7 ms |
-| `placed_pads` | 46 ms | 4 ms |
-| zone fill, 4 inner pours (`fill_zones_uncached`) | 2212 ms | 1371 ms |
-| `islands` | 3309 ms | 39 ms |
-| ratsnest from copper items (islands + MST) | 3484 ms | 40 ms |
-| `ratsnest` (with fill) | 5612 ms | 1453 ms |
-| `drc::check` (with fill) / fills cached | 8797 / ~6600 ms | 1587 / 206 ms |
-| `render.board` PNG (with fill) / fills cached | 6331 / ~4100 ms | 1854 / 431 ms |
-| `export.gerber` (with fill) / fills cached | 2505 / ~300 ms | 1569 / 167 ms |
-| `board.export_kicad` | 62 ms | 27 ms |
-| `render.schematic` (layout + PNG) | 1492 ms | 1538 ms |
+| Step | Before D23 | After D23 | After D42 |
+|---|---|---|---|
+| `project.save` / `Project::load` | 16 / 7 ms | 17 / 7 ms | 17 / 7 ms |
+| `placed_pads` | 46 ms | 4 ms | 4 ms |
+| zone fill, 4 inner pours (`fill_zones_uncached`) | 2212 ms | 1371 ms | 1000 ms |
+| `islands` | 3309 ms | 39 ms | 42 ms |
+| ratsnest from copper items (islands + MST) | 3484 ms | 40 ms | 43 ms |
+| `ratsnest` (with fill) | 5612 ms | 1453 ms | 1059 ms |
+| `drc::check` (with fill) / fills cached | 8797 / ~6600 ms | 1587 / 206 ms | 1170 / 199 ms |
+| `render.board` PNG (with fill) / fills cached | 6331 / ~4100 ms | 1854 / 431 ms | 1363 / 429 ms |
+| `export.gerber` (with fill) / fills cached | 2505 / ~300 ms | 1569 / 167 ms | 1131 / 159 ms |
+| `board.export_kicad` | 62 ms | 27 ms | 30 ms |
+| `render.schematic` (layout + PNG) | 1492 ms | 1538 ms | (unchanged code) |
+| `place.auto` (all 528 parts, `replace`) | | 182 s | 39 s |
 
-What changed (outputs are byte-identical, D20): `placed_pads` builds one pin → net index instead of
+What changed in D23 (outputs are byte-identical, D20): `placed_pads` builds one pin → net index instead of
 scanning all nets per pin; `islands` skips pairs already connected and tests zone fills through
 `board::prepared` (a segment grid and edge bands, so an item is tested against the pour's nearby edges only);
 the ratsnest keeps each anchor's best link to the tree (O(k²) per net instead of rescanning every pair at
@@ -330,12 +343,35 @@ vertex by vertex; rendering computes copper items once and unions copper layers 
 coordinates are written without temporary strings; later zones reuse grown earlier fills; polygon booleans
 use `polyclip`'s `rayon` feature (cadlab feature `parallel`, default on).
 
-Remaining: zone fill is above the 1 s target. It is spent in `polyclip`'s `opening` and offsets of the large
-fills (the GND fill has 360 k vertices and 1460 holes; one offset takes ~0.5 s, of which ~15 % is
-re-normalizing already canonical input). Everything that needs the fill (cold ratsnest, DRC, render, Gerber)
-inherits it; within one session the fill cache removes it. Speeding it up needs `polyclip` work (skip
-normalization of canonical input, parallel offset of rings), not cadlab changes. Schematic rendering is
-dominated by PNG encoding of the large sheet.
+What changed in D42 (outputs byte-identical again): a packed R-tree (`geom::RTree`); zone fill gives each zone
+only what can reach its outline (see "Zone fill"); the fill cache compares its inputs instead of serializing
+them (cached lookup 15 → 5 ms); the DRC indexes the outline's segments for the edge and containment rules; PNG
+rendering skips what leaves no pixel (a cropped `--around` view: raster 48 → 28 ms); `place.auto` computes each
+net's MST in one pass per step and reuses net costs across swap candidates (it spent 170 of 182 s there, under
+1 s in validity checks); `polyclip` 0.0.4. The router keeps its bucket grid: its index changes while routing
+(an R-tree packed once does not fit) and queries are under 10 % of `route.all` on the small boards.
+
+`cargo run --release --example bigboard corpus` times the open-source corpus boards (`CADLAB_CORPUS_DIR`,
+docs/TESTING.md), cold (fill cache cleared), before → after D42:
+
+| Board | Zones | Zone fill | `drc::check` | `render.board` | `export.gerber` |
+|---|---|---|---|---|---|
+| corne-cherry | 925 (teardrops) | 4238 → 613 ms | 4724 → 758 ms | 4362 → 726 ms | 4225 → 663 ms |
+| cynthion | 57 | 568 → 429 ms | 1232 → 653 ms | 964 → 737 ms | 714 → 556 ms |
+| glasgow-revD1 | 7 | 685 → 711 ms | 1048 → 1053 ms | 1099 → 1087 ms | 976 → 945 ms |
+| lumenpnp-mobo | 82 | 599 → 578 ms | 848 → 816 ms | 874 → 842 ms | 703 → 667 ms |
+| sweep-v2.2 | 2 | 144 → 146 ms | 260 → 204 ms | 212 → 213 ms | 161 → 163 ms |
+| buspirate5-rev10 | 15 | 237 → 252 ms | 334 → 351 ms | 413 → 432 ms | 315 → 333 ms |
+| glasgow-revC3 | 31 | 196 → 199 ms | 428 → 422 ms | 410 → 403 ms | 308 → 296 ms |
+| tinytapeout-demo | 3 | 281 → 262 ms | 436 → 413 ms | 507 → 488 ms | 356 → 337 ms |
+
+Remaining: the zone fill of the synthetic board (1.0 s) is now almost all inside `polyclip`, on one thread
+per layer: on the GND layer, ~650 ms of the ~950 ms go to `opening` (two offsets of a 240 k-vertex, 2150-hole
+set), ~180 ms to the two differences, ~85 ms to merging the spokes. What `polyclip` would need is listed in
+[POLYGON_LIB.md](POLYGON_LIB.md), "Wishlist from cadlab", with a reproduction
+(`cargo run --release --example polyclip_opening`). Everything that needs the fill (cold ratsnest, DRC,
+render, Gerber) inherits it; within one session the fill cache removes it. Schematic rendering is dominated by
+PNG encoding of the large sheet.
 
 ## Workstreams after the model lands
 

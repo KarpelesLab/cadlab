@@ -512,6 +512,29 @@ and are converted exactly, while symbol graphics are presentation that cadlab re
 conversion path for board and library footprints keeps the corpus-tested fixes (custom pads, paste windows,
 courtyards) in both and avoids two behaviors for the same KiCad item.
 
+### D42. Spatial index and second performance pass, still byte-identical (2026-10-04)
+cadlab has its own small static R-tree (`geom::RTree`: sort-tile-recursive packing over integer boxes,
+fan-out 16, queries return indices sorted) rather than `rstar`: it is ~250 lines, needs no dependency, works
+on `polyclip::Rect`, and answers exactly what a linear scan would, so no result can depend on the tree's
+shape. It is used where it measured faster: zone fill gives each zone only the items, NPTH holes, keep-outs and
+parts of earlier fills that can reach its outline (far polygons dropped and far holes filled before growing
+an earlier fill; far same-net gaps and thermal pads skipped; pour rings meeting no thermal window left out of
+the spoke clips), and the DRC indexes the outline's segments so that only items near the outline ask
+`polyclip::contains`/`distance_less_than` on the whole contour (an item no segment comes near is located by
+the exact even-odd parity of one point). Where it did not help it is not used: the DRC pair grid lists
+candidate pairs faster than an R-tree self-join; the router's bucket grid changes while routing; placement
+spends its time in ratsnest costs, not validity checks (that MST now runs in one pass per step, with net costs
+reused across swap candidates); `islands` already sweeps sorted boxes. The fill cache keeps its inputs and
+compares them (the board by pointer first) instead of serializing them. As in D23, every output (fills, DRC,
+Gerbers, drill, IPC files, renders, KiCad and Specctra exports) of the synthetic board, two variants and 12
+corpus boards is compared byte for byte before and after (`--example bigboard dump`), and the replaced
+algorithms stay in tests. `polyclip` moved to 0.0.4 (identical outputs).
+*Why:* the shapes left out are farther from a zone (or the board edge) than any distance that can change the
+result, so culling them skips work whose answer is known, which D23 allows; clipping shapes to windows would
+add edges and move vertices by snap rounding, which it does not. The remaining zone fill time is inside
+`polyclip`'s offsets and booleans; what it would need is measured in docs/POLYGON_LIB.md §8 instead of being
+worked around in cadlab.
+
 ## Open questions
 
 None currently.

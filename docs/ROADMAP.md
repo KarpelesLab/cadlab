@@ -15,7 +15,7 @@ Workspace skeleton and the pieces every later milestone depends on.
 - [x] Crate and module layout per [ARCHITECTURE.md](ARCHITECTURE.md) (single crate, D16)
 - [x] Core types: units (`Nm` = i64 nanometers, `Angle`), points/vectors, transforms, bounding boxes
 - [x] Geometry: `cadlab::geom` adapter over polyclip ([POLYGON_LIB.md](POLYGON_LIB.md)), from crates.io
-- [ ] Spatial index (R-tree) for shapes (moved to M4, where DRC first needs it)
+- [x] Spatial index (R-tree) for shapes: `geom::RTree`, packed (STR), used by zone fill and the DRC outline rules (D42)
 - [x] ID scheme: stable internal IDs (`ObjectId`, persisted allocator), `ObjectRef` name syntax, "did you mean"
       suggestions (model-aware resolution comes with the circuit in M2)
 - [x] Command system: `Command` trait, registry, transactions, undo/redo, dry-run, diagnostics type
@@ -28,7 +28,7 @@ Workspace skeleton and the pieces every later milestone depends on.
 - [x] License check in CI (`cargo-deny`): MIT-compatible dependencies only
 
 **Exit:** `cadlab project new demo && cadlab -p demo project info --json` works via CLI and MCP; round-trip tests
-pass. **Done 2026-10-04** (spatial index deferred to M4).
+pass. **Done 2026-10-04** (spatial index added with the D42 performance pass).
 
 ## M1 — Parts, libraries, BOM (L)
 
@@ -226,7 +226,8 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - **Docs:** every command documented from its schema; examples doubled as tests.
 - **Performance:** benchmarks tracked in CI from M4 on (load, DRC, zone fill, route). A synthetic 500-component,
   four-layer board and timings of every heavy operation exist (`cargo run --release --example bigboard`,
-  `tests/perf.rs`; numbers in docs/BOARD.md "Performance"); tracking them in CI is still to do.
+  `tests/perf.rs`, the corpus boards with `--example bigboard corpus`; numbers in docs/BOARD.md "Performance");
+  tracking them in CI is still to do.
 - **Determinism:** golden files for every exporter and renderer.
 - **Agent ergonomics:** after each milestone, run a scripted agent session that designs a board from a prompt,
   and fix whatever the agent got stuck on.
