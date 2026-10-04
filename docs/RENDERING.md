@@ -90,6 +90,16 @@ encodes the PNG).
   light dot on ICs (on pad 1's side), polarized two-terminal parts get a cathode band at pad 1. Footprints without a
   spec get a box from their body size, or a 1 mm grey box over the courtyard. Bottom-side parts are mirrored under
   the board.
+- **3D models**: a component whose part or footprint has a model attached (`footprint.model_set`, see
+  [PARTS.md](PARTS.md#3d-models)) is drawn with the model's triangles instead of the generated body. The file is
+  decoded through oxideav-mesh3d (`cadlab::models3d`, D36): every node's mesh with its world transform, meshes no
+  node uses as they are; colors from the primitive's material base color (linear, converted to sRGB) times the
+  vertex colors, grey without a material. The reference's unit, up axis, scale, rotation and offset place it in
+  footprint coordinates, then it is placed on the board like the generated bodies (bottom side mirrored under the
+  board). Model triangles are drawn double-sided (the files' winding is not trusted) and shaded on the side facing
+  the viewer. Each distinct model reference is decoded once per render. A model that cannot be read falls back to
+  the generated body and the command reports it (`model.invalid`, `model.unsupported_format`, ...). Tests probe
+  pixels above and under the board where the model stands instead of storing images.
 - **Camera**: `view top|bottom` (the bottom view turns the board over, mirrored like the realistic bottom view),
   `azimuth` (degrees clockwise from the front edge; 45 = front-left, the default), `elevation` (5–90°, default
   35.26° = isometric; 90 looks straight down, with the board turned by the azimuth). `size` (longer side, default
@@ -101,4 +111,5 @@ encodes the PNG).
   dark vertical gradient. `highlight U1,R3` paints those parts orange.
 - **Speed**: the STM32 test board (60 × 45 mm, 40 parts) renders at 1600 px in well under 0.1 s (release).
 
-Later: STEP/VRML models for accurate bodies (STEP needs a B-rep tessellator; evaluate crates then).
+STEP and VRML model files come with the oxideav STEP/VRML decoders (the STEP decoder tessellates the B-rep into
+a `Scene3D`); cadlab only registers the crate (see `src/models3d.rs`).

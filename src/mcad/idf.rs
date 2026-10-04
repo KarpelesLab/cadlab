@@ -11,10 +11,12 @@
 //! Y, mounting offset 0, rotation, `TOP`/`BOTTOM`, `PLACED`).
 //!
 //! Library file: one `.ELECTRICAL` section per (geometry, part number) with the body height and
-//! its outline (the package body rectangle, counter-clockwise, centered on the footprint
-//! origin). A bottom-side component is the library outline mirrored about its Y axis, then
+//! its outline, counter-clockwise: the package body rectangle centered on the footprint origin,
+//! or, for a component with an attached 3D model, the model's bounding rectangle and its top as
+//! the height. A bottom-side component is the library outline mirrored about its Y axis, then
 //! rotated counter-clockwise (seen from the top) by the placement angle: cadlab's own
-//! convention, which for the centered body rectangles equals any other mirror axis.
+//! convention (the same as for pads), which for centered rectangles equals any other mirror
+//! axis.
 //!
 //! Strings are always double-quoted. The header date is fixed so that output is
 //! byte-identical across runs.
@@ -22,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use super::{BodyBox, DrillHole, Edge, Loop, Options, board_profile, bodies, drill_holes, sweep_deg};
+use super::{BodyBox, DrillHole, Edge, Loop, Options, board_profile, body_set, drill_holes, sweep_deg};
 use crate::fabout::HoleKind;
 use crate::fabout::gerber::mm;
 use crate::model::Project;
@@ -40,6 +42,8 @@ pub struct IdfOut {
     pub library: String,
     /// Components without a package body (left out of the placement).
     pub no_body: Vec<String>,
+    /// Components whose attached 3D model could not be read (their package box is used).
+    pub model_errors: Vec<(String, crate::models3d::ModelError3d)>,
     /// Components placed.
     pub placed: usize,
     /// Drilled holes listed.
@@ -102,8 +106,9 @@ fn library_entry(out: &mut String, b: &BodyBox) {
     let _ = writeln!(out, "{} {} MM {}", q(&b.footprint), q(&b.part_number), mm(b.height.0));
     let (hw, hl) = (b.width.0 / 2, b.length.0 / 2);
     let (w, l) = (b.width.0 - hw, b.length.0 - hl);
+    let (ox, oy) = (b.offset.x.0, b.offset.y.0);
     for (x, y) in [(-hw, -hl), (w, -hl), (w, l), (-hw, l), (-hw, -hl)] {
-        let _ = writeln!(out, "0 {} {} 0", mm(x), mm(y));
+        let _ = writeln!(out, "0 {} {} 0", mm(ox + x), mm(oy + y));
     }
     let _ = writeln!(out, ".END_ELECTRICAL");
 }
@@ -114,7 +119,8 @@ pub fn export(p: &Project, o: &Options) -> Option<IdfOut> {
     let name = p.manifest().name.clone();
     let source = q(&format!("cadlab {}", o.version));
     let holes = drill_holes(p, o.vias);
-    let (bodies, no_body) = if o.components { bodies(p) } else { (Vec::new(), Vec::new()) };
+    let set = if o.components { body_set(p) } else { Default::default() };
+    let (bodies, no_body, model_errors) = (set.bodies, set.no_body, set.model_errors);
 
     let mut b = String::new();
     let _ = writeln!(b, ".HEADER\nBOARD_FILE 3.0 {source} {DATE} 1\n{} MM\n.END_HEADER", q(&name));
@@ -156,7 +162,7 @@ pub fn export(p: &Project, o: &Options) -> Option<IdfOut> {
     for c in seen.values() {
         library_entry(&mut l, c);
     }
-    Some(IdfOut { board: b, library: l, no_body, placed: bodies.len(), holes: holes.len() })
+    Some(IdfOut { board: b, library: l, no_body, model_errors, placed: bodies.len(), holes: holes.len() })
 }
 
 #[cfg(test)]

@@ -78,6 +78,12 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -122,6 +128,11 @@ dependencies = [
  "clap",
  "indexmap",
  "insta",
+ "oxideav-gltf",
+ "oxideav-mesh3d",
+ "oxideav-obj",
+ "oxideav-stl",
+ "oxideav-usdz",
  "polyclip",
  "proptest",
  "rayon",
@@ -199,6 +210,12 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "compcol"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f29da98742f258743e8bb44b09f0cc1cbca2591e709b1bb85ccd6e9111f431"
 
 [[package]]
 name = "console"
@@ -486,6 +503,75 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8de32b40e24dd0f22ec37a0cb723ad499c05b43aa391971b7621c9a1c96fb15"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "oxideav-gltf"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a8ba255bdea173ebb34067278115455189dbcc6bf39afea8f4b4878b9fdd73"
+dependencies = [
+ "base64 0.22.1",
+ "oxideav-core",
+ "oxideav-mesh3d",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxideav-mesh3d"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaf5dfa9a6886a0dcfc45b2ddad0d2fda94acad760535c59e159314afda164e0"
+dependencies = [
+ "oxideav-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxideav-obj"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5be7b89ca859e077617cb2087d237ef3b219e95ce1d0e7b06162fbbf6df5c21"
+dependencies = [
+ "oxideav-core",
+ "oxideav-mesh3d",
+ "serde_json",
+]
+
+[[package]]
+name = "oxideav-stl"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70b3baefc61939a4bb2ebe869a97c523816ff2dfce779c0d709c00c8979c4eed"
+dependencies = [
+ "oxideav-core",
+ "oxideav-mesh3d",
+ "serde_json",
+]
+
+[[package]]
+name = "oxideav-usdz"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f596026678f928ce795de74cfebf9fc5f7de4b4b780780fc8a05fe7110ccc7b"
+dependencies = [
+ "compcol",
+ "oxideav-core",
+ "oxideav-mesh3d",
+ "serde_json",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -1035,7 +1121,7 @@ version = "3.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "flate2",
  "log",
  "percent-encoding",
@@ -1052,7 +1138,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f86fd172ccca569e458f61b6bdd6220965a9ef36e672a6852953b51a0e1583be"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "http",
  "httparse",
  "log",

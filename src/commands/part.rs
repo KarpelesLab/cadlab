@@ -378,8 +378,11 @@ impl Command for Create {
         }
 
         // Pin ↔ pad consistency.
-        let fref =
-            footprint.as_ref().map(|fp| FootprintRef { footprint: fp.name.clone(), pin_map: self.pin_map.clone() });
+        let fref = footprint.as_ref().map(|fp| FootprintRef {
+            footprint: fp.name.clone(),
+            pin_map: self.pin_map.clone(),
+            model: None,
+        });
         if let (Some(fp), Some(fr)) = (&footprint, &fref) {
             let pads = fp.pad_numbers();
             for k in fr.pin_map.keys() {
@@ -697,6 +700,7 @@ impl Command for Remove {
         }
         let p = ctx.project_mut()?;
         p.library_mut().parts.remove(&id);
+        p.library_mut().prune_models();
         p.bom_mut().lines.remove(&id);
         Ok(Removed { id })
     }

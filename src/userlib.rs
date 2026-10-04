@@ -7,7 +7,9 @@
 //! ├── library.toml            schema_version (written on first publish)
 //! ├── parts/<id>.json         a Part, same format as a project's library/parts/<id>.json
 //! ├── footprints/<name>.json  a Footprint
-//! └── blocks/<name>.json      a LibBlock: the block plus copies of every part and footprint it uses
+//! ├── models/<file>           a 3D model file (`SOT-23-5.stl`), as-is, used by footprints/parts
+//! └── blocks/<name>.json      a LibBlock: the block plus copies of every part, footprint and
+//!                             model it uses
 //! ```
 //!
 //! The **user library** lives in `$XDG_DATA_HOME/cadlab/library` (default
@@ -32,6 +34,7 @@ use crate::model::Project;
 use crate::model::circuit::Block;
 use crate::model::footprint::Footprint;
 use crate::model::format::to_canonical_string;
+use crate::model::model3d::{ModelData, valid_model_name};
 use crate::model::part::{Part, valid_id};
 
 /// Marker file at the root of a library.
@@ -53,11 +56,13 @@ pub enum ItemKind {
     Footprint,
     /// A block with the parts and footprints it uses (`blocks/<name>.json`).
     Block,
+    /// A 3D model file used by footprints and parts (`models/<file>`, stored as-is).
+    Model,
 }
 
 impl ItemKind {
     /// Every kind, in listing order.
-    pub const ALL: [ItemKind; 3] = [ItemKind::Part, ItemKind::Footprint, ItemKind::Block];
+    pub const ALL: [ItemKind; 4] = [ItemKind::Part, ItemKind::Footprint, ItemKind::Block, ItemKind::Model];
 
     /// Subdirectory holding items of this kind.
     pub fn dir(self) -> &'static str {
@@ -65,6 +70,7 @@ impl ItemKind {
             ItemKind::Part => "parts",
             ItemKind::Footprint => "footprints",
             ItemKind::Block => "blocks",
+            ItemKind::Model => "models",
         }
     }
 
@@ -74,6 +80,7 @@ impl ItemKind {
             ItemKind::Part => "part",
             ItemKind::Footprint => "footprint",
             ItemKind::Block => "block",
+            ItemKind::Model => "model",
         }
     }
 }
@@ -93,6 +100,24 @@ pub struct LibBlock {
     /// Every footprint those parts reference, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub footprints: BTreeMap<String, Footprint>,
+    /// Every 3D model file those parts and footprints reference, by file name (base64).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, ModelData>,
+}
+
+/// Model files referenced by `parts` (their own models) and `footprints`, sorted.
+pub fn models_used<'a>(
+    parts: impl IntoIterator<Item = &'a Part>,
+    footprints: impl IntoIterator<Item = &'a Footprint>,
+) -> Vec<String> {
+    let mut out: Vec<String> =
+        footprints.into_iter().filter_map(|f| f.model.as_ref().map(|m| m.file.clone())).collect();
+    for p in parts {
+        out.extend(p.footprints.iter().filter_map(|r| r.model.as_ref().map(|m| m.file.clone())));
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 impl LibBlock {
@@ -119,9 +144,18 @@ impl LibBlock {
             }
             parts.insert(part.id.clone(), part.clone());
         }
+        let mut models = BTreeMap::new();
+        for m in models_used(parts.values(), footprints.values()) {
+            match lib.models.get(&m) {
+                Some(d) => {
+                    models.insert(m, d.clone());
+                }
+                None => missing.push(format!("model {m}")),
+            }
+        }
         missing.sort();
         missing.dedup();
-        Some((LibBlock { name: name.to_string(), block, parts, footprints }, missing))
+        Some((LibBlock { name: name.to_string(), block, parts, footprints, models }, missing))
     }
 
     /// Checks internal consistency: every component's part is bundled.
@@ -134,6 +168,11 @@ impl LibBlock {
         for (name, f) in &self.footprints {
             if &f.name != name {
                 return Err(format!("bundled footprint key `{name}` does not match its name `{}`", f.name));
+            }
+        }
+        for name in self.models.keys() {
+            if !valid_model_name(name) {
+                return Err(format!("bundled model `{name}` has an invalid file name"));
             }
         }
         for (r, bc) in &self.block.components {
@@ -154,6 +193,8 @@ pub enum Item {
     Footprint(Footprint),
     /// A block with its parts and footprints.
     Block(LibBlock),
+    /// A 3D model file: name (with extension) and bytes.
+    Model(String, ModelData),
 }
 
 impl Item {
@@ -163,6 +204,7 @@ impl Item {
             Item::Part(_) => ItemKind::Part,
             Item::Footprint(_) => ItemKind::Footprint,
             Item::Block(_) => ItemKind::Block,
+            Item::Model(..) => ItemKind::Model,
         }
     }
 
@@ -172,6 +214,7 @@ impl Item {
             Item::Part(p) => &p.id,
             Item::Footprint(f) => &f.name,
             Item::Block(b) => &b.name,
+            Item::Model(n, _) => n,
         }
     }
 
@@ -181,6 +224,11 @@ impl Item {
             Item::Part(p) => serde_json::to_value(p),
             Item::Footprint(f) => serde_json::to_value(f),
             Item::Block(b) => serde_json::to_value(b),
+            Item::Model(n, d) => Ok(serde_json::json!({
+                "name": n,
+                "format": crate::models3d::format_of(n),
+                "bytes": d.len(),
+            })),
         };
         v.expect("library items serialize to JSON")
     }
@@ -201,6 +249,10 @@ impl Item {
                 s
             }
             Item::Footprint(f) => format!("{} pads  {}", f.pads.len(), f.description).trim_end().to_string(),
+            Item::Model(n, d) => {
+                let f = crate::models3d::extension(n).to_ascii_uppercase();
+                format!("{f} 3D model, {} bytes", d.len())
+            }
             Item::Block(b) => {
                 let mut s = format!("{} component(s), ports: {}", b.block.components.len(), b.block.ports.join(", "));
                 if !b.block.description.is_empty() {
@@ -313,7 +365,10 @@ impl UserLibrary {
     }
 
     fn file(&self, kind: ItemKind, name: &str) -> PathBuf {
-        self.path.join(kind.dir()).join(format!("{name}.json"))
+        match kind {
+            ItemKind::Model => self.path.join(kind.dir()).join(name),
+            _ => self.path.join(kind.dir()).join(format!("{name}.json")),
+        }
     }
 
     /// Fails if the library was written by a newer cadlab.
@@ -339,11 +394,18 @@ impl UserLibrary {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(LibError::Io(dir, e)),
         };
-        let mut out: Vec<String> = rd
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".json")).map(str::to_string))
-            .filter(|n| valid_id(n))
-            .collect();
+        let mut out: Vec<String> = match kind {
+            ItemKind::Model => rd
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .filter(|n| valid_model_name(n) && !n.ends_with(".tmp"))
+                .collect(),
+            _ => rd
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".json")).map(str::to_string))
+                .filter(|n| valid_id(n))
+                .collect(),
+        };
         out.sort();
         Ok(out)
     }
@@ -361,6 +423,13 @@ impl UserLibrary {
     pub fn read(&self, kind: ItemKind, name: &str) -> Result<Option<Item>, LibError> {
         self.check_schema()?;
         let path = self.file(kind, name);
+        if kind == ItemKind::Model {
+            return match fs::read(&path) {
+                Ok(b) => Ok(Some(Item::Model(name.to_string(), ModelData::new(b)))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(LibError::Io(path, e)),
+            };
+        }
         let text = match fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -370,6 +439,7 @@ impl UserLibrary {
         let item = match kind {
             ItemKind::Part => Item::Part(parse(&path, v)?),
             ItemKind::Footprint => Item::Footprint(parse(&path, v)?),
+            ItemKind::Model => unreachable!("read above"),
             ItemKind::Block => {
                 let b: LibBlock = parse(&path, v)?;
                 b.validate().map_err(|e| LibError::Invalid(path.clone(), e))?;
@@ -423,7 +493,8 @@ impl UserLibrary {
     pub fn write(&self, item: &Item) -> Result<PathBuf, LibError> {
         let kind = item.kind();
         let name = item.name();
-        if !valid_id(name) {
+        let valid = if kind == ItemKind::Model { valid_model_name(name) } else { valid_id(name) };
+        if !valid {
             return Err(LibError::InvalidName(kind.label(), name.to_string()));
         }
         self.ensure()?;
@@ -436,7 +507,10 @@ impl UserLibrary {
         let dir = self.path.join(kind.dir());
         fs::create_dir_all(&dir).map_err(|e| LibError::Io(dir.clone(), e))?;
         let path = self.file(kind, name);
-        write_atomic(&path, &to_canonical_string(&item.to_value()))?;
+        match item {
+            Item::Model(_, d) => write_atomic_bytes(&path, d.bytes())?,
+            _ => write_atomic(&path, &to_canonical_string(&item.to_value()))?,
+        }
         Ok(path)
     }
 
@@ -536,6 +610,12 @@ fn parse<T: DeserializeOwned>(path: &Path, v: Value) -> Result<T, LibError> {
     serde_json::from_value(v).map_err(|e| LibError::Invalid(path.to_path_buf(), e.to_string()))
 }
 
+fn write_atomic_bytes(path: &Path, content: &[u8]) -> Result<(), LibError> {
+    let tmp = path.with_extension(format!("{}.tmp", path.extension().and_then(|e| e.to_str()).unwrap_or("")));
+    fs::write(&tmp, content).map_err(|e| LibError::Io(tmp.clone(), e))?;
+    fs::rename(&tmp, path).map_err(|e| LibError::Io(path.to_path_buf(), e))
+}
+
 fn write_atomic(path: &Path, content: &str) -> Result<(), LibError> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, content).map_err(|e| LibError::Io(tmp.clone(), e))?;
@@ -559,6 +639,7 @@ mod tests {
             graphics: vec![],
             body: None,
             generator: None,
+            model: None,
         }
     }
 

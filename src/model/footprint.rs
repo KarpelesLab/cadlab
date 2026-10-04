@@ -207,6 +207,10 @@ pub struct Footprint {
     /// Generator spec that produced it (a `PackageSpec`), for regeneration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generator: Option<serde_json::Value>,
+    /// 3D model for renders and MCAD exports, instead of a body generated from the package
+    /// dimensions (`footprint.model_set`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::model::model3d::Model3d>,
 }
 
 impl Footprint {

@@ -431,12 +431,16 @@ pub struct FootprintRef {
     /// Pin number → pad numbers. Pins not listed map to the pad with the same number.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pin_map: BTreeMap<String, Vec<String>>,
+    /// 3D model of this part on this footprint, overriding the footprint's own model
+    /// (`footprint.model_set --part`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::model::model3d::Model3d>,
 }
 
 impl FootprintRef {
     /// Reference with the identity pin map.
     pub fn new(footprint: impl Into<String>) -> Self {
-        FootprintRef { footprint: footprint.into(), pin_map: BTreeMap::new() }
+        FootprintRef { footprint: footprint.into(), pin_map: BTreeMap::new(), model: None }
     }
 
     /// Pads a pin connects to.

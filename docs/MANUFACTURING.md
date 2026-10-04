@@ -18,7 +18,7 @@ published specifications.
 | Intelligent fab data | ODB++ | — | not implemented: Siemens' terms do not permit it (below, D37) |
 | Routing exchange | **Specctra DSN / SES** | DSN export, SES import (DSN reader as library) | M5, done (`export.dsn`, `route.import_ses`; [ROUTER.md](ROUTER.md)) |
 | Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | M9, done (`export.idf`, `export.idx` baseline) |
-| 3D | **STEP** AP214/AP242 (export), STEP/VRML models (import) | both | M9: AP214 export done (`export.step`); model import later |
+| 3D | **STEP** AP214/AP242 (export), 3D models (import) | both | M9: AP214 export done (`export.step`); models via oxideav-mesh3d (STL, OBJ, glTF/GLB, USDZ now; STEP/VRML decoders pending upstream, D36) |
 | Simulation | SPICE netlist (ngspice dialect) | export | M8 |
 | Documentation | SVG, PNG, PDF | export | M3/M4 |
 | KiCad | `.kicad_pcb`, `.kicad_sch`, `.kicad_sym`, `.kicad_mod`, netlist | import + export | M2–M7, see below |
@@ -83,13 +83,26 @@ the footprint origin, on the top face, or turned over under the bottom face for 
 without a body are reported (`export.no_body`); DNP parts are left out. Colors: green board, dark gray bodies.
 The header time stamp is fixed (`1970-01-01T00:00:00`).
 
+Components with an attached 3D model (`footprint.model_set`, see [PARTS.md](PARTS.md#3d-models)) get the model
+instead of the box. The model is a triangle mesh (decoded through oxideav-mesh3d, D36), written as a **faceted
+B-rep**: vertices welded on the nanometer grid, one `FACE_SURFACE` per triangle on its `PLANE`, bounded by a
+`POLY_LOOP`. Each connected piece that is closed and consistently wound becomes a `FACETED_BREP` (`CLOSED_SHELL`,
+turned outward by the sign of its volume) in a `FACETED_BREP_SHAPE_REPRESENTATION`, so MCAD tools see solids
+(the FreeCAD oracle checks validity and volume). A model with an open or inconsistently wound piece is written
+as surfaces instead (`SHELL_BASED_SURFACE_MODEL` with `OPEN_SHELL`s in a `MANIFOLD_SURFACE_SHAPE_REPRESENTATION`)
+and reported (`export.step_open_model`, info). Colors are the model's material colors: the most common one per
+piece, plus face styles where faces differ. One body part per footprint and model reference, named
+`<footprint>_<model file>`, placed like the boxes (bottom side: turned over). A model that cannot be read is
+reported (`model.invalid`, `model.unsupported_format`, ...) and the package box is used.
+
 **IDF 3.0** (`export.idf [dir] [--vias] [--components false]`, default `out/mcad/`): `<project>.emn` (board:
 `.HEADER` with units `MM`; `.BOARD_OUTLINE ECAD` with the thickness and loops of points, label 0 the outline
 counter-clockwise, then cutouts clockwise, arcs as included angles, circles as center + point at 360°;
 `.DRILLED_HOLES` with `PTH`/`NPTH`, associated designator or `BOARD`, type `PIN`/`VIA`/`MTG`, owner `ECAD`;
 `.PLACEMENT` with geometry = footprint name, part number = MPN or part ID, designator, position, rotation,
 `TOP`/`BOTTOM`, `PLACED`) and `<project>.emp` (library: one `.ELECTRICAL` outline per geometry and part number,
-the body rectangle with its height). Bottom-side parts: the library outline mirrored about its Y axis, then
+the body rectangle with its height; for a component with a 3D model, the model's bounding rectangle in footprint
+coordinates and its top as the height). Bottom-side parts: the library outline mirrored about its Y axis, then
 rotated counter-clockwise, as cadlab places them (for the centered body rectangles any mirror axis gives the
 same result). Header dates are fixed (`1970/01/01.00:00:00`).
 
@@ -116,9 +129,9 @@ readers of either work). Identifiers use system scope `CADLAB` and stable number
 `HOLE:J1.1`, `HOLE:H1`, `VIA:<id>`, `KEEPOUT:<name>:ROUTING`, `COMPONENT:U1`, `PACKAGE:<footprint>:<part>`), so
 a later baseline names the same objects the same way. Z = 0 is the board's bottom face (the IDX convention);
 matrices are `x' = xx·x + xy·y + xz·z + tx`. Creator name and company are empty (projects store no people), the
-creation and modification time stamps fixed (`1970-01-01T00:00:00Z`). Heights come from the footprint's
-package body; components without one are reported (`export.no_body`) and left out, DNP parts too. No 3D model
-references (`Model3D`) until model import exists. Checked by the published XSD with `xmllint` (oracle above).
+creation and modification time stamps fixed (`1970-01-01T00:00:00Z`). Bodies come from the attached 3D
+model's bounding box when there is one (D36), else from the footprint's package body; components with neither
+are reported (`export.no_body`) and left out, DNP parts too. Model files are not referenced (`Model3D`). Checked by the published XSD with `xmllint` (oracle above).
 
 **ODB++ is not implemented.** The ODB++ Design Format Specification (Siemens, release 8.1 update 4, August 2024,
 `https://odbplusplus.com/wp-content/uploads/sites/2/2024/08/odb_spec_user.pdf`) is free to download, but its
@@ -135,8 +148,9 @@ cannot pass to the users and forks of an MIT crate is not compatible with cadlab
 format from observed files (KiCad's exporter, for instance) would sidestep the same terms. IPC-2581 (an open
 IPC standard, `export.ipc2581`) covers the same intelligent-fab-data need. See DECISIONS D37.
 
-Not yet: package bodies other than boxes (pins, chamfers, cylinders), STEP/VRML model import (M9), AP242,
-IDF `.PLACE_OUTLINE`/keep-outs, IDX change and response messages.
+Not yet: generated package bodies other than boxes in STEP (pins, chamfers, cylinders; the 3D view has them),
+STEP/VRML model files (they arrive with the oxideav STEP/VRML decoders, D36), writing a STEP model's exact B-rep
+through (models are meshes), AP242, IDF `.PLACE_OUTLINE`/keep-outs, IDX change and response messages.
 
 Design standards used as rule and geometry sources (from the standards themselves, never from another tool's
 implementation):

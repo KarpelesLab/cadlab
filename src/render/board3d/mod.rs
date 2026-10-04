@@ -3,8 +3,9 @@
 //! - The board is its outline extruded to the stackup thickness, with cutout and drill-hole
 //!   walls; its top and bottom faces are textured with the realistic 2D render of that side
 //!   ([`super::board::realistic_scene`]), and holes are see-through.
-//! - Components are convex solids built from their package dimensions (see `bodies`);
-//!   bottom-side parts are mirrored under the board.
+//! - Components are their attached 3D model (decoded through oxideav-mesh3d, see
+//!   [`crate::models3d`]), else convex solids built from their package dimensions (see
+//!   `bodies`); bottom-side parts are mirrored under the board.
 //! - Hidden surfaces: a supersampled z-buffer (`raster`); flat shading with one directional
 //!   light fixed relative to the camera.
 //!
@@ -20,6 +21,7 @@ use crate::board as geo;
 use crate::geom::poly::{ArcTol, Side};
 use crate::model::Project;
 use crate::model::board::BoardSide;
+use crate::models3d::{self, ModelError3d};
 use crate::units::{LengthUnit, Nm};
 
 use super::View;
@@ -116,6 +118,8 @@ pub struct Image3d {
     pub rgba: Vec<u8>,
     /// The projection used.
     pub camera: Camera,
+    /// Components whose attached 3D model could not be used (drawn with a generated body).
+    pub model_errors: Vec<(String, ModelError3d)>,
 }
 
 impl Image3d {
@@ -274,9 +278,12 @@ fn bounds(pts: impl Iterator<Item = (f64, f64)>) -> Option<(f64, f64, f64, f64)>
     })
 }
 
-/// Component solids in world coordinates.
-fn component_tris(p: &Project, t: f64, highlight: &[String]) -> Vec<Tri> {
+/// Component solids in world coordinates: the attached 3D model's triangles, else convex
+/// solids generated from the package. Also returns the models that could not be used.
+fn component_tris(p: &Project, t: f64, highlight: &[String]) -> (Vec<Tri>, Vec<(String, ModelError3d)>) {
     let mut out = Vec::new();
+    let mut failed = Vec::new();
+    let mut cache = models3d::Cache::default();
     for (refdes, pf) in &p.board().footprints {
         let Some(fp) = geo::footprint_for(p, refdes) else { continue };
         let (s, c) = match pf.rotation.quarter_turns() {
@@ -291,6 +298,21 @@ fn component_tris(p: &Project, t: f64, highlight: &[String]) -> Vec<Tri> {
             [ox + x * c - v[1] * s, oy + x * s + v[1] * c, z]
         };
         let lit = highlight.iter().any(|h| h == refdes);
+        if let Some(m) = models3d::model_for(p, refdes) {
+            match cache.get(p, m) {
+                Ok(facets) => {
+                    for f in &facets.tris {
+                        let v = f.v.map(place);
+                        let n = normalize(cross(sub(v[1], v[0]), sub(v[2], v[0])));
+                        let color = if lit { mix(f.color, HIGHLIGHT, 0.65) } else { f.color };
+                        // Meshes are drawn double-sided: their winding is not trusted.
+                        out.push(Tri { v, n, surface: Surface::Flat(color), cull: false });
+                    }
+                    continue;
+                }
+                Err(e) => failed.push((refdes.clone(), e)),
+            }
+        }
         for solid in bodies::solids(fp, t) {
             let Solid { faces, color } = solid;
             let color = if lit { mix(color, HIGHLIGHT, 0.65) } else { color };
@@ -311,7 +333,7 @@ fn component_tris(p: &Project, t: f64, highlight: &[String]) -> Vec<Tri> {
             }
         }
     }
-    out
+    (out, failed)
 }
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
@@ -373,8 +395,11 @@ pub fn render(p: &Project, o: &Options3d) -> Result<Image3d, String> {
     }
     let holes = drill_holes(p);
     let mut tris = board_tris(p, t, &rings, &holes);
+    let mut model_errors = Vec::new();
     if o.components {
-        tris.extend(component_tris(p, t, &o.highlight));
+        let (c, failed) = component_tris(p, t, &o.highlight);
+        tris.extend(c);
+        model_errors = failed;
     }
     let mut cam = Camera::new(o);
     // Fit: projected extent of everything.
@@ -425,8 +450,10 @@ pub fn render(p: &Project, o: &Options3d) -> Result<Image3d, String> {
         if tr.cull && dot(tr.n, cam.toward) <= 1e-9 {
             continue;
         }
+        // Double-sided faces are shaded on the side facing the viewer.
+        let n = if !tr.cull && dot(tr.n, cam.toward) < 0.0 { tr.n.map(|x| -x) } else { tr.n };
         let fill = match tr.surface {
-            Surface::Flat(c) => Fill::Flat(c.map(|x| x * shade(tr.n))),
+            Surface::Flat(c) => Fill::Flat(c.map(|x| x * shade(n))),
             Surface::Tex(i) => {
                 if (i == 0) != top_visible {
                     continue;
@@ -441,5 +468,5 @@ pub fn render(p: &Project, o: &Options3d) -> Result<Image3d, String> {
         ptris.push(PTri { p: pr, depth: tr.v.map(|q| cam.depth(q)), fill });
     }
     let rgba = raster::rasterize(&ptris, std::slice::from_ref(&tex), w as usize, h as usize);
-    Ok(Image3d { width: w, height: h, rgba, camera: cam })
+    Ok(Image3d { width: w, height: h, rgba, camera: cam, model_errors })
 }

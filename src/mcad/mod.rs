@@ -6,8 +6,9 @@
 //! - [`idx`]: IDX (ProSTEP iViP EDMD) baseline for incremental ECAD-MCAD collaboration.
 //!
 //! All start from the same data, built here: the outline as closed loops of lines and arcs
-//! ([`board_profile`]), the drilled holes, and component bodies as boxes taken from the
-//! footprint's package dimensions ([`bodies`]). See `docs/MANUFACTURING.md`.
+//! ([`board_profile`]), the drilled holes, and component bodies ([`body_set`]): the attached
+//! 3D model (decoded through oxideav-mesh3d, [`crate::models3d`]) or a box taken from the
+//! footprint's package dimensions. See `docs/MANUFACTURING.md`.
 //!
 //! Coordinates are board coordinates (millimeters in the files, Y up), unchanged, so the model
 //! lines up with the Gerber and drill files. The board's bottom face is at Z = 0.
@@ -16,11 +17,16 @@ pub mod idf;
 pub mod idx;
 pub mod step;
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use crate::board::{self, footprint_for};
 use crate::fabout::{self, HoleKind};
 use crate::geom::Point;
 use crate::model::Project;
 use crate::model::board::{BoardSide, Segment};
+use crate::model::model3d::Model3d;
+use crate::models3d::{self, Facets, ModelError3d};
 use crate::units::{Angle, Nm};
 
 /// Export options.
@@ -380,7 +386,8 @@ pub fn cuttable_holes(outer: &Loop, cutouts: &[Loop], holes: Vec<DrillHole>) -> 
     (ok, rest)
 }
 
-/// A component body: a box from the package dimensions, centered on the footprint origin.
+/// A component body: its attached 3D model (`model`, with the model's bounding box as the
+/// box), or a box from the package dimensions centered on the footprint origin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BodyBox {
     /// Designator.
@@ -401,39 +408,88 @@ pub struct BodyBox {
     pub length: Nm,
     /// Height above the board surface.
     pub height: Nm,
+    /// Center of the box (outline) relative to the footprint origin, in footprint coordinates:
+    /// zero for package boxes, the bounding-box center for models.
+    pub offset: Point,
+    /// The 3D model the body comes from (its triangles are in [`BodySet::models`]).
+    pub model: Option<Model3d>,
 }
 
-/// Bodies of the placed, populated components (DNP excluded), by designator, and the
-/// designators left out because their footprint has no package body.
-pub fn bodies(p: &Project) -> (Vec<BodyBox>, Vec<String>) {
+/// Component bodies of a board, with the models they use.
+#[derive(Clone, Debug, Default)]
+pub struct BodySet {
+    /// Bodies of the placed, populated components, by designator.
+    pub bodies: Vec<BodyBox>,
+    /// Components without a body (no model and no package dimensions).
+    pub no_body: Vec<String>,
+    /// Components whose attached model could not be used (they fall back to the package box).
+    pub model_errors: Vec<(String, ModelError3d)>,
+    /// Placed triangles of every model used, in footprint coordinates.
+    pub models: BTreeMap<Model3d, Arc<Facets>>,
+}
+
+/// Bodies of the placed, populated components (DNP excluded), by designator: the attached 3D
+/// model when it can be read, else the package box; components with neither are listed in
+/// `no_body`.
+pub fn body_set(p: &Project) -> BodySet {
     let info = fabout::populated(p);
-    let mut out = Vec::new();
-    let mut missing = Vec::new();
+    let mut set = BodySet::default();
+    let mut cache = models3d::Cache::default();
     for (refdes, pf) in &p.board().footprints {
         let Some(ci) = info.get(refdes) else { continue };
-        let fp = footprint_for(p, refdes);
-        let Some((fp, body)) = fp.and_then(|fp| fp.body.map(|b| (fp, b))) else {
-            missing.push(refdes.clone());
+        let Some(fp) = footprint_for(p, refdes) else {
+            set.no_body.push(refdes.clone());
             continue;
         };
-        if body.width.0 <= 0 || body.length.0 <= 0 || body.height.0 <= 0 {
-            missing.push(refdes.clone());
-            continue;
-        }
         let part = p.circuit().components.get(refdes).map(|c| c.part.clone()).unwrap_or_default();
-        out.push(BodyBox {
+        let mut body = BodyBox {
             refdes: refdes.clone(),
             footprint: fp.name.clone(),
             part_number: ci.mpn.clone().unwrap_or(part),
             at: pf.at,
             rotation: pf.rotation,
             side: pf.side,
-            width: body.width,
-            length: body.length,
-            height: body.height,
-        });
+            width: Nm::ZERO,
+            length: Nm::ZERO,
+            height: Nm::ZERO,
+            offset: Point::new(Nm::ZERO, Nm::ZERO),
+            model: None,
+        };
+        if let Some(m) = models3d::model_for(p, refdes) {
+            match cache.get(p, m) {
+                Ok(f) => {
+                    let n = |v: f64| Nm((v * 1e6).round() as i64);
+                    body.width = n(f.max[0] - f.min[0]).max(Nm(1));
+                    body.length = n(f.max[1] - f.min[1]).max(Nm(1));
+                    body.height = n(f.max[2]).max(Nm(1));
+                    body.offset = Point::new(n((f.max[0] + f.min[0]) / 2.0), n((f.max[1] + f.min[1]) / 2.0));
+                    body.model = Some(m.clone());
+                    set.models.insert(m.clone(), f);
+                    set.bodies.push(body);
+                    continue;
+                }
+                Err(e) => set.model_errors.push((refdes.clone(), e)),
+            }
+        }
+        match fp.body {
+            Some(b) if b.width.0 > 0 && b.length.0 > 0 && b.height.0 > 0 => {
+                body.width = b.width;
+                body.length = b.length;
+                body.height = b.height;
+                set.bodies.push(body);
+            }
+            _ => set.no_body.push(refdes.clone()),
+        }
     }
-    (out, missing)
+    set
+}
+
+/// Bodies of the placed, populated components (DNP excluded), by designator, and the
+/// designators left out because they have neither a usable model nor package dimensions. See
+/// [`body_set`].
+pub fn bodies(p: &Project) -> (Vec<BodyBox>, Vec<String>) {
+    let set = body_set(p);
+    (set.bodies, set.no_body)
 }
 
 #[cfg(test)]

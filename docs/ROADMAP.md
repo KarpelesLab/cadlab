@@ -187,7 +187,11 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 
 - [x] Isometric 3D PNG render: board, layers, extruded package bodies generated from package dimensions
   (`render.board3d`, D30)
-- [ ] STEP/VRML model import for accurate bodies
+- [x] 3D model import for accurate bodies via oxideav-mesh3d (D36): `footprint.model_set / model_clear /
+      model_list`, models on footprints or a part's footprint, stored in `library/models/`, carried by shared
+      libraries; used by `render.board3d` (mesh instead of the generated body), `export.step` (faceted B-rep) and
+      `export.idf` (model extent). STL, OBJ, glTF/GLB and USDZ now; **STEP/VRML decoders pending upstream** (oxideav
+      STEP/VRML crates; they plug into the registry in `src/models3d.rs`)
 - [x] STEP export of the assembled board (`export.step`: AP214, exact B-rep board with cutouts and holes, box
       bodies from package dimensions as an assembly; FreeCAD oracle; D31)
 - [x] IPC-2581 rev C output (`export.ipc2581`, also in `export.all`: BOM, stackup, profile, packages,

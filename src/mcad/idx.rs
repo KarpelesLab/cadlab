@@ -632,8 +632,10 @@ pub fn export(p: &Project, o: &Options) -> Option<IdxOut> {
         if !packages.contains_key(&key) {
             let (hw, hl) = (b.width.0 / 2, b.length.0 / 2);
             let (w, l) = (b.width.0 - hw, b.length.0 - hl);
+            // Model bodies are centered on their bounding box, not on the footprint origin.
+            let (ox, oy) = (b.offset.x.0, b.offset.y.0);
             let corners = [(-hw, -hl), (w, -hl), (w, l), (-hw, l)];
-            let mut pts: Vec<String> = corners.iter().map(|&(px, py)| x.point(px, py)).collect();
+            let mut pts: Vec<String> = corners.iter().map(|&(px, py)| x.point(ox + px, oy + py)).collect();
             pts.push(pts[0].clone());
             let c = x.polyline(&pts);
             let se = x.shape(&c, Some(0), Some(b.height.0), "FeatureShapeElement", false);
@@ -703,6 +705,8 @@ mod tests {
             width: Nm(1),
             length: Nm(1),
             height: Nm(1),
+            offset: pt(0, 0),
+            model: None,
         };
         let t = body_transform(&b, 1_600_000);
         // Local X (1, 0, 0) → mirrored to -X, rotated 90° → (0, -1).

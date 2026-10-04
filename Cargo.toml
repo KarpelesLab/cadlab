@@ -10,7 +10,7 @@ keywords = ["eda", "pcb", "cad", "electronics", "mcp"]
 categories = ["science", "command-line-utilities"]
 
 [features]
-default = ["cli", "net", "png", "parallel"]
+default = ["cli", "net", "png", "parallel", "models3d"]
 # The `cadlab` binary (CLI + MCP server). Library users can disable it to avoid the CLI dependencies.
 cli = ["dep:clap", "dep:rpassword"]
 # Network part research providers (DigiKey, ...).
@@ -20,6 +20,10 @@ png = ["dep:tiny-skia"]
 # Multi-threaded polygon booleans (polyclip's rayon feature) and autorouting of independent nets;
 # results are identical for any thread count. Zone fills of large boards are about a quarter faster.
 parallel = ["polyclip/rayon", "dep:rayon"]
+# 3D model import (footprint models in render.board3d, export.step and export.idf) through the
+# oxideav-mesh3d scene model and its format crates (DECISIONS D36). Without it, attached models
+# are kept in the project but bodies fall back to generated boxes.
+models3d = ["dep:oxideav-mesh3d", "dep:oxideav-stl", "dep:oxideav-obj", "dep:oxideav-gltf", "dep:oxideav-usdz"]
 
 [[bin]]
 name = "cadlab"
@@ -44,6 +48,11 @@ clap = { version = "4.6", features = ["derive", "string"], optional = true }
 rpassword = { version = "7.5", optional = true }
 tiny-skia = { version = "0.12", optional = true }
 ureq = { version = "3.4", optional = true }
+oxideav-mesh3d = { version = "0.0.6", optional = true }
+oxideav-stl = { version = "0.0.4", optional = true }
+oxideav-obj = { version = "0.0.4", optional = true }
+oxideav-gltf = { version = "0.0.4", optional = true }
+oxideav-usdz = { version = "0.0.4", optional = true }
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
