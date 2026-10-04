@@ -251,6 +251,22 @@ storing golden images, whose floating-point rounding could differ between platfo
 recognizable picture of the assembly from data cadlab already has. A z-buffer is simpler and more robust than a
 painter's algorithm with polygon splitting; supersampling gives anti-aliasing for free. Accurate bodies from STEP/VRML
 remain a separate roadmap item.
+### D33. Mouser and Nexar providers; LCSC/JLCPCB through imported parts lists (2026-10-04)
+Mouser (Search API key) and Nexar/Octopart (GraphQL, client credentials) are network providers like DigiKey:
+behind `net`, cached, credentials entered only through `cadlab config mouser|nexar` (D17), implemented from
+Mouser's published OpenAPI description and Nexar's documentation and published schema. Network providers send
+requests through a `supplier::http::Transport`, so tests use a mock transport and fixtures. Nexar returns one
+candidate per seller offer with a `<seller>:<sku>` SKU, brokers excluded and unauthorized sellers opt-in;
+neither Mouser's suggested replacement nor Octopart's similar parts count as drop-ins (D26). LCSC and JLCPCB
+have APIs, but only for approved partners, with non-public documentation and (LCSC) terms forbidding sharing
+technical aspects with third parties: cadlab ships no client and never scrapes. `catalog.import` instead turns a
+CSV parts list the user downloads into an offline `lcsc` catalog, matched by header names (neither publishes a
+stable export format), with explicit mapping for anything else and parameters of passives read from the
+description; it writes to the user catalog directory, outside projects. PCBWay's partner API has no parts
+search; PCBWay sources by MPN.
+*Why:* the fab profile already orders JLCPCB parts by LCSC SKU, and a user-provided list is the only source
+that is both permitted and reproducible. Header recognition plus explicit mapping survives export format
+changes without guessing, and reading values only for passives keeps parametric matching (D26) honest.
 
 ## Open questions
 

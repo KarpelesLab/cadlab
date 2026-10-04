@@ -84,6 +84,8 @@ expression: names
   "lib.publish",
   "lib.import",
   "lib.remove",
+  "catalog.import",
+  "catalog.list",
   "drc.run",
   "zone.add",
   "zone.set",

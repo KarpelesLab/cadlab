@@ -1,7 +1,8 @@
 //! User settings: `config.toml` in the user configuration directory
 //! (`$XDG_CONFIG_HOME/cadlab` or `~/.config/cadlab`).
 //!
-//! Holds per-user data that must never go into projects, such as supplier API credentials. The
+//! Holds per-user data that must never go into projects, such as supplier API credentials
+//! (DigiKey, Mouser, Nexar). The
 //! file is written with owner-only permissions on Unix. Environment variables override it.
 //!
 //! ```toml
@@ -12,6 +13,15 @@
 //! client_id = "..."
 //! client_secret = "..."
 //! site = "US"
+//! currency = "USD"
+//!
+//! [mouser]
+//! api_key = "..."
+//!
+//! [nexar]
+//! client_id = "..."
+//! client_secret = "..."
+//! country = "US"
 //! currency = "USD"
 //! ```
 
@@ -41,6 +51,33 @@ pub struct DigiKeySettings {
     pub sandbox: bool,
 }
 
+/// Mouser Search API settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MouserSettings {
+    /// Search API key (from <https://www.mouser.com/api-search/>).
+    pub api_key: String,
+}
+
+/// Nexar (Octopart) API settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NexarSettings {
+    /// OAuth client ID of your Nexar application.
+    pub client_id: String,
+    /// OAuth client secret.
+    pub client_secret: String,
+    /// Country for offers (ISO 3166 alpha-2, default `US`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// Currency prices are converted to (ISO 4217, default `USD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Also list offers from sellers not authorized by the manufacturer (brokers stay excluded).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unauthorized: bool,
+}
+
 /// The user settings file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +89,12 @@ pub struct UserConfig {
     /// DigiKey credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digikey: Option<DigiKeySettings>,
+    /// Mouser API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouser: Option<MouserSettings>,
+    /// Nexar credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nexar: Option<NexarSettings>,
 }
 
 /// Error reading or writing settings.
@@ -167,6 +210,13 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
                 currency: Some("EUR".into()),
+                ..Default::default()
+            }),
+            mouser: Some(MouserSettings { api_key: "key".into() }),
+            nexar: Some(NexarSettings {
+                client_id: "nid".into(),
+                client_secret: "nsecret".into(),
+                country: Some("DE".into()),
                 ..Default::default()
             }),
         };

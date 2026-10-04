@@ -8,7 +8,14 @@ pub mod cache;
 pub mod catalog;
 #[cfg(feature = "net")]
 pub mod digikey;
+#[cfg(feature = "net")]
+pub mod http;
+pub mod import;
 mod money;
+#[cfg(feature = "net")]
+pub mod mouser;
+#[cfg(feature = "net")]
+pub mod nexar;
 pub mod normalize;
 pub mod query;
 
@@ -208,8 +215,9 @@ impl Suppliers {
 
     /// Providers from the user settings and environment: catalog files listed in
     /// `CADLAB_CATALOGS` (path-separated), `*.json` in the user catalog directory
-    /// (`$XDG_CONFIG_HOME/cadlab/catalogs` or `~/.config/cadlab/catalogs`), and DigiKey when
-    /// credentials are in `config.toml` or `DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`.
+    /// (`$XDG_CONFIG_HOME/cadlab/catalogs` or `~/.config/cadlab/catalogs`), then the network
+    /// providers whose credentials are in `config.toml` or the environment: DigiKey, Mouser,
+    /// Nexar.
     /// Returns warnings (e.g. an unreadable settings file) alongside.
     pub fn from_user_settings() -> (Self, Vec<crate::diag::Diagnostic>) {
         let mut warnings = Vec::new();
@@ -228,7 +236,7 @@ impl Suppliers {
         if let Some(v) = std::env::var_os("CADLAB_CATALOGS") {
             paths.extend(std::env::split_paths(&v));
         }
-        if let Some(dir) = config_dir().map(|d| d.join("catalogs"))
+        if let Some(dir) = catalog_dir()
             && let Ok(rd) = std::fs::read_dir(dir)
         {
             let mut files: Vec<_> =
@@ -240,8 +248,16 @@ impl Suppliers {
             s = s.with(Arc::new(catalog::Catalog::lazy(p)));
         }
         #[cfg(feature = "net")]
-        if let Some(dk) = digikey::DigiKey::from_settings(cfg.digikey.as_ref()) {
-            s = s.with(Arc::new(dk));
+        {
+            if let Some(dk) = digikey::DigiKey::from_settings(cfg.digikey.as_ref()) {
+                s = s.with(Arc::new(dk));
+            }
+            if let Some(m) = mouser::Mouser::from_settings(cfg.mouser.as_ref()) {
+                s = s.with(Arc::new(m));
+            }
+            if let Some(n) = nexar::Nexar::from_settings(cfg.nexar.as_ref()) {
+                s = s.with(Arc::new(n));
+            }
         }
         #[cfg(not(feature = "net"))]
         let _ = cfg;
@@ -294,6 +310,11 @@ impl Suppliers {
         }
         r
     }
+}
+
+/// The user catalog directory (`<config dir>/catalogs`), where `catalog.import` writes.
+pub fn catalog_dir() -> Option<std::path::PathBuf> {
+    config_dir().map(|d| d.join("catalogs"))
 }
 
 /// User configuration directory (`$XDG_CONFIG_HOME/cadlab` or `~/.config/cadlab`).
