@@ -237,6 +237,28 @@ replaced and board placements of components that come back are kept. `kicad-cli`
 placeholder is one `bom.replace` away from a real part. Matching only on exact IDs, MPNs and value plus
 footprint keeps the result deterministic and explainable.
 
+### D31. Exchange outputs: IPC-2581C, STEP AP214 and IDF 3.0 written by hand, boxes for bodies (2026-10-04)
+`export.ipc2581`, `export.step` and `export.idf` write their formats directly from the published
+specifications, without XML or CAD-kernel dependencies: the files are text, the subset needed is small, and a
+kernel (OpenCASCADE) would bring a large C++ LGPL dependency. IPC-2581 lives with the other fab outputs
+(`src/fabout/ipc2581.rs`, included in `export.all`); STEP and IDF in a new algorithm module `src/mcad/` that
+shares one description of the board: outline loops of lines and exact arcs (arc centers recovered from the
+stored mid points, snapped to the roundest whole-nanometer center that fits), the drilled holes, and component
+bodies. Choices: bodies are boxes from the footprint's package dimensions (`body`), centered on the footprint
+origin, the only 3D data cadlab has until model import; components without one are reported, never guessed.
+The STEP board is an exact B-rep (planes and cylinders), not a faceted mesh, so MCAD tools measure holes and
+arcs exactly; holes that would touch the edge, a cutout or another hole are skipped with a warning rather than
+producing an invalid solid, and vias are opt-in. The STEP file is an assembly (one product per footprint body,
+instances named by designator) so MCAD trees show designators. IPC-2581 writes pads per layer with dictionary
+primitives (no padstack definitions), uses placeholder logistic data (projects store no people), and leaves out
+`HistoryRecord`/`Avl`, which need dates; STEP and IDF headers carry fixed dates. The IPC-2581 schema is not
+vendored (IPC's terms; not freely downloadable at the time of writing): structure is checked by tests that parse
+the output, and by `xmllint` against a user-supplied XSD when available. FreeCAD (`freecadcmd`) is an optional
+oracle that must read the STEP file as valid closed solids with the expected volumes.
+*Why:* MCAD and fab exchange are needed to finish a product, and these three formats cover what fabs and
+mechanical engineers ask for; hand-written text keeps the crate small and the output byte-for-byte deterministic,
+and exact geometry with explicit skips keeps the files trustworthy.
+
 ## Open questions
 
 None currently.

@@ -1,6 +1,7 @@
 //! Manufacturing outputs (roadmap M4), generic and fab-independent: Gerber X2 layers, Gerber X3
 //! component layers, Excellon/XNC drill files (and optional Gerber X2 drill files), pick-and-place
-//! CSV and the IPC-D-356A bare-board test netlist. See `docs/MANUFACTURING.md`.
+//! CSV, the IPC-D-356A bare-board test netlist and the IPC-2581 revision C XML. See
+//! `docs/MANUFACTURING.md`.
 //!
 //! Every output is deterministic (no dates, stable ordering). File names come from one table,
 //! [`file_name`]; fab-specific layouts are applied later by fab profiles (DECISIONS D12).
@@ -11,6 +12,7 @@
 
 pub mod excellon;
 pub mod gerber;
+pub mod ipc2581;
 pub mod ipc356;
 mod layers;
 pub mod pnp;
@@ -94,6 +96,8 @@ pub enum FileKind {
     PickPlace,
     /// IPC-D-356A netlist.
     Ipc356,
+    /// IPC-2581 revision C XML.
+    Ipc2581,
 }
 
 fn side_prefix(s: BoardSide) -> &'static str {
@@ -105,7 +109,7 @@ fn side_prefix(s: BoardSide) -> &'static str {
 
 /// The generic file naming scheme, in one place: `<project>-<layer>.gbr` with layer names as
 /// on the board (`.` → `_`), `<project>-PTH.drl` / `-NPTH.drl` for drills, `<project>-pos.csv`
-/// and `<project>.d356`. Fab profiles will substitute their own table.
+/// `<project>.d356` and `<project>-ipc2581.xml`. Fab profiles will substitute their own table.
 pub fn file_name(project: &str, kind: &FileKind) -> String {
     let p = sanitize(project);
     let drill = |plated: bool, from: usize, to: usize, through: bool| {
@@ -125,7 +129,13 @@ pub fn file_name(project: &str, kind: &FileKind) -> String {
         }
         FileKind::PickPlace => format!("{p}-pos.csv"),
         FileKind::Ipc356 => format!("{p}.d356"),
+        FileKind::Ipc2581 => format!("{p}-ipc2581.xml"),
     }
+}
+
+/// The portable file stem used for a project's outputs (see [`file_name`]).
+pub fn file_stem(project: &str) -> String {
+    sanitize(project)
 }
 
 /// Keeps file names portable: anything but `[A-Za-z0-9._-]` becomes `_`.
