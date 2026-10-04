@@ -44,7 +44,29 @@ pub(crate) fn to_pixmap(scene: &Scene, view: &View) -> Result<Pixmap, String> {
     };
     let stroke =
         |w: f64| Stroke { width: w as f32, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
+    // What lies entirely outside the image (with a margin of a few pixels for anti-aliasing
+    // and float rounding) leaves no pixel: it is not drawn (a cropped view of a large board).
+    let pad = 4.0 / view.px_per_mm.max(1e-9);
+    let (vx0, vy0, vx1, vy1) = (view.area.0 - pad, view.area.1 - pad, view.area.2 + pad, view.area.3 + pad);
+    let visible = |pts: &mut dyn Iterator<Item = (f64, f64)>, grow: f64| {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for (x, y) in pts {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+        // NaN or empty: keep (draw as before).
+        !(x1 + grow < vx0 || x0 - grow > vx1 || y1 + grow < vy0 || y0 - grow > vy1)
+    };
+    let half = |st: &Option<(f64, Color)>| st.map_or(0.0, |s| s.0 / 2.0);
     for p in &scene.prims {
+        let shown = match p {
+            Prim::Line { pts, width, .. } => visible(&mut pts.iter().copied(), width / 2.0),
+            Prim::Polygon { pts, stroke, .. } => visible(&mut pts.iter().copied(), half(stroke)),
+            Prim::Region { rings, .. } => visible(&mut rings.iter().flatten().copied(), 0.0),
+            Prim::Circle { c, r, stroke, .. } => visible(&mut [*c].into_iter(), r.abs() + half(stroke)),
+        };
+        if !shown {
+            continue;
+        }
         match p {
             Prim::Line { pts, width, color, closed } => {
                 if pts.len() == 1 || pts.windows(2).all(|w| w[0] == w[1]) {
@@ -66,7 +88,8 @@ pub(crate) fn to_pixmap(scene: &Scene, view: &View) -> Result<Pixmap, String> {
             }
             Prim::Region { rings, fill } => {
                 let mut b = PathBuilder::new();
-                for r in rings.iter().filter(|r| r.len() >= 3) {
+                // Even-odd: a ring that leaves no pixel adds no crossing inside the image.
+                for r in rings.iter().filter(|r| r.len() >= 3 && visible(&mut r.iter().copied(), 0.0)) {
                     b.move_to(r[0].0 as f32, r[0].1 as f32);
                     for &(x, y) in &r[1..] {
                         b.line_to(x as f32, y as f32);
