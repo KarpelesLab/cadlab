@@ -113,6 +113,14 @@ design data, never KiCad's libraries); a placement whose footprint differs from 
 the placement's `footprint` override. Coordinates are converted exactly (KiCad's decimal millimeters are parsed
 to `Nm` without floats; Y is flipped around the chosen origin).
 
+The user's own KiCad libraries come in as library items (D41): `footprint.import_kicad` (`.kicad_mod` /
+`.pretty`) adds footprints, `part.import_kicad_sym` (`.kicad_sym`) adds parts, `lib.import_kicad` puts either
+into a shared library. Imported items record where they came from: a part's `provenance` and a footprint's
+optional `provenance` (`{"origin": "import", "detail": "KiCad footprint `SOT23` from MyLib.pretty",
+"license": "..."}`). Symbol pins may carry a `unit` (gate of a multi-unit part, from 1; absent when shared by
+every unit) and `alternates` (`[{"name": "USART1_TX", "kind": "output"}]`); both fields are optional, so older
+files read unchanged.
+
 ### Provider independence
 
 Nothing in the project names a fab or a supplier as a requirement: rules, board spec and BOM express intent, and

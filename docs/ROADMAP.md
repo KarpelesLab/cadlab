@@ -166,7 +166,9 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] `.kicad_pcb` import (`board.import_kicad`: setup, outline, footprints, copper, zones, keep-outs, holes,
   graphics; circuit matched or built from the board, DECISIONS D32)
 - [x] `.kicad_pro` / `.kicad_dru` rules import (`board.import_kicad_rules`, also run by `board.import_kicad`)
-- [ ] User `.kicad_sym` / `.kicad_mod` import
+- [x] User `.kicad_sym` / `.kicad_mod` import (`footprint.import_kicad`, `part.import_kicad_sym`, `lib.import_kicad`:
+  footprints through the board importer's conversion, symbols as pins and fields with generated drawings,
+  DECISIONS D41; fixtures, round trips through cadlab's exports, `kicad-cli fp/sym upgrade` oracle)
 - [x] KiCad netlist import (circuits come in as netlists; no `.kicad_sch` parser, see DECISIONS D13):
   `circuit.import`, parts matched or created per DECISIONS D27, oracle round trip through `kicad-cli`
 - [x] Round-trip and oracle tests: cadlab boards → `.kicad_pcb` → import (model and DRC equal), the same after

@@ -87,6 +87,20 @@ outlines, rings), trapezoid pads, slots, paste apertures, bottom footprints, mou
 stitching vias and hole patterns, logos, keep-outs with wildcard layers and with holes, circle courtyards, text
 variables and every unsupported-item diagnostic.
 
+### KiCad library import (`tests/kicad_lib_import.rs`)
+
+`footprint.import_kicad`, `part.import_kicad_sym` and `lib.import_kicad` (D41) run on hand-written fixtures in
+`tests/fixtures/kicad/` (cadlab's own files, see its README: KiCad 6 and 8 syntax, every pad kind, custom pad,
+slot, trapezoid, circle courtyard, drawings on unsupported layers, a derived symbol, a dual op-amp with a
+supply unit and a De Morgan body style, alternate pin functions, stacked and hidden pins, a power symbol,
+supplier fields). Round trip without KiCad: the footprints of the placed ATtiny85 board are cut out of
+`board.export_kicad` into a `.pretty`, its library symbols out of `schematic.export` into a `.kicad_sym`, and
+importing both must give the same land patterns and the same parts (symbol, category, footprint, value,
+datasheet, description). With `CADLAB_ORACLES=1`, `kicad-cli sym upgrade` and `fp upgrade` must read the
+fixtures and the round-trip libraries, importing KiCad's rewrite (KiCad 10 syntax, items reordered) must give
+the same footprints (as land patterns) and parts, and `kicad-cli sym export svg` must draw every fixture
+symbol.
+
 ### Cross-checks: KiCad DRC vs cadlab DRC, KiCad Gerbers vs ours
 
 Both run on the boards of `tests/crosscheck/mod.rs`: the LDO board fully routed with a bottom GND pour

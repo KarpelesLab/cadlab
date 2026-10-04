@@ -39,8 +39,8 @@ therefore be built at JLCPCB one month and PCBWay the next. See
   shared library, the `part.not_found` error hints `lib.import <id>`.
 - **Generated**: footprints and symbols created from parameters (below). This is the main source: cadlab ships
   its own base library built from generators, never from KiCad's libraries (DECISIONS D7).
-- **User imports**: a user's own KiCad `.kicad_sym` / `.kicad_mod` files can be imported (M7). The user is
-  responsible for the license of what they import, which is recorded in provenance.
+- **User imports**: a user's own KiCad `.kicad_sym` / `.kicad_mod` files can be imported (below, D41). The
+  user is responsible for the license of what they import, which is recorded in provenance.
 
 ### Shared user libraries
 
@@ -117,7 +117,8 @@ From a pin table (which an agent can extract from a datasheet), `symbolgen` lays
 grid: ground pins at the bottom, supply inputs at the top, inputs and bidirectional pins left, outputs right,
 connector pins left in number order. Ports (`PA*`, `PB*`, or explicit `group`s) stay together and are moved
 between sides to balance them; explicit `side`s are kept. Two-terminal parts get fixed styles (resistor,
-capacitor, inductor, diode/LED with pin 1 = cathode, ...). Multi-unit symbols are planned. Drawing happens in M3.
+capacitor, inductor, diode/LED with pin 1 = cathode, ...). Multi-unit parts are drawn as one body for now:
+pins carry their `unit` (from imported KiCad symbols) and each unit's pins stay together on their side.
 
 ## Generic part specs
 
@@ -134,6 +135,9 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `part.list / show / set / remove` | inspect and edit the library (removal refused while in use) |
 | `footprint.generate / list / show / remove` | land patterns |
 | `footprint.model_set / model_clear / model_list` | 3D models of footprints and parts (below) |
+| `footprint.import_kicad <path>` | the user's KiCad footprints (`.kicad_mod`, `.pretty`) into the project (below) |
+| `part.import_kicad_sym <path>` | the user's KiCad symbols (`.kicad_sym`) as project parts (below) |
+| `lib.import_kicad <path>` | either into a shared library instead |
 | `circuit.add <part or spec>` | add components (`--count`), auto-numbered by category (R1, C3, U2) |
 | `circuit.remove / list` | components |
 | `bom.list` | one line per part: quantity, designators, DNP, order MPN, unsourced lines |
@@ -142,6 +146,56 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `bom.note <part> <text>` | purchasing/assembly note |
 | `bom.replace <from> <to>` | switch components to another part, warning about missing pins |
 | `bom.export <path> --format generic|jlcpcb|pcbway` | CSV; fab layouts omit DNP and warn about lines without MPN |
+
+### Importing KiCad libraries
+
+Your own KiCad 6+ libraries (DECISIONS D41; KiCad's shipped libraries are never read or converted, D7):
+
+```sh
+cadlab footprint import-kicad MyLib.pretty [--footprint SOT23_X] [--license "CC-BY-SA-4.0"]
+cadlab part import-kicad-sym MyLib.kicad_sym --footprints MyLib.pretty [--symbol LDO_X] [--category ldo]
+cadlab lib import-kicad MyLib.kicad_sym --footprints MyLib.pretty [--library team-library]
+```
+
+- **Footprints** (`.kicad_mod`, or every `.kicad_mod` of a `.pretty` directory) are converted like the
+  footprints of an imported board (D32): named after the file, pads of every shape (custom pads as polygon
+  pads; trapezoids as their bounding box, chamfers as rounded corners, oval slots as round holes, each with an
+  `import.pad_approximated` warning), drills, paste (paste-only apertures become paste windows), silkscreen,
+  fab and courtyard drawings of the footprint's side (arcs as polylines; a courtyard made of lines, a
+  rectangle or a circle becomes the courtyard polygon; without one, a box 0.25 mm around the pads). Not kept,
+  each reported: texts (`import.footprint_text`), drawings on other layers, copper drawings and board edges
+  (`import.footprint_layer`), 3D model paths (`import.footprint_model`: attach a model with
+  `footprint.model_set`), local mask/paste margins and clearances (`import.local_setting`). An `at` in a
+  library file is ignored, as KiCad does.
+- **Symbols** (`.kicad_sym`, all or `--symbol` ones) become parts named after the symbol. Pins keep number,
+  name (`~` = none), electrical type (`free` reads as passive), the side of the body they are on (from the
+  KiCad orientation), their unit for multi-unit symbols (unit 0 or pins repeated in every unit are shared;
+  De Morgan body styles are the same pins) and their alternate functions. Derived symbols (`extends`) get the
+  root symbol's pins and their own fields; the standard ones (Reference, Value, Footprint, Datasheet,
+  description, keywords) fall back to the parent's, as in KiCad. **The drawing is not converted**: cadlab
+  symbols are generated from their pins (box or two-terminal style, D41), keeping each pin's side.
+- **Fields:** the category comes from the reference prefix (`R`, `C`, `L`, `FB`, `D`/`LED`, `Q`, `U`, `J`,
+  `Y`, `X`, `SW`, `F`, `TP`, `H`), refined by name, value, description and keywords (`LDO`, `MOSFET`, ...), or
+  from `--category`. Value becomes the resistance/capacitance/inductance/impedance/frequency or LED color
+  when it reads as one; Datasheet (`~` = none), Description (or `ki_description`), MPN
+  (`MPN`, `Manufacturer Part Number`, `Mfr. Part #`, ...) and manufacturer fields are kept; other fields become
+  parameters (`Voltage Out` → `voltage_out`, typed when the key is known). Distributor and assembler fields
+  (`LCSC`, `DigiKey_PN`, `Mouser`, ...) are dropped with `import.symbol_supplier_field`: projects stay
+  provider-agnostic (D12). `Sim.*` fields are dropped (`import.symbol_sim_field`).
+- **Footprint field:** `MyLib:SOT23_X` attaches footprint `SOT23_X` when the target library has it (imported
+  with `--footprints` in the same command, or before) and it has a pad for every pin; else
+  `import.symbol_footprint_missing` / `import.symbol_pin_without_pad` and the part has no footprint.
+- **Skipped**, listed in `skipped`: power symbols (`import.symbol_power`: nets in cadlab, drawn as power
+  symbols on export), symbols without pins (`import.symbol_no_pins`), broken `extends`
+  (`import.symbol_extends`). Hidden power input pins, which KiCad joins to the net of their name, get
+  `import.symbol_hidden_power_pin`: cadlab connects pins only explicitly.
+- **Conflicts:** an item equal to the target's is `unchanged`; a different item of the same name (or case
+  variant) is an `import.conflict` error listing them all, unless `--replace` (a 3D model set in cadlab on a
+  replaced footprint is kept). Replacing a part used in the circuit that loses pins warns
+  (`import.part_in_use`). Project imports are undoable and `--dry-run` reports without changing anything;
+  `lib.import_kicad` writes outside the project like `lib.publish` (nothing in a dry run, no undo). KiCad 5
+  files (`(module`, `.lib`) are refused with `import.kicad_version` and the `kicad-cli fp/sym upgrade`
+  command to run first.
 
 ### 3D models
 

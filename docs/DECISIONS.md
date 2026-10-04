@@ -485,6 +485,33 @@ closes length budgets with a report of what remains; a centerline router reuses 
 D22/D34 with little new machinery, and closed-form meanders make the residual error negligible instead of
 iterating on measured lengths.
 
+### D41. User KiCad libraries: footprints converted like board footprints, symbols as pins plus generated drawings (2026-10-04)
+`footprint.import_kicad` (`.kicad_mod`, `.pretty`) and `part.import_kicad_sym` (`.kicad_sym`) bring the user's
+own KiCad 6+ libraries into the project; `lib.import_kicad` puts them into a shared library (D19), writing
+outside the project like `lib.publish`. They are commands of the groups whose items they create, next to
+`footprint.generate` and `part.create`. Footprints go through the board importer's footprint conversion
+(D32), refactored into one function used by both, so a footprint imported from a library and the same
+footprint read from a board are identical; a library file's `at` is ignored, as KiCad does. A footprint is
+named after its file (what a symbol's `Lib:Name` Footprint field refers to). Symbols keep their pin data
+(number, name, electrical type, side, unit, alternate functions, the last two new optional `Pin` fields) and
+fields; their drawing is not converted: cadlab symbols are generated from pins (D2: the schematic is
+presentation), and KiCad graphics (arbitrary polylines, arcs, De Morgan styles, pin lengths off cadlab's grid)
+have no counterpart in the symbol model. Each pin keeps the side it had in KiCad, so the generated box keeps
+the author's arrangement; multi-unit parts are one body for now, with each unit's pins together. Derived
+symbols take the root's pins and their own fields, inheriting only the standard ones, which matches what KiCad
+writes (`sym upgrade`). Power symbols are skipped: in cadlab they are nets. Categories come from the reference
+prefix refined by keywords, values become typed parameters when they read as one, MPN and manufacturer
+fields are recognized under their usual names, distributor fields are dropped (D12), other fields become
+parameters. Footprints record a provenance (new optional field) like parts, with the license the user gives.
+Re-importing is idempotent (`unchanged`); a different item of the same name is a conflict listed in full
+unless `replace`, and a 3D model attached in cadlab survives a replace. KiCad's shipped libraries are never
+read or converted (D7); tests use hand-written fixtures and cadlab's own exports, with `kicad-cli fp/sym
+upgrade` as the oracle that KiCad reads the same thing.
+*Why:* migrating users bring their own vetted footprints and pinouts; footprints matter at the copper level
+and are converted exactly, while symbol graphics are presentation that cadlab regenerates anyway. One
+conversion path for board and library footprints keeps the corpus-tested fixes (custom pads, paste windows,
+courtyards) in both and avoids two behaviors for the same KiCad item.
+
 ## Open questions
 
 None currently.
