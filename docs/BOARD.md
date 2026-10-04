@@ -19,7 +19,8 @@ graphics. Stored in `board.json`; zone fills are derived data, recomputed on dem
 
 ```
 Board
-├── stackup       copper layer count and names, finished thickness, copper weights, dielectric (optional),
+├── stackup       copper layer count and names, finished thickness, copper weights, dielectrics (optional:
+│                 thickness, εr, material per gap, for impedance; docs/ELECTRICAL.md),
 │                 board spec preferences (finish, mask/silk colors) — requirements, not a fab choice (D12)
 ├── outline       closed contours of line/arc segments: the first is the outer edge, others are cutouts
 ├── rules         design rules (engineering intent): clearance, track width, via drill/diameter, min annular
@@ -98,6 +99,9 @@ or batch session cost ~1.5 ms.
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set`, `remove`, `list`, `fill` (report area/islands, warn empty or split) |
 | `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given), `remove`, `list` |
 | `drc` | `run` (plus `fab.check` warnings for the manifest `targets`) |
+| `board` (stackup) | `stackup` (copper, dielectrics, line model per layer), `dielectric` (thickness, εr, material per gap; [ELECTRICAL.md](ELECTRICAL.md)) |
+| `impedance` | `calc` (Z0 / Zdiff of a width on a layer), `solve` (width for a target, optionally into a net class) |
+| `current` | `width` (IPC-2152 width per layer for a current; optionally raises a net class width) |
 | `render` | `board` (layers, realistic) (M4 rendering workstream) |
 | `export` | `gerber`, `drill`, `pnp`, `ipc356`, `all` (generic outputs), `dsn` (Specctra design for external routers) |
 | `fab` | `list`, `show`, `check`, `compare`, `export`, `substitute` (fab profiles, [MANUFACTURING.md](MANUFACTURING.md)) |
@@ -228,6 +232,8 @@ to 1 µm, distance rules accept a 2 µm deficit.
 | `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad on that side |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
 | `drc.unrouted` | error | a ratsnest connection, with both ends |
+| `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |
+| `drc.impedance` | warning | tracks of a net whose class has an `impedance` target more than 10 % off on their layer |
 
 Candidate pairs come from a uniform grid over bounding boxes (no extra dependency), so a board with a few
 thousand items checks in well under a second in release builds (3000 tracks + 200 vias: about 75 ms). Zone

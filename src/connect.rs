@@ -195,7 +195,7 @@ pub fn connect(
     }
     if !p.circuit().nets.contains_key(net) {
         let id = p.alloc_id();
-        p.circuit_mut().nets.insert(net.to_string(), Net { id, pins: Default::default(), class: None, driven: false });
+        p.circuit_mut().nets.insert(net.to_string(), Net::new(id));
         report.created.push(net.to_string());
     }
     let c: &mut Circuit = p.circuit_mut();

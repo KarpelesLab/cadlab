@@ -345,7 +345,7 @@ pub fn build(spec: Spec) -> (tempfile::TempDir, Registry, Session) {
     }
     for (name, pins) in nets {
         let id = p.alloc_id();
-        p.circuit_mut().nets.insert(name, Net { id, pins, class: None, driven: false });
+        p.circuit_mut().nets.insert(name, Net { pins, ..Net::new(id) });
     }
 
     // Copper: fanout of every netted pad to a via, then L-shaped bottom routes between the vias of

@@ -173,7 +173,12 @@ impl Command for Setup {
         }
         let p = ctx.project_mut()?;
         let s = &mut p.board_mut().stackup;
+        let mut dropped = false;
         if let Some(n) = self.layers {
+            if n != s.copper_layers && !s.dielectrics.is_empty() {
+                s.dielectrics.clear();
+                dropped = true;
+            }
             s.copper_layers = n;
         }
         if let Some(v) = self.thickness {
@@ -193,6 +198,15 @@ impl Command for Setup {
         }
         if let Some(v) = self.silk_color {
             s.silk_color = v;
+        }
+        if dropped {
+            ctx.report(
+                Diagnostic::warning(
+                    "board.dielectrics_cleared",
+                    "the copper layer count changed: the stackup's dielectrics were cleared",
+                )
+                .with_hint("set them again with `board.dielectric` (board.stackup shows the assumed ones)"),
+            );
         }
         Ok(info(ctx.project()?))
     }

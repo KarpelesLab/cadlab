@@ -26,7 +26,7 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
 | **freerouting** | same DSN routed by both → compare completion, via count, length, runtime (router benchmarks) |
 | **gerbv** (and/or other Gerber viewers) | our Gerbers parse cleanly and rasterize to the expected image |
 | **Clipper2** | differential testing of the polygon library |
-| **ngspice** | SPICE netlist export parses and simulates (M8) |
+| **ngspice** | SPICE netlist export parses and simulates: `ngspice -b` on the divider golden file gives v(out) = 2.5 V (`tests/electrical.rs`, M8) |
 | Fab online DFM checkers | manual, per release, on the demo boards for each supported fab profile |
 
 ### Comparison methods

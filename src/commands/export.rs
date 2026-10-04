@@ -24,7 +24,8 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<All>()
         .register::<Step>()
         .register::<Idf>()
-        .register::<ExportDsn>();
+        .register::<ExportDsn>()
+        .register::<Spice>();
 }
 
 /// Default output directory, relative to the project.
@@ -589,5 +590,104 @@ impl Command for ExportDsn {
             "wrote {} ({} components, {} nets, {} classes, {} padstacks, {} wires, {} vias, {} protected)",
             o.path, o.components, o.nets, o.classes, o.padstacks, o.wires, o.vias, o.protected
         )
+    }
+}
+
+/// Write a SPICE netlist (ngspice dialect) of the circuit: R, C, L, diodes and transistors from
+/// part data, ICs as subcircuit calls (`spice_model`, `spice_lib`, `spice_pins` part parameters
+/// or component properties), placeholders commented out with a warning when a part has no
+/// model. Optional DC sources for supply nets and analysis/control lines for simulation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Spice {
+    /// Output file (default `out/spice/<project>.cir`; relative to the project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Ground net, written as node 0 (default `GND`, else the first ground-like net name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ground: Option<String>,
+    /// Add DC voltage sources: nets with a voltage (`net.set --voltage`), and driven nets whose
+    /// name gives one (`3V3`, `+5V`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supplies: bool,
+    /// Analysis lines written as-is (".op", ".tran 1u 10m").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis: Vec<String>,
+    /// ngspice `.control` block lines ("op", "print v(out)").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control: Vec<String>,
+    /// Also write DNP components.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_dnp: bool,
+}
+
+/// Result of `export.spice`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SpiceExported {
+    /// File written.
+    pub path: String,
+    /// Elements written (components and sources).
+    pub elements: usize,
+    /// Components written as commented-out placeholders (no model).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub placeholders: Vec<String>,
+    /// Components not simulated (connectors, switches, test points, DNP).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub omitted: Vec<String>,
+    /// Supply sources: net to voltage.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sources: std::collections::BTreeMap<String, crate::value::Quantity>,
+    /// Net to SPICE node name (ground is `0`).
+    pub nodes: std::collections::BTreeMap<String, String>,
+}
+
+impl Command for Spice {
+    const NAME: &'static str = "export.spice";
+    const SUMMARY: &'static str = "Write a SPICE netlist (ngspice): passives, diodes, models, supply sources";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = SpiceExported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<SpiceExported, CommandError> {
+        let p = ctx.project()?;
+        let opts = crate::spice::Options {
+            ground: self.ground.clone(),
+            supplies: self.supplies,
+            analysis: self.analysis.clone(),
+            control: self.control.clone(),
+            include_dnp: self.include_dnp,
+        };
+        let n =
+            crate::spice::export(p, &opts).map_err(|e| CommandError::not_found(e.code, e.message).with_hint(e.hint))?;
+        let default =
+            PathBuf::from("out/spice").join(format!("{}.cir", crate::model::part::slugify(&p.manifest().name)));
+        let path = resolve(ctx, self.path.as_deref(), default);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+        }
+        std::fs::write(&path, n.text.as_bytes()).map_err(|e| io(&path, e))?;
+        for d in n.diagnostics {
+            ctx.report(d);
+        }
+        Ok(SpiceExported {
+            path: path.display().to_string(),
+            elements: n.elements,
+            placeholders: n.placeholders,
+            omitted: n.omitted,
+            sources: n.sources.into_iter().collect(),
+            nodes: n.nodes,
+        })
+    }
+
+    fn summarize(o: &SpiceExported) -> String {
+        let mut s = format!("wrote {} ({} elements)", o.path, o.elements);
+        if !o.placeholders.is_empty() {
+            s += &format!("\n  no model (commented out): {}", o.placeholders.join(", "));
+        }
+        if !o.sources.is_empty() {
+            let v: Vec<String> = o.sources.iter().map(|(n, v)| format!("{n}={v}")).collect();
+            s += &format!("\n  supplies: {}", v.join(", "));
+        }
+        s
     }
 }

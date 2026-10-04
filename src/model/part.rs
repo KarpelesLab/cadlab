@@ -218,6 +218,13 @@ pub const KNOWN_PARAMS: &[KnownParam] = &[
     KnownParam { key: "color", unit: None, description: "LED color" },
     KnownParam { key: "package", unit: None, description: "Package name (0402, SOT-23-5, QFN-32, ...)" },
     KnownParam { key: "pitch", unit: None, description: "Pin pitch, with unit (\"2.54mm\")" },
+    KnownParam { key: "spice_model", unit: None, description: "SPICE model or subcircuit name (export.spice)" },
+    KnownParam { key: "spice_lib", unit: None, description: "SPICE library file to .include (export.spice)" },
+    KnownParam {
+        key: "spice_pins",
+        unit: None,
+        description: "Subcircuit pin order, as pin numbers or names (export.spice)",
+    },
 ];
 
 /// Looks up a known parameter.

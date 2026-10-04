@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::id::ObjectId;
 use crate::model::sections::natural_cmp;
 use crate::units::Nm;
+use crate::value::Quantity;
 
 /// Whether `s` is a reference designator: uppercase letters (or `_`), then a number (`R1`, `SW3`).
 pub fn valid_refdes(s: &str) -> bool {
@@ -117,6 +118,23 @@ pub struct Net {
     /// inputs on this net, like KiCad's PWR_FLAG.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub driven: bool,
+    /// Nominal voltage (`3.3V`): used by the SPICE export (supply sources) and the design lint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage: Option<Quantity>,
+    /// Continuous (RMS) current the net's tracks carry (`2A`): checked against IPC-2152
+    /// track widths by the DRC (`docs/ELECTRICAL.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<Quantity>,
+    /// Allowed temperature rise of the net's tracks for `current` (default 10 °C).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_rise: Option<Quantity>,
+}
+
+impl Net {
+    /// An empty net with no class or electrical properties.
+    pub fn new(id: ObjectId) -> Self {
+        Net { id, pins: BTreeSet::new(), class: None, driven: false, voltage: None, current: None, temp_rise: None }
+    }
 }
 
 /// Routing rules for a group of nets. Unset values fall back to the board's design rules (M4).
@@ -144,6 +162,13 @@ pub struct NetClass {
     /// Differential pair gap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_pair_gap: Option<Nm>,
+    /// Target single-ended impedance (`50Ω`), set by `impedance.solve`; the DRC warns about
+    /// tracks of the class whose impedance on their layer is more than 10 % off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impedance: Option<Quantity>,
+    /// Target differential impedance (`90Ω`), set by `impedance.solve` with a gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_impedance: Option<Quantity>,
 }
 
 /// A reusable subcircuit: components with local designators, nets with local names, and the
@@ -287,12 +312,7 @@ mod tests {
         );
         c.nets.insert(
             "A".into(),
-            Net {
-                id: ObjectId(2),
-                pins: [PinRef::new("R1", "1"), PinRef::new("R2", "1")].into(),
-                class: None,
-                driven: false,
-            },
+            Net { pins: [PinRef::new("R1", "1"), PinRef::new("R2", "1")].into(), ..Net::new(ObjectId(2)) },
         );
         c.no_connect.insert(PinRef::new("R1", "2"));
         c.rename_component("R1", "R5");

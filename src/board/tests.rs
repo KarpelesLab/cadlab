@@ -267,7 +267,7 @@ fn pad_nets_follow_the_first_net() {
     // as with `Circuit::net_of`.
     for (name, id) in [("B", 1), ("A", 2)] {
         let pins = [PinRef::new("U1", "1"), PinRef::new("U2", "3")].into_iter().collect();
-        c.nets.insert(name.into(), Net { id: ObjectId(id), pins, class: None, driven: false });
+        c.nets.insert(name.into(), Net { pins, ..Net::new(ObjectId(id)) });
     }
     let index = pin_nets(&p, None);
     assert_eq!(index["U1"]["1"], "A");

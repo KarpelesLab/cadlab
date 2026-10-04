@@ -163,10 +163,14 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 ## M8 — Advanced electrical (L)
 
 - [ ] Differential pairs (routing + rules), length/skew matching with meanders
-- [ ] Impedance calculator from stackup (microstrip/stripline) → width per net class
-- [ ] SPICE netlist export (ngspice), simulation hooks
-- [ ] Current/thermal checks (IPC-2152 trace width)
-- [ ] Design lint beyond ERC: missing decoupling, missing pull-ups on I²C, unterminated high-speed nets
+- [x] Impedance calculator from stackup (microstrip/stripline) → width per net class (stackup dielectrics,
+      `board.dielectric`, `impedance.calc/solve`, `drc.impedance`; [ELECTRICAL.md](ELECTRICAL.md), D29)
+- [x] SPICE netlist export (ngspice), simulation hooks (`export.spice`: supplies, analysis and `.control` lines;
+      ngspice oracle in `tests/electrical.rs`)
+- [x] Current/thermal checks (IPC-2152 trace width): `net.set --current`, `current.width`, `drc.current_width`
+      (chart curve fit, approximate)
+- [x] Design lint beyond ERC: missing decoupling, missing pull-ups on I²C, unterminated high-speed nets
+      (`circuit.lint`, `circuit.erc --lint`: decoupling, I²C pull-ups, USB ESD, clock termination, floating inputs)
 
 ## M9 — 3D and advanced rendering (M)
 

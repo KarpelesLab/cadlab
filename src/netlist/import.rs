@@ -912,7 +912,7 @@ pub fn import(
         };
         let id = p.alloc_id();
         let c = p.circuit_mut();
-        let entry = c.nets.entry(name).or_insert(Net { id, pins: BTreeSet::new(), class: None, driven: false });
+        let entry = c.nets.entry(name).or_insert(Net::new(id));
         entry.pins.extend(pins);
         if entry.class.is_none() {
             entry.class = class;

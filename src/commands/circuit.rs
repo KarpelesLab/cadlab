@@ -16,6 +16,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Rename>()
         .register::<Summary>()
         .register::<Erc>()
+        .register::<Lint>()
         .register::<Export>()
         .register::<Import>();
 }
@@ -330,10 +331,14 @@ impl Command for Summary {
     }
 }
 
-/// Run the electrical rule check.
+/// Run the electrical rule check (with `lint`, also the design lint of `circuit.lint`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Erc {}
+pub struct Erc {
+    /// Also run the design lint (missing decoupling, I²C pull-ups, USB ESD, ...).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lint: bool,
+}
 
 /// ERC result; the findings themselves are the command's diagnostics.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -351,7 +356,10 @@ impl Command for Erc {
     type Output = ErcReport;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<ErcReport, CommandError> {
-        let diags = crate::erc::check(ctx.project()?);
+        let mut diags = crate::erc::check(ctx.project()?);
+        if self.lint {
+            diags.extend(crate::lint::check(ctx.project()?));
+        }
         let errors = diags.iter().filter(|d| d.severity == crate::diag::Severity::Error).count();
         let warnings = diags.iter().filter(|d| d.severity == crate::diag::Severity::Warning).count();
         for d in diags {
@@ -365,6 +373,48 @@ impl Command for Erc {
             "ERC clean".into()
         } else {
             format!("ERC: {} error(s), {} warning(s)", o.errors, o.warnings)
+        }
+    }
+}
+
+/// Design lint beyond ERC: heuristics for likely mistakes (docs/ELECTRICAL.md): IC supply
+/// rails without a decoupling capacitor, I²C lines without pull-ups, USB data lines without ESD
+/// protection, unterminated clock outputs, floating inputs.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Lint {}
+
+/// Lint result; the findings are the command's diagnostics.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LintReport {
+    /// Number of warnings.
+    pub warnings: usize,
+    /// Number of notes (info).
+    pub notes: usize,
+}
+
+impl Command for Lint {
+    const NAME: &'static str = "circuit.lint";
+    const SUMMARY: &'static str =
+        "Design lint: missing decoupling, I2C pull-ups, USB ESD, clock termination, floating inputs";
+    const KIND: CommandKind = CommandKind::Query;
+    type Output = LintReport;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<LintReport, CommandError> {
+        let diags = crate::lint::check(ctx.project()?);
+        let warnings = diags.iter().filter(|d| d.severity == crate::diag::Severity::Warning).count();
+        let notes = diags.iter().filter(|d| d.severity == crate::diag::Severity::Info).count();
+        for d in diags {
+            ctx.report(d);
+        }
+        Ok(LintReport { warnings, notes })
+    }
+
+    fn summarize(o: &LintReport) -> String {
+        if o.warnings == 0 && o.notes == 0 {
+            "lint clean".into()
+        } else {
+            format!("lint: {} warning(s), {} note(s)", o.warnings, o.notes)
         }
     }
 }
