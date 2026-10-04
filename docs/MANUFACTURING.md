@@ -14,11 +14,11 @@ published specifications.
 | Bare-board electrical test netlist | **IPC-D-356A** | export | M4, done (`export.ipc356`) |
 | Pick and place | CSV (generic + per-fab column layouts), Gerber X3 | export | M4, done (`export.pnp`; per-fab layouts in `fab.export`) |
 | Assembly BOM | CSV / XLSX (generic + per-fab layouts) | export | M1/M4, CSV done (`bom.export`, `fab.export`) |
-| Intelligent fab data | **IPC-2581** (rev C) | export | M9 |
+| Intelligent fab data | **IPC-2581** (rev C) | export | M9, done (`export.ipc2581`) |
 | Intelligent fab data | ODB++ (check spec license terms first) | export | later |
 | Routing exchange | **Specctra DSN / SES** | DSN export, SES import (DSN reader as library) | M5, done (`export.dsn`, `route.import_ses`; [ROUTER.md](ROUTER.md)) |
-| Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | later |
-| 3D | **STEP** AP214/AP242 (export), STEP/VRML models (import) | both | M9 |
+| Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | M9: IDF 3.0 done (`export.idf`); IDX later |
+| 3D | **STEP** AP214/AP242 (export), STEP/VRML models (import) | both | M9: AP214 export done (`export.step`); model import later |
 | Simulation | SPICE netlist (ngspice dialect) | export | M8 |
 | Documentation | SVG, PNG, PDF | export | M3/M4 |
 | KiCad | `.kicad_pcb`, `.kicad_sch`, `.kicad_sym`, `.kicad_mod`, netlist | import + export | M2–M7, see below |
@@ -41,8 +41,60 @@ Implemented from the Ucamco Gerber Layer Format Specification (rev. 2026.05) and
 | `-pos.csv` | Designator, value, package, footprint, X/Y in mm from the outline's lower-left corner, rotation (placement, CCW from the IPC-7351 zero orientation), side; DNP excluded |
 | `.d356` | IPC-D-356A, `UNITS CUST 1`: `327` SMD pads, `317` plated holes and vias (mid-net `M`, tented `S3`), `367` non-plated holes |
 
-Gerber, drill and IPC-D-356A files use board coordinates unchanged (`.SameCoordinates`). Fab-specific names,
+`export.all` also writes `<project>-ipc2581.xml` (below). Gerber, drill, IPC-D-356A and IPC-2581 files use
+board coordinates unchanged (`.SameCoordinates`). Fab-specific names,
 origins and rotation offsets are applied by fab profiles at export (D12).
+
+### Exchange outputs: IPC-2581, STEP, IDF (M9)
+
+All three are deterministic (fixed or no dates), in board coordinates (mm, Y up), and written by hand from the
+published specifications with no new dependency. Algorithm code: `src/fabout/ipc2581.rs` and `src/mcad/`
+(STEP and IDF share the outline loops, hole list and component bodies built in `mcad`).
+
+**IPC-2581 revision C** (`export.ipc2581 [path] [--mask-expansion]`, default `out/fab/<project>-ipc2581.xml`,
+also part of `export.all`). One XML file, namespace `http://webstds.ipc.org/2581`, function mode `ASSEMBLY`:
+
+| Section | Content |
+|---|---|
+| `Content` | step and layer references, BOM reference; `DictionaryLineDesc` (`LINE_<width>`, round ends) and `DictionaryStandard` (`Circle`, `RectCenter`, `RectRound`, `Oval`; ids name shape and size: `RECT_1X0.6`, `RRECT_0.565X0.57R0.14125`) |
+| `LogisticHeader` | sender role, enterprise and person as placeholders (`UNKNOWN`): projects store no people or companies |
+| `Bom` | one `BomItem` per BOM line (part ID as `OEMDesignNumberRef`, quantity, pin count, description), `RefDes` per designator (`populate="false"` for DNP), value, manufacturer, MPN and package as `Textual` characteristics |
+| `Ecad/CadData` | layers in stack order (`F.SilkS`, `F.Paste`, `F.Mask`, copper and `DielectricN`, ..., `B.SilkS`), one `DRILL_<from>_<to>` layer per copper span with its `Span`; `Stackup` with copper thicknesses and dielectrics sharing the rest of the board thickness (`whereMeasured="METAL"`) |
+| `Step` | `Datum`, `Profile` (outline polygon with `PolyStepCurve` arcs, `Cutout`s), a `Package` per footprint (courtyard outline, pick-up point, `LandPattern` pads, body rectangle as `AssemblyDrawing`, `Pin`s), a `Component` per placement (`Xform` rotation, `mirror` on the bottom: mirror about Y, then counter-clockwise rotation), `LogicalNet`s (component pins by pad number), and `LayerFeature`s |
+| Features | copper: pads, vias (`padUsage="VIA"`), tracks (`Line`, `Arc`) and zone fills (`Contour` with `Cutout`s) grouped in a `Set` per net; mask: pad openings grown by the mask expansion (vias tented); paste: SMD pads or exposed-pad windows; legend: footprint silk, designators and board graphics as strokes (`Polyline`, `Line`, `Arc`), not clipped at mask openings; drill: `Hole`s with `PLATED`, `NONPLATED` or `VIA` |
+
+Left out: `HistoryRecord` and `Avl` (both require dates; the AVL would repeat the BOM's MPNs), `PadStackDef`
+(pads are written per layer instead), material `Spec`s (the project has requirements, not materials), board
+graphics on copper, mask and paste layers. The schema (`IPC-2581C.xsd`) is published by IPC at
+`webstds.ipc.org` (not reachable without access at the time of writing) and is not shipped: its distribution terms
+are IPC's. Element order follows the published revision C structure and `kicad-cli pcb export ipc2581` output
+(observed, as an oracle). Tests parse the file back and check structure, references and counts against the
+board; `CADLAB_IPC2581_XSD=/path/IPC-2581C.xsd` with `CADLAB_ORACLES=1` validates with `xmllint` (docs/TESTING.md).
+
+**STEP** (`export.step [path] [--vias] [--components false]`, default `out/mcad/<project>.step`): ISO 10303-21,
+schema AP214 (`AUTOMOTIVE_DESIGN`), millimeters. An assembly product named after the project holds the board part
+and one body part per footprint, instanced per designator (`NEXT_ASSEMBLY_USAGE_OCCURRENCE` with the designator as
+name, placement through `ITEM_DEFINED_TRANSFORMATION`). Geometry is exact B-rep (`MANIFOLD_SOLID_BREP`): the board
+is the outline extruded from Z = 0 to the stackup thickness, with planar faces for straight edges, cylindrical
+faces for arcs, outline cutouts and drilled holes (pad and mounting holes; vias with `vias`). Holes crossing the
+edge, a cutout or a larger hole are not cut (`export.step_hole_skipped`, with location). Bodies are boxes from
+the footprint's package dimensions (`body`: width, length, height; generated footprints have them), centered on
+the footprint origin, on the top face, or turned over under the bottom face for bottom-side parts. Components
+without a body are reported (`export.no_body`); DNP parts are left out. Colors: green board, dark gray bodies.
+The header time stamp is fixed (`1970-01-01T00:00:00`).
+
+**IDF 3.0** (`export.idf [dir] [--vias] [--components false]`, default `out/mcad/`): `<project>.emn` (board:
+`.HEADER` with units `MM`; `.BOARD_OUTLINE ECAD` with the thickness and loops of points, label 0 the outline
+counter-clockwise, then cutouts clockwise, arcs as included angles, circles as center + point at 360°;
+`.DRILLED_HOLES` with `PTH`/`NPTH`, associated designator or `BOARD`, type `PIN`/`VIA`/`MTG`, owner `ECAD`;
+`.PLACEMENT` with geometry = footprint name, part number = MPN or part ID, designator, position, rotation,
+`TOP`/`BOTTOM`, `PLACED`) and `<project>.emp` (library: one `.ELECTRICAL` outline per geometry and part number,
+the body rectangle with its height). Bottom-side parts: the library outline mirrored about its Y axis, then
+rotated counter-clockwise, as cadlab places them (for the centered body rectangles any mirror axis gives the
+same result). Header dates are fixed (`1970/01/01.00:00:00`).
+
+Not yet: package bodies other than boxes (pins, chamfers, cylinders), STEP/VRML model import (M9), AP242,
+IDF `.PLACE_OUTLINE`/keep-outs and the IDX (EDMD) exchange.
 
 Design standards used as rule and geometry sources (from the standards themselves, never from another tool's
 implementation):

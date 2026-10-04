@@ -208,7 +208,7 @@ fn kind_key(kind: &FileKind, layers: usize) -> Option<(&'static str, [usize; 4])
             (k, [0, 0, *from, *to])
         }
         FileKind::Ipc356 => ("ipc356", [0; 4]),
-        FileKind::DrillGerber { .. } | FileKind::PickPlace => return None,
+        FileKind::DrillGerber { .. } | FileKind::PickPlace | FileKind::Ipc2581 => return None,
     })
 }
 

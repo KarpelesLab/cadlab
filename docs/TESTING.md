@@ -140,6 +140,18 @@ sometimes drops wiring from its session while reporting a complete route; those 
 ROUTER.md). Not in the CI oracle job, which installs no Java. Example:
 `CADLAB_ORACLES=1 CADLAB_ORACLE_FREEROUTING=$HOME/freerouting.jar cargo test --test specctra -- --nocapture`.
 
+### Exchange outputs (`tests/exchange.rs`)
+
+IPC-2581, STEP and IDF have golden files (`tests/golden/exchange/`) and structural checks that parse the files
+back: a minimal XML reader (references to dictionaries and layers resolve, counts match the board), a Part 21
+reader (every `#ref` defined, every B-rep shell closed: each edge used once in each direction) and an IDF section
+reader. Two optional oracles skip when the tool is missing even with `CADLAB_ORACLES=1`:
+`CADLAB_ORACLE_FREECAD` (`freecadcmd`, e.g. `/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd`) must
+read the STEP file as valid closed solids whose volumes match the outline minus cutouts and holes, and the bodies'
+boxes; `CADLAB_IPC2581_XSD` (a local copy of IPC's `IPC-2581C.xsd`, not shipped) validates the XML with
+`xmllint --schema`. Example:
+`CADLAB_ORACLES=1 CADLAB_ORACLE_FREECAD=/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd cargo test --test exchange`.
+
 ### Oracle availability
 
 - Oracle tests are behind an env flag (`CADLAB_ORACLES=1`). Without it they skip with a message; with it, a

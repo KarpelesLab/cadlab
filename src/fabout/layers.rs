@@ -311,7 +311,7 @@ fn paste(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
 }
 
 /// A stroked legend element.
-enum Stroke {
+pub(crate) enum Stroke {
     Line { pts: Vec<Xy>, width: i64 },
     Circle { c: Xy, r: i64, width: i64, filled: bool },
 }
@@ -361,7 +361,7 @@ fn overlaps(a: (Xy, Xy), b: (Xy, Xy)) -> bool {
 }
 
 /// Text as strokes: centered on `at`, cap height `size`, rotated, mirrored for the bottom side.
-fn text_strokes(text: &str, at: Point, size: Nm, rotation: Angle, mirror: bool, width: i64) -> Vec<Stroke> {
+pub(crate) fn text_strokes(text: &str, at: Point, size: Nm, rotation: Angle, mirror: bool, width: i64) -> Vec<Stroke> {
     let (s, c) = rotation.to_rad_f64().sin_cos();
     font::layout(text, (0.0, 0.0), size.0 as f64, HAlign::Center, VAlign::Middle, 0)
         .into_iter()

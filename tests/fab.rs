@@ -201,7 +201,7 @@ fn export_commands() {
     let (dir, r, mut s) = tiny_board();
     let o = exec(&r, &mut s, "export.all", json!({}));
     let files = o["output"]["files"].as_array().unwrap();
-    assert_eq!(files.len(), 11 + 1 + 2);
+    assert_eq!(files.len(), 11 + 1 + 2 + 1, "Gerber, drill, pick-and-place, IPC-D-356A, IPC-2581");
     let root = dir.path().join("p");
     for f in files {
         let path = Path::new(f["path"].as_str().unwrap());

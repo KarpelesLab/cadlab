@@ -27,7 +27,7 @@ M1 added `value` (exact electrical quantities), `landpattern` (IPC-7351B footpri
 `config` (user settings) and `userlib` (shared libraries outside projects, D19). M7 added `sexpr` (S-expression
 reader for KiCad files) and `netlist::import` (D27). Modules to come: `erc` (M2),
 `schematic` and `render` (M3), `board`, `drc`, `io` and `fab` (M4), `router` and `specctra`
-(DSN/SES exchange) (M5). Spin-off candidates: the
+(DSN/SES exchange) (M5), `mcad` (STEP and IDF export, M9). Spin-off candidates: the
 router, Gerber/Excellon I/O, the footprint generator (`landpattern`).
 
 Dependency direction between modules is strictly downward, and enforced by review:

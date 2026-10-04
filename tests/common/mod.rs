@@ -29,6 +29,11 @@ pub mod oracle {
         Gerbv,
         /// ngspice: SPICE netlist checks.
         Ngspice,
+        /// FreeCAD's command-line interpreter: reads our STEP files (optional: tests skip
+        /// when it is missing).
+        FreeCad,
+        /// xmllint: XML schema validation (optional, with an IPC-2581 schema the user supplies).
+        Xmllint,
     }
 
     impl Oracle {
@@ -39,6 +44,8 @@ pub mod oracle {
                 Oracle::Freerouting => ("freerouting", "CADLAB_ORACLE_FREEROUTING"),
                 Oracle::Gerbv => ("gerbv", "CADLAB_ORACLE_GERBV"),
                 Oracle::Ngspice => ("ngspice", "CADLAB_ORACLE_NGSPICE"),
+                Oracle::FreeCad => ("freecadcmd", "CADLAB_ORACLE_FREECAD"),
+                Oracle::Xmllint => ("xmllint", "CADLAB_ORACLE_XMLLINT"),
             }
         }
     }
@@ -64,6 +71,21 @@ pub mod oracle {
                 panic!("{ENABLE_VAR}=1 but oracle `{name}` was not found (install it or set {var})")
             }
         }
+    }
+
+    /// Like [`require`] for optional oracles: `None` (with a message) when oracle tests are
+    /// disabled or the tool is not installed, instead of panicking.
+    pub fn optional(o: Oracle) -> Option<PathBuf> {
+        if !enabled() {
+            eprintln!("skipping: oracle tests disabled (set {ENABLE_VAR}=1)");
+            return None;
+        }
+        let (name, var) = o.program();
+        let found = std::env::var_os(var).map(PathBuf::from).or_else(|| find_in_path(name));
+        if found.is_none() {
+            eprintln!("skipping: optional oracle `{name}` not found (set {var})");
+        }
+        found
     }
 
     fn find_in_path(name: &str) -> Option<PathBuf> {

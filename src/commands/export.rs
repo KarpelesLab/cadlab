@@ -1,5 +1,6 @@
 //! `export.*`: generic manufacturing outputs (Gerber X2/X3, XNC drill, pick-and-place,
-//! IPC-D-356A) and the Specctra DSN design for external autorouters. Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
+//! IPC-D-356A, IPC-2581), mechanical CAD outputs (STEP, IDF) and the Specctra DSN design for
+//! external autorouters. Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
 
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::Diagnostic;
 use crate::fabout::{self, Options, OutFile};
+use crate::mcad;
 use crate::model::Project;
 use crate::refs::ObjectRef;
 use crate::units::Nm;
@@ -18,7 +20,10 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Drill>()
         .register::<Pnp>()
         .register::<Ipc356>()
+        .register::<Ipc2581>()
         .register::<All>()
+        .register::<Step>()
+        .register::<Idf>()
         .register::<ExportDsn>();
 }
 
@@ -246,7 +251,41 @@ impl Command for Ipc356 {
     }
 }
 
-/// Write every generic manufacturing output: Gerber X2/X3, XNC drill, pick-and-place, IPC-D-356A.
+/// Write the IPC-2581 revision C XML: BOM, stackup, layers, outline, packages, components,
+/// nets and every copper, mask, paste, legend and drill feature in one file.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Ipc2581 {
+    /// Output file (default `out/fab/<project>-ipc2581.xml`, relative to the project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Solder mask opening growth per side (default 0: openings equal pads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_expansion: Option<Nm>,
+}
+
+impl Command for Ipc2581 {
+    const NAME: &'static str = "export.ipc2581";
+    const SUMMARY: &'static str = "Write the IPC-2581 revision C XML (fab and assembly data in one file)";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = Exported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Exported, CommandError> {
+        check_board(ctx)?;
+        check_placed(ctx)?;
+        let f = fabout::ipc2581::document(ctx.project()?, &options(self.mask_expansion));
+        let path = resolve(ctx, self.path.as_deref(), Path::new(DEFAULT_DIR).join(&f.name));
+        write(vec![(path, f)])
+    }
+
+    fn summarize(o: &Exported) -> String {
+        summary(o)
+    }
+}
+
+/// Write every generic manufacturing output: Gerber X2/X3, XNC drill, pick-and-place, IPC-D-356A,
+/// IPC-2581.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct All {
@@ -260,7 +299,8 @@ pub struct All {
 
 impl Command for All {
     const NAME: &'static str = "export.all";
-    const SUMMARY: &'static str = "Write all generic fab outputs (Gerber X2/X3, drill, pick-and-place, IPC-D-356A)";
+    const SUMMARY: &'static str =
+        "Write all generic fab outputs (Gerber X2/X3, drill, pick-and-place, IPC-D-356A, IPC-2581)";
     const KIND: CommandKind = CommandKind::Query;
     const POSITIONAL: &'static [&'static str] = &["dir"];
     type Output = Exported;
@@ -269,12 +309,188 @@ impl Command for All {
         check_board(ctx)?;
         check_placed(ctx)?;
         check_drills(ctx.project()?)?;
-        let files = fabout::all(ctx.project()?, &options(self.mask_expansion));
+        let o = options(self.mask_expansion);
+        let p = ctx.project()?;
+        let mut files = fabout::all(p, &o);
+        files.push(fabout::ipc2581::document(p, &o));
         write_dir(ctx, self.dir.as_deref(), files)
     }
 
     fn summarize(o: &Exported) -> String {
         summary(o)
+    }
+}
+
+/// Default directory of mechanical CAD outputs, relative to the project.
+fn mcad_dir() -> PathBuf {
+    Path::new("out").join("mcad")
+}
+
+fn mcad_options(vias: bool, components: Option<bool>) -> mcad::Options {
+    mcad::Options { vias, components: components.unwrap_or(true), ..mcad::Options::default() }
+}
+
+fn no_outline() -> CommandError {
+    CommandError::conflict("board.no_outline", "the board has no outline")
+        .with_hint("set one with `board.outline` before exporting a 3D or MCAD model")
+}
+
+fn report_no_body(ctx: &mut Context<'_>, refdes: Vec<String>) {
+    for r in refdes {
+        ctx.report(
+            Diagnostic::warning("export.no_body", format!("`{r}` has no package body dimensions and is left out"))
+                .with_subject(ObjectRef::Name(r))
+                .with_hint(
+                    "use a footprint generated from a package (`footprint.generate`), which records the body size and height",
+                ),
+        );
+    }
+}
+
+/// Appends `.ext` unless the path already has that extension.
+fn with_ext(path: PathBuf, ext: &str) -> PathBuf {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)) {
+        return path;
+    }
+    let mut s = path.into_os_string();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
+/// Write the board as a STEP (AP214) assembly for MCAD: the board solid (outline extruded to
+/// the stackup thickness, minus cutouts and drilled holes) and component bodies as boxes from
+/// the package dimensions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Step {
+    /// Output file (default `out/mcad/<project>.step`, relative to the project; `.step` is
+    /// appended if missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Also drill the vias (default: component and mounting holes only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vias: bool,
+    /// Include component bodies (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<bool>,
+}
+
+/// Result of `export.step`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct StepExported {
+    /// File written.
+    pub path: String,
+    /// Component bodies written.
+    pub bodies: usize,
+    /// Holes cut in the board.
+    pub holes: usize,
+    /// Holes left out (crossing the edge, a cutout or another hole).
+    pub skipped_holes: usize,
+}
+
+impl Command for Step {
+    const NAME: &'static str = "export.step";
+    const SUMMARY: &'static str = "Write the board and component bodies as a STEP AP214 assembly";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = StepExported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<StepExported, CommandError> {
+        check_placed(ctx)?;
+        let p = ctx.project()?;
+        let stem = fabout::file_stem(&p.manifest().name);
+        let out = mcad::step::export(p, &mcad_options(self.vias, self.components)).ok_or_else(no_outline)?;
+        let path = resolve(ctx, self.path.as_deref(), mcad_dir().join(format!("{stem}.step")));
+        let path = with_ext(path, "step");
+        let file = OutFile { name: String::new(), function: "STEP".into(), content: out.content };
+        let written = write(vec![(path, file)])?;
+        for h in &out.skipped_holes {
+            ctx.report(
+                Diagnostic::warning(
+                    "export.step_hole_skipped",
+                    format!(
+                        "a {} hole crosses the board edge, a cutout or another hole and is not cut in the 3D model",
+                        h.diameter
+                    ),
+                )
+                .at(h.at)
+                .with_hint("move the hole inside the outline, clear of cutouts and other holes (`drc.run` reports it)"),
+            );
+        }
+        report_no_body(ctx, out.no_body);
+        Ok(StepExported {
+            path: written.files[0].path.clone(),
+            bodies: out.bodies,
+            holes: out.holes,
+            skipped_holes: out.skipped_holes.len(),
+        })
+    }
+
+    fn summarize(o: &StepExported) -> String {
+        let mut s = format!("wrote {} ({} bodies, {} holes)", o.path, o.bodies, o.holes);
+        if o.skipped_holes > 0 {
+            s.push_str(&format!(", {} hole(s) not cut", o.skipped_holes));
+        }
+        s
+    }
+}
+
+/// Write IDF 3.0 board (`.emn`) and library (`.emp`) files for MCAD: outline, cutouts,
+/// drilled holes and component placements with body outlines and heights.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Idf {
+    /// Output directory (default out/mcad, relative to the project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+    /// Also list the vias as drilled holes (default: component and mounting holes only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vias: bool,
+    /// Include component placements (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<bool>,
+}
+
+/// Result of `export.idf`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct IdfExported {
+    /// Files written (board, library).
+    pub files: Vec<WrittenFile>,
+    /// Components placed.
+    pub components: usize,
+    /// Drilled holes listed.
+    pub holes: usize,
+}
+
+impl Command for Idf {
+    const NAME: &'static str = "export.idf";
+    const SUMMARY: &'static str = "Write IDF 3.0 board and library files (.emn, .emp) for MCAD";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["dir"];
+    type Output = IdfExported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<IdfExported, CommandError> {
+        check_placed(ctx)?;
+        let p = ctx.project()?;
+        let stem = fabout::file_stem(&p.manifest().name);
+        let out = mcad::idf::export(p, &mcad_options(self.vias, self.components)).ok_or_else(no_outline)?;
+        let files = vec![
+            OutFile { name: format!("{stem}.emn"), function: "IdfBoard".into(), content: out.board },
+            OutFile { name: format!("{stem}.emp"), function: "IdfLibrary".into(), content: out.library },
+        ];
+        let dir = resolve(ctx, self.dir.as_deref(), mcad_dir());
+        let written = write(files.into_iter().map(|f| (dir.join(&f.name), f)).collect())?;
+        report_no_body(ctx, out.no_body);
+        Ok(IdfExported { files: written.files, components: out.placed, holes: out.holes })
+    }
+
+    fn summarize(o: &IdfExported) -> String {
+        let mut s = format!("wrote {} file(s) ({} components, {} holes)", o.files.len(), o.components, o.holes);
+        for f in &o.files {
+            s.push_str(&format!("\n  {} ({})", f.path, f.function));
+        }
+        s
     }
 }
 

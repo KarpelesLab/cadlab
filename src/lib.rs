@@ -46,6 +46,7 @@ pub mod geom;
 pub mod id;
 pub mod kicad_pcb;
 pub mod landpattern;
+pub mod mcad;
 pub mod model;
 pub mod netlist;
 pub mod partspec;

@@ -173,9 +173,14 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] Isometric 3D PNG render: board, layers, extruded package bodies generated from package dimensions
   (`render.board3d`, D30)
 - [ ] STEP/VRML model import for accurate bodies
-- [ ] STEP export of the assembled board
-- [ ] IPC-2581 rev C output; ODB++ if spec terms allow
-- [ ] IDF 3.0 / IDX export for MCAD
+- [x] STEP export of the assembled board (`export.step`: AP214, exact B-rep board with cutouts and holes, box
+      bodies from package dimensions as an assembly; FreeCAD oracle; D31)
+- [x] IPC-2581 rev C output (`export.ipc2581`, also in `export.all`: BOM, stackup, profile, packages,
+      components, logical nets, copper/mask/paste/legend/drill features; D31)
+- [ ] ODB++ if spec terms allow
+- [x] IDF 3.0 export for MCAD (`export.idf`: `.emn` board with outline, cutouts, holes and placement, `.emp`
+      library of body outlines; D31)
+- [ ] IDX (ProSTEP EDMD) export
 
 ---
 
