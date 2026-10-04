@@ -141,11 +141,16 @@ Details in [ROUTER.md](ROUTER.md).
 ## M6 — Autorouter v2: freerouting parity (XL)
 
 - [ ] Gridless, shape-based router (free-space decomposition, expansion rooms)
-- [ ] Any-angle / 45° optimized output, arc support
-- [ ] Push-and-shove for incremental and interactive (API-driven) routing
-- [ ] BGA/fine-pitch fanout, escape routing
-- [ ] Parallel routing (independent regions/nets) with deterministic merge
-- [ ] Benchmark suite: completion rate, vias, wirelength, runtime vs freerouting
+- [ ] Any-angle / 45° optimized output, arc support (done: 45° pull-tight over longer runs, mitered corners,
+      a second optimization round, escape junctions smoothed, optional any-angle shortcuts; to do: arcs)
+- [ ] Push-and-shove for incremental and interactive (API-driven) routing (done: `route.connection` reroutes
+      the unlocked nets in its way and keeps the result only if they lose nothing; to do: segment-level shove)
+- [x] BGA/fine-pitch fanout, escape routing: dog-bone quadrant fanout of area arrays, staggered escapes for
+      off-grid fine-pitch pads, `route.fanout` (DECISIONS D28)
+- [x] Parallel routing (independent regions/nets) with deterministic merge: level-scheduled batches of nets
+      with disjoint regions, identical for any thread count
+- [x] Benchmark suite: completion rate, vias, wirelength, runtime vs freerouting
+      (`cargo run --release --example route_bench`, results in ROUTER.md)
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 

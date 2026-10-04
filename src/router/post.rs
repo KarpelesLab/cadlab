@@ -2,10 +2,10 @@
 //! and corner chamfers. Every change is validated with exact clearance checks against all
 //! other copper ([`Checker`]), so it can never introduce a violation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::engine::{Engine, NetRoute};
-use super::geo::{BoxF, P};
+use super::geo::{BoxF, P, point_seg_d2};
 use super::index::{Checker, Index, Item};
 
 /// A polyline on one layer.
@@ -35,14 +35,23 @@ fn key(p: P) -> (i64, i64) {
 
 /// Converts a net's wires to polylines and vias (one vertex per grid node).
 pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
-    // Junctions: wire ends (and stub anchors) per layer.
-    let mut pins: BTreeSet<(usize, (i64, i64))> = BTreeSet::new();
+    // Junctions: wire ends per layer, with the number of wire ends there.
+    let mut pins: BTreeMap<(usize, (i64, i64)), usize> = BTreeMap::new();
+    let end_key = |n: u32| {
+        let (s, _, _) = e.unpack(n);
+        (e.slots[s], key(e.node_pos(n)))
+    };
     for w in &nr.wires {
         for &n in [w.nodes.first(), w.nodes.last()].into_iter().flatten() {
-            let (s, _, _) = e.unpack(n);
-            pins.insert((e.slots[s], key(e.node_pos(n))));
+            *pins.entry(end_key(n)).or_default() += 1;
         }
     }
+    // A wire end with a stub is free to move unless another wire ends there too.
+    let shared = |w: &super::engine::Wire, n: u32| {
+        let k = end_key(n);
+        let own = [w.nodes.first(), w.nodes.last()].into_iter().flatten().filter(|&&m| end_key(m) == k).count();
+        pins.get(&k).copied().unwrap_or(0) > own
+    };
     let mut g = NetGeom::default();
     for (wi, w) in nr.wires.iter().enumerate() {
         let mut cur: Option<Path> = None;
@@ -53,7 +62,7 @@ pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
             match &mut cur {
                 Some(path) if path.layer == layer => {
                     path.pts.push(p);
-                    path.pinned.push(pins.contains(&(layer, key(p))));
+                    path.pinned.push(pins.contains_key(&(layer, key(p))));
                 }
                 _ => {
                     if let Some(done) = cur.take() {
@@ -62,24 +71,30 @@ pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
                     }
                     let mut path = Path { layer, pts: vec![], pinned: vec![], wire: wi };
                     if k == 0
-                        && let Some(st) = w.start
+                        && let Some(st) = &w.start
                     {
-                        path.pts.push(st);
-                        path.pinned.push(true);
+                        // Anchor pinned; an escape's bend may move.
+                        for (i, &q) in st.iter().enumerate().rev() {
+                            path.pts.push(q);
+                            path.pinned.push(i + 1 == st.len());
+                        }
                     }
                     path.pts.push(p);
-                    path.pinned.push(true);
+                    path.pinned.push(k > 0 || w.start.is_none() || shared(w, n));
                     cur = Some(path);
                 }
             }
         }
         if let Some(mut path) = cur.take() {
+            let last_node = *w.nodes.last().expect("node");
             if let Some(last) = path.pinned.last_mut() {
-                *last = true;
+                *last = w.end.is_none() || shared(w, last_node) || w.nodes.len() == 1;
             }
-            if let Some(en) = w.end {
-                path.pts.push(en);
-                path.pinned.push(true);
+            if let Some(en) = &w.end {
+                for (i, &q) in en.iter().enumerate() {
+                    path.pts.push(q);
+                    path.pinned.push(i + 1 == en.len());
+                }
             }
             g.paths.push(path);
         }
@@ -96,6 +111,51 @@ pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
     g.vias.sort_by(|a, b| key(a.0).cmp(&key(b.0)).then(a.1.cmp(&b.1)));
     g.vias.dedup_by(|a, b| key(a.0) == key(b.0));
     g
+}
+
+/// Makes an escape (`pts` from the pad center, on stackup layer `layer`, existing copper of
+/// the net) part of the one path that attaches to it, so that the optimizer can smooth the
+/// junction. Returns whether it was absorbed; it is not when no path or several paths touch
+/// it (the escape copper then stays as it is).
+pub(crate) fn absorb(g: &mut NetGeom, layer: usize, pts: &[P]) -> bool {
+    let on = |q: P| pts.windows(2).position(|s| point_seg_d2(q, s[0], s[1]) < 4.0);
+    let mut hits = Vec::new();
+    for (pi, p) in g.paths.iter().enumerate() {
+        for (k, q) in p.pts.iter().enumerate() {
+            if let Some(seg) = on(*q) {
+                hits.push((pi, k, seg));
+            }
+        }
+    }
+    let [(pi, k, seg)] = hits[..] else { return false };
+    let p = &mut g.paths[pi];
+    if p.layer != layer || (k != 0 && k + 1 != p.pts.len()) {
+        return false;
+    }
+    if k != 0 {
+        p.pts.reverse();
+        p.pinned.reverse();
+    }
+    let q = p.pts[0];
+    let junction = g.vias.iter().any(|v| key(v.0) == key(q));
+    let mut new_pts: Vec<P> = pts[..=seg].to_vec();
+    let mut new_pin: Vec<bool> = (0..=seg).map(|i| i == 0).collect();
+    if new_pts.last().is_some_and(|l| l.dist(q) < 1.0) {
+        new_pts.pop();
+        new_pin.pop();
+    }
+    p.pinned[0] = junction;
+    new_pts.extend(p.pts.iter().copied());
+    new_pin.extend(p.pinned.iter().copied());
+    if new_pts.len() < 2 {
+        return false;
+    }
+    if let Some(l) = new_pin.last_mut() {
+        *l = true;
+    }
+    p.pts = new_pts;
+    p.pinned = new_pin;
+    true
 }
 
 /// Inserts a net's geometry in the index.
@@ -224,6 +284,9 @@ fn len(pts: &[P]) -> f64 {
     pts.windows(2).map(|w| w[0].dist(w[1])).sum()
 }
 
+/// Most vertices a pull-tight or shortcut step replaces at once.
+const WINDOW: usize = 24;
+
 /// 45° pull-tight: replaces runs of vertices by a shorter octilinear connection when legal.
 fn pull_tight(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
     let mut any = false;
@@ -231,7 +294,7 @@ fn pull_tight(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
     while i + 2 < p.pts.len() {
         // Furthest j with no pinned vertex strictly between i and j.
         let mut jmax = i + 2;
-        while jmax + 1 < p.pts.len() && jmax < i + 10 && !p.pinned[jmax - 1] {
+        while jmax + 1 < p.pts.len() && jmax < i + WINDOW && !p.pinned[jmax - 1] {
             jmax += 1;
         }
         let mut done = false;
@@ -300,8 +363,40 @@ fn chamfer(p: &mut Path, net: u32, ck: &Checker<'_>, g: f64) {
     }
 }
 
-/// Post-processes a net's polylines in place.
-pub(crate) fn optimize(g: &mut NetGeom, net: u32, ck: &Checker<'_>, grid: f64, passes: usize) {
+/// Any-angle shortcuts: replaces a run of vertices by one straight segment when it is shorter
+/// and legal (furthest reachable vertex first).
+fn shortcut(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
+    let mut any = false;
+    let mut i = 0;
+    while i + 2 < p.pts.len() {
+        let mut jmax = i + 2;
+        while jmax + 1 < p.pts.len() && jmax < i + WINDOW && !p.pinned[jmax - 1] {
+            jmax += 1;
+        }
+        let mut done = false;
+        for j in (i + 2..=jmax).rev() {
+            if (i + 1..j).any(|k| p.pinned[k]) {
+                continue;
+            }
+            let (a, b) = (p.pts[i], p.pts[j]);
+            if a.dist(b) < len(&p.pts[i..=j]) - 1.0 && ck.seg(p.layer, a, b, net).is_none() {
+                p.pts.drain(i + 1..j);
+                p.pinned.drain(i + 1..j);
+                any = true;
+                done = true;
+                break;
+            }
+        }
+        if !done {
+            i += 1;
+        }
+    }
+    any
+}
+
+/// Post-processes a net's polylines in place: collinear merging, 45° pull-tight (`passes`
+/// rounds), 90° corners mitered, and with `any_angle` straight shortcuts at any angle.
+pub(crate) fn optimize(g: &mut NetGeom, net: u32, ck: &Checker<'_>, grid: f64, passes: usize, any_angle: bool) {
     for p in &mut g.paths {
         merge(p);
         for _ in 0..passes {
@@ -312,5 +407,13 @@ pub(crate) fn optimize(g: &mut NetGeom, net: u32, ck: &Checker<'_>, grid: f64, p
         }
         chamfer(p, net, ck, grid);
         merge(p);
+        if any_angle {
+            for _ in 0..passes {
+                if !shortcut(p, net, ck) {
+                    break;
+                }
+                merge(p);
+            }
+        }
     }
 }

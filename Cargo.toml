@@ -17,9 +17,9 @@ cli = ["dep:clap", "dep:rpassword"]
 net = ["dep:ureq"]
 # PNG rendering (SVG needs no extra dependency).
 png = ["dep:tiny-skia"]
-# Multi-threaded polygon booleans (polyclip's rayon feature; results are identical for any
-# thread count). Zone fills of large boards are about a quarter faster.
-parallel = ["polyclip/rayon"]
+# Multi-threaded polygon booleans (polyclip's rayon feature) and autorouting of independent nets;
+# results are identical for any thread count. Zone fills of large boards are about a quarter faster.
+parallel = ["polyclip/rayon", "dep:rayon"]
 
 [[bin]]
 name = "cadlab"
@@ -39,6 +39,7 @@ strsim = "0.11"
 thiserror = "2"
 toml = "1.1"
 
+rayon = { version = "1.12", optional = true }
 clap = { version = "4.6", features = ["derive", "string"], optional = true }
 rpassword = { version = "7.5", optional = true }
 tiny-skia = { version = "0.12", optional = true }
@@ -48,6 +49,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate-flate2-z
 [dev-dependencies]
 insta = { version = "1.49", features = ["json"] }
 proptest = "1"
+rayon = "1.12"
 tempfile = "3"
 
 [lints.rust]

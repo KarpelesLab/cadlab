@@ -10,20 +10,26 @@
 //! 2. **Grid** (`grid`): pitch (track width + clearance) / 2 of the finest routed net class,
 //!    aligned with the most pad centers; static legality maps per rule profile, sampled at half
 //!    the pitch with an inflation margin that makes the sampling exact.
+//!    **Fanout** (`fanout`, on that grid, before routing): dog-bone vias for BGA balls,
+//!    staggered escapes for off-grid fine-pitch pads, planned exactly, then existing copper.
 //! 3. **Search** (`engine`): A* with 8 directions, costs for length, bends (45° cheap, 90°
 //!    dearer, sharper forbidden), vias, wrong-way moves per layer (alternating horizontal /
 //!    vertical preference) and congestion; multi-source/multi-target so nets grow as trees.
 //! 4. **Negotiated congestion** (PathFinder, McMurchie and Ebeling 1995): route everything
 //!    allowing overlaps at a cost, raise history costs on overused points, rip up and reroute
-//!    the nets involved until nothing is shared; then legalize what still conflicts.
-//! 5. **Post-processing** (`post`): via reduction, collinear merging, 45° pull-tight and
-//!    chamfers, each validated exactly against all other copper.
+//!    the nets involved until nothing is shared; then legalize what still conflicts and retry
+//!    failures by rerouting the nets in their way. Nets with disjoint regions are routed in
+//!    batches (on rayon threads with the `parallel` feature); the batches depend only on the
+//!    data, so results are identical for any thread count.
+//! 5. **Post-processing** (`post`): via reduction, collinear merging, 45° pull-tight, mitered
+//!    corners and optional any-angle shortcuts, each validated exactly against all other copper.
 //! 6. **Verification**: `crate::drc::check` on the result; any routed item with a DRC error is
 //!    ripped up and reported, so the output never violates the rules silently.
 //!
 //! Deterministic for a given input, options and seed (unless the time budget cuts it short).
 
 mod engine;
+mod fanout;
 mod geo;
 mod grid;
 mod index;
@@ -44,7 +50,7 @@ use crate::model::board::{Track, Via};
 use crate::refs::ObjectRef;
 use crate::units::Nm;
 
-use engine::{Access, Conn, Costs, Engine, FailKind, Island, Mode, NetRoute, Rng};
+use engine::{Access, Conn, Costs, Engine, FailKind, Island, Mode, NetRoute, Rng, Scratch, Stop};
 use geo::{BoxF, P};
 use index::{Blocker, Checker, Index, Item};
 use model::{ObKind, RouterBoard};
@@ -78,6 +84,26 @@ pub struct RouteOptions {
     pub grid: Option<Nm>,
     /// Negotiation iterations (default by effort: 10 / 40 / 120).
     pub max_iterations: Option<usize>,
+    /// Dog-bone fanout of BGA balls and escapes of off-grid fine-pitch pads before routing
+    /// (default on; see [`fanout`]).
+    pub fanout: Option<bool>,
+    /// Allow any-angle shortcuts in post-processing (default: 0°/45°/90° segments only).
+    pub any_angle: bool,
+    /// For [`Scope::Connection`]: when the connection cannot be routed, move the unlocked
+    /// routing of the nets in the way: rip it, route the connection, route those nets again,
+    /// and keep the result only if they end up with no more unrouted connections than before.
+    pub shove: bool,
+}
+
+/// Result of [`fanout`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FanoutResult {
+    /// Stubs from the balls to their vias.
+    pub tracks: Vec<Track>,
+    /// Fanout vias.
+    pub vias: Vec<Via>,
+    /// Pads fanned out (`U1.C3`).
+    pub pads: Vec<String>,
 }
 
 /// What to route.
@@ -178,6 +204,13 @@ pub struct RouteStats {
     pub drc_removed: usize,
     /// Whether the time budget ran out.
     pub budget_exhausted: bool,
+    /// Dog-bone fanout vias (included in `vias`).
+    #[serde(default)]
+    pub fanout_vias: usize,
+    /// Fine-pitch pads routed through an escape (a straight track out of the pad row, then 45°
+    /// onto the grid); part of `tracks`.
+    #[serde(default)]
+    pub escapes: usize,
 }
 
 /// Router output: items to add (IDs allocated in order from the project's allocator) and the
@@ -192,6 +225,16 @@ pub struct RouteResult {
     pub connections: Vec<ConnectionReport>,
     /// Numbers.
     pub stats: RouteStats,
+    /// Existing unlocked tracks to remove (the routing of nets moved out of the way by
+    /// `shove`; their new routing is in `tracks` / `vias`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_tracks: Vec<ObjectId>,
+    /// Existing unlocked vias to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_vias: Vec<ObjectId>,
+    /// Nets rerouted to make room (`shove`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rerouted: Vec<String>,
 }
 
 /// Router errors.
@@ -230,23 +273,155 @@ fn costs(effort: Effort) -> Costs {
 
 /// Routes the connections in `scope`. The project is not modified.
 pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
-    let start = Instant::now();
-    if p.board().outline.contours.is_empty() {
-        return Err(RouteError::NoOutline);
+    let first = route_once(p, scope, opts, hooks)?;
+    if !opts.shove || first.stats.failed == 0 || !matches!(scope, Scope::Connection { .. }) {
+        return Ok(first);
     }
-    let names = p.board().stackup.copper_names();
-    let mut slots: Vec<usize> = Vec::new();
-    for l in &opts.layers {
-        let i = names.iter().position(|n| n == l).ok_or_else(|| RouteError::InvalidLayer(l.clone()))?;
-        if !slots.contains(&i) {
-            slots.push(i);
+    shove(p, scope, opts, hooks, first)
+}
+
+/// Rounds of rip-up and retry after legalization.
+const RETRY_ROUNDS: usize = 3;
+
+/// Negotiation stops when the best iteration is this many iterations old.
+const STAGNATION: usize = 12;
+
+/// Rounds of [`shove`] (each may add the nets found in the way).
+const SHOVE_ROUNDS: usize = 3;
+
+/// Makes room for a connection that failed: rips the unlocked routing of the nets reported in
+/// the way, routes the connection, then routes those nets again around it. Kept only when the
+/// rerouted nets have no more unrouted connections than before; otherwise `first` is returned.
+fn shove(
+    p: &Project,
+    scope: &Scope,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+    mut first: RouteResult,
+) -> Result<RouteResult, RouteError> {
+    let own: BTreeSet<String> = first.connections.iter().map(|c| c.net.clone()).collect();
+    let in_the_way = |r: &RouteResult, set: &mut BTreeSet<String>| {
+        for c in r.connections.iter().filter(|c| c.status == ConnStatus::Failed) {
+            for s in &c.subjects {
+                if let ObjectRef::Net(n) = s
+                    && !own.contains(n)
+                {
+                    set.insert(n.clone());
+                }
+            }
         }
+    };
+    let unrouted =
+        |q: &Project, nets: &BTreeSet<String>| geo_board::ratsnest(q).iter().filter(|l| nets.contains(&l.net)).count();
+    let mut blockers = BTreeSet::new();
+    in_the_way(&first, &mut blockers);
+    let sub = RouteOptions { shove: false, ..opts.clone() };
+    for _ in 0..SHOVE_ROUNDS {
+        if blockers.is_empty() {
+            break;
+        }
+        let mut q = p.clone();
+        let movable = |net: &Option<String>| net.as_ref().is_some_and(|n| blockers.contains(n));
+        let b = q.board_mut();
+        let removed_tracks: Vec<ObjectId> =
+            b.tracks.iter().filter(|t| !t.locked && movable(&t.net)).map(|t| t.id).collect();
+        let removed_vias: Vec<ObjectId> =
+            b.vias.iter().filter(|v| !v.locked && movable(&v.net)).map(|v| v.id).collect();
+        if removed_tracks.is_empty() && removed_vias.is_empty() {
+            break;
+        }
+        b.tracks.retain(|t| !removed_tracks.contains(&t.id));
+        b.vias.retain(|v| !removed_vias.contains(&v.id));
+        (hooks.progress)(0, None, &format!("rerouting {} net(s) in the way", blockers.len()));
+        let conn = route_once(&q, scope, &sub, hooks)?;
+        if conn.stats.failed > 0 {
+            let before = blockers.len();
+            in_the_way(&conn, &mut blockers);
+            if blockers.len() == before {
+                break;
+            }
+            continue;
+        }
+        let apply = |q: &mut Project, r: &RouteResult| {
+            for t in &r.tracks {
+                let id = q.alloc_id();
+                q.board_mut().tracks.push(Track { id, ..t.clone() });
+            }
+            for v in &r.vias {
+                let id = q.alloc_id();
+                q.board_mut().vias.push(Via { id, ..v.clone() });
+            }
+        };
+        apply(&mut q, &conn);
+        let again = route_once(&q, &Scope::Nets(blockers.iter().cloned().collect()), &sub, hooks)?;
+        apply(&mut q, &again);
+        if unrouted(&q, &blockers) > unrouted(p, &blockers) {
+            continue;
+        }
+        let mut out = conn;
+        out.tracks.extend(again.tracks);
+        out.vias.extend(again.vias);
+        out.connections.extend(again.connections);
+        out.removed_tracks = removed_tracks;
+        out.removed_vias = removed_vias;
+        out.rerouted = blockers.into_iter().collect();
+        let st = &mut out.stats;
+        st.connections = out.connections.len();
+        st.routed = out.connections.iter().filter(|c| c.status == ConnStatus::Routed).count();
+        st.failed = st.connections - st.routed;
+        st.completion = (st.routed as f64 * 1000.0 / st.connections.max(1) as f64).round() / 10.0;
+        st.tracks = out.tracks.len();
+        st.vias = out.vias.len();
+        st.length = Nm(out.tracks.iter().map(|t| P::of(t.start).dist(P::of(t.end))).sum::<f64>().round() as i64);
+        return Ok(out);
     }
-    if slots.is_empty() {
-        slots = (0..names.len()).collect();
+    for c in first.connections.iter_mut().filter(|c| c.status == ConnStatus::Failed) {
+        c.hints.push("rerouting the nets in the way did not make room; move parts or rip more routing".into());
     }
-    slots.sort_unstable();
+    Ok(first)
+}
+
+/// One routing run (see [`route`]).
+fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
+    let start = Instant::now();
+    let slots = routing_slots(p, &opts.layers)?;
     (hooks.progress)(0, None, "preparing");
+    // Fanout: planned on the board as it is, then part of the board the router works on.
+    let fan = if opts.fanout != Some(false) && !matches!(scope, Scope::Connection { .. }) {
+        fanout_items(p, scope, &slots, opts, None)?
+    } else {
+        vec![]
+    };
+    let with_fanout;
+    // (track IDs, via ID) of each fanout.
+    let mut fan_ids: Vec<(Vec<ObjectId>, Option<ObjectId>)> = Vec::new();
+    // Escapes: (net name, layer, points, index in `fan_ids`).
+    let mut fan_escapes: Vec<(String, usize, Vec<P>, usize)> = Vec::new();
+    let p: &Project = if fan.is_empty() {
+        p
+    } else {
+        let mut q = p.clone();
+        for mut f in fan {
+            f.tracks_net = f.tracks.first().and_then(|t| t.net.clone());
+            let mut ids = (vec![], None);
+            for mut t in f.tracks {
+                t.id = q.alloc_id();
+                ids.0.push(t.id);
+                q.board_mut().tracks.push(t);
+            }
+            if let Some(mut v) = f.via {
+                v.id = q.alloc_id();
+                ids.1 = Some(v.id);
+                q.board_mut().vias.push(v);
+            }
+            if let (Some((layer, pts)), Some(net)) = (f.escape, f.tracks_net) {
+                fan_escapes.push((net, layer, pts, fan_ids.len()));
+            }
+            fan_ids.push(ids);
+        }
+        with_fanout = q;
+        &with_fanout
+    };
     let items = geo_board::copper_items(p);
     let isl = geo_board::islands(&items);
     let rb = RouterBoard::build(p, &items, &isl);
@@ -260,24 +435,16 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
     for r in &routes {
         active[r.prof] = true;
     }
-    let pitch = opts.grid.map(|g| g.0 as f64).unwrap_or_else(|| {
-        routes
-            .iter()
-            .map(|r| {
-                let k = rb.profiles[r.prof].key;
-                (k.width.0 + k.clear.0) as f64 / 2.0
-            })
-            .fold(f64::MAX, f64::min)
-    });
-    let pitch = if pitch.is_finite() { pitch.round().max(25_000.0) } else { 225_000.0 };
-    let (offx, offy) = alignment(&rb, &routes, pitch);
-    let grid = grid::Grid::new(rb.bbox, pitch, offx, offy);
+    let grid = make_grid(&rb, &routes, opts);
+    let pitch = grid.g;
 
     let budget_end = opts.budget.map(|b| start + b);
     let negotiate_end = opts.budget.map(|b| start + b.mul_f64(0.75));
-    let phase_end = std::cell::Cell::new(negotiate_end);
-    let stop = || (hooks.cancelled)() || phase_end.get().is_some_and(|d| Instant::now() > d);
+    let phase_end = std::sync::Mutex::new(negotiate_end);
+    let stop = || phase_end.lock().expect("deadline").is_some_and(|d| Instant::now() > d);
     let mut eng = Engine::new(&rb, grid, slots.clone(), &active, costs(opts.effort), &stop);
+    let mut sc = eng.scratch();
+    let pool: std::sync::Mutex<Vec<Scratch>> = std::sync::Mutex::new(Vec::new());
 
     // Static index for access stubs and exact checks.
     let reach = reach(&rb);
@@ -314,30 +481,32 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
     let mut order: Vec<usize> = (0..routes.len()).collect();
     let mut reroute: Vec<usize> = order.clone();
     let mut best: Option<Snapshot> = None;
+    let mut best_it = 0;
     let mut exhausted = false;
     for it in 0..max_iter.max(1) {
         stats.iterations = it + 1;
-        for (k, &ri) in reroute.iter().enumerate() {
-            let r = &mut routes[ri];
-            eng.uncommit(r);
-            let res = eng.route_net(r, Mode::Negotiate(pres));
-            eng.commit(r);
-            if res.is_err() {
-                if (hooks.cancelled)() {
-                    return Err(RouteError::Cancelled);
-                }
+        let mut k = 0;
+        for batch in engine::batches(&reroute, &routes) {
+            if (hooks.cancelled)() {
+                return Err(RouteError::Cancelled);
+            }
+            (hooks.progress)(
+                (it * nroutes + k) as u64,
+                None,
+                &format!("iteration {}: routing {}", it + 1, rb.nets[routes[batch[0]].net as usize]),
+            );
+            k += batch.len();
+            if route_batch(&mut eng, &mut routes, &batch, Mode::Negotiate(pres), &pool).is_err() {
                 exhausted = true;
-                for f in r.failed.iter_mut().filter(|f| f.is_none()) {
-                    *f = Some(FailKind::Budget);
+                for &ri in &batch {
+                    let r = &mut routes[ri];
+                    for (ci, f) in r.failed.iter_mut().enumerate() {
+                        if f.is_none() && !r.wires.iter().any(|w| w.conn == ci) {
+                            *f = Some(FailKind::Budget);
+                        }
+                    }
                 }
                 break;
-            }
-            if k % 8 == 0 {
-                (hooks.progress)(
-                    (it * nroutes + k) as u64,
-                    None,
-                    &format!("iteration {}: routing {}", it + 1, rb.nets[r.net as usize]),
-                );
             }
         }
         // Overuse.
@@ -361,8 +530,9 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
                 routes.iter().map(|r| r.wires.clone()).collect(),
                 routes.iter().map(|r| r.failed.clone()).collect(),
             ));
+            best_it = it;
         }
-        if total == 0 || exhausted || stop() {
+        if total == 0 || exhausted || stop() || it - best_it >= STAGNATION {
             exhausted |= total > 0 && stop();
             break;
         }
@@ -411,7 +581,7 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
     }
 
     // ---- legalization: rip what still conflicts, reroute without sharing ----
-    phase_end.set(budget_end);
+    *phase_end.lock().expect("deadline") = budget_end;
     let mut ripped: Vec<usize> = Vec::new();
     loop {
         let conf: Vec<usize> = routes.iter().map(|r| eng.conflicts(r).len()).collect();
@@ -430,8 +600,11 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
     }
     ripped.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length).then(a.cmp(b)));
     for ri in ripped {
+        if (hooks.cancelled)() {
+            return Err(RouteError::Cancelled);
+        }
         let r = &mut routes[ri];
-        let res = eng.route_net(r, Mode::Hard);
+        let res = eng.route_net(&mut sc, r, Mode::Hard);
         eng.commit(r);
         if res.is_err() {
             if (hooks.cancelled)() {
@@ -445,11 +618,80 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
             }
         }
     }
+    // ---- rip-up and retry: a net that still fails takes the room of the nets in its way,
+    // which are routed again around it; kept only when fewer connections fail overall ----
+    for _ in 0..RETRY_ROUNDS {
+        let mut improved = false;
+        let failing: Vec<usize> =
+            (0..routes.len()).filter(|&ri| routes[ri].failed.contains(&Some(FailKind::Congestion))).collect();
+        for fi in failing {
+            if (hooks.cancelled)() {
+                return Err(RouteError::Cancelled);
+            }
+            if stop() {
+                break;
+            }
+            let Some(ci) = routes[fi].failed.iter().position(|f| *f == Some(FailKind::Congestion)) else { continue };
+            let Ok(keys) = eng.blocking_keys(&mut sc, &routes[fi], ci) else { break };
+            let blockers: Vec<usize> = (0..routes.len())
+                .filter(|&j| j != fi && keys.iter().any(|k| routes[j].keys.binary_search(k).is_ok()))
+                .collect();
+            if blockers.is_empty() || blockers.len() > 8 {
+                continue;
+            }
+            let group: Vec<usize> = std::iter::once(fi).chain(blockers.iter().copied()).collect();
+            let fails = |routes: &[NetRoute]| -> usize {
+                group.iter().map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count()).sum()
+            };
+            let before = fails(&routes);
+            let saved: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)> =
+                group.iter().map(|&j| (routes[j].wires.clone(), routes[j].failed.clone())).collect();
+            for &j in &group {
+                eng.uncommit(&mut routes[j]);
+            }
+            let mut ok = true;
+            for &j in &group {
+                ok &= eng.route_net(&mut sc, &mut routes[j], Mode::Hard).is_ok();
+                eng.commit(&mut routes[j]);
+            }
+            if ok && fails(&routes) < before {
+                improved = true;
+                continue;
+            }
+            for (&j, (w, f)) in group.iter().zip(saved) {
+                eng.uncommit(&mut routes[j]);
+                routes[j].wires = w;
+                routes[j].failed = f;
+                eng.commit(&mut routes[j]);
+            }
+            if !ok {
+                break;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
     stats.budget_exhausted = exhausted;
     (hooks.progress)(0, None, "optimizing");
 
     // ---- post-processing ----
     let mut geoms: Vec<post::NetGeom> = routes.iter().map(|r| post::geometry(&eng, r)).collect();
+    // Escapes become part of the path that uses them (fan_ids index → absorbed).
+    let mut absorbed: BTreeSet<usize> = BTreeSet::new();
+    let absorb = |g: &mut post::NetGeom, net: u32, absorbed: &mut BTreeSet<usize>| {
+        for (name, layer, pts, fi) in &fan_escapes {
+            if rb.net_ids.get(name) == Some(&net) {
+                absorbed.remove(fi);
+                if post::absorb(g, *layer, pts) {
+                    absorbed.insert(*fi);
+                }
+            }
+        }
+    };
+    for (r, g) in routes.iter().zip(geoms.iter_mut()) {
+        absorb(g, r.net, &mut absorbed);
+    }
     for (r, g) in routes.iter().zip(geoms.iter_mut()) {
         let pr = rb.profile(r.net);
         post::insert(&mut index, r.net, g, pr.hw, pr.rv);
@@ -472,12 +714,28 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
         stats.vias_removed += removed;
         if removed > 0 {
             geoms[ri] = post::geometry(&eng, &routes[ri]);
+            absorb(&mut geoms[ri], routes[ri].net, &mut absorbed);
         }
         {
             let ck = Checker { rb: &rb, index: &index };
-            post::optimize(&mut geoms[ri], routes[ri].net, &ck, pitch, passes);
+            post::optimize(&mut geoms[ri], routes[ri].net, &ck, pitch, passes, opts.any_angle);
         }
         post::insert(&mut index, routes[ri].net, &mut geoms[ri], pr.hw, pr.rv);
+    }
+    // A second round: nets optimized early get the room freed by the later ones.
+    if opts.effort != Effort::Low {
+        for ri in 0..routes.len() {
+            if (hooks.cancelled)() {
+                return Err(RouteError::Cancelled);
+            }
+            let pr = rb.profile(routes[ri].net);
+            post::remove(&mut index, &mut geoms[ri]);
+            {
+                let ck = Checker { rb: &rb, index: &index };
+                post::optimize(&mut geoms[ri], routes[ri].net, &ck, pitch, passes, opts.any_angle);
+            }
+            post::insert(&mut index, routes[ri].net, &mut geoms[ri], pr.hw, pr.rv);
+        }
     }
 
     // ---- verification ----
@@ -487,6 +745,8 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
     loop {
         out = build_items(p, &rb, &routes, &geoms);
         let mut proj = p.clone();
+        let gone: BTreeSet<ObjectId> = absorbed.iter().flat_map(|&fi| fan_ids[fi].0.iter().copied()).collect();
+        proj.board_mut().tracks.retain(|t| !gone.contains(&t.id));
         proj.board_mut().tracks.extend(out.tracks.iter().cloned());
         proj.board_mut().vias.extend(out.vias.iter().cloned());
         let diags = crate::drc::check(&proj);
@@ -527,6 +787,36 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
     let proj = out.proj.take().expect("verified project");
     let fitems = geo_board::copper_items(&proj);
     let fisl = geo_board::islands(&fitems);
+    // Fanouts that ended up joining their ball to nothing else are left out of the result.
+    let mut fan_tracks: Vec<Track> = Vec::new();
+    let mut fan_vias: Vec<Via> = Vec::new();
+    if !fan_ids.is_empty() {
+        let mut pads_in: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut track_island: BTreeMap<ObjectId, usize> = BTreeMap::new();
+        for (it, &k) in fitems.iter().zip(&fisl) {
+            match &it.item {
+                geo_board::ItemRef::Pad(..) => *pads_in.entry(k).or_default() += 1,
+                geo_board::ItemRef::Track(id) => {
+                    track_island.insert(*id, k);
+                }
+                _ => {}
+            }
+        }
+        let b = p.board();
+        for (fi, (tids, vid)) in fan_ids.iter().enumerate() {
+            if absorbed.contains(&fi) {
+                stats.escapes += 1;
+                continue;
+            }
+            let used = track_island.get(&tids[0]).is_some_and(|k| pads_in.get(k).copied().unwrap_or(0) > 1);
+            if used {
+                fan_tracks.extend(b.tracks.iter().filter(|t| tids.contains(&t.id)).cloned());
+                fan_vias.extend(b.vias.iter().filter(|v| Some(v.id) == *vid).cloned());
+                stats.fanout_vias += usize::from(vid.is_some());
+                stats.escapes += usize::from(vid.is_none());
+            }
+        }
+    }
     let mut island_of: BTreeMap<String, usize> = BTreeMap::new();
     for (i, it) in fitems.iter().enumerate() {
         island_of.entry(it.item.to_string()).or_insert(fisl[i]);
@@ -551,7 +841,7 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
                 subjects: vec![],
             };
             if !joined {
-                explain(&mut eng, &ck, r, ci, r.failed[ci], &drc_reason, ri, &slots, &mut rep);
+                explain(&mut eng, &mut sc, &ck, r, ci, r.failed[ci], &drc_reason, ri, &slots, &mut rep);
                 dedup_hints(&mut rep);
             }
             reports.push(rep);
@@ -565,11 +855,206 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
     } else {
         (stats.routed as f64 * 1000.0 / stats.connections as f64).round() / 10.0
     };
+    fan_tracks.append(&mut out.tracks);
+    fan_vias.append(&mut out.vias);
+    out.tracks = fan_tracks;
+    out.vias = fan_vias;
     stats.tracks = out.tracks.len();
     stats.vias = out.vias.len();
     stats.length = Nm(out.tracks.iter().map(|t| P::of(t.start).dist(P::of(t.end))).sum::<f64>().round() as i64);
     (hooks.progress)(1, Some(1), "done");
-    Ok(RouteResult { tracks: out.tracks, vias: out.vias, connections: reports, stats })
+    Ok(RouteResult {
+        tracks: out.tracks,
+        vias: out.vias,
+        connections: reports,
+        stats,
+        removed_tracks: vec![],
+        removed_vias: vec![],
+        rerouted: vec![],
+    })
+}
+
+/// Routes a batch of nets whose regions do not meet: every net is ripped up, all are routed
+/// against the same occupancy (in parallel with the `parallel` feature), then committed in
+/// batch order. The outcome does not depend on the number of threads. When the time budget
+/// stops a search, the whole batch is put back as it was.
+fn route_batch(
+    eng: &mut Engine<'_>,
+    routes: &mut [NetRoute],
+    batch: &[usize],
+    mode: Mode,
+    pool: &std::sync::Mutex<Vec<Scratch>>,
+) -> Result<(), Stop> {
+    let saved: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)> =
+        batch.iter().map(|&ri| (routes[ri].wires.clone(), routes[ri].failed.clone())).collect();
+    for &ri in batch {
+        eng.uncommit(&mut routes[ri]);
+    }
+    let mut taken: Vec<NetRoute> = batch.iter().map(|&ri| std::mem::take(&mut routes[ri])).collect();
+    let e: &Engine<'_> = eng;
+    let run = |nr: &mut NetRoute| -> Result<(), Stop> {
+        let mut sc = pool.lock().expect("scratch pool").pop().unwrap_or_else(|| e.scratch());
+        let r = e.route_net(&mut sc, nr, mode);
+        pool.lock().expect("scratch pool").push(sc);
+        r
+    };
+    #[cfg(feature = "parallel")]
+    let res: Vec<Result<(), Stop>> = if taken.len() > 1 {
+        use rayon::prelude::*;
+        taken.par_iter_mut().map(run).collect()
+    } else {
+        taken.iter_mut().map(run).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let res: Vec<Result<(), Stop>> = taken.iter_mut().map(run).collect();
+    let stopped = res.iter().any(Result::is_err);
+    for ((&ri, mut nr), (w, f)) in batch.iter().zip(taken).zip(saved) {
+        if stopped {
+            nr.wires = w;
+            nr.failed = f;
+        }
+        routes[ri] = nr;
+        eng.commit(&mut routes[ri]);
+    }
+    if stopped { Err(Stop) } else { Ok(()) }
+}
+
+/// Routing layers (stackup indices) from layer names (all copper layers when empty).
+fn routing_slots(p: &Project, layers: &[String]) -> Result<Vec<usize>, RouteError> {
+    if p.board().outline.contours.is_empty() {
+        return Err(RouteError::NoOutline);
+    }
+    let names = p.board().stackup.copper_names();
+    let mut slots: Vec<usize> = Vec::new();
+    for l in layers {
+        let i = names.iter().position(|n| n == l).ok_or_else(|| RouteError::InvalidLayer(l.clone()))?;
+        if !slots.contains(&i) {
+            slots.push(i);
+        }
+    }
+    if slots.is_empty() {
+        slots = (0..names.len()).collect();
+    }
+    slots.sort_unstable();
+    Ok(slots)
+}
+
+/// Plans dog-bone fanouts (tracks and vias with placeholder IDs, and the pad label) for the
+/// nets in `scope`, limited to the components `only` when given.
+fn fanout_items(
+    p: &Project,
+    scope: &Scope,
+    slots: &[usize],
+    opts: &RouteOptions,
+    only: Option<&[String]>,
+) -> Result<Vec<FanItem>, RouteError> {
+    let items = geo_board::copper_items(p);
+    let isl = geo_board::islands(&items);
+    let rb = RouterBoard::build(p, &items, &isl);
+    let routes = plan(&rb, scope)?;
+    if routes.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut index = Index::new(rb.bbox.expand(1_000_000.0), 500_000.0, reach(&rb));
+    for (i, ob) in rb.obstacles.iter().enumerate() {
+        index.insert(Item::Static(i as u32), ob.bbox);
+    }
+    let bones = fanout::plan(&rb, &routes, slots, &mut index, only);
+    // Escapes end on cells from which the router can move outwards (static maps).
+    let grid = make_grid(&rb, &routes, opts);
+    let mut active = vec![false; rb.profiles.len()];
+    for r in &routes {
+        active[r.prof] = true;
+    }
+    let st = grid::Statics::build(&rb, &grid, slots, &active);
+    let open = |net: u32, layer: usize, (x, y): (i32, i32), (dx, dy): (i32, i32)| {
+        let Some(s) = slots.iter().position(|&l| l == layer) else { return false };
+        let map = &st.track[rb.net_profile[net as usize]][s];
+        [(2 * x, 2 * y), (2 * x + dx, 2 * y + dy), (2 * x + 2 * dx, 2 * y + 2 * dy)]
+            .into_iter()
+            .all(|(i, j)| i >= 0 && j >= 0 && i < grid.dw() && j < grid.dh() && grid::ok(map[grid.didx(i, j)], net))
+    };
+    let escapes = fanout::escape(&rb, &routes, slots, &grid, &mut index, only, &open);
+    let (first, last) = (rb.layer_names[0].clone(), rb.layer_names[rb.layer_names.len() - 1].clone());
+    let track = |net: u32, layer: usize, a: P, b: P| {
+        let key = rb.profile(net).key;
+        Track {
+            id: ObjectId(0),
+            layer: rb.layer_names[layer].clone(),
+            width: key.width,
+            net: Some(rb.nets[net as usize].clone()),
+            start: a.to_point(),
+            end: b.to_point(),
+            mid: None,
+            locked: false,
+        }
+    };
+    let mut out: Vec<FanItem> = bones
+        .into_iter()
+        .map(|b| {
+            let key = rb.profile(b.net).key;
+            let net = Some(rb.nets[b.net as usize].clone());
+            let via = Via {
+                id: ObjectId(0),
+                at: b.via.to_point(),
+                drill: key.via_drill,
+                diameter: key.via_dia,
+                net,
+                from: first.clone(),
+                to: last.clone(),
+                locked: false,
+            };
+            FanItem {
+                tracks: vec![track(b.net, b.layer, b.pad, b.via)],
+                via: Some(via),
+                label: b.label,
+                escape: None,
+                tracks_net: None,
+            }
+        })
+        .collect();
+    for e in escapes {
+        let tracks = e.pts.windows(2).map(|w| track(e.net, e.layer, w[0], w[1])).collect();
+        out.push(FanItem { tracks, via: None, label: e.label, escape: Some((e.layer, e.pts)), tracks_net: None });
+    }
+    Ok(out)
+}
+
+/// A planned fanout or escape (IDs not allocated yet).
+struct FanItem {
+    tracks: Vec<Track>,
+    via: Option<Via>,
+    /// Pad label.
+    label: String,
+    /// An escape's layer and points (pad center first).
+    escape: Option<(usize, Vec<P>)>,
+    /// Net of the tracks (filled when applied).
+    tracks_net: Option<String>,
+}
+
+/// Fanout of the components `components` (all when empty), for the pads whose nets have
+/// unrouted connections: dog bones for the inner balls of BGA (area-array) footprints (a short
+/// track to a through via between the balls) and escapes for off-grid fine-pitch pads
+/// (docs/ROUTER.md, "Fanout and escape"). Returns the items to add (IDs allocated from a copy
+/// of the project's allocator); the project is not modified.
+pub fn fanout(p: &Project, components: &[String], layers: &[String]) -> Result<FanoutResult, RouteError> {
+    let slots = routing_slots(p, layers)?;
+    let only = (!components.is_empty()).then_some(components);
+    let items = fanout_items(p, &Scope::All, &slots, &RouteOptions::default(), only)?;
+    let mut alloc = p.clone();
+    let mut out = FanoutResult { tracks: vec![], vias: vec![], pads: vec![] };
+    for f in items {
+        for mut t in f.tracks {
+            t.id = alloc.alloc_id();
+            out.tracks.push(t);
+        }
+        if let Some(mut v) = f.via {
+            v.id = alloc.alloc_id();
+            out.vias.push(v);
+        }
+        out.pads.push(f.label);
+    }
+    Ok(out)
 }
 
 /// Largest extra distance a check adds beyond an item's own extent.
@@ -581,13 +1066,30 @@ fn reach(rb: &RouterBoard) -> f64 {
     r.max(rb.rules.clearance.0 as f64) + 2.0 * index::TOL
 }
 
+/// The routing grid: pitch (track width + clearance) / 2 of the finest routed profile (or the
+/// `grid` option), aligned with the routed pads. Fanout is planned on the same grid.
+fn make_grid(rb: &RouterBoard, routes: &[NetRoute], opts: &RouteOptions) -> grid::Grid {
+    let pitch = opts.grid.map(|g| g.0 as f64).unwrap_or_else(|| {
+        routes
+            .iter()
+            .map(|r| {
+                let k = rb.profiles[r.prof].key;
+                (k.width.0 + k.clear.0) as f64 / 2.0
+            })
+            .fold(f64::MAX, f64::min)
+    });
+    let pitch = if pitch.is_finite() { pitch.round().max(25_000.0) } else { 225_000.0 };
+    let (offx, offy) = alignment(rb, routes, pitch);
+    grid::Grid::new(rb.bbox, pitch, offx, offy)
+}
+
 /// Grid offset aligning cell centers with as many routed pad centers as possible.
 fn alignment(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> (f64, f64) {
     let mut cx: BTreeMap<i64, usize> = BTreeMap::new();
     let mut cy: BTreeMap<i64, usize> = BTreeMap::new();
     for r in routes {
         for isl in &r.islands {
-            for &t in &isl.terms {
+            for &t in isl.terms.iter().filter(|&&t| rb.terminals[t].pad) {
                 let at = rb.terminals[t].at;
                 *cx.entry(((at.x - rb.bbox.min.x).rem_euclid(g) / 1_000.0).round() as i64).or_default() += 1;
                 *cy.entry(((at.y - rb.bbox.min.y).rem_euclid(g) / 1_000.0).round() as i64).or_default() += 1;
@@ -599,6 +1101,9 @@ fn alignment(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> (f64, f64) {
     };
     (pick(&cx).min(g - 1.0), pick(&cy).min(g - 1.0))
 }
+
+/// Margin around a net's terminals for its batching region (nm), plus a quarter of its extent.
+const REGION_MARGIN: f64 = 1_500_000.0;
 
 /// Nets to route with their islands and connections.
 fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
@@ -631,12 +1136,13 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
         if islands.len() < 2 {
             continue;
         }
+        // Ratsnest anchors: the pads of an island (its vias when it has none).
         let anchors = |i: usize| -> Vec<usize> {
-            islands[i]
-                .iter()
-                .copied()
-                .filter(|&t| rb.terminals[t].pad || rb.terminals[t].label.starts_with("via#"))
-                .collect()
+            let pads: Vec<usize> = islands[i].iter().copied().filter(|&t| rb.terminals[t].pad).collect();
+            if !pads.is_empty() {
+                return pads;
+            }
+            islands[i].iter().copied().filter(|&t| rb.terminals[t].label.starts_with("via#")).collect()
         };
         let mut conns = Vec::new();
         match scope {
@@ -695,6 +1201,12 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
             continue;
         }
         let length = conns.iter().map(|c| c.from_at.dist(c.to_at)).sum();
+        let mut region = BoxF::EMPTY;
+        for &t in islands.iter().flatten() {
+            region = region.union(rb.terminals[t].shape.bbox());
+        }
+        let side = (region.max.x - region.min.x).max(region.max.y - region.min.y);
+        let region = region.expand(REGION_MARGIN + 0.25 * side);
         routes.push(NetRoute {
             net,
             prof: rb.net_profile[net as usize],
@@ -705,6 +1217,7 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
             keys: vec![],
             bbox: BoxF::EMPTY,
             length,
+            region,
         });
     }
     if let Scope::Connection { from, to } = scope
@@ -783,6 +1296,7 @@ fn build_items(p: &Project, rb: &RouterBoard, routes: &[NetRoute], geoms: &[post
 #[allow(clippy::too_many_arguments)]
 fn explain(
     eng: &mut Engine<'_>,
+    sc: &mut Scratch,
     ck: &Checker<'_>,
     r: &NetRoute,
     ci: usize,
@@ -867,7 +1381,7 @@ fn explain(
     let targets: Vec<u32> = r.islands[c.b].access.iter().map(|a| a.node).collect();
     let saved = eng.max_expansions;
     eng.max_expansions = 2_000_000;
-    let path = eng.search(r.net, r.prof, &sources, &targets, Mode::Explain).ok().flatten();
+    let path = eng.search(sc, r.net, r.prof, &sources, &targets, Mode::Explain).ok().flatten();
     eng.max_expansions = saved;
     let mut blockers: Vec<(Blocker, usize, P)> = Vec::new();
     if let Some(path) = path {
@@ -932,7 +1446,11 @@ fn describe(rb: &RouterBoard, _ck: &Checker<'_>, blockers: &[(Blocker, usize, P)
                     }
                     _ => {}
                 }
-                (format!("{} on {lname}", ob.label), ob.owner.clone().map(ObjectRef::Name))
+                let subject = match (ob.kind, ob.net) {
+                    (ObKind::Copper, Some(n)) => Some(ObjectRef::Net(rb.nets[n as usize].clone())),
+                    _ => ob.owner.clone().map(ObjectRef::Name),
+                };
+                (format!("{} on {lname}", ob.label), subject)
             }
             Blocker::Net(n, l) => {
                 let name = &rb.nets[*n as usize];

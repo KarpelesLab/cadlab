@@ -124,6 +124,7 @@ dependencies = [
  "insta",
  "polyclip",
  "proptest",
+ "rayon",
  "rpassword",
  "schemars",
  "serde",
