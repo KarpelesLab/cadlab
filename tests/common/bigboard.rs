@@ -591,3 +591,135 @@ pub fn report(summary: &str, rows: &[Timing]) -> String {
     }
     s
 }
+
+#[derive(serde::Deserialize)]
+struct CorpusEntry {
+    name: String,
+    pcb: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CorpusManifest {
+    project: Vec<CorpusEntry>,
+}
+
+/// The boards of the open-source corpus (`tests/corpus/projects.toml`) present in
+/// `$CADLAB_CORPUS_DIR` (fetched by `scripts/fetch-corpus.sh`; none when the variable is unset),
+/// each imported board-only (circuit built from the board, KiCad rules, auxiliary origin) as
+/// `tests/corpus.rs` does without oracles, with the import time. `only` keeps the named
+/// projects (all when empty).
+pub fn corpus_boards(only: &[String]) -> Vec<(String, Project, Duration)> {
+    use cadlab::kicad_import::{self, BoardImportOptions, OriginMode, rules};
+    let Some(root) = std::env::var_os("CADLAB_CORPUS_DIR") else { return vec![] };
+    let root = std::path::PathBuf::from(root);
+    let m: CorpusManifest = toml::from_str(include_str!("../corpus/projects.toml")).expect("corpus manifest");
+    let mut out = Vec::new();
+    for e in m.project {
+        if !only.is_empty() && !only.contains(&e.name) {
+            continue;
+        }
+        let pcb = root.join(&e.name).join(&e.pcb);
+        let Ok(text) = std::fs::read_to_string(&pcb) else { continue };
+        let read = |ext: &str| std::fs::read_to_string(pcb.with_extension(ext)).ok();
+        let (pro, dru) = (read("kicad_pro"), read("kicad_dru"));
+        let Ok((k, _)) = rules::parse(pro.as_deref(), dru.as_deref()) else { continue };
+        let opts = BoardImportOptions {
+            file_name: e.pcb.clone(),
+            rules: Some(k),
+            origin: OriginMode::Aux,
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let mut p = Project::new(&e.name);
+        if kicad_import::import(&mut p, &text, &opts).is_err() {
+            continue;
+        }
+        out.push((e.name, p, t.elapsed()));
+    }
+    out
+}
+
+/// A session holding `p`, rooted in a new temporary directory.
+pub fn session_with(p: Project) -> (tempfile::TempDir, Registry, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::new();
+    s.create(&dir.path().join("p"), p);
+    (dir, Registry::with_builtins(), s)
+}
+
+/// Times zone fill, DRC, board render and Gerbers on each corpus board of [`corpus_boards`]
+/// (best of `runs`, fill cache cleared before each run), after its import time.
+pub fn corpus_timings(only: &[String], runs: usize) -> Vec<(String, Vec<Timing>)> {
+    use cadlab::board::{self, zones};
+    let mut out = Vec::new();
+    for (name, p, import) in corpus_boards(only) {
+        let mut rows = Vec::new();
+        let mut row = |name: &'static str, time: Duration, note: String| rows.push(Timing { name, time, note });
+        let b = p.board();
+        let summary = format!(
+            "{} footprints, {} tracks, {} vias, {} zones",
+            b.footprints.len(),
+            b.tracks.len(),
+            b.vias.len(),
+            b.zones.len()
+        );
+        row("board.import_kicad", import, summary);
+        let base = board::base_copper_items(&p);
+        let (d, fills) = best(runs, || zones::fill_zones_uncached(&p, &base));
+        let n: usize = fills.iter().map(|f| f.fill.len()).sum();
+        row("zone fill", d, format!("{} fills, {n} islands", fills.len()));
+        let (d, diags) = best(runs, || cadlab::drc::check(&p));
+        row("drc::check", d, format!("{} diagnostics", diags.len()));
+        let (dir, r, mut s) = session_with(p);
+        let png = dir.path().join("board.png");
+        let (d, _) = best(runs, || exec(&r, &mut s, "render.board", json!({"path": png})));
+        row("render.board (PNG)", d, String::new());
+        let (d, _) = best(runs, || exec(&r, &mut s, "export.gerber", json!({"dir": dir.path().join("gerber")})));
+        row("export.gerber", d, String::new());
+        out.push((name, rows));
+    }
+    out
+}
+
+/// Writes every output derived from the session's board under `dir`: zone fills (every
+/// vertex), islands, ratsnest, DRC report, all fab outputs, board renders (PNG, SVG, realistic),
+/// the KiCad and Specctra exports and command results. Comparing two dumps byte for byte checks
+/// that a change kept every result (DECISIONS D23).
+pub fn dump(r: &Registry, s: &mut Session, dir: &std::path::Path) {
+    use cadlab::board::{self, zones};
+    std::fs::create_dir_all(dir).unwrap();
+    let w = |name: &str, v: &Value| std::fs::write(dir.join(name), serde_json::to_string_pretty(v).unwrap()).unwrap();
+    {
+        let p = s.project.as_ref().unwrap();
+        let base = board::base_copper_items(p);
+        let fills: Vec<Value> = zones::fill_zones_uncached(p, &base)
+            .into_iter()
+            .map(|f| {
+                json!({"zone": f.name, "net": f.net, "layer": f.layer, "clearance": f.clearance,
+                       "error": f.error, "fill": f.fill})
+            })
+            .collect();
+        w("fills.json", &json!(fills));
+        let items = board::copper_items(p);
+        w("islands.json", &json!(board::islands(&items)));
+        w("ratsnest.json", &serde_json::to_value(board::ratsnest(p)).unwrap());
+        w("drc.json", &serde_json::to_value(cadlab::drc::check(p)).unwrap());
+    }
+    let run = |s: &mut Session, cmd: &str, args: Value| match r.execute(s, cmd, args, RunOptions::default()) {
+        Ok(o) => serde_json::to_value(&o).unwrap(),
+        // Some boards cannot give every output (no outline, ...): the error is the result.
+        Err(f) => serde_json::to_value(&f).unwrap(),
+    };
+    let log = vec![
+        run(s, "export.all", json!({"dir": dir.join("fab")})),
+        run(s, "render.board", json!({"path": dir.join("board.png")})),
+        run(s, "render.board", json!({"path": dir.join("board.svg")})),
+        run(s, "render.board", json!({"path": dir.join("top.png"), "realistic": "top"})),
+        run(s, "board.export_kicad", json!({"path": dir.join("kicad/board.kicad_pcb")})),
+        run(s, "export.dsn", json!({"path": dir.join("board.dsn")})),
+        run(s, "zone.fill", json!({})),
+        run(s, "board.ratsnest", json!({})),
+    ];
+    let log = serde_json::to_string_pretty(&log).unwrap().replace(&dir.display().to_string(), "<dir>");
+    std::fs::write(dir.join("commands.json"), log).unwrap();
+}
