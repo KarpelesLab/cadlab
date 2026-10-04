@@ -155,6 +155,43 @@ pub fn features(r: &Registry, s: &mut Session) {
     t.mid = Some(cadlab::geom::Point::new(n(6.225), n(10.8)));
 }
 
+/// The clean board with local settings (DECISIONS D40): mask and paste margins on the board and
+/// the capacitors' footprint, a header (bottom side, unconnected but for J1.1 on GND) with a
+/// slotted pad, paste-in-hole and a solid zone connection, and U1.4 (no net) keeping a 0.3 mm
+/// local clearance that a VIN track 0.2 mm away violates.
+pub fn local_settings(r: &Registry, s: &mut Session) {
+    route_all(r, s);
+    let fp = |s: &mut Session, refdes: &str| {
+        cadlab::board::footprint_for(s.project.as_ref().unwrap(), refdes).unwrap().name.clone()
+    };
+    exec(r, s, "board.rules", json!({"mask_expansion": "0.03mm", "paste_margin": "-0.02mm"}));
+    let cap = fp(s, "C1");
+    exec(r, s, "footprint.set", json!({"name": cap, "mask_margin": "0.06mm", "paste_ratio": "-0.1"}));
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "HDR-1x02", "category": "connector", "package": "PinHeader 1x02",
+               "pins": [{"number": "1", "name": "A", "kind": "passive"}, {"number": "2", "name": "B", "kind": "passive"}]}),
+    );
+    exec(r, s, "circuit.add", json!({"part": "HDR-1x02", "refdes": "J1"}));
+    exec(r, s, "place.set", json!({"refdes": "J1", "at": mm(12.0, 2.0), "rotation": 90, "side": "bottom"}));
+    exec(r, s, "net.connect", json!({"net": "GND", "pins": ["J1.1"]}));
+    let hdr = fp(s, "J1");
+    exec(
+        r,
+        s,
+        "footprint.set",
+        json!({"name": hdr, "pads": ["1"], "slot": ["1.2mm", "0.8mm"], "zone_connection": "solid"}),
+    );
+    exec(r, s, "footprint.set", json!({"name": hdr, "pads": ["2"], "paste": "pad", "mask_margin": "-0.05mm"}));
+    let ldo = fp(s, "U1");
+    exec(r, s, "footprint.set", json!({"name": ldo, "pads": ["4"], "clearance": "0.3mm"}));
+    // U1.4: 1.405 × 0.57 mm at (11.1525, 6.55), right edge 11.855; a 0.4 mm VIN track from U1.3
+    // under U1 and up 0.2 mm right of U1.4 (left edge 12.055).
+    track(r, s, "F.Cu", vec![json!("U1.3"), mm(8.85, 5.5), mm(12.255, 5.5), mm(12.255, 6.55)]);
+}
+
 /// Pushes a silkscreen line (board graphics have no command yet).
 fn silk_line(s: &mut Session, from: (f64, f64), to: (f64, f64)) {
     use cadlab::geom::Point;
@@ -184,6 +221,12 @@ pub fn cases() -> Vec<Case> {
             what: "clean, plus a QFN at 45° with paste windows, a bottom THT header, parts at 30° and 135° (bottom), an arc track",
             expect: &[],
             build: features,
+        },
+        Case {
+            name: "local_settings",
+            what: "mask/paste margins, a slot, paste-in-hole, a solid pad connection, and a track 0.2 mm from a pad keeping 0.3 mm",
+            expect: &["drc.clearance"],
+            build: local_settings,
         },
         Case {
             name: "clearance_track_track",

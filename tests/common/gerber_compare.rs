@@ -389,7 +389,8 @@ pub struct Hit {
 }
 
 /// Reads the hits of an Excellon/XNC file written in decimal millimeters (both tools' format).
-/// A routed slot (`X..Y..G85X..Y..`) is one hit at its middle, marked as a slot.
+/// A slot (`X..Y..G85X..Y..`, or routed: `G00X..Y..`, `M15`, `G01X..Y..`, `M16`) is one hit at
+/// its middle, marked as a slot.
 pub fn drill_hits(path: &Path) -> Vec<Hit> {
     let text = std::fs::read_to_string(path).unwrap();
     let plated = !text.contains("TF.FileFunction,NonPlated");
@@ -403,6 +404,7 @@ pub fn drill_hits(path: &Path) -> Vec<Hit> {
     let mut function = String::new();
     let mut current = None;
     let mut header = true;
+    let mut route_from: Option<(i64, i64)> = None;
     let mut out = Vec::new();
     for line in text.lines().map(str::trim) {
         if let Some(f) = line.strip_prefix("; #@! TA.AperFunction,") {
@@ -420,6 +422,15 @@ pub fn drill_hits(path: &Path) -> Vec<Hit> {
             } else {
                 current = Some(n);
             }
+        } else if let Some(rest) = line.strip_prefix("G00X") {
+            // Route mode (XNC): `G00` to the slot start, `M15`, `G01` to its end, `M16`.
+            route_from = xy(rest);
+        } else if let Some(rest) = line.strip_prefix("G01X") {
+            let (f, d) = tools[&current.expect("route before tool selection")].clone();
+            if let (Some((x0, y0)), Some((x1, y1))) = (route_from, xy(rest)) {
+                out.push(Hit { plated, function: f, dia: d, x: (x0 + x1) / 2, y: (y0 + y1) / 2, slot: true });
+            }
+            route_from = xy(rest);
         } else if let Some(rest) = line.strip_prefix('X') {
             let (f, d) = tools[&current.expect("hit before tool selection")].clone();
             let hit = |x, y, slot| Hit { plated, function: f.clone(), dia: d, x, y, slot };
@@ -493,9 +504,9 @@ fn drill_parsing() {
     let f = dir.path().join("t.drl");
     std::fs::write(
         &f,
-        "M48\n; #@! TF.FileFunction,Plated,1,2,PTH\nMETRIC\n; #@! TA.AperFunction,Plated,PTH,ViaDrill\nT1C0.300\n%\nG05\nT1\nX3.5Y10.0\nX1Y2G85X1Y3\nM30\n",
+        "M48\n; #@! TF.FileFunction,Plated,1,2,PTH\nMETRIC\n; #@! TA.AperFunction,Plated,PTH,ViaDrill\nT1C0.300\n%\nG05\nT1\nX3.5Y10.0\nX1Y2G85X1Y3\nG00X5.0Y1.0\nM15\nG01X6.0Y1.0\nM16\nG05\nM30\n",
     )
     .unwrap();
     let h = |x, y, slot| Hit { plated: true, function: "ViaDrill".to_string(), dia: 300, x, y, slot };
-    assert_eq!(drill_hits(&f), vec![h(3500, 10000, false), h(1000, 2500, true)]);
+    assert_eq!(drill_hits(&f), vec![h(3500, 10000, false), h(1000, 2500, true), h(5500, 1000, true)]);
 }
