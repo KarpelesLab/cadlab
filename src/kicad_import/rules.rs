@@ -17,6 +17,7 @@
 //! | `min_hole_to_hole` | `hole_to_hole` |
 //! | `min_copper_edge_clearance` | `copper_to_edge` |
 //! | `defaults.silk_line_width` | `min_silk_width` |
+//! | `min_silk_clearance` | `silk_to_pad` (zero included: overlaps only) |
 //! | other classes | net classes (values equal to the board defaults are inherited) |
 //! | `netclass_patterns`, `netclass_assignments` | `net.class` of matching circuit nets |
 //! | `.kicad_dru` rules without condition (`clearance`, `track_width`, `hole_size`, `annular_width`, `hole_to_hole`, `edge_clearance`) | the board rule, when stricter |
@@ -50,6 +51,9 @@ pub struct KicadRules {
     /// Net name patterns (`*` and `?` wildcards) → class, in file order (explicit assignments
     /// first).
     pub patterns: Vec<(String, String)>,
+    /// Project text variables (`${NAME}` in texts), substituted into board texts on import:
+    /// cadlab texts have no variables.
+    pub text_variables: BTreeMap<String, String>,
 }
 
 /// What a rules import changed.
@@ -98,6 +102,13 @@ fn parse_pro(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
             "give the `.kicad_pro` file KiCad saved next to the board",
         )
     })?;
+    if let Some(m) = pro["text_variables"].as_object() {
+        for (k2, v) in m {
+            if let Some(v) = v.as_str() {
+                k.text_variables.insert(k2.clone(), v.to_string());
+            }
+        }
+    }
     let ds = &pro["board"]["design_settings"];
     let r = &ds["rules"];
     let mut set = |field: &str, v: Option<Nm>, kicad: &str, diags: &mut Vec<Diagnostic>| match v {
@@ -120,6 +131,11 @@ fn parse_pro(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
     set("hole_to_hole", json_mm(r.get("min_hole_to_hole")), "min_hole_to_hole", diags);
     set("copper_to_edge", json_mm(r.get("min_copper_edge_clearance")), "min_copper_edge_clearance", diags);
     set("min_silk_width", json_mm(ds["defaults"].get("silk_line_width")), "defaults.silk_line_width", diags);
+    // Zero is a real value here: silkscreen may come up to pads but not over them (cadlab's
+    // silk-to-pad check then reports overlaps only), as KiCad's silk_over_copper does.
+    if let Some(v) = json_mm(r.get("min_silk_clearance")).filter(|v| v.0 >= 0) {
+        k.rules.insert("silk_to_pad".into(), v);
+    }
     let min_clearance = json_mm(r.get("min_clearance"));
 
     let ns = &pro["net_settings"];

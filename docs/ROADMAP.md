@@ -172,7 +172,12 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] Round-trip and oracle tests: cadlab boards → `.kicad_pcb` → import (model and DRC equal), the same after
   `kicad-cli pcb upgrade`, KiCad DRC of the export vs cadlab DRC of the import (`tests/kicad_pcb_import.rs`,
   `tests/drc_crosscheck.rs`)
-- [ ] Open-source projects fetched in CI (the test reads `CADLAB_KICAD_PCB_FIXTURES`; fetching is not set up)
+- [x] Round-trip and oracle tests on open-source projects fetched in CI: 12 pinned KiCad 6–10 projects
+  (`tests/corpus/projects.toml`, `scripts/fetch-corpus.sh`, D35); netlist → `circuit.import`, board import,
+  KiCad DRC of the original and of the re-export vs cadlab's, Gerber/drill raster cross-check, optional
+  re-route; known differences recorded per board (`tests/corpus.rs`, TESTING.md "Open-source corpus")
+- [ ] Import gaps the corpus measures: mask/paste margins and local clearances, net ties, pads on the other
+  side of their footprint, copper in footprints, paste on through-hole pads, slots, geometric custom rules
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
 

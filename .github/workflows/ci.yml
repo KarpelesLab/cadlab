@@ -83,6 +83,62 @@ jobs:
           path: target/tmp/
           if-no-files-found: ignore
 
+  corpus:
+    name: Open-source corpus (KiCad 10, gerbv)
+    runs-on: ubuntu-24.04
+    # Informative for now, like the oracle job (docs/TESTING.md, "Open-source corpus").
+    continue-on-error: true
+    timeout-minutes: 60
+    env:
+      CADLAB_CORPUS_DIR: ${{ github.workspace }}/../cadlab-corpus
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: corpus
+      - name: Install KiCad 10 and gerbv
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
+          sudo apt-get update
+          # No recommends: the symbol/footprint/3D libraries are not needed (and are large).
+          sudo apt-get install --yes --no-install-recommends kicad gerbv xvfb xauth
+          kicad-cli version
+          gerbv --version
+      # The projects are fetched at their pinned commits (never vendored); the cache key is the
+      # manifest, so changing a pin refetches.
+      - name: Cache the corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CADLAB_CORPUS_DIR }}
+          key: corpus-${{ hashFiles('tests/corpus/projects.toml', 'scripts/fetch-corpus.sh') }}
+      - name: Fetch the corpus
+        run: scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
+      - name: Corpus tests
+        env:
+          CADLAB_ORACLES: "1"
+          CADLAB_CORPUS_ROUTE: "1"
+          CADLAB_CORPUS_ROUTE_BUDGET: "30"
+        # xvfb: gerbv (GTK) may want a display even when exporting.
+        run: xvfb-run -a cargo test --release --all-features --test corpus -- --nocapture
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f target/tmp/corpus/summary.txt ]; then
+            { echo '```'; cat target/tmp/corpus/summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-report
+          path: |
+            target/tmp/corpus/report.json
+            target/tmp/corpus/summary.txt
+            target/tmp/corpus/*/drc-*.json
+            target/tmp/corpus/*/reexport/drc.json
+          if-no-files-found: ignore
+
   msrv:
     name: MSRV (1.89)
     runs-on: ubuntu-latest

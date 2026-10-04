@@ -31,7 +31,7 @@ Implemented from the Ucamco Gerber Layer Format Specification (rev. 2026.05) and
 
 | File | Content |
 |---|---|
-| `<project>-F_Cu.gbr`, `-In1_Cu.gbr`, ..., `-B_Cu.gbr` | `Copper,Ln,Top/Inr/Bot`: pads flashed (`C`/`R`/`O`, fixed macros for rounded or rotated pads), tracks drawn (arcs with `G75`), pours as fractured regions; `.N`/`.P`/`.C` object attributes, `.AperFunction` on every aperture |
+| `<project>-F_Cu.gbr`, `-In1_Cu.gbr`, ..., `-B_Cu.gbr` | `Copper,Ln,Top/Inr/Bot`: pads flashed (`C`/`R`/`O`, fixed macros for rounded or rotated pads, outline macros for polygon pads), tracks drawn (arcs with `G75`), pours as fractured regions; `.N`/`.P`/`.C` object attributes, `.AperFunction` on every aperture |
 | `-F_Mask.gbr`, `-B_Mask.gbr` | `Soldermask`, negative (the image is the openings); openings grown by `mask_expansion` (default 0); vias tented |
 | `-F_Paste.gbr`, `-B_Paste.gbr` | SMD pads, or the pad's paste windows (exposed pads) |
 | `-F_SilkS.gbr`, `-B_SilkS.gbr` | `Legend`: footprint silk, designators (Hershey strokes, mirrored on the bottom), board graphics; clipped at mask openings |
@@ -56,7 +56,7 @@ also part of `export.all`). One XML file, namespace `http://webstds.ipc.org/2581
 
 | Section | Content |
 |---|---|
-| `Content` | step and layer references, BOM reference; `DictionaryLineDesc` (`LINE_<width>`, round ends) and `DictionaryStandard` (`Circle`, `RectCenter`, `RectRound`, `Oval`; ids name shape and size: `RECT_1X0.6`, `RRECT_0.565X0.57R0.14125`) |
+| `Content` | step and layer references, BOM reference; `DictionaryLineDesc` (`LINE_<width>`, round ends) and `DictionaryStandard` (`Circle`, `RectCenter`, `RectRound`, `Oval`; ids name shape and size: `RECT_1X0.6`, `RRECT_0.565X0.57R0.14125`; polygon pads as `Contour` entries `CONTOUR_<n>`, board pads in board orientation) |
 | `LogisticHeader` | sender role, enterprise and person as placeholders (`UNKNOWN`): projects store no people or companies |
 | `Bom` | one `BomItem` per BOM line (part ID as `OEMDesignNumberRef`, quantity, pin count, description), `RefDes` per designator (`populate="false"` for DNP), value, manufacturer, MPN and package as `Textual` characteristics |
 | `Ecad/CadData` | layers in stack order (`F.SilkS`, `F.Paste`, `F.Mask`, copper and `DielectricN`, ..., `B.SilkS`), one `DRILL_<from>_<to>` layer per copper span with its `Span`; `Stackup` with copper thicknesses and dielectrics sharing the rest of the board thickness (`whereMeasured="METAL"`) |

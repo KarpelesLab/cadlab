@@ -200,6 +200,19 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
     }
     let refdes = refdes.trim().to_string();
     let subject = ObjectRef::Name(if refdes.is_empty() { lib_id.clone() } else { refdes.clone() });
+    super::local_overrides(e, &subject, notes);
+    if e.get("net_tie_pad_groups").is_some() {
+        notes.agg(
+            "import.net_tie",
+            "net_tie",
+            Diagnostic::warning(
+                "import.net_tie",
+                "net-tie footprints are imported as ordinary footprints: cadlab has no net ties, so the copper joining their nets is a short for its DRC",
+            )
+            .with_subject(subject.clone())
+            .with_hint("keep the nets joined in the circuit, or replace the net tie with a 0 Ω part"),
+        );
+    }
 
     let attrs: BTreeSet<String> = e
         .get("attr")
@@ -475,40 +488,44 @@ fn merge_paths(gs: Vec<Graphic>) -> Vec<Graphic> {
     out
 }
 
-/// Takes the courtyard outline out of the courtyard drawings: the last closed polygon, else
-/// courtyard paths forming one closed loop, else the bounding box of all courtyard drawings.
+/// Takes the courtyard outline out of the courtyard drawings (a cadlab footprint has one
+/// courtyard polygon, and the drawings it replaces are removed so an export does not write the
+/// courtyard twice): a single closed polygon as is, a circle as a polygon around it, paths
+/// forming one closed loop; several closed shapes as their union when it is one polygon without
+/// holes; else the bounding box of all courtyard drawings.
 fn take_courtyard(gs: &mut Vec<Graphic>) -> Option<Vec<Point>> {
-    if let Some(i) = gs
-        .iter()
-        .rposition(|g| g.layer == GraphicLayer::Courtyard && matches!(g.geometry, GraphicGeometry::Polygon { .. }))
-    {
-        let GraphicGeometry::Polygon { points } = gs.remove(i).geometry else { unreachable!() };
-        return Some(points);
-    }
     let crt: Vec<usize> = (0..gs.len()).filter(|&i| gs[i].layer == GraphicLayer::Courtyard).collect();
     if crt.is_empty() {
         return None;
     }
-    // Chain courtyard paths into one loop.
-    let paths: Vec<Vec<Point>> = crt
-        .iter()
-        .filter_map(|&i| match &gs[i].geometry {
-            GraphicGeometry::Path { points } => Some(points.clone()),
-            _ => None,
-        })
-        .collect();
-    if paths.len() == crt.len()
-        && let Some(ring) = chain_loop(paths)
-    {
-        for i in crt.into_iter().rev() {
-            gs.remove(i);
-        }
-        return Some(ring);
+    let mut taken: Vec<GraphicGeometry> = crt.iter().rev().map(|&i| gs.remove(i).geometry).collect();
+    taken.reverse();
+    if let [GraphicGeometry::Polygon { points }] = taken.as_slice() {
+        return Some(points.clone());
     }
-    // Fallback: bounding box of every courtyard drawing (kept as drawings).
+    // Closed rings: polygons, circles (polygons around them) and loops of paths.
+    let mut rings: Vec<Vec<Point>> = Vec::new();
+    let mut paths: Vec<Vec<Point>> = Vec::new();
+    for g in &taken {
+        match g {
+            GraphicGeometry::Polygon { points } => rings.push(points.clone()),
+            GraphicGeometry::Circle { center, radius, .. } => rings.push(circle_ring(*center, *radius)),
+            GraphicGeometry::Path { points } => paths.push(points.clone()),
+        }
+    }
+    let loops_ok = paths.is_empty() || chain_loop(paths.clone()).map(|r| rings.push(r)).is_some();
+    if loops_ok {
+        if rings.len() == 1 {
+            return rings.pop();
+        }
+        if let Some(r) = union_ring(&rings) {
+            return Some(r);
+        }
+    }
+    // Fallback: bounding box of every courtyard drawing.
     let mut pts = Vec::new();
-    for &i in &crt {
-        match &gs[i].geometry {
+    for g in &taken {
+        match g {
             GraphicGeometry::Path { points } | GraphicGeometry::Polygon { points } => {
                 pts.extend(points.iter().copied())
             }
@@ -520,6 +537,137 @@ fn take_courtyard(gs: &mut Vec<Graphic>) -> Option<Vec<Point>> {
     }
     let b = BBox::of_points(pts)?;
     Some(vec![b.min, Point::new(b.max.x, b.min.y), b.max, Point::new(b.min.x, b.max.y)])
+}
+
+/// Arc tolerance of custom pad outlines: 1 µm, outside (copper is never smaller than drawn).
+const PAD_ARC_TOL: i64 = 1_000;
+
+/// The outline of a KiCad custom pad in its own coordinates (KiCad's, Y down): the anchor
+/// (circle of the pad width, or the `size` rectangle) united with the primitives (filled
+/// polygons, lines and arcs stroked with their width, circles filled or as rings, rectangles).
+/// Holes are joined to the outline by zero-width cuts. Returns the outline and the number of
+/// separate parts (only the largest is kept), or `None` when nothing usable comes out.
+fn custom_outline(c: &Sexpr, (w, h): K) -> Option<(Vec<K>, usize)> {
+    use crate::geom::poly::{self, ArcTol, Circle, EndCap, FillRule, Join, Path, Polygon, Ring, Side};
+    let tol = ArcTol::new(PAD_ARC_TOL, Side::Outside);
+    let p = |q: Point| -> poly::Point { q.into() };
+    let mut shapes: Vec<Polygon> = Vec::new();
+    let stroke = |pts: Vec<poly::Point>, width: Nm, shapes: &mut Vec<Polygon>| {
+        if width.0 > 0 && pts.len() >= 2 {
+            shapes.extend(
+                poly::offset_paths(&vec![Path(pts)], width.0 / 2, Join::Round, EndCap::Round, tol).unwrap_or_default(),
+            );
+        }
+    };
+    let rect = |x0: i64, y0: i64, x1: i64, y1: i64| {
+        let (x0, x1, y0, y1) = (x0.min(x1), x0.max(x1), y0.min(y1), y0.max(y1));
+        Polygon::new(
+            vec![
+                poly::Point::new(x0, y0),
+                poly::Point::new(x1, y0),
+                poly::Point::new(x1, y1),
+                poly::Point::new(x0, y1),
+            ],
+            vec![],
+        )
+    };
+    let anchor_circle = c.get("options").and_then(|o| o.child_value("anchor")) == Some("circle");
+    if anchor_circle {
+        if w.0 > 0 {
+            shapes.push(Polygon::new(Circle::new(poly::Point::new(0, 0), w.0 / 2).to_ring(tol).ok()?, vec![]));
+        }
+    } else if w.0 > 0 && h.0 > 0 {
+        shapes.push(rect(-w.0 / 2, -h.0 / 2, w.0 - w.0 / 2, h.0 - h.0 / 2));
+    }
+    for g in c.get("primitives").map(|ps| ps.items().iter().skip(1).collect::<Vec<_>>()).unwrap_or_default() {
+        let width = width_of(g);
+        let xy = |hd: &str| child_xy(g, hd).map(|(x, y)| Point::new(x, y));
+        let filled = g.get("fill").and_then(|f| f.value()).is_none_or(|v| v == "yes" || v == "solid");
+        match g.head() {
+            Some("gr_poly") => {
+                let pts: Vec<poly::Point> =
+                    pts_of(g).unwrap_or_default().into_iter().map(|(x, y)| p(Point::new(x, y))).collect();
+                if pts.len() >= 3 {
+                    if filled {
+                        shapes.extend(poly::union_all(&pts, FillRule::NonZero).ok()?);
+                    }
+                    let mut closed = pts.clone();
+                    closed.push(pts[0]);
+                    stroke(closed, width, &mut shapes);
+                }
+            }
+            Some("gr_line") => {
+                if let (Some(a), Some(b)) = (xy("start"), xy("end")) {
+                    stroke(vec![p(a), p(b)], width, &mut shapes);
+                }
+            }
+            Some("gr_arc") => {
+                if let (Some(s), Some(m), Some(en)) = (xy("start"), xy("mid"), xy("end")) {
+                    stroke(arc_points(s, m, en, PAD_ARC_TOL).into_iter().map(p).collect(), width, &mut shapes);
+                }
+            }
+            Some("gr_circle") => {
+                if let (Some(ce), Some(en)) = (xy("center"), xy("end")) {
+                    let d = en - ce;
+                    let r = ((d.x.0 as f64).hypot(d.y.0 as f64)).round() as i64;
+                    let outer = Circle::new(p(ce), r + width.0 / 2).to_ring(tol).ok()?;
+                    if filled || 2 * r <= width.0 {
+                        shapes.push(Polygon::new(outer, vec![]));
+                    } else {
+                        let inner =
+                            Circle::new(p(ce), r - width.0 / 2).to_ring(ArcTol::new(PAD_ARC_TOL, Side::Inside)).ok()?;
+                        let mut hole = inner;
+                        hole.reverse_orientation();
+                        shapes.push(Polygon::new(outer, vec![hole]));
+                    }
+                }
+            }
+            Some("gr_rect") => {
+                if let (Some(a), Some(b)) = (xy("start"), xy("end")) {
+                    if filled {
+                        shapes.push(rect(a.x.0, a.y.0, b.x.0, b.y.0));
+                    }
+                    let corners = vec![p(a), p(Point::new(b.x, a.y)), p(b), p(Point::new(a.x, b.y)), p(a)];
+                    stroke(corners, width, &mut shapes);
+                }
+            }
+            _ => {}
+        }
+    }
+    let set = poly::union_all(&shapes, FillRule::NonZero).ok()?;
+    let parts = set.len();
+    let largest = set.into_iter().max_by_key(|pg| pg.outer.signed_area2())?;
+    let ring: Ring = poly::fracture(&largest).ok()?;
+    (ring.0.len() >= 3).then(|| (ring.0.iter().map(|q| (Nm(q.x), Nm(q.y))).collect(), parts))
+}
+
+/// A polygon around a circle (within 5 µm outside it).
+fn circle_ring(center: Point, radius: Nm) -> Vec<Point> {
+    use crate::geom::poly::{ArcTol, Circle, Side};
+    match Circle::new(center.into(), radius.0).to_ring(ArcTol::new(5_000, Side::Outside)) {
+        Ok(r) => r.0.iter().map(|&q| q.into()).collect(),
+        Err(_) => {
+            let r = radius;
+            vec![
+                center - Point::new(r, r),
+                center + Point::new(r, -r),
+                center + Point::new(r, r),
+                center + Point::new(-r, r),
+            ]
+        }
+    }
+}
+
+/// The union of closed rings when it is one polygon without holes.
+fn union_ring(rings: &[Vec<Point>]) -> Option<Vec<Point>> {
+    use crate::geom::poly::{self, FillRule, Ring};
+    let rs: Vec<Ring> =
+        rings.iter().map(|r| Ring::from(r.iter().map(|&q| q.into()).collect::<Vec<poly::Point>>())).collect();
+    let set = poly::union_all(&rs, FillRule::NonZero).ok()?;
+    match set.as_slice() {
+        [pg] if pg.holes.is_empty() => Some(pg.outer.0.iter().map(|&q| q.into()).collect()),
+        _ => None,
+    }
 }
 
 /// Polylines forming exactly one closed loop → its vertices (without repeating the first).
@@ -586,6 +734,7 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         skip("no position or size", notes);
         return None;
     };
+    super::local_overrides(c, &pad_subject, notes);
     let mut at = loc.pt(pos);
     let rotation = loc.pad_rot(a);
     let (w, h) = size;
@@ -619,6 +768,13 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
             let d = child_xy(c, "rect_delta").unwrap_or((Nm::ZERO, Nm::ZERO));
             approx("a trapezoid is drawn as its bounding rectangle".into(), notes);
             PadShape::Rect { w: w + d.1.abs(), h: h + d.0.abs() }
+        }
+        "custom" if custom_outline(c, (w, h)).is_some() => {
+            let (ring, parts) = custom_outline(c, (w, h)).expect("checked");
+            if parts > 1 {
+                approx(format!("a custom shape in {parts} separate parts keeps only its largest part"), notes);
+            }
+            PadShape::Polygon { points: ring.into_iter().map(|k| loc.pad_offset(k)).collect() }
         }
         "custom" => {
             // Bounding box of the anchor and the primitives, in KiCad pad coordinates.
@@ -688,7 +844,7 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         }
         if oval && a != b {
             approx(
-                format!("an oval {}×{} mm slot is drilled as a round {} mm hole", Nm(a.0), Nm(b.0), Nm(a.0.min(b.0))),
+                format!("an oval {}×{} slot is drilled as a round {} hole", Nm(a.0), Nm(b.0), Nm(a.0.min(b.0))),
                 notes,
             );
         }
@@ -701,6 +857,18 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
                 skip("a through-hole pad without a drill", notes);
                 return None;
             };
+            if has(&format!("{front}Paste")) || has(&format!("{back}Paste")) {
+                notes.agg(
+                    "import.tht_paste",
+                    "paste",
+                    Diagnostic::warning(
+                        "import.tht_paste",
+                        "through-hole pads with solder paste (paste-in-hole) get no paste: cadlab puts paste on SMD pads only",
+                    )
+                    .with_subject(pad_subject.clone())
+                    .with_hint("add the paste in the paste layer after export if the assembly reflows these parts"),
+                );
+            }
             (PadKind::Tht { drill: d }, PadRole::Copper { paste: has(&format!("{front}Paste")) })
         }
         "np_thru_hole" => {
@@ -828,6 +996,7 @@ pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {
         (PadShape::RoundRect { w, h, r }, PadShape::RoundRect { w: w2, h: h2, r: r2 }) => {
             w == w2 && h == h2 && (r.0 - r2.0).abs() <= 10
         }
+        (PadShape::Polygon { points: p }, PadShape::Polygon { points: q }) => close_pts(p, q),
         _ => x == y,
     };
     let paste_eq = |x: &Option<Paste>, y: &Option<Paste>| match (x, y) {

@@ -78,6 +78,20 @@ pub(crate) fn pad_aperture(g: &mut Gerber, shape: PadShape, a: Angle) -> String 
     let q = a.quarter_turns();
     let swap = |w: Nm, h: Nm| if q.is_some_and(|q| q % 2 == 1) { (h.0, w.0) } else { (w.0, h.0) };
     match shape {
+        PadShape::Polygon { points } => {
+            // The outline may join holes to it by zero-width cuts; macro outlines must not touch
+            // themselves, so each part is its own outline: exposed, holes cleared.
+            let ring: Vec<polyclip::Point> =
+                points.iter().map(|q| rot(q.x.0, q.y.0, a)).map(|(x, y)| polyclip::Point::new(x, y)).collect();
+            let set = polyclip::union_all(&ring, FillRule::NonZero).unwrap_or_default();
+            let xy = |r: &polyclip::Ring| -> Vec<Xy> { r.0.iter().map(|q| (q.x, q.y)).collect() };
+            let mut prims = vec![format!("0 Pad polygon of {} vertices", points.len())];
+            for pg in &set {
+                prims.push(outline_prim(&xy(&pg.outer)));
+                prims.extend(pg.holes.iter().map(|h| outline_prim(&xy(h)).replacen("4,1,", "4,0,", 1)));
+            }
+            g.macro_def(prims.join("*\n"))
+        }
         PadShape::Circle { d } => format!("C,{}", mm(d.0)),
         PadShape::Rect { w, h } => match q {
             Some(_) => {
@@ -135,6 +149,11 @@ struct Ctx<'a> {
 impl Ctx<'_> {
     fn rotation(&self, pp: &PlacedPad) -> Angle {
         pad_rotation(pp, super::fp_rotation(self.p, &pp.refdes))
+    }
+
+    /// The pad's shape and rotation to flash ([`super::oriented`]).
+    fn oriented(&self, pp: &PlacedPad) -> (PadShape, Angle) {
+        super::oriented(pp, super::fp_rotation(self.p, &pp.refdes))
     }
 
     fn out(&self, kind: FileKind, function: &str, g: Gerber) -> OutFile {
@@ -205,7 +224,8 @@ fn copper(ctx: &Ctx<'_>, i: usize, items: &[CopperItem]) -> OutFile {
 
     g.comment("Pads");
     for pp in ctx.pads.iter().filter(|pp| pp.layers.contains(layer)) {
-        let ap = pad_aperture(&mut g, pp.pad.shape, ctx.rotation(pp));
+        let (shape, a) = ctx.oriented(pp);
+        let ap = pad_aperture(&mut g, shape, a);
         let f = match pp.pad.kind {
             PadKind::Smd if is_heatsink(&pp.pad) => "HeatsinkPad",
             PadKind::Smd => "SMDPad,CuDef",
@@ -271,7 +291,8 @@ fn mask(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
     g.comment("Solder mask openings (negative image); vias are tented");
     let e = ctx.o.mask_expansion.0;
     for pp in ctx.mask_pads(side) {
-        let ap = pad_aperture(&mut g, grow(pp.pad.shape, e), ctx.rotation(pp));
+        let (shape, a) = ctx.oriented(pp);
+        let ap = pad_aperture(&mut g, grow(shape, e), a);
         let d = g.aperture(&ap, Some("Material"));
         g.attrs(&[(".C", field(&pp.refdes))]);
         g.flash(d, xy(pp.center));
@@ -289,7 +310,8 @@ fn paste(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
         g.attrs(&[(".C", field(&pp.refdes))]);
         match &pp.pad.paste {
             None => {
-                let ap = pad_aperture(&mut g, pp.pad.shape, a);
+                let (shape, a) = ctx.oriented(pp);
+                let ap = pad_aperture(&mut g, shape, a);
                 let d = g.aperture(&ap, Some("Material"));
                 g.flash(d, xy(pp.center));
             }
@@ -667,23 +689,54 @@ mod tests {
     fn pad_apertures() {
         let mut g = Gerber::new("t", "Copper,L1,Top", Polarity::Positive);
         let rect = PadShape::Rect { w: Nm(1_000_000), h: Nm(600_000) };
-        assert_eq!(pad_aperture(&mut g, rect, Angle::ZERO), "R,1X0.6");
-        assert_eq!(pad_aperture(&mut g, rect, Angle::DEG_90), "R,0.6X1");
-        assert_eq!(pad_aperture(&mut g, rect, Angle::DEG_270), "R,0.6X1");
+        assert_eq!(pad_aperture(&mut g, rect.clone(), Angle::ZERO), "R,1X0.6");
+        assert_eq!(pad_aperture(&mut g, rect.clone(), Angle::DEG_90), "R,0.6X1");
+        assert_eq!(pad_aperture(&mut g, rect.clone(), Angle::DEG_270), "R,0.6X1");
         let oval = PadShape::Oval { w: Nm(1_000_000), h: Nm(600_000) };
         assert_eq!(pad_aperture(&mut g, oval, Angle::DEG_180), "O,1X0.6");
         assert_eq!(pad_aperture(&mut g, PadShape::Circle { d: Nm(500_000) }, Angle(12_000)), "C,0.5");
         let rr = PadShape::RoundRect { w: Nm(1_000_000), h: Nm(600_000), r: Nm(150_000) };
-        assert_eq!(pad_aperture(&mut g, rr, Angle::ZERO), "Shape1");
-        assert_eq!(pad_aperture(&mut g, rr, Angle::DEG_180), "Shape1", "same macro at 180°");
-        assert_eq!(pad_aperture(&mut g, rr, Angle::DEG_90), "Shape2");
-        assert_eq!(pad_aperture(&mut g, rect, Angle::from_deg(45)), "Shape3");
+        assert_eq!(pad_aperture(&mut g, rr.clone(), Angle::ZERO), "Shape1");
+        assert_eq!(pad_aperture(&mut g, rr.clone(), Angle::DEG_180), "Shape1", "same macro at 180°");
+        assert_eq!(pad_aperture(&mut g, rr.clone(), Angle::DEG_90), "Shape2");
+        assert_eq!(pad_aperture(&mut g, rect.clone(), Angle::from_deg(45)), "Shape3");
         // Fully rounded corners are an obround.
         let full = PadShape::RoundRect { w: Nm(1_000_000), h: Nm(600_000), r: Nm(300_000) };
         assert_eq!(pad_aperture(&mut g, full, Angle::ZERO), "O,1X0.6");
         let body = round_rect_macro(1_000_000, 600_000, 150_000, Angle::ZERO);
         assert!(body.contains("4,1,4,-0.5,-0.15,0.5,-0.15,0.5,0.15,-0.5,0.15,-0.5,-0.15,0"), "{body}");
         assert!(body.contains("1,1,0.3,0.35,0.15"), "{body}");
+    }
+
+    #[test]
+    fn polygon_pad_apertures() {
+        let mut g = Gerber::new("t", "Copper,L1,Top", Polarity::Positive);
+        let p = |x: i64, y: i64| Point::new(Nm(x * 100_000), Nm(y * 100_000));
+        // A square ring: the 2 × 2 hole joined to the 6 × 6 outline by a cut along y = 0.
+        let ring = vec![
+            p(-3, -3),
+            p(3, -3),
+            p(3, 0),
+            p(1, 0),
+            p(1, -1),
+            p(-1, -1),
+            p(-1, 1),
+            p(1, 1),
+            p(1, 0),
+            p(3, 0),
+            p(3, 3),
+            p(-3, 3),
+        ];
+        pad_aperture(&mut g, PadShape::Polygon { points: ring }, Angle::ZERO);
+        let body = g.finish();
+        assert_eq!(body.matches("4,1,").count(), 1, "one exposed outline: {body}");
+        assert_eq!(body.matches("4,0,").count(), 1, "the hole cleared: {body}");
+        // A quarter turn rotates the vertices: (0.4, 0) → (0, 0.4).
+        let mut g = Gerber::new("t", "Copper,L1,Top", Polarity::Positive);
+        let tri = vec![p(0, 0), p(4, 0), p(0, 2)];
+        pad_aperture(&mut g, PadShape::Polygon { points: tri }, Angle::DEG_90);
+        let body = g.finish();
+        assert!(body.contains(",0,0.4,"), "{body}");
     }
 
     #[test]

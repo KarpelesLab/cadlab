@@ -114,7 +114,7 @@ fn imports_a_hand_written_board() {
     assert_eq!(b.outline.contours.len(), 2);
     assert_eq!(b.outline.contours[0].start, pt(0.0, 20.0));
     assert!(matches!(b.outline.contours[1].segments[0], Segment::Arc { .. }));
-    // R1: top, 90°; pad 2 custom → bounding rectangle 0.8 × 0.4 shifted by 0.2 mm along the pad.
+    // R1: top, 90°; pad 2 custom: the anchor rectangle and the polygon primitive united (Y up).
     let r1 = &b.footprints["R1"];
     assert_eq!((r1.at, r1.rotation, r1.side), (pt(10.0, 10.0), Angle::DEG_90, BoardSide::Top));
     let fp = crate::board::footprint_for(&p, "R1").unwrap();
@@ -124,8 +124,12 @@ fn imports_a_hand_written_board() {
     assert_eq!(p1.shape, PadShape::RoundRect { w: Nm(600_000), h: Nm(500_000), r: Nm(125_000) });
     assert_eq!(p1.paste, None, "F.Paste: opening equal to the pad");
     let p2 = &fp.pads[1];
-    assert_eq!(p2.shape, PadShape::Rect { w: Nm(800_000), h: Nm(400_000) });
-    assert_eq!(p2.at, pt(0.7, 0.0));
+    let outline = vec![pt(-0.2, -0.2), pt(-0.2, 0.2), pt(0.6, -0.2), pt(0.6, 0.2)];
+    let PadShape::Polygon { points } = &p2.shape else { panic!("{:?}", p2.shape) };
+    let mut sorted = points.clone();
+    sorted.sort();
+    assert_eq!(sorted, outline);
+    assert_eq!(p2.at, pt(0.5, 0.0));
     assert_eq!(p2.paste, Some(Paste::None));
     assert_eq!(fp.courtyard, vec![pt(-1.5, 1.0), pt(1.5, 1.0), pt(1.5, -1.0), pt(-1.5, -1.0)]);
     assert_eq!(fp.graphics.len(), 1, "silk lines joined");
@@ -294,3 +298,98 @@ fn origins() {
 use crate::model::board::BoardSide;
 use crate::model::footprint::{GraphicGeometry, Mount};
 use crate::model::sections::PinRef;
+
+/// A small board exercising the corpus-driven import features: a ring-shaped custom pad around
+/// a hole, a circle courtyard, a keep-out frame (outline with a hole), board-only stitching-via
+/// and mouse-bite footprints, local settings, a net tie and a text variable.
+const FEATURES: &str = r#"(kicad_pcb (version 20240108) (generator pcbnew)
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user) (44 "Edge.Cuts" user)
+    (47 "F.CrtYd" user))
+  (setup (pad_to_mask_clearance 0.05))
+  (net 0 "") (net 1 "GND") (net 2 "A")
+  (footprint "Mount:Ring" (layer "F.Cu") (at 110 60)
+    (property "Reference" "H5") (property "Value" "M2.5")
+    (fp_circle (center 0 0) (end 3.2 0) (stroke (width 0.05)) (fill none) (layer "F.CrtYd"))
+    (pad "" np_thru_hole circle (at 0 0) (size 3.7 3.7) (drill 3.7) (layers "*.Cu" "*.Mask"))
+    (pad "1" smd custom (at 2.425 0) (size 1.15 1.15) (layers "F.Cu" "F.Mask") (net 1 "GND")
+      (solder_mask_margin 0.1) (clearance 0.2) (zone_connect 0)
+      (options (clearance outline) (anchor circle))
+      (primitives (gr_circle (center -2.425 0) (end 0 0) (width 1.15) (fill no)))))
+  (footprint "Jumper:NetTie" (layer "F.Cu") (at 120 60)
+    (property "Reference" "NT1") (property "Value" "NetTie")
+    (net_tie_pad_groups "1, 2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "A")))
+  (footprint "Stitch:Via" (layer "F.Cu") (at 105 55)
+    (property "Reference" "STITCH01") (attr through_hole board_only)
+    (pad "1" thru_hole circle (at 0 0) (size 0.6 0.6) (drill 0.3) (layers "*.Cu") (net 1 "GND")))
+  (footprint "Stitch:Via" (layer "F.Cu") (at 106 55)
+    (property "Reference" "STITCH01") (attr through_hole board_only)
+    (pad "1" thru_hole circle (at 0 0) (size 0.6 0.6) (drill 0.3) (layers "*.Cu") (net 1 "GND")))
+  (footprint "Panel:MouseBite" (layer "F.Cu") (at 125 52)
+    (property "Reference" "mouse-bite-1")
+    (pad "" np_thru_hole circle (at -0.5 0) (size 0.5 0.5) (drill 0.5) (layers "*.Cu" "*.Mask"))
+    (pad "" np_thru_hole circle (at 0.5 0) (size 0.5 0.5) (drill 0.5) (layers "*.Cu" "*.Mask")))
+  (gr_rect (start 100 50) (end 130 70) (stroke (width 0.1)) (fill none) (layer "Edge.Cuts"))
+  (gr_text "rev ${VERSION}" (at 115 68) (layer "F.SilkS") (effects (font (size 1 1))))
+  (zone (net 0) (net_name "") (layers "F&B.Cu") (name "frame")
+    (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+    (polygon (pts (xy 100 50) (xy 130 50) (xy 130 70) (xy 100 70)))
+    (polygon (pts (xy 101 51) (xy 101 69) (xy 129 69) (xy 129 51)))))"#;
+
+#[test]
+fn corpus_features() {
+    use crate::geom::poly;
+    let pro = r#"{"text_variables": {"VERSION": "1.2"},
+        "board": {"design_settings": {"rules": {"min_silk_clearance": 0.0}}}}"#;
+    let (k, _) = rules::parse(Some(pro), None).unwrap();
+    assert_eq!(k.rules["silk_to_pad"], Nm::ZERO, "a zero silk clearance is a value");
+    let mut p = Project::new("t");
+    let (r, d) = import(&mut p, FEATURES, &BoardImportOptions { rules: Some(k), ..opts() }).unwrap();
+    let c = codes(&d);
+    let b = p.board();
+    // The ring pad: an annulus (the hole stays free) plus the anchor inside the ring.
+    let ring = crate::board::placed_pads(&p).into_iter().find(|pp| pp.refdes == "H5" && pp.number == "1").unwrap();
+    assert!(matches!(ring.pad.shape, PadShape::Polygon { .. }), "{:?}", ring.pad.shape);
+    let area = poly::area2(&vec![ring.shape.clone()]) as f64 / 2.0 / 1e12;
+    let annulus = std::f64::consts::PI * (3.0f64.powi(2) - 1.85f64.powi(2));
+    assert!((area - annulus).abs() < 0.05, "ring area {area} mm², annulus {annulus} mm²");
+    let hole_center: poly::Point = b.footprints["H5"].at.into();
+    assert!(!poly::contains(&vec![ring.shape.clone()], &hole_center), "no copper over the hole");
+    // Circle courtyard: one polygon around it, the drawing not kept as well.
+    let h5 = crate::board::footprint_for(&p, "H5").unwrap();
+    assert!(h5.courtyard.len() > 8, "a polygon around the circle");
+    assert!(h5.graphics.iter().all(|g| g.layer != GraphicLayer::Courtyard));
+    // Keep-out frame: one keep-out whose outline goes around the hole.
+    assert_eq!(b.keepouts.len(), 1);
+    let ko: poly::Ring = b.keepouts[0].outline.iter().map(|&q| q.into()).collect::<Vec<poly::Point>>().into();
+    let area = (ko.signed_area2().abs() as f64) / 2.0 / 1e12;
+    assert!((area - (600.0 - 28.0 * 18.0)).abs() < 1e-6, "frame area {area}");
+    // Board-only footprints: stitching vias (one designator for both) as vias, mouse bites
+    // (a designator cadlab cannot use) as holes.
+    assert_eq!(b.vias.len(), 2);
+    assert!(b.vias.iter().all(|v| v.net.as_deref() == Some("GND") && v.drill == Nm(300_000)));
+    assert_eq!(b.holes.len(), 2, "{:?}", b.holes);
+    assert!(b.holes.iter().all(|h| h.pad.is_none() && h.name.starts_with('H')));
+    assert_eq!(r.holes, 2);
+    // Text variables replaced.
+    assert!(b.graphics.iter().any(|g| matches!(&g.kind, GraphicKind::Text { text, .. } if text == "rev 1.2")));
+    for want in [
+        "import.local_setting",
+        "import.net_tie",
+        "import.footprint_as_via",
+        "import.footprint_as_holes",
+        "import.zone_outlines",
+        "import.text_variable",
+    ] {
+        assert!(c.contains(&want), "{want} missing from {c:?}");
+    }
+    // Aggregated notes name every subject.
+    let local: Vec<String> = d
+        .iter()
+        .filter(|x| x.code == "import.local_setting")
+        .flat_map(|x| x.subjects.iter().map(|s| s.to_string()))
+        .collect();
+    assert!(local.iter().any(|s| s.contains("H5")), "{local:?}");
+    assert!(local.iter().any(|s| s == "setup"), "{local:?}");
+}

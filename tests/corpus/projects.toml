@@ -1,0 +1,668 @@
+# Open-source KiCad projects used as import and oracle inputs (docs/TESTING.md, "Open-source corpus";
+# DECISIONS D35). Nothing here is vendored: `scripts/fetch-corpus.sh` fetches each project at the pinned
+# commit into a cache directory outside the repository (default `target/corpus`), and `tests/corpus.rs`
+# reads it through `CADLAB_CORPUS_DIR`.
+#
+# Per project:
+#   name     directory name under the corpus dir, and the name in reports
+#   repo     git URL (GitHub)
+#   sha      full 40-hex commit; the fetch checks out exactly this commit and verifies it
+#   sparse   gitignore-style patterns of the files to check out (non-cone sparse checkout)
+#   pcb      board file, relative to the repository root
+#   sch      root schematic (optional): `kicad-cli sch export netlist` → `circuit.import`
+#   license  SPDX identifier of the hardware design license (see the repository for the text)
+#   layers   copper layers;  kicad: the KiCad major version that saved the board
+#   notes    what the project covers
+#   [[project.known]]         a DRC difference expected on this board: side = "kicad" | "cadlab",
+#                             rule = KiCad type or cadlab code, max = how many unmatched findings of
+#                             that rule are accepted, reason, and optionally stage = "original" |
+#                             "reexport" (default: both comparisons). Counts are exact as of the pin
+#                             and KiCad 10.0: a new difference, or more of a known one, fails.
+#   [[project.gerber_known]]  a Gerber layer (or `drill`) whose differences are reported, not failed,
+#                             with the reason.
+# Global, principled allowances live in tests/common/drc_compare.rs and tests/corpus.rs; the entries
+# here are board-specific and summarized in docs/TESTING.md ("Open-source corpus").
+#
+# The fetch script reads this file line by line: keep `key = "value"` lines and one-line arrays.
+# Changing a pin or adding a project changes this file's hash, which is the CI cache key.
+
+[[project]]
+name = "nrfmicro"
+repo = "https://github.com/joric/nrfmicro"
+sha = "5ac390d9d133e781a46a9c9fe43880f4826422e0"
+sparse = ["/hardware/", "/LICENSE*"]
+pcb = "hardware/nrfmicro.kicad_pcb"
+sch = "hardware/nrfmicro.kicad_sch"
+license = "Unlicense"
+layers = 2
+kicad = 6
+notes = "Pro Micro-sized nRF52840 module carrier: small 2-layer SMD board, castellated edge pads, solder-jumper custom pads"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.clearance"
+max = 3
+stage = "original"
+reason = "the JP1 solder-jumper pads carry a local clearance of 0.14 mm (import.local_setting); cadlab applies the 0.2 mm net clearance"
+
+[[project.known]]
+side = "kicad"
+rule = "copper_edge_clearance"
+max = 2
+stage = "reexport"
+reason = "KiCad also keeps copper away from the drawing the project puts on the Margin layer (past the USB-C shield pads J1.S1); cadlab's board edge is Edge.Cuts only"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.courtyard_overlap"
+max = 1
+stage = "reexport"
+reason = "R8 and U3 have no courtyard in KiCad; the ones the import generates overlap by 6.6 um, which KiCad's courtyard test lets pass on the re-export"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "the board sets a 0.25 mm solder mask minimum web: KiCad merges openings closer than that (J1's USB-C pads); cadlab draws one opening per pad"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "the board sets a 0.25 mm solder mask minimum web: KiCad merges openings closer than that; cadlab draws one opening per pad"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "through-hole pads (J1's shield slots, the module header) carry paste in KiCad (import.tht_paste); cadlab puts paste on SMD pads only"
+
+[[project]]
+name = "buspirate-flash-sop"
+repo = "https://github.com/DangerousPrototypes/BusPirate5-hardware"
+sha = "acb9cd667ce608e7eb560a663938787343b424c4"
+sparse = ["/adapter-flash-sop-1REV3/", "/LICENSE*"]
+pcb = "adapter-flash-sop-1REV3/flash-sop-rev3.kicad_pcb"
+sch = "adapter-flash-sop-1REV3/flash-sop-rev3.kicad_sch"
+license = "MIT"
+layers = 2
+kicad = 7
+notes = "Bus Pirate 5 SOP flash adapter: small 2-layer SMD/THT board"
+
+[[project]]
+name = "buspirate-rs232"
+repo = "https://github.com/DangerousPrototypes/BusPirate5-hardware"
+sha = "acb9cd667ce608e7eb560a663938787343b424c4"
+sparse = ["/adapter-rs232-dual-1REV0/", "/LICENSE*"]
+pcb = "adapter-rs232-dual-1REV0/rs232-dual-adapter.kicad_pcb"
+sch = "adapter-rs232-dual-1REV0/rs232-dual-adapter.kicad_sch"
+license = "MIT"
+layers = 2
+kicad = 8
+notes = "Bus Pirate 5 dual RS-232 adapter: 2-layer, KiCad 8 format; its schematic and board disagree"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.short"
+max = 19
+reason = "schematic and board disagree (import.net_conflict, import.pad_missing): J4 is the DB9 COM2 in the schematic but a 1x10 pin socket on the board, J2's pins are swapped; cadlab's circuit comes from the schematic, KiCad's DRC from the board's own nets"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.clearance"
+max = 2
+reason = "schematic and board disagree (J2/J4, see drc.short): copper the board gives one net is another net in the circuit"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 14
+reason = "schematic and board disagree (J2/J4, see drc.short): the circuit's nets are not the ones the board routes"
+
+[[project.known]]
+side = "kicad"
+rule = "unconnected_items"
+max = 2
+stage = "original"
+reason = "the DB9 J1 has two mounting pads numbered 0 on a one-pin unconnected-(J1-PAD-Pad0) net, which the netlist import leaves out (D27): cadlab has no net to route there"
+
+[[project.known]]
+side = "kicad"
+rule = "unconnected_items"
+max = 16
+stage = "reexport"
+reason = "schematic and board disagree (J2/J4, see drc.short): the re-export carries the circuit's nets, so tracks join pads of different nets"
+
+[[project]]
+name = "buspirate5-rev10"
+repo = "https://github.com/DangerousPrototypes/BusPirate5-hardware"
+sha = "acb9cd667ce608e7eb560a663938787343b424c4"
+sparse = ["/bus_pirate_pcb/5-REV10A/", "/LICENSE*"]
+pcb = "bus_pirate_pcb/5-REV10A/REV10a.kicad_pcb"
+sch = "bus_pirate_pcb/5-REV10A/REV10a.kicad_sch"
+license = "MIT"
+layers = 4
+kicad = 7
+notes = "Bus Pirate 5 main board: 4-layer RP2040 board, hierarchical schematic, dense 0402 SMD, mask and paste margins"
+
+[[project.known]]
+side = "kicad"
+rule = "invalid_outline"
+max = 10
+stage = "original"
+reason = "Edge.Cuts holds open arcs besides the outline (import.outline_open); cadlab builds the outline from the closed contours and reports the open chains at import"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.clearance"
+max = 9
+stage = "original"
+reason = "the resistor networks RN30x carry a local clearance of 0.08 mm (import.local_setting); cadlab applies the 0.1524 mm net class clearance"
+
+[[project.known]]
+side = "kicad"
+rule = "clearance"
+max = 2
+stage = "reexport"
+reason = "not analyzed yet: KiCad finds two 0.1484 mm track-to-RN309 gaps on the re-export that cadlab's DRC of the same board does not pair with its own findings"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unplaced"
+max = 1
+stage = "original"
+reason = "LOGO1 is a schematic symbol whose board footprint has no pads: the import makes its drawings board graphics (import.footprint_as_graphics), so the component stays unplaced"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 15
+reason = "connectivity through pours: cadlab refills the zones with its own algorithm, without the LEDs' per-pad zone connection overrides (import.local_setting), so some GND pads KiCad's fill reaches stay unconnected"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "the board's 0.05 mm mask expansion and per-pad mask margins are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "the board's 0.05 mm mask expansion and per-pad mask margins are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "per-pad paste margin ratios (-5 % on the LEDs) are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "Edge.Cuts"
+reason = "KiCad plots the open Edge.Cuts arcs too; cadlab's profile is the closed outline (import.outline_open)"
+
+[[project]]
+name = "lumenpnp-ringlight"
+repo = "https://github.com/opulo-inc/lumenpnp"
+sha = "5ec657b34fbf1f4e2f1bc2ade36a16c438070b10"
+sparse = ["/pnp/pcb/ring-light/", "/LICENSE*"]
+pcb = "pnp/pcb/ring-light/ringLight.kicad_pcb"
+sch = "pnp/pcb/ring-light/ringLight.kicad_sch"
+license = "CERN-OHL-W-2.0"
+layers = 2
+kicad = 6
+notes = "LumenPnP camera ring light: round 2-layer board with a central cutout, LEDs on an arc"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 2
+reason = "connectivity through pours: KiCad's fill joins U1.1 and U1.3 (GND) through a neck between the pins that cadlab's fill does not keep"
+
+[[project.gerber_known]]
+layer = "F.Cu"
+reason = "the board has C10, the schematic C8 (component_not_in_circuit / missing_footprint): C10 is not placed"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "fiducial mask margins (0.5 mm) are not kept, and C10 is not placed (see F.Cu)"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "C10 is not placed (see F.Cu)"
+
+[[project]]
+name = "lumenpnp-mobo"
+repo = "https://github.com/opulo-inc/lumenpnp"
+sha = "5ec657b34fbf1f4e2f1bc2ade36a16c438070b10"
+sparse = ["/pnp/pcb/mobo/", "/LICENSE*"]
+pcb = "pnp/pcb/mobo/mobo.kicad_pcb"
+sch = "pnp/pcb/mobo/mobo.kicad_sch"
+license = "CERN-OHL-W-2.0"
+layers = 4
+kicad = 8
+notes = "LumenPnP motherboard: 4-layer STM32 board with motor drivers, many zones, THT connectors, a net tie"
+
+[[project.known]]
+side = "kicad"
+rule = "annular_width"
+max = 2
+reason = "J7's slotted pads are drilled as round holes of the slot width (import.pad_approximated); KiCad sees the original slot reaching the pad edge"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.hole_to_hole"
+max = 1
+stage = "original"
+reason = "J7 has two co-located slots numbered 2; drilled round by the import they are one hole twice, which KiCad's DRC of the slotted original does not report"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 5
+reason = "connectivity through pours: cadlab refills the zones with its own algorithm; the motor drivers' exposed pads on the other side (import.pad_unsupported) are missing too"
+
+[[project.known]]
+side = "kicad"
+rule = "unconnected_items"
+max = 2
+stage = "reexport"
+reason = "the net tie JP1 (import.net_tie) joins GND to another net through copper drawn in the footprint, which is not imported"
+
+[[project.gerber_known]]
+layer = "F.Cu"
+reason = "copper drawn inside the net tie footprint JP1 is not imported (import.footprint_layer)"
+
+[[project.gerber_known]]
+layer = "In1.Cu"
+reason = "the copper text opulo.io on In1.Cu is not imported (import.text_layer)"
+
+[[project.gerber_known]]
+layer = "B.Cu"
+reason = "the motor drivers' exposed pads sit on the other side of their footprints (import.pad_unsupported)"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "fiducial mask margins are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "the motor drivers' exposed pads on the other side are not imported (import.pad_unsupported)"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "not analyzed yet: 0.05 mm² of paste differences on the motor drivers"
+
+[[project]]
+name = "sweep-v2.2"
+repo = "https://github.com/davidphilipbarr/Sweep"
+sha = "8ba72a256d627567660ecc0b6f51bb18fa8badb5"
+sparse = ["/Sweep v2.2/", "/LICENSE*"]
+pcb = "Sweep v2.2/sweepv2.kicad_pcb"
+license = "SHL-2.1"
+layers = 2
+kicad = 6
+notes = "Ferris Sweep split keyboard (reversible): 2-layer THT/SMD, no schematic (board-only import builds the circuit)"
+
+[[project.known]]
+side = "kicad"
+rule = "silk_over_copper"
+max = 31
+reason = "the reversible TRRS jacks J1/J2 have slotted pads (drilled round by the import) and silkscreen KiCad clips at their mask openings; not analyzed further"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_over_pad"
+max = 8
+stage = "original"
+reason = "the reversible TRRS jack J1's silkscreen over its own pads, which KiCad's DRC of the original reports per segment against other items; not analyzed further"
+
+[[project.known]]
+side = "kicad"
+rule = "unconnected_items"
+max = 3
+reason = "connectivity through pours: KiCad's fill reaches three GND pads that cadlab's fill leaves alone"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 4
+reason = "the POWER SW switches have a designator cadlab cannot use (import.invalid_refdes) and are not imported, so the vcc net is split"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.courtyard_overlap"
+max = 2
+stage = "reexport"
+reason = "mouse-bite holes imported as board holes sit in switch courtyards; KiCad checks no holes against courtyards"
+
+[[project.gerber_known]]
+layer = "F.Cu"
+reason = "the logo's copper is drawn inside a footprint (import.footprint_layer) and the POWER SW switches are not imported (import.invalid_refdes)"
+
+[[project.gerber_known]]
+layer = "B.Cu"
+reason = "the POWER SW switches are not imported (import.invalid_refdes)"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "the logo's mask drawings in its footprint are not imported (import.footprint_layer)"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "the POWER SW switches are not imported (import.invalid_refdes)"
+
+[[project.gerber_known]]
+layer = "B.Paste"
+reason = "the POWER SW switches are not imported (import.invalid_refdes)"
+
+[[project.gerber_known]]
+layer = "drill"
+reason = "the POWER SW switches' holes are not imported (import.invalid_refdes)"
+
+[[project]]
+name = "corne-cherry"
+repo = "https://github.com/foostan/crkbd"
+sha = "63366fb7f51cf2a796462fdd90527e99dd126055"
+sparse = ["/pcbs/corne-cherry/hotswap/", "/pcbs/common/", "/LICENSE*"]
+pcb = "pcbs/corne-cherry/hotswap/corne-cherry.kicad_pcb"
+sch = "pcbs/corne-cherry/hotswap/corne-cherry.kicad_sch"
+license = "MIT"
+layers = 2
+kicad = 7
+notes = "Corne keyboard (hotswap): 2-layer, reversible footprints on both sides, hundreds of teardrop zones"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.clearance"
+max = 9
+reason = "the USB connector U3/rU3 carries a local clearance (import.local_setting); cadlab applies the 0.19 mm net clearance to the D+/D- tracks"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.courtyard_overlap"
+max = 5
+stage = "original"
+reason = "not analyzed yet: reversible LED and switch footprints (REXLED/REXSW) whose courtyards cadlab finds overlapping, KiCad not"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 4
+reason = "connectivity through pours: cadlab refills the zones (teardrops included) with its own algorithm"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "the board's mask expansion and the per-footprint mask margins are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "the board's mask expansion and the per-footprint mask margins are not kept (import.local_setting)"
+
+[[project]]
+name = "glasgow-revC3"
+repo = "https://github.com/GlasgowEmbedded/glasgow"
+sha = "50c97c42965612ab28562748f939988a754fd827"
+sparse = ["/hardware/boards/glasgow/revC3/", "/LICENSE*"]
+pcb = "hardware/boards/glasgow/revC3/glasgow.kicad_pcb"
+sch = "hardware/boards/glasgow/revC3/glasgow.kicad_sch"
+license = "0BSD"
+layers = 4
+kicad = 7
+notes = "Glasgow Interface Explorer revC3: 4-layer, iCE40 BGA, FX2 QFN, hierarchical schematic, a keep-out frame with a hole"
+
+[[project.known]]
+side = "kicad"
+rule = "courtyards_overlap"
+max = 6
+stage = "original"
+reason = "the fiducials FID1-FID8 are on the board but not in the schematic (import.component_not_in_circuit): not placed, so cadlab has no courtyard for them"
+
+[[project.known]]
+side = "kicad"
+rule = "silk_over_copper"
+max = 6
+stage = "original"
+reason = "the fiducials' 0.375 mm mask margins are not kept (import.local_setting) and the fiducials themselves are not placed: KiCad's silkscreen-to-mask-opening check sees openings cadlab does not have"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_over_pad"
+max = 2
+stage = "original"
+reason = "not analyzed yet: a board silkscreen drawing over C11.2 that KiCad's DRC of the original does not report"
+
+[[project.gerber_known]]
+layer = "F.Cu"
+reason = "the fiducials are not placed (import.component_not_in_circuit)"
+
+[[project.gerber_known]]
+layer = "B.Cu"
+reason = "pads on the other side of their footprint (U1.57, U8.7, U36.7: import.pad_unsupported)"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "the fiducials are not placed and their mask margins are not kept"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "pads on the other side of their footprint are not imported (import.pad_unsupported)"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "the USB receptacle J1's slotted pads carry paste in KiCad (import.tht_paste); cadlab puts paste on SMD pads only"
+
+[[project]]
+name = "glasgow-revD1"
+repo = "https://github.com/GlasgowEmbedded/glasgow"
+sha = "50c97c42965612ab28562748f939988a754fd827"
+sparse = ["/hardware/boards/glasgow/revD1/", "/LICENSE*"]
+pcb = "hardware/boards/glasgow/revD1/glasgow.kicad_pcb"
+sch = "hardware/boards/glasgow/revD1/glasgow.kicad_sch"
+license = "0BSD"
+layers = 6
+kicad = 10
+notes = "Glasgow revD1: 6-layer, BGA FPGA and RAM, KiCad 10 format (nets by name), ring-shaped custom pads, net ties"
+
+[[project.known]]
+side = "kicad"
+rule = "silk_over_copper"
+max = 3
+stage = "original"
+reason = "silkscreen over NPTH openings (J1, J6) and a solder mask margin on U8 that is not kept (import.local_setting)"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.courtyard_overlap"
+max = 13
+reason = "the net ties NT3/NT9 and their neighbours: KiCad does not check the courtyards of net-tie footprints the same way; not analyzed further"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unplaced"
+max = 1
+stage = "original"
+reason = "G1 is a schematic symbol whose board footprint has no pads (a logo, import.footprint_as_graphics), so the component stays unplaced"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 3
+reason = "connectivity through pours: cadlab refills the zones with its own algorithm"
+
+[[project.gerber_known]]
+layer = "F.Cu"
+reason = "copper drawn inside the net tie footprint NT1 is not imported (import.footprint_layer)"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "U8's mask margin is not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "per-pad paste margins (144 pads) are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "B.Paste"
+reason = "per-pad paste margins are not kept (import.local_setting)"
+
+[[project]]
+name = "cynthion"
+repo = "https://github.com/greatscottgadgets/cynthion-hardware"
+sha = "13aa71c2fb0be3837cd2ec580ee5d2c25fc1c678"
+sparse = ["/*.kicad_*", "/LICENSE*"]
+pcb = "cynthion.kicad_pcb"
+sch = "cynthion.kicad_sch"
+license = "CERN-OHL-P-2.0"
+layers = 4
+kicad = 7
+notes = "Cynthion USB analyzer: ECP5 BGA, USB PHYs, Kelvin current-sense resistors (net ties), custom design rules (.kicad_dru)"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.short"
+max = 16
+stage = "original"
+reason = "the Kelvin current-sense resistors R42, R59... are net-tie footprints (import.net_tie): cadlab has no net ties, so their sense pads joining the power pads are shorts"
+
+[[project.known]]
+side = "kicad"
+rule = "shorting_items"
+max = 4
+stage = "original"
+reason = "KiCad's own shorts at the net-tie resistors (tracks crossing a tied pad); cadlab reports these net ties as shorts of the pads (see drc.short), not of the tracks"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 27
+reason = "the net-tie resistors (import.net_tie) and connectivity through pours that cadlab refills with its own algorithm"
+
+[[project.known]]
+side = "kicad"
+rule = "copper_edge_clearance"
+max = 3
+stage = "original"
+reason = "the side-mount switches SW2/SW3 near the edge: KiCad and cadlab pair the edge findings with different pads of the two identical switches; not analyzed further"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.copper_to_edge"
+max = 3
+stage = "original"
+reason = "see the KiCad copper_edge_clearance entry (SW2/SW3)"
+
+[[project.known]]
+side = "kicad"
+rule = "unconnected_items"
+max = 11
+stage = "reexport"
+reason = "the net-tie resistors (import.net_tie) and pours refilled by each tool"
+
+[[project.gerber_known]]
+layer = "F.Cu"
+reason = "the layer-number texts 1-6 on the copper layers are not imported (import.text_layer)"
+
+[[project.gerber_known]]
+layer = "In1.Cu"
+reason = "the layer-number texts 1-6 on the copper layers are not imported (import.text_layer)"
+
+[[project.gerber_known]]
+layer = "In2.Cu"
+reason = "the layer-number texts 1-6 on the copper layers are not imported (import.text_layer)"
+
+[[project.gerber_known]]
+layer = "In3.Cu"
+reason = "the layer-number texts 1-6 on the copper layers are not imported (import.text_layer)"
+
+[[project.gerber_known]]
+layer = "In4.Cu"
+reason = "the layer-number texts 1-6 on the copper layers are not imported (import.text_layer)"
+
+[[project.gerber_known]]
+layer = "B.Cu"
+reason = "the layer-number texts 1-6 on the copper layers are not imported (import.text_layer)"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "the board's 0.05 mm mask expansion and the fiducials' margins are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "the board's 0.05 mm mask expansion is not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "the board's -5 % paste ratio and per-pad paste margins are not kept (import.local_setting)"
+
+[[project.gerber_known]]
+layer = "B.Paste"
+reason = "the board's -5 % paste ratio and per-pad paste margins are not kept (import.local_setting)"
+
+[[project]]
+name = "tinytapeout-demo"
+repo = "https://github.com/TinyTapeout/tt-demo-pcb"
+sha = "bbf3dd1f771d5aed249b07ddf130b3ddc8261d60"
+sparse = ["/*.kicad_*", "/LICENSE*"]
+pcb = "tinytapeout-demo.kicad_pcb"
+sch = "tinytapeout-demo.kicad_sch"
+license = "Apache-2.0"
+layers = 4
+kicad = 9
+notes = "Tiny Tapeout demo board: 4-layer RP2350 board, custom design rules, stitching-via footprints, KiCad 9 format"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.clearance"
+max = 330
+stage = "original"
+reason = "the .kicad_dru neck-down rules (0.16 mm clearance inside the QFN-80, DF40 carrier and USB courtyards and breakout areas) have geometric conditions cadlab does not import (import.rule_unsupported)"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.clearance"
+max = 168
+stage = "reexport"
+reason = "the .kicad_dru neck-down rules are not imported (import.rule_unsupported), so cadlab's DRC keeps the class clearances the re-export also states"
+
+[[project.known]]
+side = "kicad"
+rule = "clearance"
+max = 4
+stage = "reexport"
+reason = "not analyzed yet: 0.198 mm gaps against the Managemnt class's 0.2 mm on the re-export that cadlab pairs with neck-down findings of other items"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.courtyard_overlap"
+max = 31
+stage = "original"
+reason = "the PMOD SIL headers overlap by design; the .kicad_dru rule excluding their courtyard clearance is not imported (import.rule_unsupported)"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.courtyard_overlap"
+max = 3
+stage = "reexport"
+reason = "not analyzed yet: three courtyard overlaps (R44/U7 and others) cadlab reports and KiCad's DRC of the re-export does not"
+
+[[project.known]]
+side = "kicad"
+rule = "items_not_allowed"
+max = 2
+stage = "original"
+reason = "the custom rule carrier placeholders disallows pads in placeholder footprints; not imported (import.rule_unsupported)"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.unrouted"
+max = 2
+reason = "connectivity through pours: cadlab refills the zones with its own algorithm"
+
+[[project.gerber_known]]
+layer = "F.Cu"
+reason = "board-only footprints that are neither in the schematic nor plain holes (placeholder pads) are not placed (import.component_not_in_circuit)"
+
+[[project.gerber_known]]
+layer = "B.Cu"
+reason = "board-only footprints that are neither in the schematic nor plain holes (placeholder pads) are not placed (import.component_not_in_circuit)"
+
+[[project.gerber_known]]
+layer = "F.Mask"
+reason = "per-pad mask margins are not kept (import.local_setting) and placeholder footprints are not placed"
+
+[[project.gerber_known]]
+layer = "B.Mask"
+reason = "placeholder footprints are not placed (import.component_not_in_circuit)"
+
+[[project.gerber_known]]
+layer = "F.Paste"
+reason = "per-pad paste margins (-0.05 mm on 88 pads) are not kept (import.local_setting)"
