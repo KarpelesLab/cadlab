@@ -178,8 +178,10 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
   (`tests/corpus/projects.toml`, `scripts/fetch-corpus.sh`, D35); netlist → `circuit.import`, board import,
   KiCad DRC of the original and of the re-export vs cadlab's, Gerber/drill raster cross-check, optional
   re-route; known differences recorded per board (`tests/corpus.rs`, TESTING.md "Open-source corpus")
-- [ ] Import gaps the corpus measures: mask/paste margins and local clearances, net ties, pads on the other
-  side of their footprint, copper in footprints, paste on through-hole pads, slots, geometric custom rules
+- [x] Import gaps the corpus measures, modeled (D40): mask/paste margins and the minimum web, local clearances
+  and zone connections, net ties, pads on the other side of their footprint and per-side mask openings,
+  copper (and mask, paste) drawings in footprints and copper drawings and texts on the board, paste on
+  through-hole pads, slots (routed in XNC), geometric custom rules (`board.custom_rule`); `footprint.set`
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
 

@@ -105,8 +105,9 @@ symbol.
 
 Both run on the boards of `tests/crosscheck/mod.rs`: the LDO board fully routed with a bottom GND pour
 (`clean`), the same with a QFN at 45° (paste windows), a bottom-side THT header whose pin 1 joins the pour
-through a thermal relief, 0402s at 30° and 135° (bottom) and an arc track (`features`), and one board per
-deliberate violation: clearance track/track, track/pad, pad/via, short, net class width, minimum width, via
+through a thermal relief, 0402s at 30° and 135° (bottom) and an arc track (`features`), board and footprint mask and paste
+margins, a slotted pad, paste-in-hole, a solid pad zone connection and a pad keeping a 0.3 mm local
+clearance a track violates (`local_settings`, D40), and one board per deliberate violation: clearance track/track, track/pad, pad/via, short, net class width, minimum width, via
 annular ring, via drill, pad drill and annular ring, hole-to-hole, copper-to-edge, courtyard overlap, silk over
 pad, unrouted, keep-out (tracks), keep-out (footprints), and a netless track touching a net. Outputs are kept in
 `$CARGO_TARGET_TMPDIR/{drc,gerber}_crosscheck/<board>/` for inspection.
@@ -204,8 +205,8 @@ Per project, on a copy of the checkout:
    copy of the board, cadlab's zones removed), which must agree, and with each tool's own refill
    (informative: the fill algorithms differ). Mask, paste and Edge.Cuts are compared as in the cross-check;
    silkscreen is informative (fonts, generated reference designators). Drill hits must match in plating,
-   diameter and position; a KiCad slot matched by a round hole at its middle is counted apart (the import
-   drills slots round); hole functions are not compared (KiCad's component drill for a stitching-via
+   diameter and position, slots as slots (KiCad writes `G85` slots, cadlab routes them; a KiCad slot matched only by a round
+   hole at its middle would be counted apart); hole functions are not compared (KiCad's component drill for a stitching-via
    footprint is cadlab's via drill).
 6. **Re-route** (`CADLAB_CORPUS_ROUTE=1`, budget `CADLAB_CORPUS_ROUTE_BUDGET` seconds, default 60): tracks and
    vias ripped up and routed again by cadlab's router; completion is reported, never a failure.
@@ -262,23 +263,30 @@ first (a keep-out frame became a solid keep-out); circle and multi-shape courtya
 silkscreen counted as overlapping through the outward arc approximation (overlaps must now be wider than the
 2 µm tolerance); the KiCad export floored net classes with a smaller clearance at the board clearance; mask and
 paste margins, local clearances, zone connection overrides, net ties and paste on through-hole pads were
-dropped silently (now `import.local_setting`, `import.net_tie`, `import.tht_paste`).
+dropped silently (first reported, then modeled, D40); local pad and footprint settings, net ties, pads on the
+back of their footprint, per-side and missing mask openings, slots, paste-in-hole, copper, mask and paste
+drawings in footprints, copper drawings and texts on the board, filled board polygons, mask-only and
+non-rectangular paste-only apertures, the board's mask expansion, minimum web and paste margins, and
+`.kicad_dru` rules with geometric conditions are now modeled and exported back (D40): with them, the
+known differences fell from 46 DRC entries (812 findings at most) and 48 Gerber layers to 40 entries
+(272 findings) and 23 layers (`tests/corpus/projects.toml`; local clearances alone removed 330 neck-down clearance findings on
+`tinytapeout-demo`, net ties the Kelvin resistor shorts and opens on `cynthion`).
 
 **Known issues** (recorded per board in the manifest; candidates for later work):
 
-- mask and paste margins (board, footprint, pad), local clearances and pad zone-connection overrides are not
-  modeled; KiCad's solder mask minimum web (merged openings) is not either;
-- net-tie footprints are ordinary footprints (their tied nets are shorts);
-- pads on the other side of their footprint, copper drawings and texts inside footprints or on copper layers,
-  footprints with designators cadlab cannot use (`POWER SW`), logos with a schematic symbol (unplaced), and
-  board footprints missing from the schematic are not imported;
-- paste on through-hole pads, slots (drilled round), trapezoid and chamfered pads (bounding rectangles);
-- custom DRC rules with geometric conditions (`intersectsCourtyard`, `memberOfFootprint`, rule areas) and
-  per-project rule severities;
+- footprints with designators cadlab cannot use (`POWER SW`), logos with a schematic symbol (unplaced), and
+  board footprints missing from the schematic (fiducials, placeholders) are not imported;
+- trapezoid and chamfered pads (bounding rectangles, rounded corners), per-layer pad stacks, drill offsets;
+- custom DRC rules cadlab has no counterpart for (`hasComponentClass`, `disallow`, conditions on `B`) and
+  rule severities or exclusions (layer-marker texts outside the outline, overlapping PMOD headers);
+- texts on copper layers are drawn in cadlab's stroke font, whose glyphs differ from KiCad's (Gerber
+  copper layers, copper-to-edge near the edge);
+- KiCad checks silkscreen against mask openings (with the mask expansion), cadlab against the copper;
+- net-tie shorts of sense tracks crossing a tied pad are reported by KiCad unevenly (not paired);
 - connectivity through pours differs where cadlab's refill (its own algorithm, no thermal spoke angle or count
   settings) does not reach a pad KiCad's fill reaches;
-- not yet analyzed: a few residual differences on `buspirate5-rev10`, `corne-cherry`, `glasgow-revC3`,
-  `glasgow-revD1`, `sweep-v2.2` and `tinytapeout-demo` (marked so in the manifest).
+- not yet analyzed: a few residual differences on `corne-cherry`, `glasgow-revC3`, `sweep-v2.2` and
+  `tinytapeout-demo` (marked so in the manifest).
 
 ### freerouting oracle (`tests/specctra.rs`)
 

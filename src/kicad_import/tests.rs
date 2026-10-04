@@ -133,7 +133,7 @@ fn imports_a_hand_written_board() {
     assert_eq!(p2.paste, Some(Paste::None));
     assert_eq!(fp.courtyard, vec![pt(-1.5, 1.0), pt(1.5, 1.0), pt(1.5, -1.0), pt(-1.5, -1.0)]);
     assert_eq!(fp.graphics.len(), 1, "silk lines joined");
-    // U1: bottom, KiCad 180° = cadlab 0°, locked; paste windows on pad 3; oval slot drilled round.
+    // U1: bottom, KiCad 180° = cadlab 0°, locked; paste windows on pad 3; an oval hole kept as a slot.
     let u1 = &b.footprints["U1"];
     assert_eq!((u1.rotation, u1.side, u1.locked), (Angle::ZERO, BoardSide::Bottom, true));
     let fu = crate::board::footprint_for(&p, "U1").unwrap();

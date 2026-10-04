@@ -10,7 +10,7 @@ published specifications.
 |---|---|---|---|
 | Copper, mask, silk, paste, outline | **Gerber X2** (Ucamco spec), RS-274X compatible | export | M4, done (`export.gerber`) |
 | Component data (assembly) | **Gerber X3** | export | M4, done (`export.gerber`) |
-| Drill / route | **Excellon** (XNC profile, Ucamco), optionally Gerber X2 drill files | export | M4, drills done (`export.drill`); routed slots later |
+| Drill / route | **Excellon** (XNC profile, Ucamco), optionally Gerber X2 drill files | export | M4, done (`export.drill`); slots routed (M7, D40) |
 | Bare-board electrical test netlist | **IPC-D-356A** | export | M4, done (`export.ipc356`) |
 | Pick and place | CSV (generic + per-fab column layouts), Gerber X3 | export | M4, done (`export.pnp`; per-fab layouts in `fab.export`) |
 | Assembly BOM | CSV / XLSX (generic + per-fab layouts) | export | M1/M4, CSV done (`bom.export`, `fab.export`) |
@@ -31,13 +31,13 @@ Implemented from the Ucamco Gerber Layer Format Specification (rev. 2026.05) and
 
 | File | Content |
 |---|---|
-| `<project>-F_Cu.gbr`, `-In1_Cu.gbr`, ..., `-B_Cu.gbr` | `Copper,Ln,Top/Inr/Bot`: pads flashed (`C`/`R`/`O`, fixed macros for rounded or rotated pads, outline macros for polygon pads), tracks drawn (arcs with `G75`), pours as fractured regions; `.N`/`.P`/`.C` object attributes, `.AperFunction` on every aperture |
-| `-F_Mask.gbr`, `-B_Mask.gbr` | `Soldermask`, negative (the image is the openings); openings grown by `mask_expansion` (default 0); vias tented |
-| `-F_Paste.gbr`, `-B_Paste.gbr` | SMD pads, or the pad's paste windows (exposed pads) |
+| `<project>-F_Cu.gbr`, `-In1_Cu.gbr`, ..., `-B_Cu.gbr` | `Copper,Ln,Top/Inr/Bot`: pads flashed (`C`/`R`/`O`, fixed macros for rounded or rotated pads, outline macros for polygon pads), tracks drawn (arcs with `G75`), pours, footprint copper drawings and board copper drawings and texts as fractured regions; `.N`/`.P`/`.C` object attributes, `.AperFunction` on every aperture |
+| `-F_Mask.gbr`, `-B_Mask.gbr` | `Soldermask`, negative (the image is the openings): pads with an opening on that side (`mask`), grown by their mask margin (pad, footprint, else the export's `mask_expansion`, else the board's; an exact offset), footprint and board mask drawings; with a board `mask_min_web`, the closing of all openings as regions (openings closer than the web merge); vias tented |
+| `-F_Paste.gbr`, `-B_Paste.gbr` | SMD pads on that side (and through-hole pads with `paste: pad`), or the pad's paste windows (exposed pads), resized by the paste margin and ratio (pad, footprint, else board); footprint and board paste drawings |
 | `-F_SilkS.gbr`, `-B_SilkS.gbr` | `Legend`: footprint silk, designators (Hershey strokes, mirrored on the bottom), board graphics; clipped at mask openings |
 | `-Edge_Cuts.gbr` | `Profile,NP`: outline contours with arcs |
 | `-F_Component.gbr`, `-B_Component.gbr` | Gerber X3: `ComponentMain` flash with `.CRot/.CMfr/.CMPN/.CVal/.CMnt/.CFtp/.CPgN/.CHgt`, courtyard outline, pins; DNP excluded |
-| `-PTH.drl`, `-NPTH.drl` (`-PTH-L1-L2.drl` for blind/buried spans) | XNC: metric, decimal coordinates, one tool per (function, diameter), X2 attributes in `; #@!` comments. `export.drill {gerber: true}` also writes `-PTH-drl.gbr` X2 drill files |
+| `-PTH.drl`, `-NPTH.drl` (`-PTH-L1-L2.drl` for blind/buried spans) | XNC: metric, decimal coordinates, one tool per (function, diameter), X2 attributes in `; #@!` comments; slots routed with their width as the tool (`G00` to one end, `M15`, `G01` to the other, `M16`, `G05`). `export.drill {gerber: true}` also writes `-PTH-drl.gbr` X2 drill files (slots as draws) |
 | `-pos.csv` | Designator, value, package, footprint, X/Y in mm from the outline's lower-left corner, rotation (placement, CCW from the IPC-7351 zero orientation), side; DNP excluded |
 | `.d356` | IPC-D-356A, `UNITS CUST 1`: `327` SMD pads, `317` plated holes and vias (mid-net `M`, tented `S3`), `367` non-plated holes |
 
@@ -61,11 +61,11 @@ also part of `export.all`). One XML file, namespace `http://webstds.ipc.org/2581
 | `Bom` | one `BomItem` per BOM line (part ID as `OEMDesignNumberRef`, quantity, pin count, description), `RefDes` per designator (`populate="false"` for DNP), value, manufacturer, MPN and package as `Textual` characteristics |
 | `Ecad/CadData` | layers in stack order (`F.SilkS`, `F.Paste`, `F.Mask`, copper and `DielectricN`, ..., `B.SilkS`), one `DRILL_<from>_<to>` layer per copper span with its `Span`; `Stackup` with copper thicknesses and dielectrics sharing the rest of the board thickness (`whereMeasured="METAL"`) |
 | `Step` | `Datum`, `Profile` (outline polygon with `PolyStepCurve` arcs, `Cutout`s), a `Package` per footprint (courtyard outline, pick-up point, `LandPattern` pads, body rectangle as `AssemblyDrawing`, `Pin`s), a `Component` per placement (`Xform` rotation, `mirror` on the bottom: mirror about Y, then counter-clockwise rotation), `LogicalNet`s (component pins by pad number), and `LayerFeature`s |
-| Features | copper: pads, vias (`padUsage="VIA"`), tracks (`Line`, `Arc`) and zone fills (`Contour` with `Cutout`s) grouped in a `Set` per net; mask: pad openings grown by the mask expansion (vias tented); paste: SMD pads or exposed-pad windows; legend: footprint silk, designators and board graphics as strokes (`Polyline`, `Line`, `Arc`), not clipped at mask openings; drill: `Hole`s with `PLATED`, `NONPLATED` or `VIA` |
+| Features | copper: pads, vias (`padUsage="VIA"`), tracks (`Line`, `Arc`) and zone fills (`Contour` with `Cutout`s) grouped in a `Set` per net; mask: pad openings as in the Gerber mask (per-side `mask`, margins; vias tented); paste: as in the Gerber paste (margins, ratios, paste-in-hole, windows); legend: footprint silk, designators and board graphics as strokes (`Polyline`, `Line`, `Arc`), not clipped at mask openings; drill: `Hole`s with `PLATED`, `NONPLATED` or `VIA` (a slot as a hole of its width at its center) |
 
 Left out: `HistoryRecord` and `Avl` (both require dates; the AVL would repeat the BOM's MPNs), `PadStackDef`
-(pads are written per layer instead), material `Spec`s (the project has requirements, not materials), board
-graphics on copper, mask and paste layers. The schema (`IPC-2581C.xsd`) is published by IPC at
+(pads are written per layer instead), material `Spec`s (the project has requirements, not materials), mask and
+paste drawings (copper drawings are copper features), the solder mask minimum web, slot outlines. The schema (`IPC-2581C.xsd`) is published by IPC at
 `webstds.ipc.org` (not reachable without access at the time of writing) and is not shipped: its distribution terms
 are IPC's. Element order follows the published revision C structure and `kicad-cli pcb export ipc2581` output
 (observed, as an oracle). Tests parse the file back and check structure, references and counts against the

@@ -30,10 +30,19 @@ Board
 ├── tracks        segments (and arcs): layer, width, net, start, end, optional arc midpoint
 ├── vias          position, drill, diameter, net, layer span (through by default)
 ├── zones         polygon, layer(s), net, priority, clearance, min width, thermal relief settings
-├── keepouts      polygon, layers, what is forbidden (tracks, vias, pours, footprints)
+├── keepouts      polygon, layers, what is forbidden (tracks, vias, pours, footprints); forbidding
+│                 nothing: a named rule area for custom rules
 ├── holes         mounting holes: name (H1), center, drill, plated pad diameter and net (none = NPTH)
-└── graphics      silkscreen/fab/user drawings and texts
+├── graphics      silkscreen/fab/user drawings, filled polygons and texts; on copper layers they
+│                 are netless copper
+└── custom_rules  clearance / track width for a scope: item kinds, layer, footprint, courtyard,
+                  rule area (see "Local settings, net ties and custom rules")
 ```
+
+Footprints (in the project library, shared by their placements) carry the per-footprint and
+per-pad settings of the next section: mask and paste margins, local clearance, zone connection,
+net ties, pads on the back, mask openings per side, slotted holes, paste-in-hole, and copper,
+mask and paste drawings.
 
 ## Shared geometry (`src/board/`)
 
@@ -57,13 +66,17 @@ router agree on what copper exists:
 For each zone and each of its layers, in priority order (higher first, ties in board order):
 
 1. Area = zone outline ∩ board outline (outer contour minus cutouts, shrunk by `copper_to_edge`).
-2. Minus every other-net copper item on the layer (netless items too) inflated by max(zone clearance, the DRC
-   clearance of the item's net and of the zone's net: class clearance, else the rules'), so a zone clearance set
-   below the rules (as KiCad zones often are) never makes the fill violate the DRC; NPTH holes inflated by the zone clearance; higher-priority fills of other nets inflated by
+2. Minus every other-net copper item on the layer (netless items too, copper drawings and texts included)
+   inflated by max(zone clearance, the DRC clearance of the item and of the zone's net: the item's custom
+   rule, else its local clearance, else its net's class clearance, else the rules'), so a zone clearance set
+   below the rules (as KiCad zones often are) never makes the fill violate the DRC; NPTH holes (slots as
+   stadiums) inflated by the zone clearance; higher-priority fills of other nets inflated by
    the larger of both zones' clearances; keep-outs with `no_pours` on that layer.
-3. Same-net pads: `solid` merges them; `thermal` keeps a `thermal_gap` around the pad (default: the clearance) and
-   adds spokes of width `thermal_spoke` (default: max(net track width, 0.25 mm)) in the four axis directions;
-   `none` keeps a clearance gap. Same-net tracks and vias are always solid.
+3. Same-net pads, by the pad's own zone connection (`footprint.set --zone-connection`, pad then
+   footprint), else the zone's: `solid` merges them; `thermal` keeps a `thermal_gap` around the pad
+   (default: the clearance) and adds spokes of width `thermal_spoke` (default: max(net track width,
+   0.25 mm)) in the four axis directions; `none` keeps a clearance gap; `tht_thermal` is `thermal` for
+   plated through-hole pads and `solid` for the others. Same-net tracks and vias are always solid.
 4. Opening by `min_width / 2` removes copper narrower than `min_width` (default: rules `zone_min_width`).
 5. Spokes are added only when they lie entirely in the allowed area of step 2 and reach the pour (a spoke that
    would violate a clearance is dropped, never trimmed into a sliver).
@@ -83,7 +96,7 @@ output see zone copper through it.
 Performance and caching: layers fill in parallel (zones interact only within a layer), and later zones of a
 layer reuse earlier fills grown by their keep-away distance. Each zone only receives what can reach its outline
 (D42): the layer's items come from a packed R-tree (`geom::RTree`) queried with the outline's box grown by the
-largest keep-away distance, far NPTH holes and keep-outs are skipped, and earlier fills are grown only where
+largest keep-away distance (each item's resolved clearance included), far NPTH holes and keep-outs are skipped, and earlier fills are grown only where
 they can matter (polygons too far away dropped, holes too far away filled first). Same-net pad gaps and
 thermal pads far from the area are skipped too, and rings of the pour meeting no thermal window are left out
 of the spoke clips. Shapes that far away cannot change the fill, so the result is the same polygons (checked
@@ -92,20 +105,65 @@ board with ~550 copper items (120 pads, 200 tracks, 240 vias) fills both GND lay
 large boards: see "Performance".
 Fills are not stored on disk: `copper_items` has no project directory, and a recompute is cheap. Instead
 `fill_zones` keeps the last 4 results in process with their inputs (board, net classes and net assignments,
-base copper, NPTH holes) and reuses one only when every input compares equal (the board first by pointer: an
+base copper with its local settings, NPTH holes and slots, and the clearance resolved for each base item, which
+also depends on library footprints through custom rules and local clearances, D40) and reuses one only when every input compares equal (the board first by pointer: an
 unchanged project shares it), so repeated queries on the same state in one MCP or batch session cost a few
 milliseconds (5 ms on the synthetic board below, the NPTH list included).
+
+## Local settings, net ties and custom rules (D40)
+
+Footprints and pads carry settings that override the board's, all optional (unset: inherited), in
+`Nm` (paste ratios as exact decimals), set with `footprint.set` (`pads` for pad settings, none for the
+footprint's own defaults; `unset` resets). They belong to the land pattern, so every placement of the
+footprint follows; nothing in them names a fab (D12).
+
+| Setting | Where | Effect |
+|---|---|---|
+| `mask_margin` | pad, footprint; board `mask_expansion` | solder mask opening grown (shrunk) by it on every side, an exact offset (a rectangle grows with corners rounded by the margin); `export.gerber --mask-expansion` replaces the board's value for one export |
+| `paste_margin`, `paste_ratio` | pad, footprint; board `paste_margin`, `paste_ratio` | paste opening resized by margin + ratio × side, per axis (a rounded rectangle keeps its corner ratio); exposed-pad paste windows and paste drawings are not resized |
+| board `mask_min_web` | board | openings closer than it merge: the mask layer is written as the closing of all openings (grown by half the web, shrunk back, round joins), as regions |
+| `clearance` | pad, footprint | see the clearance resolution below |
+| `zone_connection` | pad, footprint | how zones of the pad's net join it (zone fill, step 3) |
+| `back` | SMD pad | the pad's copper, mask and paste are on the other side of its footprint (card-edge fingers, heat sinks soldered from the back) |
+| `mask` | pad | openings on the pad's outer copper (default), on the footprint's side only (`front`) or the other side only (`back`) for holes, or none (`none`: tented thermal vias, covered heat spreaders) |
+| `slot` | through-hole and non-plated pads | an oval hole (size along the pad's X and Y); the drill is its width |
+| `paste: pad` | through-hole pads | paste-in-hole on the footprint's side (SMD pads have paste unless `paste: none`) |
+| `net_ties` | footprint | groups of pad numbers whose nets the footprint joins on purpose |
+| copper, mask, paste drawings | footprint graphics (`back` for the other side) | copper: copper items (DRC, fills, Gerber, IPC-2581) on the net of the first pad they touch; mask, paste: openings on those layers |
+
+**Clearance resolution** (`board::clearance`), for two copper items of different nets, highest first:
+the last custom rule (board order) with a clearance whose scope holds either item; when either item
+has a local clearance (pad, else footprint), the larger local value of the two, the other item's net
+class not counting; else the larger net clearance (class, else `board.rules` `clearance`). Never below
+`board.rules` `min_clearance` (0: no floor). Observed with `kicad-cli` on test boards, KiCad resolves
+local overrides the same way (a pad's local 0.05 mm wins over a 0.3 mm net class of the other item,
+the board minimum still applies), so imported boards check alike.
+
+**Net ties.** Items of one net-tie group of one footprint (its pads, and its copper drawings, which
+also bridge any copper of the group's nets) may touch: no `drc.short`, no `drc.clearance`, and
+`board::islands` does not join them, so each net keeps its own connectivity (a net tie never routes
+one net through another). Any other copper touching a tied pad is still a short, as in KiCad
+(`shorting_items`).
+
+**Custom rules** (`board.custom_rule`, `board.custom_rule_remove`, `board.custom_rules`) give a
+clearance and/or a track width to the copper items in a scope: item `kinds` (pad, track, via, zone,
+graphic), a copper `layer`, the pads and drawings of footprints matching a `footprint` pattern
+(designator or footprint name, `*` `?`), items touching the courtyard of matching footprints
+(`in_courtyard`), items entirely inside a named keep-out or rule area (`in_area`, `keepout.add
+--rule-area`). A rule's clearance applies when either item is in scope (later rules win); its track
+width replaces the net class width (`drc.track_width` when a track in scope is narrower; the board
+minimum still applies). Zone fills keep each item's rule clearance too.
 
 ## Commands
 
 | Group | Commands |
 |---|---|
-| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field; see "Design rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
+| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance and track width, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
 | `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set`, `remove`, `list`, `fill` (report area/islands, warn empty or split) |
-| `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given), `remove`, `list` |
+| `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given; `rule_area`: forbid nothing, a named area for custom rules), `remove`, `list` |
 | `drc` | `run` (plus `fab.check` warnings for the manifest `targets`) |
 | `board` (stackup) | `stackup` (copper, dielectrics, line model per layer), `dielectric` (thickness, εr, material per gap; [ELECTRICAL.md](ELECTRICAL.md)) |
 | `impedance` | `calc` (Z0 / Zdiff of a width on a layer), `solve` (width for a target, optionally into a net class) |
@@ -196,20 +254,26 @@ the library stay).
 | pads: rect, circle, oval, roundrect | the same shapes (rounded corner = ratio × shorter side) |
 | pads: custom | polygon pads: anchor ∪ primitives (filled polygons, stroked lines and arcs, circles, rectangles; curves within 1 µm outside), holes joined by zero-width cuts; only the largest part of a pad in separate parts (`import.pad_approximated`) |
 | pads: trapezoid, chamfered | bounding rectangle, rounded corners (`import.pad_approximated`) |
-| oval drill (slot), drill offset | round hole of the slot's width, centered (`import.pad_approximated`) |
-| paste-only apertures | paste windows of the copper pad they sit on |
+| oval drill (slot) | a slotted hole (`slot`); a drill offset is ignored, the hole centered (`import.pad_approximated`) |
+| SMD pad with copper only on the other side of its footprint | a pad on the back (`back`) |
+| pad layers without `*.Mask` / `F.Mask` / `B.Mask` | the pad's `mask`: none (tented), front or back only |
+| through-hole pad with `F.Paste` | paste-in-hole (`paste: pad`; paste on the other side only: `import.tht_paste`) |
+| paste-only apertures | paste windows of the copper pad they sit on (equal aligned rectangles); others (custom shapes, mixed sizes, off a pad) become paste drawings of the footprint (`import.paste_drawing`) |
+| mask-only apertures | mask drawings of the footprint |
+| copper, mask and paste drawings of either side (`fp_line`, `fp_poly`, ...) | footprint graphics on those layers (`back` for the other side); filled polygons and rectangles are areas, outlines closed polylines; inner-layer copper is not imported (`import.footprint_layer`) |
 | silkscreen, fab and courtyard drawings of the footprint's side | footprint graphics (arcs as polylines); the courtyard replaces the courtyard drawings: one closed polygon as is, a circle as a polygon around it, lines forming one loop, several closed shapes as their union when it is one polygon, else the bounding box; none: 0.25 mm around the pads (`import.courtyard_generated`, listing every footprint) |
 | `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
 | board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad (`import.footprint_as_via`, `import.footprint_as_holes`) |
-| solder mask / paste margins, local clearances, pad zone connections (pad, footprint, board setup) | not kept: the mask follows the pads (plus the export's expansion), the net's clearance and the zone's connection apply (`import.local_setting`, every subject listed) |
-| `net_tie_pad_groups` | an ordinary footprint: the tied nets are shorts for cadlab's DRC (`import.net_tie`) |
+| `solder_mask_margin`, `solder_paste_margin`, `solder_paste_margin_ratio` / `solder_paste_ratio`, `clearance`, `zone_connect` (pad, footprint) | the pad's or footprint's settings (zero margins and clearances are KiCad's "not set" and stay unset; `zone_connect` 0 none, 1 thermal, 2 solid, 3 `tht_thermal`) |
+| setup `pad_to_mask_clearance`, `solder_mask_min_width`, `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | `board.rules` `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio` |
+| `net_tie_pad_groups` (`"1, 2"`) | the footprint's `net_ties` |
 | project text variables (`${NAME}` in board texts) | replaced by their `.kicad_pro` values |
-| footprints without pads (logos) | board graphics |
+| footprints without pads (logos) | board graphics (copper, mask and paste polygons stay filled areas) |
 | `segment`, `arc`, `via` (through, blind, micro) | tracks (arcs keep their mid point), vias |
-| copper `zone` | zone: outline, net, layers, priority, clearance, minimum width, pad connection, thermal gap and spoke; fills recomputed; values equal to cadlab's defaults left unset |
-| rule area (`keepout`) | keep-out: tracks, vias, copper pour, footprints (all copper layers = no layer list) |
+| copper `zone` | zone: outline, net, layers, priority, clearance, minimum width, pad connection (`thru_hole_only`: `tht_thermal`), thermal gap and spoke; fills recomputed; values equal to cadlab's defaults left unset |
+| rule area (`keepout`) | keep-out: tracks, vias, copper pour, footprints (all copper layers = no layer list); one that forbids nothing is kept as a rule area when a custom rule names it (`enclosedByArea`), else reported (`import.rule_area`) |
 | zone or rule area with several `polygon` outlines | their area under the even-odd rule (a polygon inside another is a hole): one zone or keep-out per separate part, holes joined to the outline by zero-width cuts (`import.zone_outlines`) |
-| `gr_line`/`gr_arc`/`gr_circle`/`gr_rect`/`gr_poly`, `gr_text` on non-copper layers | board graphics (lines, arcs and circles as polylines; texts with size and angle) |
+| `gr_line`/`gr_arc`/`gr_circle`/`gr_rect`/`gr_poly`, `gr_text` | board graphics (lines, arcs and circles as polylines; filled polygons, rectangles and circles as areas; texts with size and angle); on copper layers they are netless copper (a net they carry is reported, `import.copper_drawing_net`) |
 
 Nets: with a circuit in the project, footprints are matched by designator, pads to pins through the part's
 pin map, and each board net takes the circuit name most of its pads carry (`import.net_conflict`,
@@ -224,15 +288,25 @@ Rules (`.kicad_pro`, `.kicad_dru` next to the board, or `board.import_kicad_rule
 Default class give `board.rules` (clearance = the larger of `min_clearance` and the Default class clearance),
 other classes become net classes (values equal to the board's are inherited), patterns and explicit
 assignments give nets their class, custom rules without condition tighten board minimums and `A.NetClass ==
-'X'` width and clearance rules tighten the class. Other rules are reported (`import.rule_unsupported`), zero
-minimums keep cadlab's value (`import.rule_zero`), except `min_silk_clearance`, which becomes `silk_to_pad` even
-at zero (silkscreen may then touch pads but not cover them, as KiCad checks it).
+'X'` width and clearance rules tighten the class. Rules with geometric conditions become custom rules
+(`board.custom_rules`) when every term of the condition (joined by `&&`) is one of `A.Type == 'Pad'`
+(`Track`, `Via`, `Zone`, `Graphic`; `!=` too), `A.Layer == '<copper layer>'`, `A.memberOfFootprint('…')`,
+`A.intersectsCourtyard('…')` (the library prefix of a footprint pattern is dropped: cadlab footprint
+names have none) or `A.enclosedByArea('…')`, or a parenthesized `||` of one kind of term (as the export
+writes them); a rule `(layer ...)` naming one copper layer is the layer term; their `clearance` and
+`track_width` minimums are kept (a maximum is not checked: `import.rule_partial`). Not supported, each
+reported (`import.rule_unsupported`): conditions on `B`, other functions (`hasComponentClass`,
+`insideArea`, ...), net class terms mixed with geometric ones, other constraints in scoped rules
+(`disallow`, `courtyard_clearance`, `silk_clearance`, ...), and rules switched off
+(`severity ignore` or `exclusion`). Zero minimums keep cadlab's value (`import.rule_zero`), except `min_silk_clearance`, which
+becomes `silk_to_pad` even at zero (silkscreen may then touch pads but not cover them, as KiCad checks
+it).
 
 Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
 notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
-(members are imported), footprint texts, 3D models, copper drawings, zones inside footprints, pads on the other
-side of their footprint, per-layer pad stacks, hatched fills (solid), teardrop zone attributes (teardrops are
-ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
+(members are imported), footprint texts, 3D models, copper drawings on inner layers of footprints, zones
+inside footprints, per-layer pad stacks (the front layer's shape is kept, `import.pad_approximated`),
+drill offsets, hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
 can be read against the imported project.
 
 ## Placement (`src/board/place.rs`)
@@ -282,19 +356,19 @@ courtyards) count an overlap only where it is wider than 2 µm.
 |---|---|---|
 | `drc.no_outline` | error | the board has no outline (edge rules are skipped) |
 | `drc.unplaced`, `drc.no_footprint` | warning | component not placed / placed without a footprint |
-| `drc.short` | error | copper of different nets touches on a shared layer (also no-net copper touching a net) |
-| `drc.clearance` | error | copper of different nets (or no net vs a net) closer than the larger of the two clearances; pads of one footprint are not checked against each other |
-| `drc.track_width` / `drc.track_width_class` | error / warning | track narrower than `min_track_width` / than its net class width |
+| `drc.short` | error | copper of different nets touches on a shared layer (also no-net copper touching a net); copper of one net-tie group of a footprint may touch |
+| `drc.clearance` | error | copper of different nets (or no net vs a net) closer than the clearance in effect (custom rule, local clearances, else the larger net clearance; see "Local settings, net ties and custom rules"); pads and copper drawings of one footprint are not checked against each other |
+| `drc.track_width` / `drc.track_width_class` | error / warning | track narrower than `min_track_width` or a custom rule's width / than its net class width |
 | `drc.via_size_class` | warning | via drill or diameter smaller than its net class asks |
 | `drc.netclass_rule` | warning | a net class value below the board minimums (track or diff pair width < `min_track_width`, via drill < `min_drill`, via ring < `min_annular_ring`) |
 | `drc.via_drill`, `drc.pad_drill` | error | via or pad hole below `min_drill` |
-| `drc.via_annular_ring`, `drc.pad_annular_ring` | error | (pad size − drill) / 2 below `min_annular_ring` (vias, plated pads) |
-| `drc.hole_to_hole` | error | holes (vias, plated and non-plated pads) closer than `hole_to_hole`, edge to edge |
+| `drc.via_annular_ring`, `drc.pad_annular_ring` | error | (pad size − hole) / 2 below `min_annular_ring` (vias, plated pads; slots per pad axis) |
+| `drc.hole_to_hole` | error | holes (vias, plated and non-plated pads, slots as stadiums) closer than `hole_to_hole`, edge to edge; holes of one pin (pads of a footprint sharing a number) are not checked against each other |
 | `drc.outside_board` | error | copper or a non-plated board hole not inside the outer contour, or overlapping a cutout |
 | `drc.copper_to_edge` | error | copper closer than `copper_to_edge` to any contour |
 | `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine), or a board hole is inside a courtyard (either side) |
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout |
-| `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad on that side |
+| `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad with a mask opening on that side |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
 | `drc.unrouted` | error | a ratsnest connection, with both ends |
 | `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |

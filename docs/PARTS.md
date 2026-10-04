@@ -134,6 +134,7 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `part.create` | concrete or custom part from a pin list + package name or dimensions |
 | `part.list / show / set / remove` | inspect and edit the library (removal refused while in use) |
 | `footprint.generate / list / show / remove` | land patterns |
+| `footprint.set` | local settings of a footprint or some of its pads: mask and paste margins, clearance, zone connection, net ties, pads on the back, mask openings per side, slots, paste-in-hole ([BOARD.md](BOARD.md), "Local settings, net ties and custom rules") |
 | `footprint.model_set / model_clear / model_list` | 3D models of footprints and parts (below) |
 | `footprint.import_kicad <path>` | the user's KiCad footprints (`.kicad_mod`, `.pretty`) into the project (below) |
 | `part.import_kicad_sym <path>` | the user's KiCad symbols (`.kicad_sym`) as project parts (below) |

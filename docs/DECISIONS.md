@@ -332,8 +332,8 @@ Coordinates are parsed from decimal millimeters to `Nm` exactly and converted wi
 cadlab board comes back equal. Footprints embedded in the board are the user's design data and become project
 footprints; KiCad's libraries are still never read or converted (D7). Identical instances share one footprint,
 and a footprint equal (within 3 nm, any item order) to a project footprint reuses it. Shapes cadlab cannot
-represent are approximated conservatively (trapezoid pads as bounding rectangles, slots as round holes; custom
-pads were bounding rectangles until the corpus, D35, made them polygon pads) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
+represent are approximated conservatively (trapezoid pads as bounding rectangles; custom pads were bounding rectangles until the
+corpus, D35, made them polygon pads, and slots round holes until D40 modeled them) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
 project it wins: footprints match by designator, pads to pins through the part's pin map, board nets take the
 circuit's names, and disagreements are reported for the user to fix; footprints the circuit lacks are not
 placed. Without one, the circuit is built from the board through the netlist importer (D27), so parts are
@@ -485,6 +485,38 @@ closes length budgets with a report of what remains; a centerline router reuses 
 D22/D34 with little new machinery, and closed-form meanders make the residual error negligible instead of
 iterating on measured lengths.
 
+### D40. Local pad settings, net ties, copper drawings, slots and scoped rules are design data (2026-10-04)
+The import gaps the open-source corpus measured (D35) are modeled in cadlab rather than approximated at
+import. Footprints and their pads carry optional local settings (`Overrides`: mask margin, paste margin
+and ratio, clearance, zone connection; a pad's value wins over its footprint's, which wins over the
+board's), net-tie pad groups, SMD pads on the back of their footprint, a per-side mask opening choice
+(`mask`: pad, front, back, none), slotted holes (`slot`: the hole's size along the pad axes, the drill
+staying its width so code that knows only round holes stays conservative), paste-in-hole (`paste:
+pad`), and copper, mask and paste drawings (on either side). The board gets `min_clearance`,
+`mask_expansion`, `mask_min_web`, `paste_margin` and `paste_ratio` in its rules, filled polygon
+graphics, copper graphics (netless copper), rule areas (keep-outs forbidding nothing) and custom rules
+scoped by item kind, copper layer, footprint pattern, courtyard and area. All are optional with serde
+defaults (no migration), stored in `Nm` or exact decimals (`Scale`), and none names a fab: they are the
+designer's choices, applied by every consumer through the shared geometry (`board::placed_pads`,
+`copper_items`, `board::clearance`), so DRC, zone fill, Gerber, drill, IPC-2581, IPC-D-356, Specctra,
+rendering and the KiCad export agree. Semantics were taken from KiCad's documented behavior and checked
+by observing `kicad-cli` on small test boards (no code read): a local clearance replaces the net class
+clearance of both items (the larger local value wins, the board minimum still applies); custom rules
+outrank local values and the last matching rule wins; paste is resized per axis by margin + ratio × side
+with rounded rectangles keeping their corner ratio, while mask openings are exact offsets; the minimum
+web is the morphological closing of the openings (round joins); a net tie lets copper of one group of
+one footprint touch (its drawings bridge the group's nets) but keeps the nets apart for connectivity,
+and any other copper touching a tied pad is still a short. Slots are routed in the XNC drill files
+(`G00`/`M15`/`G01`/`M16`/`G05`, the documented XNC route mode) and drawn in X2 drill files. KiCad's
+custom rules import when their conditions are conjunctions of the supported terms; everything else is
+reported, never dropped silently. Left for later: per-layer pad stacks (front shape kept), footprint
+texts, zones inside footprints, rule severities and exclusions, inner-layer footprint copper.
+*Why:* the corpus showed these settings change real outputs (mask openings, stencils, neck-down
+clearances, Kelvin resistors, card-edge pads) by more than the comparison tolerances, and an import that
+drops them changes the design; modeling them once in the shared geometry fixes every output at the same
+time and makes them editable (`footprint.set`, `board.rules`, `board.custom_rule`), while the KiCad
+export writes them back so the KiCad DRC oracle checks them.
+
 ### D41. User KiCad libraries: footprints converted like board footprints, symbols as pins plus generated drawings (2026-10-04)
 `footprint.import_kicad` (`.kicad_mod`, `.pretty`) and `part.import_kicad_sym` (`.kicad_sym`) bring the user's
 own KiCad 6+ libraries into the project; `lib.import_kicad` puts them into a shared library (D19), writing
@@ -534,6 +566,7 @@ result, so culling them skips work whose answer is known, which D23 allows; clip
 add edges and move vertices by snap rounding, which it does not. The remaining zone fill time is inside
 `polyclip`'s offsets and booleans; what it would need is measured in docs/POLYGON_LIB.md §8 instead of being
 worked around in cadlab.
+
 
 ## Open questions
 

@@ -7,6 +7,7 @@
 | Length / coordinate | `Nm` | `i64` nanometers. ±9.2 × 10⁹ m range, 1 nm resolution. KiCad uses i32 nm; we keep headroom for intermediate math. |
 | Angle | `Angle` | `i32` in millidegrees (0.001°). Multiples of 90° get exact fast paths. |
 | Electrical values | `Value<Unit>` | decimal mantissa + SI exponent (`10k`, `100n`, `4.7u`), never `f64`, so `4.7uF` stays `4.7uF` |
+| Ratio / scale factor | `Scale` | `i64` parts per million, written as an exact decimal (`"-0.05"`, `"2.54"`): paste ratios, 3D model scales |
 
 Parsing accepts human input everywhere: `"0.2mm"`, `"8mil"`, `"0.1in"`, `"10k"`, `"100nF"`. Output uses mm by
 default, configurable per project. Bare numbers without units are rejected in the public API to avoid mm/mil
@@ -39,7 +40,9 @@ Resolution errors list the closest matches.
 ```
 Project
 ├── manifest        name, version, schema version, units, optional compatibility targets, metadata
-├── library         parts available to this project (local copies, pinned, see PARTS.md)
+├── library         parts available to this project (local copies, pinned, see PARTS.md) and their
+│                   footprints, with per-footprint and per-pad local settings (mask and paste margins,
+│                   clearance, zone connection, net ties, back-side pads, slots; BOARD.md, D40)
 ├── bom             sourcing overlay: requirements, approved MPNs + alternates, DNP, cached supplier data
 ├── circuit         SOURCE OF TRUTH for connectivity
 │   ├── components  refdes → part, properties, block membership
@@ -52,7 +55,8 @@ Project
 ├── board
 │   ├── stackup     layers, thicknesses, materials, copper weights, board spec (finish/color preferences)
 │   ├── outline     edge cuts, cutouts, slots
-│   ├── rules       design rules (engineering intent, fab-independent), per net class overrides
+│   ├── rules       design rules (engineering intent, fab-independent), per net class overrides; solder
+│   │               mask expansion and minimum web, paste margins; custom rules for parts of the board
 │   ├── footprints  component placement: position, rotation, side, locked
 │   ├── tracks      segments and arcs: layer, width, net
 │   ├── vias        position, drill, pad, layer span (through/blind/buried/micro)
