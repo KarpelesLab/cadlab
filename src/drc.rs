@@ -16,7 +16,7 @@ use polyclip::{Circle, EndCap, FillRule, Geometry, Join, Op, Path, Polygon, Poly
 use crate::board::prepared::{self, Prepared};
 use crate::board::{self as geo, COPPER_TOL, CopperItem};
 use crate::diag::Diagnostic;
-use crate::geom::Point;
+use crate::geom::{Point, RTree};
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind, Rules};
 use crate::model::circuit::NetClass;
@@ -600,6 +600,32 @@ struct BoardShape {
     edges: Vec<Path>,
     /// The outer contour, counter-clockwise, when it is a simple convex polygon.
     convex: Option<Ring>,
+    /// Boxes of the outer contour's segments.
+    outer_index: RTree,
+    /// Boxes of every edge segment (outer contour and cutouts).
+    edge_index: RTree,
+    /// Every outer contour vertex is within `polyclip`'s coordinate range.
+    outer_in_range: bool,
+}
+
+/// Bounding boxes of a closed ring's segments.
+fn segment_boxes(r: &Ring) -> impl Iterator<Item = Option<Rect>> + '_ {
+    let v = &r.0;
+    (0..v.len()).map(move |i| Some(Rect::new(v[i], v[(i + 1) % v.len()])))
+}
+
+/// Even-odd location of `p` in the region bounded by `r`, for a point on no edge: the parity
+/// of the edges crossing the rightward ray from `p` (exact, as `polyclip`'s own locator).
+fn even_odd_inside(r: &Ring, p: polyclip::Point) -> bool {
+    let v = &r.0;
+    let mut inside = false;
+    for i in 0..v.len() {
+        let (a, b) = (v[i], v[(i + 1) % v.len()]);
+        if (a.y > p.y) != (b.y > p.y) && (polyclip::predicates::orient(a, b, p) > 0) == (b.y > a.y) {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 impl BoardShape {
@@ -612,10 +638,37 @@ impl BoardShape {
             .map(|c| Ring::from(geo::contour_ring(c, COPPER_TOL)))
             .filter(|r| r.len() >= 3);
         let outer = rings.next()?;
-        let cutouts: Vec<Ring> = rings.collect();
+        Some(BoardShape::new(outer, rings.collect()))
+    }
+
+    fn new(outer: Ring, cutouts: Vec<Ring>) -> BoardShape {
         let edges = std::iter::once(&outer).chain(&cutouts).map(|r| Path::from(r.clone())).collect();
         let convex = convex_ccw(&outer);
-        Some(BoardShape { outer, cutouts, edges, convex })
+        let outer_index = RTree::new(segment_boxes(&outer));
+        let edge_index = RTree::new(std::iter::once(&outer).chain(&cutouts).flat_map(segment_boxes));
+        let outer_in_range = polyclip::in_range(&outer);
+        BoardShape { outer, cutouts, edges, convex, outer_index, edge_index, outer_in_range }
+    }
+
+    /// Whether `polyclip::contains(&self.outer, g)` holds. When no segment of the outer
+    /// contour comes near `g`'s box, the contour's (even-odd) inside does not change over that
+    /// box, so `g` is inside exactly when one of its points is: the same answer without
+    /// building an arrangement of the whole contour.
+    fn outer_contains<G: Geometry + ?Sized>(&self, g: &G) -> bool {
+        if let (Some(bb), Some(ba), Some(p)) = (g.bbox(), self.outer.bbox(), g.any_point())
+            && self.outer_in_range
+            && !self.outer_index.any(&bb)
+        {
+            return ba.contains_rect(&bb) && polyclip::in_range(g) && even_odd_inside(&self.outer, p);
+        }
+        polyclip::contains(&self.outer, g)
+    }
+
+    /// Whether `g` comes closer than `d` to a board edge.
+    fn near_edge<G: Geometry + ?Sized>(&self, g: &G, d: i64) -> bool {
+        // Only segments within `d` of `g`'s box can be closer than `d`.
+        g.bbox().is_some_and(|b| self.edge_index.any(&b.expand(d)))
+            && self.edges.iter().any(|e| polyclip::distance_less_than(g, e, d))
     }
 
     /// Whether a region lies outside the board or overlaps a cutout.
@@ -630,7 +683,7 @@ impl BoardShape {
             });
             all
         });
-        !(inside || polyclip::contains(&self.outer, g)) || self.cutouts.iter().any(|c| overlap(c, g).is_some())
+        !(inside || self.outer_contains(g)) || self.cutouts.iter().any(|c| overlap(c, g).is_some())
     }
 }
 
@@ -667,7 +720,7 @@ fn board_edges(ctx: &Ctx, items: &[CopperItem], o: &BoardShape, out: &mut Vec<Di
             Diagnostic::error("drc.outside_board", format!("{label} is outside the board outline or in a cutout"))
                 .at(it.anchor)
                 .with_hint("move it inside the board outline")
-        } else if limit > 0 && o.edges.iter().any(|e| polyclip::distance_less_than(&it.shape, e, limit)) {
+        } else if limit > 0 && o.near_edge(&it.shape, limit) {
             let (dist, at) = o
                 .edges
                 .iter()
@@ -959,6 +1012,51 @@ mod tests {
 
     fn r(x0: i64, y0: i64, x1: i64, y1: i64) -> Option<Rect> {
         Some(Rect::new(polyclip::Point::new(x0, y0), polyclip::Point::new(x1, y1)))
+    }
+
+    /// The indexed outline queries answer exactly as `polyclip` on the whole contour.
+    #[test]
+    fn board_shape_queries_match_polyclip() {
+        let p = polyclip::Point::new;
+        // A comb (non-convex), a notch meeting the contour at a vertex, and a cutout.
+        let mut outer = vec![p(0, 0), p(100_000, 0), p(100_000, 60_000)];
+        for k in (0..5).rev() {
+            let x = 10_000 + k * 20_000;
+            outer.extend([p(x + 8_000, 60_000), p(x + 8_000, 20_000), p(x, 20_000), p(x, 60_000)]);
+        }
+        outer.extend([p(0, 60_000), p(0, 30_000), p(5_000, 25_000), p(0, 20_000)]);
+        let cut = Ring::from(vec![p(60_000, 5_000), p(70_000, 5_000), p(70_000, 12_000), p(60_000, 12_000)]);
+        let o = BoardShape::new(Ring::from(outer), vec![cut]);
+        assert!(o.convex.is_none());
+        let mut shapes: Vec<PolygonSet> = Vec::new();
+        for i in -2..=52 {
+            for j in -2..=32 {
+                let (x, y) = (i * 2_000 + (j % 3) * 300, j * 2_000);
+                let sq = |s: i64| Polygon::new(vec![p(x, y), p(x + s, y), p(x + s, y + s), p(x, y + s)], vec![]);
+                shapes.push(vec![sq(900)]);
+                if (i + j) % 7 == 0 {
+                    shapes.push(vec![sq(4_500)]);
+                }
+            }
+        }
+        // A large shape with a hole around part of the contour.
+        let big = Polygon::new(
+            vec![p(-5_000, -5_000), p(30_000, -5_000), p(30_000, 30_000), p(-5_000, 30_000)],
+            vec![vec![p(1_000, 1_000), p(1_000, 25_000), p(25_000, 25_000), p(25_000, 1_000)].into()],
+        );
+        shapes.push(vec![big]);
+        let (mut inside, mut near) = (0, 0);
+        for g in &shapes {
+            let want = polyclip::contains(&o.outer, g);
+            assert_eq!(o.outer_contains(g), want, "{g:?}");
+            inside += want as usize;
+            for d in [1, 1_500, 4_000] {
+                let want = o.edges.iter().any(|e| polyclip::distance_less_than(g, e, d));
+                assert_eq!(o.near_edge(g, d), want, "{g:?} {d}");
+                near += want as usize;
+            }
+        }
+        assert!(inside > 100 && inside < shapes.len() - 100 && near > 100, "{inside} {near}");
     }
 
     #[test]
