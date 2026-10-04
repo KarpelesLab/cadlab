@@ -390,6 +390,211 @@ fn failures_explain_what_blocks() {
     assert_eq!(f.error.diagnostic.code, "route.invalid_layer");
 }
 
+/// An LQFP-48 (0.5 mm pitch) with default rules (0.25 mm tracks): most of its pads are off the
+/// 0.225 mm grid and need escapes. Pins go to four 1x12 headers, one per side.
+fn lqfp_board(r: &Registry, s: &mut Session) {
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "MCU48", "category": "mcu", "package": "LQFP-48", "pins": numbered_pins(48)}),
+    );
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "HDR12", "category": "connector", "package": "PinHeader 1x12", "pins": numbered_pins(12)}),
+    );
+    exec(r, s, "circuit.add", json!({"part": "MCU48", "refdes": "U1"}));
+    exec(r, s, "board.outline", json!({"width": "60mm", "height": "60mm"}));
+    exec(r, s, "place.set", json!({"refdes": "U1", "at": ["30mm", "30mm"]}));
+    for (k, (x, y, rot)) in [(6, 30, 0), (30, 6, 90), (54, 30, 0), (30, 54, 90)].iter().enumerate() {
+        let j = format!("J{}", k + 1);
+        exec(r, s, "circuit.add", json!({"part": "HDR12", "refdes": j}));
+        exec(r, s, "place.set", json!({"refdes": j, "at": [format!("{x}mm"), format!("{y}mm")], "rotation": rot}));
+        for i in 1..=12 {
+            let pin = k * 12 + i;
+            exec(
+                r,
+                s,
+                "net.connect",
+                json!({"net": format!("P{pin}"), "pins": [format!("U1.{pin}"), format!("{j}.{i}")]}),
+            );
+        }
+    }
+}
+
+fn completion(o: &Value) -> f64 {
+    o["output"]["stats"]["completion"].as_f64().unwrap()
+}
+
+#[test]
+fn fine_pitch_escapes() {
+    let r = Registry::with_builtins();
+    let mut results = Vec::new();
+    for fanout in [false, true] {
+        let mut s = Session::new();
+        let _d = new_project(&r, &mut s);
+        lqfp_board(&r, &mut s);
+        let o = exec(&r, &mut s, "route.all", json!({"fanout": fanout}));
+        report(&format!("lqfp48 fanout={fanout}"), &o, 0);
+        let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+        assert_eq!(errors, Vec::<String>::new());
+        results.push((completion(&o), o["output"]["stats"]["escapes"].as_u64().unwrap()));
+    }
+    assert_eq!(results[0].1, 0);
+    assert!(results[1].1 > 10, "{results:?}");
+    assert!(results[1].0 > results[0].0, "escapes help: {results:?}");
+    assert_eq!(results[1].0, 100.0);
+}
+
+/// A BGA-64 (8 × 8, 0.8 mm) with every ball on a net to a header pin, on 4 layers with
+/// fine-pitch rules.
+fn bga_board(r: &Registry, s: &mut Session) {
+    let balls: Vec<String> = "ABCDEFGH".chars().flat_map(|c| (1..=8).map(move |i| format!("{c}{i}"))).collect();
+    let pins: Vec<Value> = balls.iter().map(|b| json!({"number": b, "name": b, "kind": "passive"})).collect();
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "BGA64", "category": "ic", "package": "BGA-64 8x8 P0.8mm 7x7mm", "pins": pins}),
+    );
+    exec(
+        r,
+        s,
+        "part.create",
+        json!({"id": "HDR32", "category": "connector", "package": "PinHeader 2x16 P1.27mm", "pins": numbered_pins(32)}),
+    );
+    exec(r, s, "board.setup", json!({"layers": 4}));
+    exec(
+        r,
+        s,
+        "board.rules",
+        json!({"clearance": "0.1mm", "track_width": "0.1mm", "min_track_width": "0.1mm", "via_drill": "0.2mm",
+               "via_diameter": "0.45mm", "min_drill": "0.2mm", "min_annular_ring": "0.1mm", "hole_to_hole": "0.25mm"}),
+    );
+    exec(r, s, "board.outline", json!({"width": "36mm", "height": "30mm"}));
+    exec(r, s, "circuit.add", json!({"part": "BGA64", "refdes": "U1"}));
+    exec(r, s, "place.set", json!({"refdes": "U1", "at": ["18mm", "15mm"]}));
+    for (j, x) in [("J1", 7), ("J2", 29)] {
+        exec(r, s, "circuit.add", json!({"part": "HDR32", "refdes": j}));
+        exec(r, s, "place.set", json!({"refdes": j, "at": [format!("{x}mm"), "15mm"]}));
+    }
+    let mut used = [0, 0];
+    for b in &balls {
+        let col: usize = b[1..].parse().unwrap();
+        let side = usize::from(col > 4);
+        used[side] += 1;
+        let (j, pin) = (["J1", "J2"][side], used[side]);
+        exec(r, s, "net.connect", json!({"net": format!("N{b}"), "pins": [format!("U1.{b}"), format!("{j}.{pin}")]}));
+    }
+}
+
+#[test]
+fn bga_fanout_is_drc_clean() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    bga_board(&r, &mut s);
+    let f = r.execute(&mut s, "route.fanout", json!({"refdes": ["U9"]}), RunOptions::default()).expect_err("unknown");
+    assert_eq!(f.error.diagnostic.code, "component.not_found");
+    let o = exec(&r, &mut s, "route.fanout", json!({"refdes": ["U1"]}));
+    eprintln!("{}", o["summary"]);
+    // 8 x 8 with room for a track between balls: the two outer rings escape on top, the 4 x 4
+    // core gets dog bones.
+    assert_eq!(o["output"]["vias"], 16);
+    assert_eq!(o["output"]["tracks"], 16);
+    let p = s.project.as_ref().unwrap();
+    let pads = cadlab::board::placed_pads(p);
+    for v in &p.board().vias {
+        for pp in pads.iter().filter(|pp| pp.refdes == "U1") {
+            let (dx, dy) = ((v.at.x.0 - pp.center.x.0) as f64, (v.at.y.0 - pp.center.y.0) as f64);
+            assert!((dx * dx + dy * dy).sqrt() > 400_000.0, "via in pad {}", pp.number);
+        }
+    }
+    let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+    assert_eq!(errors, Vec::<String>::new());
+    // Routing on top of the fanout completes the board.
+    let o = exec(&r, &mut s, "route.all", json!({"effort": "low"}));
+    report("bga64", &o, 0);
+    render(&r, &mut s, "bga64");
+    assert_eq!(completion(&o), 100.0);
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+}
+
+#[test]
+fn shove_reroutes_blocking_nets() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    // A VIN track across the whole board between U1 and C2: 3V3 (U1.5 to C2.1) cannot pass on F.Cu.
+    exec(
+        &r,
+        &mut s,
+        "track.add",
+        json!({"net": "VIN", "layer": "F.Cu", "points": [["12.5mm", "0.6mm"], ["12.5mm", "14.4mm"]]}),
+    );
+    let o = exec(
+        &r,
+        &mut s,
+        "route.connection",
+        json!({"from": "U1.VOUT", "to": "C2.1", "layers": ["F.Cu"], "shove": false}),
+    );
+    assert_eq!(o["output"]["stats"]["failed"], 1);
+    assert!(o["output"]["connections"][0]["subjects"].as_array().unwrap().contains(&json!("net:VIN")), "{o}");
+    let o = exec(&r, &mut s, "route.connection", json!({"from": "U1.VOUT", "to": "C2.1", "layers": ["F.Cu"]}));
+    eprintln!("{}", o["summary"]);
+    assert_eq!(o["output"]["connections"][0]["status"], "routed");
+    assert_eq!(o["output"]["rerouted"], json!(["VIN"]));
+    let b = s.project.as_ref().unwrap().board();
+    assert!(!b.tracks.iter().any(|t| t.start.x == cadlab::Nm::from_um(12_500) && t.end.x == t.start.x));
+    let st = exec(&r, &mut s, "route.status", json!({}));
+    assert_eq!(st["output"]["unrouted_by_net"].get("3V3"), None);
+    let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+    assert_eq!(errors, Vec::<String>::new());
+}
+
+#[test]
+fn identical_for_any_thread_count() {
+    let r = Registry::with_builtins();
+    let mut results = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let res = pool.install(|| {
+            let mut s = Session::new();
+            let _d = new_project(&r, &mut s);
+            generated_board(&r, &mut s, 4, 2, 2, 3);
+            let o = exec(&r, &mut s, "route.all", json!({"seed": 5, "effort": "low"}));
+            (copper(&s), o["output"].clone())
+        });
+        results.push(res);
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn any_angle_shortcuts() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    dense_board(&r, &mut s);
+    let o = exec(&r, &mut s, "route.all", json!({"seed": 7, "any_angle": true}));
+    report("dense any-angle", &o, 0);
+    let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+    assert_eq!(errors, Vec::<String>::new());
+    let b = s.project.as_ref().unwrap().board();
+    let any = b
+        .tracks
+        .iter()
+        .filter(|t| {
+            let (dx, dy) = ((t.end.x.0 - t.start.x.0).abs(), (t.end.y.0 - t.start.y.0).abs());
+            dx > 2 && dy > 2 && (dx - dy).abs() > 2
+        })
+        .count();
+    assert!(any > 0, "some segment at another angle than 0/45/90");
+}
+
 /// A generated board: `cols` × `rows` SOIC-16s, each joined to its right neighbor by a
 /// permuted 6-bit bus and to the one below by one net, plus GND and VCC on every IC.
 fn generated_board(r: &Registry, s: &mut Session, cols: usize, rows: usize, layers: u8, seed: u64) {

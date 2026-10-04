@@ -19,6 +19,7 @@ pub(crate) fn register(r: &mut Registry) {
     r.register::<RouteAll>()
         .register::<RouteNets>()
         .register::<RouteConnection>()
+        .register::<RouteFanout>()
         .register::<RouteRip>()
         .register::<RouteStatus>()
         .register::<ImportSes>();
@@ -142,6 +143,9 @@ pub struct Routed {
     pub stats: RouteStats,
     /// Every connection attempted, with failure reasons, locations and hints.
     pub connections: Vec<ConnectionReport>,
+    /// Nets whose unlocked routing was ripped and routed again to make room (`shove`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rerouted: Vec<String>,
 }
 
 fn summary(o: &Routed) -> String {
@@ -150,6 +154,9 @@ fn summary(o: &Routed) -> String {
         "routed {}/{} connections ({}%): {} track segment(s), {} via(s), {} of track",
         s.routed, s.connections, s.completion, s.tracks, s.vias, s.length
     );
+    if !o.rerouted.is_empty() {
+        out.push_str(&format!("; rerouted {} to make room", o.rerouted.join(", ")));
+    }
     for c in o.connections.iter().filter(|c| c.status == ConnStatus::Failed) {
         out.push_str(&format!(
             "\nfailed {}: {} -> {}: {}",
@@ -201,6 +208,9 @@ fn run_router(ctx: &mut Context<'_>, scope: Scope, opts: RouteOptions) -> Result
         router::route(p, &scope, &opts, &Hooks { progress: &progress, cancelled: &cancelled }).map_err(route_error)?
     };
     let pm = ctx.project_mut()?;
+    let board = pm.board_mut();
+    board.tracks.retain(|t| !result.removed_tracks.contains(&t.id));
+    board.vias.retain(|v| !result.removed_vias.contains(&v.id));
     for mut t in result.tracks {
         t.id = pm.alloc_id();
         pm.board_mut().tracks.push(t);
@@ -232,7 +242,7 @@ fn run_router(ctx: &mut Context<'_>, scope: Scope, opts: RouteOptions) -> Result
         }
         ctx.report(d);
     }
-    Ok(Routed { stats: result.stats, connections: result.connections })
+    Ok(Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted })
 }
 
 /// Route every unrouted connection on the board.
@@ -252,6 +262,13 @@ pub struct RouteAll {
     /// Seed for the reroute order (default 0); same input and seed give the same result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// Fan out BGAs (dog-bone vias) and escape off-grid fine-pitch pads before routing
+    /// (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout: Option<bool>,
+    /// Allow any-angle shortcuts when optimizing (default false: 0°/45°/90° only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub any_angle: Option<bool>,
 }
 
 impl Command for RouteAll {
@@ -261,7 +278,9 @@ impl Command for RouteAll {
     type Output = Routed;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Routed, CommandError> {
-        let opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
+        let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
+        opts.fanout = self.fanout;
+        opts.any_angle = self.any_angle.unwrap_or(false);
         run_router(ctx, Scope::All, opts)
     }
 
@@ -289,6 +308,13 @@ pub struct RouteNets {
     /// Seed (default 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// Fan out BGAs (dog-bone vias) and escape off-grid fine-pitch pads before routing
+    /// (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout: Option<bool>,
+    /// Allow any-angle shortcuts when optimizing (default false: 0°/45°/90° only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub any_angle: Option<bool>,
 }
 
 impl Command for RouteNets {
@@ -317,7 +343,9 @@ impl Command for RouteNets {
         }
         nets.sort();
         nets.dedup();
-        let opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
+        let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
+        opts.fanout = self.fanout;
+        opts.any_angle = self.any_angle.unwrap_or(false);
         run_router(ctx, Scope::Nets(nets), opts)
     }
 
@@ -357,6 +385,11 @@ pub struct RouteConnection {
     /// Effort: low, normal (default), high.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
+    /// When there is no room, move the unlocked routing of the nets in the way: rip it, route
+    /// this connection, route those nets again (kept only if they end up no less routed than
+    /// before). Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shove: Option<bool>,
 }
 
 impl Command for RouteConnection {
@@ -369,7 +402,8 @@ impl Command for RouteConnection {
     fn run(self, ctx: &mut Context<'_>) -> Result<Routed, CommandError> {
         let p = ctx.project()?;
         let (from, to) = (pad_label(p, &self.from)?, pad_label(p, &self.to)?);
-        let opts = options(self.budget_ms, &self.layers, self.effort, None);
+        let mut opts = options(self.budget_ms, &self.layers, self.effort, None);
+        opts.shove = self.shove.unwrap_or(true);
         run_router(ctx, Scope::Connection { from, to }, opts)
     }
 
@@ -378,6 +412,66 @@ impl Command for RouteConnection {
             return "already connected".into();
         }
         summary(o)
+    }
+}
+
+/// Fan out BGA footprints before routing: a short track from every inner ball to a via between
+/// the balls (dog bone), and escape stubs for fine-pitch pads off the routing grid. Only pads
+/// whose nets still have unrouted connections are fanned out; everything is DRC-checked.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteFanout {
+    /// Components to fan out (default: all).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refdes: Vec<String>,
+    /// Copper layers the router may use (default: all); fewer than two means no vias.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
+}
+
+/// What `route.fanout` added.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FannedOut {
+    /// Pads given a fanout or escape (`U1.C3`).
+    pub pads: Vec<String>,
+    /// Track segments added.
+    pub tracks: usize,
+    /// Vias added.
+    pub vias: usize,
+}
+
+impl Command for RouteFanout {
+    const NAME: &'static str = "route.fanout";
+    const SUMMARY: &'static str = "Fan out BGAs (dog-bone vias) and escape fine-pitch pads before routing";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["refdes"];
+    type Output = FannedOut;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<FannedOut, CommandError> {
+        let p = ctx.project()?;
+        let refdes = self.refdes.iter().map(|r| super::util::refdes_key(p, r)).collect::<Result<Vec<_>, _>>()?;
+        let result = router::fanout(p, &refdes, &self.layers).map_err(route_error)?;
+        if result.pads.is_empty() {
+            ctx.report(
+                Diagnostic::info("route.nothing_to_fan_out", "no pad needs a fanout or escape")
+                    .with_hint("fanout applies to BGA footprints and off-grid fine-pitch pads with unrouted nets"),
+            );
+        }
+        let pm = ctx.project_mut()?;
+        let (tracks, vias) = (result.tracks.len(), result.vias.len());
+        for mut t in result.tracks {
+            t.id = pm.alloc_id();
+            pm.board_mut().tracks.push(t);
+        }
+        for mut v in result.vias {
+            v.id = pm.alloc_id();
+            pm.board_mut().vias.push(v);
+        }
+        Ok(FannedOut { pads: result.pads, tracks, vias })
+    }
+
+    fn summarize(o: &FannedOut) -> String {
+        format!("fanned out {} pad(s): {} track segment(s), {} via(s)", o.pads.len(), o.tracks, o.vias)
     }
 }
 

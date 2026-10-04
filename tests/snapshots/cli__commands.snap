@@ -96,6 +96,7 @@ expression: names
   "route.all",
   "route.nets",
   "route.connection",
+  "route.fanout",
   "route.rip",
   "route.status",
   "route.import_ses",

@@ -237,6 +237,28 @@ replaced and board placements of components that come back are kept. `kicad-cli`
 placeholder is one `bom.replace` away from a real part. Matching only on exact IDs, MPNs and value plus
 footprint keeps the result deterministic and explainable.
 
+### D28. Router M6 phase 1: grid router extended, not replaced; fanout as copper; data-defined batches (2026-10-04)
+M6 starts by measuring and extending the M5 grid router rather than writing the gridless one first. A benchmark
+suite of generated boards (`tests/common/routebench.rs`: 2-layer hobby boards, 4-layer QFP/QFN boards, fine-pitch
+parts with 0.1 mm rules, a BGA-144, the 500-part synthetic board) reports completion, vias, length, segments,
+sharp corners, runtime and DRC errors, optionally next to freerouting run as an external process on the exported
+DSN (D7, D25). Choices: BGA dog bones and fine-pitch escapes are planned before routing and enter the run as
+existing copper of their nets (static obstacles for everyone, many access cells for their net), not as optional
+access paths: as access-only paths they lost completion on every fine-pitch board, because negotiation then
+fought over the single cell each escape offered. Escapes are absorbed into the path that uses them for
+post-processing, and unused fanouts are dropped, so the output has no dead stubs. Escapes are only made for
+components that need them (some pad too far off the grid for a straight exit); escaping well-aligned parts made
+routes longer and more segmented for nothing. Parallel routing uses batches of nets with disjoint regions found
+by level scheduling over the routing order, routed against a shared occupancy snapshot and committed in order;
+the batches depend only on the data, so the output is identical for any thread count and without the `parallel`
+feature (rayon). Cancellation is polled between batches, the time budget inside searches. Any-angle segments are
+optional (`any_angle`), since fabs and humans expect 45° routing. "Shove" for `route.connection` is rip-up and
+reroute of the whole nets reported in the way, kept only if they lose nothing; geometric push-and-shove of
+segments is left to the gridless router.
+*Why:* the benchmark showed where the grid router lost (off-grid fine-pitch pads, unresolvable negotiation
+leftovers, same-net via spacing) and those fixes were cheaper and safer than a new router. Determinism and DRC as
+the last word (D22, D23) stay non-negotiable, which rules out thread-timing-dependent merge orders.
+
 ## Open questions
 
 None currently.

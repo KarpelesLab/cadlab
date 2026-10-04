@@ -55,12 +55,17 @@ pub(crate) type WireGeometry = (Vec<(usize, P, P)>, Vec<(i32, i32)>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Stop;
 
+/// An off-grid connection from a grid cell to copper: its points after the cell, ending at
+/// the anchor (pad center or a point on a track). Usually one point (a straight stub); an
+/// escape (`fanout::escape`) has a bend.
+pub(crate) type Stub = Vec<P>;
+
 /// A grid point where a pad or other copper can be reached.
 #[derive(Clone, Debug)]
 pub(crate) struct Access {
     pub node: u32,
-    /// Stub end (pad center or point on a track) when the cell is not on the copper itself.
-    pub stub: Option<P>,
+    /// Stub to the copper when the cell is not on the copper itself.
+    pub stub: Option<Stub>,
     pub cost: f32,
 }
 
@@ -87,8 +92,10 @@ pub(crate) struct Conn {
 pub(crate) struct Wire {
     pub conn: usize,
     pub nodes: Vec<u32>,
-    pub start: Option<P>,
-    pub end: Option<P>,
+    /// Stub from the first node to its copper.
+    pub start: Option<Stub>,
+    /// Stub from the last node to its copper.
+    pub end: Option<Stub>,
 }
 
 /// Why a connection could not be routed.
@@ -120,6 +127,52 @@ pub(crate) struct NetRoute {
     pub bbox: BoxF,
     /// Ratsnest length, for ordering.
     pub length: f64,
+    /// Where the net is expected to route (its terminals with a margin): nets whose regions
+    /// do not meet are routed in the same batch (see `batches`).
+    pub region: BoxF,
+}
+
+impl Default for NetRoute {
+    fn default() -> NetRoute {
+        NetRoute {
+            net: 0,
+            prof: 0,
+            islands: vec![],
+            conns: vec![],
+            wires: vec![],
+            failed: vec![],
+            keys: vec![],
+            bbox: BoxF::EMPTY,
+            length: 0.0,
+            region: BoxF::EMPTY,
+        }
+    }
+}
+
+/// Most nets routed in one batch.
+pub(crate) const MAX_BATCH: usize = 64;
+
+/// Splits an ordered list of nets into batches of nets whose regions do not meet (level
+/// scheduling): a net goes into the first batch after every batch holding an earlier net whose
+/// region meets its own, so nets that may interact keep their relative order. Depends only on
+/// the data (never on the thread count), so results are the same with any number of threads.
+pub(crate) fn batches(order: &[usize], routes: &[NetRoute]) -> Vec<Vec<usize>> {
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    let mut level: Vec<(usize, usize)> = Vec::new(); // (net, batch)
+    for &ri in order {
+        let r = &routes[ri].region;
+        let mut b =
+            level.iter().filter(|(o, _)| routes[*o].region.intersects(r)).map(|(_, b)| b + 1).max().unwrap_or(0);
+        while b < out.len() && out[b].len() >= MAX_BATCH {
+            b += 1;
+        }
+        if b == out.len() {
+            out.push(Vec::new());
+        }
+        out[b].push(ri);
+        level.push((ri, b));
+    }
+    out
 }
 
 /// A small deterministic RNG (SplitMix64).
@@ -156,14 +209,34 @@ pub(crate) struct Engine<'a> {
     pub pref: Vec<u8>,
     pub vias_allowed: bool,
     pub max_expansions: usize,
-    // Search scratch.
+    /// Polled during searches (thread-safe: deadline and cancellation flag only).
+    pub stop: &'a (dyn Fn() -> bool + Sync),
+}
+
+/// Per-search working memory (one per thread).
+pub(crate) struct Scratch {
     gc: Vec<f32>,
     parent: Vec<u32>,
     dir: Vec<u8>,
     seen: Vec<u32>,
     tgt: Vec<u32>,
     stamp: u32,
-    pub stop: &'a dyn Fn() -> bool,
+    /// Via cells of the net being routed (earlier wires): new vias keep hole-to-hole from them.
+    pub own_vias: Vec<(i32, i32)>,
+}
+
+impl Scratch {
+    pub fn new(nodes: usize) -> Scratch {
+        Scratch {
+            gc: vec![0.0; nodes],
+            parent: vec![0; nodes],
+            dir: vec![NONE; nodes],
+            seen: vec![0; nodes],
+            tgt: vec![0; nodes],
+            stamp: 0,
+            own_vias: Vec::new(),
+        }
+    }
 }
 
 fn turn(a: u8, b: u8) -> u8 {
@@ -178,7 +251,7 @@ impl<'a> Engine<'a> {
         slots: Vec<usize>,
         active_profiles: &[bool],
         costs: Costs,
-        stop: &'a dyn Fn() -> bool,
+        stop: &'a (dyn Fn() -> bool + Sync),
     ) -> Engine<'a> {
         let st = Statics::build(rb, &grid, &slots, active_profiles);
         let mut act = vec![usize::MAX; rb.profiles.len()];
@@ -208,18 +281,17 @@ impl<'a> Engine<'a> {
             costs,
             pref,
             max_expansions: usize::MAX,
-            gc: vec![0.0; cells * ns],
-            parent: vec![0; cells * ns],
-            dir: vec![NONE; cells * ns],
-            seen: vec![0; cells * ns],
-            tgt: vec![0; cells * ns],
-            stamp: 0,
             stop,
         }
     }
 
     pub fn cells(&self) -> usize {
         self.grid.cells()
+    }
+
+    /// Working memory for [`Engine::search`].
+    pub fn scratch(&self) -> Scratch {
+        Scratch::new(self.cells() * self.slots.len())
     }
 
     /// Node → (slot, x, y).
@@ -315,9 +387,15 @@ impl<'a> Engine<'a> {
         let mut segs = Vec::new();
         let mut vias = Vec::new();
         let n = &w.nodes;
-        if let (Some(s), Some(&first)) = (w.start, n.first()) {
+        if let (Some(st), Some(&first)) = (&w.start, n.first()) {
             let (sl, _, _) = self.unpack(first);
-            segs.push((sl, s, self.node_pos(first)));
+            let mut prev = self.node_pos(first);
+            let mut rev = Vec::new();
+            for &q in st {
+                rev.push((sl, q, prev));
+                prev = q;
+            }
+            segs.extend(rev.into_iter().rev());
         }
         let mut i = 0;
         while i + 1 < n.len() {
@@ -341,9 +419,13 @@ impl<'a> Engine<'a> {
             segs.push((s0, self.node_pos(n[i]), self.node_pos(n[j])));
             i = j;
         }
-        if let (Some(e), Some(&last)) = (w.end, n.last()) {
+        if let (Some(en), Some(&last)) = (&w.end, n.last()) {
             let (sl, _, _) = self.unpack(last);
-            segs.push((sl, self.node_pos(last), e));
+            let mut prev = self.node_pos(last);
+            for &q in en {
+                segs.push((sl, prev, q));
+                prev = q;
+            }
         }
         (segs, vias)
     }
@@ -354,9 +436,10 @@ impl<'a> Engine<'a> {
         let mut bbox = BoxF::EMPTY;
         for w in &nr.wires {
             let (segs, vias) = self.wire_geometry(w);
-            let stub_ends = [w.start, w.end];
+            let n_start = w.start.as_ref().map_or(0, Vec::len);
+            let n_end = w.end.as_ref().map_or(0, Vec::len);
             for (k, (s, a, b)) in segs.iter().enumerate() {
-                let off = (k == 0 && stub_ends[0].is_some()) || (k + 1 == segs.len() && stub_ends[1].is_some());
+                let off = k < n_start || k + n_end >= segs.len();
                 self.raster_seg(nr.net, *s, *a, *b, off, &mut keys);
                 bbox.add(*a);
                 bbox.add(*b);
@@ -502,7 +585,7 @@ impl<'a> Engine<'a> {
                     if checker.seg(layer, anchor, c, t.net).is_some() {
                         continue;
                     }
-                    stubs.push(Access { node, stub: Some(anchor), cost: (len / self.grid.g) as f32 + 0.5 });
+                    stubs.push(Access { node, stub: Some(vec![anchor]), cost: (len / self.grid.g) as f32 + 0.5 });
                 }
             }
             stubs.sort_by(|a, b| a.cost.total_cmp(&b.cost).then(a.node.cmp(&b.node)));
@@ -515,26 +598,29 @@ impl<'a> Engine<'a> {
 
     /// A* from `sources` (node, initial cost) to any of `targets`. Returns the node path.
     pub fn search(
-        &mut self,
+        &self,
+        sc: &mut Scratch,
         net: u32,
         prof: usize,
         sources: &[(u32, f32)],
         targets: &[u32],
         mode: Mode,
     ) -> Result<Option<Vec<u32>>, Stop> {
+        let pr = &self.rb.profiles[prof];
+        let own_min = 2.0 * pr.dr + self.rb.h2h - TOL;
         if sources.is_empty() || targets.is_empty() {
             return Ok(None);
         }
-        self.stamp = self.stamp.wrapping_add(1);
-        if self.stamp == 0 {
-            self.seen.iter_mut().for_each(|v| *v = 0);
-            self.tgt.iter_mut().for_each(|v| *v = 0);
-            self.stamp = 1;
+        sc.stamp = sc.stamp.wrapping_add(1);
+        if sc.stamp == 0 {
+            sc.seen.iter_mut().for_each(|v| *v = 0);
+            sc.tgt.iter_mut().for_each(|v| *v = 0);
+            sc.stamp = 1;
         }
-        let stamp = self.stamp;
+        let stamp = sc.stamp;
         let mut tb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for &t in targets {
-            self.tgt[t as usize] = stamp;
+            sc.tgt[t as usize] = stamp;
             let (_, x, y) = self.unpack(t);
             tb = (tb.0.min(x), tb.1.min(y), tb.2.max(x), tb.3.max(y));
         }
@@ -561,13 +647,13 @@ impl<'a> Engine<'a> {
             }
             let c = c0 + self.hist_t[s][k] + pres * occ;
             let i = n as usize;
-            if self.seen[i] == stamp && self.gc[i] <= c {
+            if sc.seen[i] == stamp && sc.gc[i] <= c {
                 continue;
             }
-            self.seen[i] = stamp;
-            self.gc[i] = c;
-            self.parent[i] = u32::MAX;
-            self.dir[i] = NONE;
+            sc.seen[i] = stamp;
+            sc.gc[i] = c;
+            sc.parent[i] = u32::MAX;
+            sc.dir[i] = NONE;
             heap.push(Reverse(((c + heur(x, y)).to_bits(), n)));
         }
         let cells = self.cells();
@@ -577,15 +663,15 @@ impl<'a> Engine<'a> {
         while let Some(Reverse((fb, u))) = heap.pop() {
             let ui = u as usize;
             let (s, x, y) = self.unpack(u);
-            let gu = self.gc[ui];
+            let gu = sc.gc[ui];
             if f32::from_bits(fb) > gu + heur(x, y) + 1e-3 {
                 continue; // stale
             }
-            if self.tgt[ui] == stamp {
+            if sc.tgt[ui] == stamp {
                 let mut path = vec![u];
                 let mut c = u;
-                while self.parent[c as usize] != u32::MAX {
-                    c = self.parent[c as usize];
+                while sc.parent[c as usize] != u32::MAX {
+                    c = sc.parent[c as usize];
                     path.push(c);
                 }
                 path.reverse();
@@ -598,7 +684,7 @@ impl<'a> Engine<'a> {
             if pops > self.max_expansions {
                 return Ok(None);
             }
-            let du = self.dir[ui];
+            let du = sc.dir[ui];
             let tmap = &self.st.track[prof][s];
             for (nd, &(dx, dy)) in DIRS.iter().enumerate() {
                 let t = if du == NONE { 0 } else { turn(du, nd as u8) };
@@ -643,13 +729,13 @@ impl<'a> Engine<'a> {
                 let c = gu + (base + hist) * (1.0 + pres * occ) + bend + pen;
                 let v = (s * cells) as u32 + self.grid.cidx(nx, ny) as u32;
                 let vi = v as usize;
-                if self.seen[vi] == stamp && self.gc[vi] <= c {
+                if sc.seen[vi] == stamp && sc.gc[vi] <= c {
                     continue;
                 }
-                self.seen[vi] = stamp;
-                self.gc[vi] = c;
-                self.parent[vi] = u;
-                self.dir[vi] = nd as u8;
+                sc.seen[vi] = stamp;
+                sc.gc[vi] = c;
+                sc.parent[vi] = u;
+                sc.dir[vi] = nd as u8;
                 heap.push(Reverse(((c + heur(nx, ny)).to_bits(), v)));
             }
             if self.vias_allowed {
@@ -661,6 +747,15 @@ impl<'a> Engine<'a> {
                         continue;
                     }
                     pen += block_pen;
+                }
+                // Hole-to-hole with the net's own vias from earlier wires.
+                if mode != Mode::Explain
+                    && sc.own_vias.iter().any(|&(vx, vy)| {
+                        let (dx, dy) = ((vx - x) as f64, (vy - y) as f64);
+                        (vx, vy) != (x, y) && (dx * dx + dy * dy).sqrt() * self.grid.g < own_min
+                    })
+                {
+                    continue;
                 }
                 let occ = self.occ_v[ai][cell] as f32;
                 if occ > 0.0 {
@@ -681,13 +776,13 @@ impl<'a> Engine<'a> {
                     }
                     let v = (s2 * cells) as u32 + cell as u32;
                     let vi = v as usize;
-                    if self.seen[vi] == stamp && self.gc[vi] <= c0 {
+                    if sc.seen[vi] == stamp && sc.gc[vi] <= c0 {
                         continue;
                     }
-                    self.seen[vi] = stamp;
-                    self.gc[vi] = c0;
-                    self.parent[vi] = u;
-                    self.dir[vi] = NONE;
+                    sc.seen[vi] = stamp;
+                    sc.gc[vi] = c0;
+                    sc.parent[vi] = u;
+                    sc.dir[vi] = NONE;
                     heap.push(Reverse(((c0 + heur(x, y)).to_bits(), v)));
                 }
             }
@@ -695,10 +790,39 @@ impl<'a> Engine<'a> {
         Ok(None)
     }
 
+    /// Occupancy keys (as in `NetRoute::keys`) along the cheapest path of connection `ci` of
+    /// `nr` when everything is passable at a penalty: matching them against other nets' keys
+    /// tells which nets are in the way.
+    pub fn blocking_keys(&self, sc: &mut Scratch, nr: &NetRoute, ci: usize) -> Result<Vec<u64>, Stop> {
+        let c = &nr.conns[ci];
+        let sources: Vec<(u32, f32)> = nr.islands[c.a].access.iter().map(|a| (a.node, a.cost)).collect();
+        let targets: Vec<u32> = nr.islands[c.b].access.iter().map(|a| a.node).collect();
+        let Some(path) = self.search(sc, nr.net, nr.prof, &sources, &targets, Mode::Explain)? else {
+            return Ok(vec![]);
+        };
+        let ai = self.act[nr.prof];
+        let ns = self.slots.len();
+        let mut keys = Vec::new();
+        for w in path.windows(2) {
+            let (s0, x0, y0) = self.unpack(w[0]);
+            let (s1, x1, y1) = self.unpack(w[1]);
+            if s0 != s1 {
+                keys.push(self.key(ai, ns, self.grid.cidx(x0, y0)));
+                continue;
+            }
+            keys.push(self.key(ai, s0, self.grid.didx(x0 + x1, y0 + y1)));
+            keys.push(self.key(ai, s0, self.grid.didx(2 * x1, 2 * y1)));
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        Ok(keys)
+    }
+
     /// Routes every connection of a net (its wires are replaced). Connections whose islands
     /// are already joined by earlier wires are skipped.
-    pub fn route_net(&mut self, nr: &mut NetRoute, mode: Mode) -> Result<(), Stop> {
+    pub fn route_net(&self, sc: &mut Scratch, nr: &mut NetRoute, mode: Mode) -> Result<(), Stop> {
         nr.wires.clear();
+        sc.own_vias.clear();
         let n = nr.islands.len();
         let mut parent: Vec<usize> = (0..n).collect();
         fn find(p: &mut [usize], mut i: usize) -> usize {
@@ -719,19 +843,19 @@ impl<'a> Engine<'a> {
             if ra == rb {
                 continue;
             }
-            let mut src: BTreeMap<u32, (f32, Option<P>)> = BTreeMap::new();
+            let mut src: BTreeMap<u32, (f32, Option<&Stub>)> = BTreeMap::new();
             for &isl in &members[ra] {
                 for a in &nr.islands[isl].access {
-                    let e = src.entry(a.node).or_insert((a.cost, a.stub));
+                    let e = src.entry(a.node).or_insert((a.cost, a.stub.as_ref()));
                     if a.cost < e.0 {
-                        *e = (a.cost, a.stub);
+                        *e = (a.cost, a.stub.as_ref());
                     }
                 }
             }
             for &t in &tree[ra] {
                 src.insert(t, (0.0, None));
             }
-            let mut dst: BTreeMap<u32, Option<P>> = BTreeMap::new();
+            let mut dst: BTreeMap<u32, Option<&Stub>> = BTreeMap::new();
             for &isl in &members[rb] {
                 for a in &nr.islands[isl].access {
                     let better = match dst.get(&a.node) {
@@ -739,7 +863,7 @@ impl<'a> Engine<'a> {
                         Some(s) => s.is_some() && a.stub.is_none(),
                     };
                     if better {
-                        dst.insert(a.node, a.stub);
+                        dst.insert(a.node, a.stub.as_ref());
                     }
                 }
             }
@@ -752,15 +876,22 @@ impl<'a> Engine<'a> {
             }
             let sources: Vec<(u32, f32)> = src.iter().map(|(k, v)| (*k, v.0)).collect();
             let targets: Vec<u32> = dst.keys().copied().collect();
-            match self.search(nr.net, nr.prof, &sources, &targets, mode)? {
+            match self.search(sc, nr.net, nr.prof, &sources, &targets, mode)? {
                 Some(path) => {
-                    let start = src[&path[0]].1;
-                    let end = dst[path.last().expect("path")];
+                    let start = src[&path[0]].1.cloned();
+                    let end = dst[path.last().expect("path")].cloned();
                     let (ma, mb) = (std::mem::take(&mut members[rb]), std::mem::take(&mut tree[rb]));
                     members[ra].extend(ma);
                     tree[ra].extend(mb);
                     tree[ra].extend(path.iter().copied());
                     parent[rb] = ra;
+                    let cells = self.cells() as u32;
+                    for w in path.windows(2) {
+                        if w[0] / cells != w[1] / cells {
+                            let (_, x, y) = self.unpack(w[0]);
+                            sc.own_vias.push((x, y));
+                        }
+                    }
                     nr.wires.push(Wire { conn: ci, nodes: path, start, end });
                 }
                 None => {
