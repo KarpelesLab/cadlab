@@ -107,6 +107,8 @@ expression: names
   "schematic.export",
   "render.board",
   "board.export_kicad",
+  "board.import_kicad",
+  "board.import_kicad_rules",
   "export.gerber",
   "export.drill",
   "export.pnp",

@@ -66,6 +66,25 @@ since KiCad does not check net class widths by itself). `kicad-cli` then checks:
 
 KiCad report coordinates are converted back with `kicad_pcb::Frame::from_kicad`.
 
+### KiCad board import (`tests/kicad_pcb_import.rs`)
+
+`board.import_kicad` (D32) is checked by round trips through the exporter, without KiCad: every cross-check
+board (below), the small four-layer synthetic board and the STM32 board are exported and imported back
+
+- into the same project with its board cleared (circuit matched): the board model must be equal (object IDs
+  aside), the library unchanged, DRC findings equal (code, severity, location), every exported UUID mapped;
+- into an empty project (circuit built from the board): the same pads on the same nets, the same DRC findings,
+  the same effective rules and net class values.
+
+With `CADLAB_ORACLES=1`, the exports are re-saved by `kicad-cli pcb upgrade` (KiCad's current format: nets by
+name, items reordered, lines reversed) and must import to the same board (up to item order) and DRC. A test in
+`tests/drc_crosscheck.rs` compares KiCad's DRC of each export with cadlab's DRC of the board imported from it,
+with the same matching and allowlist as the DRC cross-check below. `CADLAB_KICAD_PCB_FIXTURES=<dir>` imports
+every `.kicad_pcb` under a directory (for CI-fetched open-source projects; nothing is downloaded by the test)
+and, with oracles, has KiCad load the re-exported result. Unit tests in `src/kicad_import/tests.rs` cover the
+older syntax (net tables, `fp_text reference`), custom and trapezoid pads, slots, paste apertures, bottom
+footprints, mounting holes, logos, keep-outs with wildcard layers and every unsupported-item diagnostic.
+
 ### Cross-checks: KiCad DRC vs cadlab DRC, KiCad Gerbers vs ours
 
 Both run on the boards of `tests/crosscheck/mod.rs`: the LDO board fully routed with a bottom GND pour

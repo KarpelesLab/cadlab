@@ -233,7 +233,7 @@ pub fn pin_kind(t: &str) -> Option<PinKind> {
 }
 
 /// Fields that are not carried over as component properties.
-const STANDARD_FIELDS: &[&str] = &[
+pub(crate) const STANDARD_FIELDS: &[&str] = &[
     "reference",
     "value",
     "footprint",

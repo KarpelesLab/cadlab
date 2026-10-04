@@ -91,7 +91,7 @@ or batch session cost ~1.5 ms.
 
 | Group | Commands |
 |---|---|
-| `board` | `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field; see "Design rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
+| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field; see "Design rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
 | `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
@@ -166,6 +166,55 @@ Fields the profile leaves out keep their value; `ipc_class` is kept. The pad ann
 the pad hole-to-hole distance stay `fab.check` checks: cadlab's rules have one annular ring for vias and pads.
 For JLCPCB's two-layer process, `tightest` gives 0.10 mm track/space and 0.15 / 0.25 mm vias, `comfortable`
 0.13 mm track/space minimums with 0.25 mm tracks and 0.3 / 0.6 mm vias.
+
+## KiCad import (`src/kicad_import/`, `board.import_kicad`)
+
+Migrates a KiCad board into a project (D32). Written from KiCad's published file format documentation and files
+`kicad-cli` writes; KiCad 6 to 10 formats are read (nets by number and net table, or by name as KiCad 10 writes
+them). Older files are refused with a hint to run `kicad-cli pcb upgrade`. Without `replace` the board must be
+empty; with it every placement, copper item, area, hole, drawing and the outline are replaced (the circuit and
+the library stay).
+
+| KiCad | cadlab |
+|---|---|
+| layer table, `general` thickness, stackup copper thicknesses, finish, mask/silk colors | `stackup` (dielectric layers are not kept: info) |
+| auxiliary axis origin, else the Edge.Cuts lower-left corner (`origin`: `auto`, `outline`, `aux`, `page`) | cadlab's (0, 0); Y flipped |
+| Edge.Cuts lines, arcs, circles, rectangles, polygons, curves (also inside footprints) | `outline`: chained into closed contours (ends up to 10 µm apart joined), the largest is the outer edge, contours inside it cutouts; open chains and contours outside are reported |
+| embedded footprint | a project footprint (shared by identical instances, reusing a project footprint equal within 3 nm) and a placement: position, rotation, side, lock |
+| pads: rect, circle, oval, roundrect | the same shapes (rounded corner = ratio × shorter side) |
+| pads: custom, trapezoid, chamfered | bounding rectangle, rounded corners (`import.pad_approximated`) |
+| oval drill (slot), drill offset | round hole of the slot's width, centered (`import.pad_approximated`) |
+| paste-only apertures | paste windows of the copper pad they sit on |
+| silkscreen, fab and courtyard drawings of the footprint's side | footprint graphics (arcs as polylines); the courtyard is the last closed courtyard polygon, else courtyard lines forming one loop, else their bounding box; none: 0.25 mm around the pads |
+| `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
+| footprints without pads (logos) | board graphics |
+| `segment`, `arc`, `via` (through, blind, micro) | tracks (arcs keep their mid point), vias |
+| copper `zone` | zone: outline, net, layers, priority, clearance, minimum width, pad connection, thermal gap and spoke; fills recomputed; values equal to cadlab's defaults left unset |
+| rule area (`keepout`) | keep-out: tracks, vias, copper pour, footprints (all copper layers = no layer list) |
+| `gr_line`/`gr_arc`/`gr_circle`/`gr_rect`/`gr_poly`, `gr_text` on non-copper layers | board graphics (lines, arcs and circles as polylines; texts with size and angle) |
+
+Nets: with a circuit in the project, footprints are matched by designator, pads to pins through the part's
+pin map, and each board net takes the circuit name most of its pads carry (`import.net_conflict`,
+`import.net_mismatch` when they disagree); footprints the circuit lacks are not placed
+(`import.component_not_in_circuit`); a part without a footprint gets the board's. Without a circuit, it is built
+from the footprints through the netlist importer (D27): designators, values, fields (MPN, manufacturer),
+`pinfunction`/`pintype` as pin names and types, one pin per pad number, generic passives where the footprint
+gives a size. Net names lose KiCad's root sheet `/`; single-pad `unconnected-(...)` nets become no net. A
+footprint differing from the part's preferred one is placed through the placement's footprint override.
+
+Rules (`.kicad_pro`, `.kicad_dru` next to the board, or `board.import_kicad_rules`): board minimums and the
+Default class give `board.rules` (clearance = the larger of `min_clearance` and the Default class clearance),
+other classes become net classes (values equal to the board's are inherited), patterns and explicit
+assignments give nets their class, custom rules without condition tighten board minimums and `A.NetClass ==
+'X'` width and clearance rules tighten the class. Other rules are reported (`import.rule_unsupported`), zero
+minimums keep cadlab's value (`import.rule_zero`).
+
+Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
+notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
+(members are imported), footprint texts, 3D models, copper drawings, zones inside footprints, pads on the other
+side of their footprint, per-layer pad stacks, zone outlines with holes (first outline only), hatched fills
+(solid). The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
+can be read against the imported project.
 
 ## Placement (`src/board/place.rs`)
 
