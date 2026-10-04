@@ -299,7 +299,7 @@ impl std::fmt::Display for ItemRef {
 }
 
 /// A piece of copper.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CopperItem {
     /// Identity.
     pub item: ItemRef,

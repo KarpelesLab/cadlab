@@ -124,6 +124,11 @@ impl Project {
         &self.board
     }
 
+    /// The shared board section (unchanged boards share it between snapshots).
+    pub(crate) fn board_arc(&self) -> &Arc<Board> {
+        &self.board
+    }
+
     /// Mutable board.
     pub fn board_mut(&mut self) -> &mut Board {
         Arc::make_mut(&mut self.board)

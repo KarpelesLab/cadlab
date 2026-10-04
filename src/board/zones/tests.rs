@@ -362,3 +362,57 @@ fn grown_fills_match_fresh_offsets() {
         assert_eq!(fills[k].fill, want, "zone {}", z.name);
     }
 }
+
+/// The in-process reuse of fills only answers for identical inputs: any change to the board,
+/// the net classes or a net's class gives fresh fills.
+#[test]
+fn memo_follows_every_input() {
+    use crate::model::circuit::{Net, NetClass};
+    let mut p = Project::new("t");
+    let pt = |x: i64, y: i64| Point::new(Nm(x * MM), Nm(y * MM));
+    let line = |x, y| Segment::Line { to: pt(x, y) };
+    let b = p.board_mut();
+    b.outline.contours =
+        vec![Contour { start: pt(0, 0), segments: vec![line(30, 0), line(30, 20), line(0, 20), line(0, 0)] }];
+    b.zones.push(zone(10, "GND", &["F.Cu"], vec![pt(-5, -5), pt(35, -5), pt(35, 25), pt(-5, 25)], 0, None));
+    for (i, (net, x, y)) in [("GND", 5, 5), ("SIG", 15, 10)].into_iter().enumerate() {
+        b.vias.push(Via {
+            id: ObjectId(20 + i as u64),
+            at: pt(x, y),
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some(net.into()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        });
+    }
+    let check = |p: &Project, what: &str| {
+        let base = crate::board::base_copper_items(p);
+        let (cached, fresh) = (fill_zones(p, &base), fill_zones_uncached(p, &base));
+        assert_eq!(cached.len(), fresh.len(), "{what}");
+        for (a, b) in cached.iter().zip(&fresh) {
+            assert_eq!((&a.fill, a.clearance), (&b.fill, b.clearance), "{what}");
+        }
+        cached[0].fill.clone()
+    };
+    let first = check(&p, "first");
+    assert_eq!(check(&p, "unchanged"), first);
+    let shared = p.clone();
+    assert_eq!(check(&shared, "shared board"), first);
+    p.board_mut().rules.clearance = Nm::from_um(600);
+    let wider = check(&p, "rules");
+    assert_ne!(wider, first);
+    p.board_mut().vias[1].at = pt(20, 10);
+    let moved = check(&p, "moved via");
+    assert_ne!(moved, wider);
+    let c = p.circuit_mut();
+    c.netclasses.insert("wide".into(), NetClass { clearance: Some(Nm::from_um(900)), ..Default::default() });
+    let mut sig = Net::new(ObjectId(30));
+    sig.class = Some("wide".into());
+    c.nets.insert("SIG".into(), sig);
+    let classed = check(&p, "net class");
+    assert_ne!(classed, moved);
+    p.circuit_mut().netclasses.get_mut("wide").unwrap().clearance = Some(Nm::from_um(1_200));
+    assert_ne!(check(&p, "class clearance"), classed);
+}

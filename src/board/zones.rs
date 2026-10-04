@@ -26,13 +26,15 @@
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::sync::Arc;
 
 use crate::board::{CopperItem, ItemRef, contour_ring, placed_pads};
 use crate::geom::RTree;
 use crate::geom::poly::{self, ArcTol, Boolean, Circle, FillRule, Geometry, Join, Op, Polygon, PolygonSet, Ring, Side};
 use crate::id::ObjectId;
 use crate::model::Project;
-use crate::model::board::{PadConnection, Zone};
+use crate::model::board::{Board, PadConnection, Zone};
+use crate::model::circuit::NetClass;
 use crate::units::Nm;
 
 /// Arc tolerance for fill boundaries: approximations stay inside the true region.
@@ -316,62 +318,33 @@ pub struct ZoneFill {
     pub error: Option<String>,
 }
 
-/// Stable 64-bit FNV-1a (std's hasher is not stable across releases).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+/// Everything a fill depends on: the board (zones, keep-outs, outline, rules, ...), net
+/// classes and net assignments, the non-zone copper and NPTH holes. Compared field by field
+/// (the board first by pointer: an unchanged project shares it), so a hit means identical
+/// inputs.
+struct MemoEntry {
+    board: Arc<Board>,
+    netclasses: BTreeMap<String, NetClass>,
+    net_classes: Vec<(String, Option<String>)>,
+    base: Vec<CopperItem>,
+    npth: Vec<(poly::Point, i64)>,
+    fills: Vec<ZoneFill>,
 }
 
-/// Everything a fill depends on, as bytes: the board (zones, keep-outs, outline, rules, ...), the
-/// non-zone copper, NPTH holes and net classes.
-fn memo_key(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> Vec<u8> {
-    let mut k = serde_json::to_vec(p.board()).unwrap_or_default();
-    let c = p.circuit();
-    k.extend(serde_json::to_vec(&c.netclasses).unwrap_or_default());
-    for (name, net) in &c.nets {
-        k.extend(name.as_bytes());
-        k.push(0);
-        k.extend(net.class.as_deref().unwrap_or("").as_bytes());
-        k.push(0);
+impl MemoEntry {
+    fn matches(&self, p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> bool {
+        let c = p.circuit();
+        (Arc::ptr_eq(&self.board, p.board_arc()) || *self.board == *p.board())
+            && self.netclasses == c.netclasses
+            && self.net_classes.len() == c.nets.len()
+            && self.net_classes.iter().zip(&c.nets).all(|((n, k), (name, net))| n == name && *k == net.class)
+            && self.base == base
+            && self.npth == npth
     }
-    let num = |k: &mut Vec<u8>, v: i64| k.extend(v.to_le_bytes());
-    for it in base {
-        k.extend(it.item.to_string().as_bytes());
-        k.push(0);
-        k.extend(it.net.as_deref().unwrap_or("\u{1}").as_bytes());
-        k.push(0);
-        for l in &it.layers {
-            k.extend(l.as_bytes());
-            k.push(0);
-        }
-        num(&mut k, it.anchor.x.0);
-        num(&mut k, it.anchor.y.0);
-        for q in &it.shape {
-            for r in q.rings() {
-                num(&mut k, r.0.len() as i64);
-                for v in &r.0 {
-                    num(&mut k, v.x);
-                    num(&mut k, v.y);
-                }
-            }
-        }
-        k.push(0xff);
-    }
-    for &(c, r) in npth {
-        num(&mut k, c.x);
-        num(&mut k, c.y);
-        num(&mut k, r);
-    }
-    k
 }
 
-/// Recently computed fills (in-process): (hash, exact key, fills). Fills are derived data,
-/// recomputed whenever any input differs; the full key comparison rules out hash collisions.
-type MemoEntry = (u64, Vec<u8>, Vec<ZoneFill>);
+/// Recently computed fills (in-process), most recent first. Fills are derived data, recomputed
+/// whenever any input differs.
 static MEMO: std::sync::Mutex<Vec<MemoEntry>> = std::sync::Mutex::new(Vec::new());
 const MEMO_ENTRIES: usize = 4;
 
@@ -383,17 +356,26 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
         return vec![];
     }
     let npth = npth_holes(p);
-    let key = memo_key(p, base, &npth);
-    let h = fnv1a(&key);
     if let Ok(m) = MEMO.lock()
-        && let Some((_, _, f)) = m.iter().find(|(eh, ek, _)| *eh == h && *ek == key)
+        && let Some(e) = m.iter().find(|e| e.matches(p, base, &npth))
     {
-        return f.clone();
+        return e.fills.clone();
     }
     let fills = fill_with(p, base, &npth);
     if let Ok(mut m) = MEMO.lock() {
-        m.retain(|(eh, ek, _)| !(*eh == h && *ek == key));
-        m.insert(0, (h, key, fills.clone()));
+        m.retain(|e| !e.matches(p, base, &npth));
+        let c = p.circuit();
+        m.insert(
+            0,
+            MemoEntry {
+                board: p.board_arc().clone(),
+                netclasses: c.netclasses.clone(),
+                net_classes: c.nets.iter().map(|(n, net)| (n.clone(), net.class.clone())).collect(),
+                base: base.to_vec(),
+                npth: npth.clone(),
+                fills: fills.clone(),
+            },
+        );
         m.truncate(MEMO_ENTRIES);
     }
     fills
