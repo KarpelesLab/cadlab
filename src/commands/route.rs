@@ -12,13 +12,17 @@ use crate::diag::Diagnostic;
 use crate::geom::Point;
 use crate::model::Project;
 use crate::refs::ObjectRef;
-use crate::router::{self, ConnStatus, ConnectionReport, Effort, Hooks, RouteError, RouteOptions, RouteStats, Scope};
+use crate::router::{
+    self, ConnStatus, ConnectionReport, Effort, Hooks, PlaceMode, RouteError, RouteOptions, RouteStats, Scope,
+    TrackRequest,
+};
 use crate::units::Nm;
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<RouteAll>()
         .register::<RouteNets>()
         .register::<RouteConnection>()
+        .register::<RouteTrack>()
         .register::<RouteFanout>()
         .register::<RouteRip>()
         .register::<RouteStatus>()
@@ -143,7 +147,7 @@ pub struct Routed {
     pub stats: RouteStats,
     /// Every connection attempted, with failure reasons, locations and hints.
     pub connections: Vec<ConnectionReport>,
-    /// Nets whose unlocked routing was ripped and routed again to make room (`shove`).
+    /// Nets whose unlocked routing was pushed aside or rerouted to make room (`shove`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rerouted: Vec<String>,
 }
@@ -155,7 +159,7 @@ fn summary(o: &Routed) -> String {
         s.routed, s.connections, s.completion, s.tracks, s.vias, s.length
     );
     if !o.rerouted.is_empty() {
-        out.push_str(&format!("; rerouted {} to make room", o.rerouted.join(", ")));
+        out.push_str(&format!("; moved {} to make room", o.rerouted.join(", ")));
     }
     for c in o.connections.iter().filter(|c| c.status == ConnStatus::Failed) {
         out.push_str(&format!(
@@ -197,6 +201,23 @@ fn options(budget_ms: Option<u64>, layers: &[String], effort: Option<Effort>, se
         seed: seed.unwrap_or(0),
         ..Default::default()
     }
+}
+
+/// Gridless refinement and arc options.
+fn shape_options(
+    opts: &mut RouteOptions,
+    gridless: Option<bool>,
+    arcs: Option<bool>,
+    arc_radius: Option<Nm>,
+) -> Result<(), CommandError> {
+    if arc_radius.is_some_and(|r| r <= Nm::ZERO) {
+        return Err(CommandError::invalid_args("route.invalid_arc_radius", "arc_radius must be positive")
+            .with_hint("give a radius such as \"1mm\", or leave it out for the default"));
+    }
+    opts.gridless = gridless;
+    opts.arcs = arcs.unwrap_or(false);
+    opts.arc_radius = arc_radius;
+    Ok(())
 }
 
 /// Runs the router and applies its result to the project.
@@ -269,6 +290,16 @@ pub struct RouteAll {
     /// Allow any-angle shortcuts when optimizing (default false: 0°/45°/90° only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub any_angle: Option<bool>,
+    /// Gridless refinement after optimization: shortest paths hugging the clearance of nearby
+    /// obstacles, off the routing grid (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gridless: Option<bool>,
+    /// Round every bend of the new tracks into a tangent arc (smooth / RF nets; default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arcs: Option<bool>,
+    /// Largest arc radius with `arcs` (default 1mm); smaller where the rules require.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arc_radius: Option<Nm>,
 }
 
 impl Command for RouteAll {
@@ -281,6 +312,7 @@ impl Command for RouteAll {
         let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
+        shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         run_router(ctx, Scope::All, opts)
     }
 
@@ -315,6 +347,16 @@ pub struct RouteNets {
     /// Allow any-angle shortcuts when optimizing (default false: 0°/45°/90° only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub any_angle: Option<bool>,
+    /// Gridless refinement after optimization: shortest paths hugging the clearance of nearby
+    /// obstacles, off the routing grid (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gridless: Option<bool>,
+    /// Round every bend of the new tracks into a tangent arc (smooth / RF nets; default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arcs: Option<bool>,
+    /// Largest arc radius with `arcs` (default 1mm); smaller where the rules require.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arc_radius: Option<Nm>,
 }
 
 impl Command for RouteNets {
@@ -346,6 +388,7 @@ impl Command for RouteNets {
         let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
+        shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         run_router(ctx, Scope::Nets(nets), opts)
     }
 
@@ -385,11 +428,22 @@ pub struct RouteConnection {
     /// Effort: low, normal (default), high.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
-    /// When there is no room, move the unlocked routing of the nets in the way: rip it, route
-    /// this connection, route those nets again (kept only if they end up no less routed than
-    /// before). Default true.
+    /// When there is no room, move the unlocked routing of other nets out of the way:
+    /// push-and-shove (bend their tracks, move their vias; DRC-checked), else rip it, route
+    /// this connection and route those nets again (kept only if they end up no less routed
+    /// than before). Locked items never move. Default true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shove: Option<bool>,
+    /// Gridless refinement after optimization: shortest paths hugging the clearance of nearby
+    /// obstacles, off the routing grid (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gridless: Option<bool>,
+    /// Round every bend of the new tracks into a tangent arc (smooth / RF nets; default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arcs: Option<bool>,
+    /// Largest arc radius with `arcs` (default 1mm); smaller where the rules require.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arc_radius: Option<Nm>,
 }
 
 impl Command for RouteConnection {
@@ -404,6 +458,7 @@ impl Command for RouteConnection {
         let (from, to) = (pad_label(p, &self.from)?, pad_label(p, &self.to)?);
         let mut opts = options(self.budget_ms, &self.layers, self.effort, None);
         opts.shove = self.shove.unwrap_or(true);
+        shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         run_router(ctx, Scope::Connection { from, to }, opts)
     }
 
@@ -412,6 +467,152 @@ impl Command for RouteConnection {
             return "already connected".into();
         }
         summary(o)
+    }
+}
+
+/// Place one track along waypoints with push-and-shove (interactive-style routing): the track
+/// walks around pads, locked copper, keep-outs and the board edge, and pushes the unlocked
+/// tracks and vias of other nets out of its way, which then spring back as far as the rules
+/// allow. Locked items never move; the result is DRC-checked.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteTrack {
+    /// Copper layer ("F.Cu").
+    pub layer: String,
+    /// Waypoints: coordinates ["10mm", "5mm"] or pins "U1.3" (pad center); at least two.
+    pub points: Vec<super::board::TrackPoint>,
+    /// Net (default: from a pin among the points).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<String>,
+    /// Width (default: the net class's, else the rules' track width).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<Nm>,
+    /// shove (default): walk around fixed things, push other nets' unlocked copper aside;
+    /// walkaround: walk around everything, move nothing; strict: exactly along the points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PlaceMode>,
+}
+
+/// What `route.track` placed and moved.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TrackPlaced {
+    /// Segments of the new track.
+    pub segments: usize,
+    /// Its length.
+    pub length: Nm,
+    /// Whether it detoured around something (walkaround).
+    pub walked: bool,
+    /// Nets whose copper was pushed aside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shoved: Vec<String>,
+    /// Track segments replaced by shoved geometry.
+    pub tracks_moved: usize,
+    /// Vias moved.
+    pub vias_moved: usize,
+}
+
+impl Command for RouteTrack {
+    const NAME: &'static str = "route.track";
+    const SUMMARY: &'static str = "Place a track along waypoints, pushing other nets' unlocked routing aside";
+    const KIND: CommandKind = CommandKind::Mutation;
+    type Output = TrackPlaced;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<TrackPlaced, CommandError> {
+        let p = ctx.project()?;
+        if self.points.len() < 2 {
+            return Err(CommandError::invalid_args("track.too_few_points", "a track needs at least two points")
+                .with_hint("give two or more points or pins"));
+        }
+        let mut pts = Vec::new();
+        let mut nets = Vec::new();
+        for tp in &self.points {
+            let (pt, net) = super::board::resolve_point(p, tp)?;
+            pts.push(pt);
+            if let Some(n) = net
+                && !nets.contains(&n)
+            {
+                nets.push(n);
+            }
+        }
+        let net = match (&self.net, nets.as_slice()) {
+            (Some(n), _) => super::net::net_name(p, n)?,
+            (None, [one]) => one.clone(),
+            (None, []) => {
+                return Err(CommandError::invalid_args(
+                    "route.track_no_net",
+                    "no net given and no pin among the points",
+                )
+                .with_hint("give `net`, or start or end the track on a pin"));
+            }
+            (None, many) => {
+                return Err(CommandError::conflict(
+                    "track.short",
+                    format!("the points connect different nets: {}", many.join(", ")),
+                )
+                .with_hint("a track joins one net; check the pins"));
+            }
+        };
+        let width = self.width.unwrap_or_else(|| super::board::net_width(p, Some(&net)));
+        if width <= Nm::ZERO {
+            return Err(CommandError::invalid_args("track.invalid_width", "width must be positive"));
+        }
+        let req = TrackRequest { layer: self.layer.clone(), net, width, points: pts };
+        let res = router::place_track(p, &req, self.mode.unwrap_or_default()).map_err(|e| {
+            let kind = match e.code {
+                "route.invalid_layer" | "track.too_few_points" => ErrorKind::InvalidArgs,
+                "net.not_found" => ErrorKind::NotFound,
+                _ => ErrorKind::Conflict,
+            };
+            let mut err = CommandError::new(kind, e.code, e.message).with_hint(e.hint);
+            for s in e.subjects {
+                err = err.with_subject(s);
+            }
+            if let Some(l) = e.layer {
+                err = err.with_subject(ObjectRef::Layer(l));
+            }
+            if let Some(at) = e.at {
+                err.diagnostic.location = Some(at);
+            }
+            err
+        })?;
+        let length: f64 = res.tracks[..res.placed].iter().map(|t| geo::track_length(t).0 as f64).sum();
+        let out = TrackPlaced {
+            segments: res.placed,
+            length: Nm(length.round() as i64),
+            walked: res.walked,
+            shoved: res.shoved.clone(),
+            tracks_moved: res.removed_tracks.len(),
+            vias_moved: res.removed_vias.len(),
+        };
+        let pm = ctx.project_mut()?;
+        let board = pm.board_mut();
+        board.tracks.retain(|t| !res.removed_tracks.contains(&t.id));
+        board.vias.retain(|v| !res.removed_vias.contains(&v.id));
+        for mut t in res.tracks {
+            t.id = pm.alloc_id();
+            pm.board_mut().tracks.push(t);
+        }
+        for mut v in res.vias {
+            v.id = pm.alloc_id();
+            pm.board_mut().vias.push(v);
+        }
+        Ok(out)
+    }
+
+    fn summarize(o: &TrackPlaced) -> String {
+        let mut s = format!("placed a track of {} segment(s), {}", o.segments, o.length);
+        if o.walked {
+            s.push_str(", detouring around obstacles");
+        }
+        if !o.shoved.is_empty() {
+            s.push_str(&format!(
+                "; pushed {} aside ({} track segment(s), {} via(s) moved)",
+                o.shoved.join(", "),
+                o.tracks_moved,
+                o.vias_moved
+            ));
+        }
+        s
     }
 }
 
@@ -632,14 +833,7 @@ impl Command for RouteStatus {
         areas.sort_by(|a, b| b.unrouted.cmp(&a.unrouted).then(a.at.cmp(&b.at)));
         areas.truncate(5);
         let board = p.board();
-        let length: f64 = board
-            .tracks
-            .iter()
-            .map(|t| {
-                let (dx, dy) = ((t.end.x.0 - t.start.x.0) as f64, (t.end.y.0 - t.start.y.0) as f64);
-                (dx * dx + dy * dy).sqrt()
-            })
-            .sum();
+        let length: f64 = board.tracks.iter().map(|t| geo::track_length(t).0 as f64).sum();
         let done = connections.saturating_sub(unrouted);
         Ok(Status {
             connections,

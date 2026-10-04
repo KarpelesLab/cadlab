@@ -21,20 +21,29 @@
 //!    failures by rerouting the nets in their way. Nets with disjoint regions are routed in
 //!    batches (on rayon threads with the `parallel` feature); the batches depend only on the
 //!    data, so results are identical for any thread count.
+//!    Then via minimization: nets with vias are routed again with dear vias, kept when better.
 //! 5. **Post-processing** (`post`): via reduction, collinear merging, 45° pull-tight, mitered
-//!    corners and optional any-angle shortcuts, each validated exactly against all other copper.
+//!    corners and optional any-angle shortcuts; gridless refinement (`gridless`: shortest paths
+//!    over the clearance hulls of nearby obstacles); optional arc corners (`arcs`). Each step is
+//!    validated exactly against all other copper.
 //! 6. **Verification**: `crate::drc::check` on the result; any routed item with a DRC error is
 //!    ripped up and reported, so the output never violates the rules silently.
+//! 7. **Push-and-shove** (`shove`) for what is left: connections that failed get one more try
+//!    with the unlocked copper of other nets pushed aside (walkaround, shove, spring-back);
+//!    [`place_track`] places a track along waypoints the same way.
 //!
 //! Deterministic for a given input, options and seed (unless the time budget cuts it short).
 
+mod arcs;
 mod engine;
 mod fanout;
 mod geo;
 mod grid;
+mod gridless;
 mod index;
 mod model;
 mod post;
+mod shove;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -53,6 +62,7 @@ use crate::units::Nm;
 use engine::{Access, Conn, Costs, Engine, FailKind, Island, Mode, NetRoute, Rng, Scratch, Stop};
 use geo::{BoxF, P};
 use index::{Blocker, Checker, Index, Item};
+use model::Clear;
 use model::{ObKind, RouterBoard};
 
 /// How hard to try.
@@ -90,9 +100,20 @@ pub struct RouteOptions {
     /// Allow any-angle shortcuts in post-processing (default: 0°/45°/90° segments only).
     pub any_angle: bool,
     /// For [`Scope::Connection`]: when the connection cannot be routed, move the unlocked
-    /// routing of the nets in the way: rip it, route the connection, route those nets again,
-    /// and keep the result only if they end up with no more unrouted connections than before.
+    /// routing of other nets out of the way: push-and-shove (bend their tracks, move their vias),
+    /// else rip it, route the connection, route those nets again, and keep the result only if
+    /// they end up with no more unrouted connections than before. (`Scope::All` and
+    /// `Scope::Nets` always give their failed connections one push-and-shove attempt.)
     pub shove: bool,
+    /// Gridless refinement after optimization (`gridless`): shortest paths over the
+    /// clearance hulls of nearby obstacles, so tracks are not tied to the grid. `None`: the
+    /// default (on).
+    pub gridless: Option<bool>,
+    /// Arc corners: every bend of the routed tracks becomes a tangent arc, as large as the
+    /// rules allow (up to `arc_radius`), for smooth or RF nets.
+    pub arcs: bool,
+    /// Largest arc radius with `arcs` (default 1 mm).
+    pub arc_radius: Option<Nm>,
 }
 
 /// Result of [`fanout`].
@@ -232,7 +253,7 @@ pub struct RouteResult {
     /// Existing unlocked vias to remove.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_vias: Vec<ObjectId>,
-    /// Nets rerouted to make room (`shove`).
+    /// Nets whose routing was pushed aside or rerouted to make room (`shove`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rerouted: Vec<String>,
 }
@@ -273,15 +294,425 @@ fn costs(effort: Effort) -> Costs {
 
 /// Routes the connections in `scope`. The project is not modified.
 pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
-    let first = route_once(p, scope, opts, hooks)?;
+    let start = Instant::now();
+    let first = route_once(p, scope, opts, hooks, Soft::No)?;
+    if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
+        return shove_leftovers(p, opts, hooks, first, start);
+    }
     if !opts.shove || first.stats.failed == 0 || !matches!(scope, Scope::Connection { .. }) {
         return Ok(first);
+    }
+    if let Some(r) = push_and_shove(p, scope, opts, hooks)? {
+        return Ok(r);
     }
     shove(p, scope, opts, hooks, first)
 }
 
+/// Connections left unrouted by a full run get one more chance each: push-and-shove on the
+/// routed board (`push_and_shove`), in report order, within what is left of the time budget.
+/// Returns `first` unchanged when nothing improves.
+fn shove_leftovers(
+    p: &Project,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+    first: RouteResult,
+    start: Instant,
+) -> Result<RouteResult, RouteError> {
+    let mut q = p.clone();
+    for t in &first.tracks {
+        let id = q.alloc_id();
+        q.board_mut().tracks.push(Track { id, ..t.clone() });
+    }
+    for v in &first.vias {
+        let id = q.alloc_id();
+        q.board_mut().vias.push(Via { id, ..v.clone() });
+    }
+    let mut out = first;
+    let mut changed = false;
+    let mut moved: BTreeSet<String> = BTreeSet::new();
+    for ci in 0..out.connections.len() {
+        if out.connections[ci].status != ConnStatus::Failed {
+            continue;
+        }
+        let left = opts.budget.map(|b| b.saturating_sub(start.elapsed()));
+        if left.is_some_and(|l| l < Duration::from_millis(50)) {
+            break;
+        }
+        if (hooks.cancelled)() {
+            return Err(RouteError::Cancelled);
+        }
+        let c = &out.connections[ci];
+        let scope = Scope::Connection { from: c.from.clone(), to: c.to.clone() };
+        let sub = RouteOptions { budget: left, ..opts.clone() };
+        let Some(r) = push_and_shove(&q, &scope, &sub, hooks)? else { continue };
+        let b = q.board_mut();
+        b.tracks.retain(|t| !r.removed_tracks.contains(&t.id));
+        b.vias.retain(|v| !r.removed_vias.contains(&v.id));
+        for t in r.tracks {
+            let id = q.alloc_id();
+            q.board_mut().tracks.push(Track { id, ..t });
+        }
+        for v in r.vias {
+            let id = q.alloc_id();
+            q.board_mut().vias.push(Via { id, ..v });
+        }
+        moved.extend(r.rerouted);
+        let rep = &mut out.connections[ci];
+        rep.status = ConnStatus::Routed;
+        rep.reason = None;
+        rep.at = None;
+        rep.layer = None;
+        rep.hints.clear();
+        rep.subjects.clear();
+        changed = true;
+    }
+    if !changed {
+        return Ok(out);
+    }
+    // The result: what is on `q` and not on `p`, renumbered from the project's allocator.
+    let (old_t, old_v): (BTreeSet<ObjectId>, BTreeSet<ObjectId>) =
+        (p.board().tracks.iter().map(|t| t.id).collect(), p.board().vias.iter().map(|v| v.id).collect());
+    let (new_t, new_v): (BTreeSet<ObjectId>, BTreeSet<ObjectId>) =
+        (q.board().tracks.iter().map(|t| t.id).collect(), q.board().vias.iter().map(|v| v.id).collect());
+    let mut alloc = p.clone();
+    out.tracks = q.board().tracks.iter().filter(|t| !old_t.contains(&t.id)).cloned().collect();
+    out.vias = q.board().vias.iter().filter(|v| !old_v.contains(&v.id)).cloned().collect();
+    for t in &mut out.tracks {
+        t.id = alloc.alloc_id();
+    }
+    for v in &mut out.vias {
+        v.id = alloc.alloc_id();
+    }
+    out.removed_tracks = old_t.difference(&new_t).copied().collect();
+    out.removed_vias = old_v.difference(&new_v).copied().collect();
+    out.rerouted = moved.into_iter().collect();
+    let st = &mut out.stats;
+    st.routed = out.connections.iter().filter(|c| c.status == ConnStatus::Routed).count();
+    st.failed = st.connections - st.routed;
+    st.completion =
+        if st.connections == 0 { 100.0 } else { (st.routed as f64 * 1000.0 / st.connections as f64).round() / 10.0 };
+    st.tracks = out.tracks.len();
+    st.vias = out.vias.len();
+    st.length = tracks_length(&out.tracks);
+    Ok(out)
+}
+
+/// How [`place_track`] gets past copper in its way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaceMode {
+    /// Walk around pads, locked copper and other fixed things; push the unlocked tracks and
+    /// vias of other nets out of the way (they spring back as far as they can). The default.
+    #[default]
+    Shove,
+    /// Walk around everything; move nothing.
+    Walkaround,
+    /// Exactly along the points; anything in the way is an error.
+    Strict,
+}
+
+/// A track to place with [`place_track`]: a polyline of a net on one copper layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackRequest {
+    /// Copper layer.
+    pub layer: String,
+    /// Net.
+    pub net: String,
+    /// Track width.
+    pub width: Nm,
+    /// Waypoints (at least two); ends usually on copper of the net.
+    pub points: Vec<Point>,
+}
+
+/// What [`place_track`] adds and moves (new items have IDs allocated in order from the
+/// project's allocator; the project is not modified).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlaceResult {
+    /// New track segments: the placed track, then the new geometry of shoved tracks.
+    pub tracks: Vec<Track>,
+    /// Shoved vias at their new positions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vias: Vec<Via>,
+    /// Existing tracks replaced (shoved).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_tracks: Vec<ObjectId>,
+    /// Existing vias replaced (shoved).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_vias: Vec<ObjectId>,
+    /// Nets whose copper was shoved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shoved: Vec<String>,
+    /// Whether the track had to detour around something (walkaround).
+    pub walked: bool,
+    /// Segments of the placed track (the first `placed` of `tracks`).
+    pub placed: usize,
+}
+
+/// Why [`place_track`] failed: a stable code, what is in the way, where, and what to try.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[error("{message}")]
+pub struct PlaceError {
+    /// `route.track_blocked`, `route.shove_failed`, `route.shove_limit`, `route.shove_drc`,
+    /// `route.invalid_layer`, `net.not_found`, `track.too_few_points`, `board.no_outline`.
+    pub code: &'static str,
+    /// What happened.
+    pub message: String,
+    /// Where.
+    pub at: Option<Point>,
+    /// Layer.
+    pub layer: Option<String>,
+    /// Objects involved.
+    pub subjects: Vec<ObjectRef>,
+    /// What to try.
+    pub hint: String,
+}
+
+impl PlaceError {
+    fn new(code: &'static str, message: impl Into<String>, hint: impl Into<String>) -> Box<PlaceError> {
+        Box::new(PlaceError {
+            code,
+            message: message.into(),
+            at: None,
+            layer: None,
+            subjects: vec![],
+            hint: hint.into(),
+        })
+    }
+}
+
+/// Places one track along waypoints, with push-and-shove (`mode`): the track walks around pads,
+/// locked copper, keep-outs and the board edge, and pushes the unlocked tracks and vias of
+/// other nets aside (bending them around it, moving vias), which then spring back as far as
+/// the rules allow. Never moves locked items. The result is checked exactly and by the DRC;
+/// nothing is returned that the DRC would flag. Deterministic.
+pub fn place_track(p: &Project, req: &TrackRequest, mode: PlaceMode) -> Result<PlaceResult, Box<PlaceError>> {
+    if p.board().outline.contours.is_empty() {
+        return Err(PlaceError::new("board.no_outline", "the board has no outline", "set one with `board.outline`"));
+    }
+    let items = geo_board::copper_items(p);
+    let isl = geo_board::islands(&items);
+    let rb = RouterBoard::build(p, &items, &isl);
+    let layer = rb.layer_names.iter().position(|n| *n == req.layer).ok_or_else(|| {
+        PlaceError::new(
+            "route.invalid_layer",
+            format!("`{}` is not a copper layer of the board", req.layer),
+            format!("copper layers: {}", rb.layer_names.join(", ")),
+        )
+    })?;
+    let net = *rb.net_ids.get(&req.net).ok_or_else(|| {
+        PlaceError::new("net.not_found", format!("no net `{}`", req.net), "list nets with `net.list`")
+    })?;
+    if req.points.len() < 2 {
+        return Err(PlaceError::new(
+            "track.too_few_points",
+            "a track needs at least two points",
+            "give two or more points",
+        ));
+    }
+    let head = shove::HeadLine { layer, net, width: req.width, pts: req.points.iter().map(|q| P::of(*q)).collect() };
+    let m = match mode {
+        PlaceMode::Shove => shove::Mode::Shove,
+        PlaceMode::Walkaround => shove::Mode::Walkaround,
+        PlaceMode::Strict => shove::Mode::Strict,
+    };
+    let pr = rb.profile(net);
+    let grid = ((req.width.0 as f64 + pr.c) / 2.0).max(25_000.0);
+    let o = shove::run(p, &rb, &[head], &[], m, grid).map_err(|f| place_failure(&rb, &f, mode))?;
+    let applied = apply_outcome(p, &o).map_err(|bad| {
+        let d = &bad[0];
+        let mut e = PlaceError::new(
+            "route.shove_drc",
+            format!("the shoved result fails the DRC: {}", d.message),
+            "move the waypoints, use mode walkaround, or rip the routing in the way (route.rip) and route again",
+        );
+        e.at = d.location;
+        e.subjects = d.subjects.clone();
+        e
+    })?;
+    let placed = o.tracks.iter().filter(|t| t.net.as_deref() == Some(req.net.as_str())).count();
+    Ok(PlaceResult {
+        tracks: applied.tracks,
+        vias: applied.vias,
+        removed_tracks: o.removed_tracks,
+        removed_vias: o.removed_vias,
+        shoved: o.moved_nets.iter().map(|&n| rb.nets[n as usize].clone()).collect(),
+        walked: o.walked,
+        placed,
+    })
+}
+
+/// Turns a push-and-shove failure into a [`PlaceError`].
+fn place_failure(rb: &RouterBoard, f: &shove::Fail, mode: PlaceMode) -> Box<PlaceError> {
+    let (what, locked) = (&f.label, f.locked);
+    let at = Some(f.at.to_point());
+    let layer = f.layer.map(|l| rb.layer_names[l].clone());
+    let mut e = match f.why {
+        shove::FailWhy::Blocked => PlaceError::new(
+            "route.track_blocked",
+            format!("the track cannot get past {what}"),
+            if locked {
+                "move the waypoints, or unlock that copper so it can be shoved".to_string()
+            } else if mode == PlaceMode::Strict {
+                "move the waypoints, or use mode shove or walkaround".to_string()
+            } else {
+                "move the waypoints clear of it, or route on another layer".to_string()
+            },
+        ),
+        shove::FailWhy::Stuck => PlaceError::new(
+            "route.shove_failed",
+            format!("{what} cannot be pushed out of the way (an end, a crossing or fixed copper is in the way)"),
+            "move the waypoints, use mode walkaround, or rip the routing in the way (route.rip) and route again",
+        ),
+        shove::FailWhy::Limit => PlaceError::new(
+            "route.shove_limit",
+            "too much copper would have to move".to_string(),
+            "move the waypoints to a less crowded path, or rip the routing in the way (route.rip)",
+        ),
+    };
+    e.at = at;
+    e.layer = layer;
+    e.subjects = f.subjects.clone();
+    e
+}
+
+/// How a routing run treats movable copper (unlocked straight tracks and unlocked vias).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Soft {
+    /// As an obstacle with its clearance.
+    No,
+    /// New copper may touch it (no clearance): push-and-shove moves it aside afterwards.
+    Touch,
+    /// Only its centerline is in the way (new routing never crosses it).
+    Centerline,
+}
+
+/// Softens the movable copper obstacles of `rb` for a [`Soft`] run.
+fn soften(rb: &mut RouterBoard, soft: Soft) {
+    if soft == Soft::No {
+        return;
+    }
+    let mut vias: BTreeSet<ObjectId> = BTreeSet::new();
+    for ob in rb.obstacles.iter_mut() {
+        let Some(m) = &ob.movable else { continue };
+        if let geo_board::ItemRef::Via(id) = m {
+            vias.insert(*id);
+        }
+        ob.clear = Clear::Fixed(0.0);
+        if soft == Soft::Centerline
+            && let geo::Shape::Capsule { r, .. } = &mut ob.shape
+        {
+            *r = 0.0;
+            ob.bbox = ob.shape.bbox();
+        }
+    }
+    rb.holes.retain(|h| h.via.is_none_or(|id| !vias.contains(&id)));
+}
+
+/// Push-and-shove for a connection that failed: the connection is routed with the movable
+/// copper of other nets softened (first touching allowed, then only its centerline in the
+/// way), then that copper is shoved out of the new route's way (`shove`). `None` when no
+/// attempt gives a legal, DRC-clean result.
+fn push_and_shove(
+    p: &Project,
+    scope: &Scope,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+) -> Result<Option<RouteResult>, RouteError> {
+    // Straight segments only: the new route becomes the pushing head polyline.
+    let sub = RouteOptions { shove: false, arcs: false, ..opts.clone() };
+    for soft in [Soft::Touch, Soft::Centerline] {
+        (hooks.progress)(0, None, "push-and-shove");
+        let r = route_once(p, scope, &sub, hooks, soft)?;
+        if r.stats.failed > 0 || r.connections.is_empty() {
+            continue;
+        }
+        let items = geo_board::copper_items(p);
+        let isl = geo_board::islands(&items);
+        let rb = RouterBoard::build(p, &items, &isl);
+        let heads: Vec<shove::HeadLine> = r
+            .tracks
+            .iter()
+            .filter_map(|t| {
+                Some(shove::HeadLine {
+                    layer: rb.layer_names.iter().position(|n| *n == t.layer)?,
+                    net: *rb.net_ids.get(t.net.as_ref()?)?,
+                    width: t.width,
+                    pts: vec![P::of(t.start), P::of(t.end)],
+                })
+            })
+            .collect();
+        let grid = r.stats.grid.0 as f64;
+        let Ok(o) = shove::run(p, &rb, &heads, &r.vias, shove::Mode::Shove, grid.max(25_000.0)) else { continue };
+        let Ok(applied) = apply_outcome(p, &o) else { continue };
+        let mut out = r;
+        out.tracks = applied.tracks;
+        out.vias = applied.vias;
+        out.removed_tracks = o.removed_tracks;
+        out.removed_vias = o.removed_vias;
+        out.rerouted = o.moved_nets.iter().map(|&n| rb.nets[n as usize].clone()).collect();
+        let st = &mut out.stats;
+        st.tracks = out.tracks.len();
+        st.vias = out.vias.len();
+        st.length = tracks_length(&out.tracks);
+        return Ok(Some(out));
+    }
+    Ok(None)
+}
+
+/// New items of a push-and-shove outcome with IDs (allocated in order from the project's
+/// allocator), after checking the result with the DRC: no error may involve them.
+struct Applied {
+    tracks: Vec<Track>,
+    vias: Vec<Via>,
+}
+
+fn apply_outcome(p: &Project, o: &shove::Outcome) -> Result<Applied, Vec<crate::diag::Diagnostic>> {
+    let mut q = p.clone();
+    let mut out = Applied { tracks: vec![], vias: vec![] };
+    let mut ids: BTreeSet<(String, u64)> = BTreeSet::new();
+    for t in &o.tracks {
+        let id = q.alloc_id();
+        ids.insert(("track".into(), id.0));
+        out.tracks.push(Track { id, ..t.clone() });
+    }
+    for v in &o.vias {
+        let id = q.alloc_id();
+        ids.insert(("via".into(), id.0));
+        out.vias.push(Via { id, ..v.clone() });
+    }
+    let b = q.board_mut();
+    b.tracks.retain(|t| !o.removed_tracks.contains(&t.id));
+    b.vias.retain(|v| !o.removed_vias.contains(&v.id));
+    b.tracks.extend(out.tracks.iter().cloned());
+    b.vias.extend(out.vias.iter().cloned());
+    let bad: Vec<crate::diag::Diagnostic> = crate::drc::check(&q)
+        .into_iter()
+        .filter(|d| d.severity == crate::diag::Severity::Error && d.code != "drc.unrouted")
+        .filter(|d| {
+            d.subjects
+                .iter()
+                .any(|s| matches!(s, ObjectRef::Item { kind, index } if ids.contains(&(kind.clone(), *index))))
+        })
+        .collect();
+    if bad.is_empty() { Ok(out) } else { Err(bad) }
+}
+
+/// Total length of tracks (arcs along the arc).
+fn tracks_length(tracks: &[Track]) -> Nm {
+    Nm(tracks.iter().map(|t| geo_board::track_length(t).0 as f64).sum::<f64>().round() as i64)
+}
+
+/// Default largest arc radius with `RouteOptions::arcs` (nm).
+const ARC_RADIUS: f64 = 1_000_000.0;
+
+/// Whether gridless refinement is on by default (see `RouteOptions::gridless`).
+const GRIDLESS_DEFAULT: bool = true;
+
 /// Rounds of rip-up and retry after legalization.
-const RETRY_ROUNDS: usize = 3;
+const RETRY_ROUNDS: usize = 6;
+
+/// Retries kept although they only move a failure to another net.
+const SIDEWAYS: usize = 4;
 
 /// Negotiation stops when the best iteration is this many iterations old.
 const STAGNATION: usize = 12;
@@ -333,7 +764,7 @@ fn shove(
         b.tracks.retain(|t| !removed_tracks.contains(&t.id));
         b.vias.retain(|v| !removed_vias.contains(&v.id));
         (hooks.progress)(0, None, &format!("rerouting {} net(s) in the way", blockers.len()));
-        let conn = route_once(&q, scope, &sub, hooks)?;
+        let conn = route_once(&q, scope, &sub, hooks, Soft::No)?;
         if conn.stats.failed > 0 {
             let before = blockers.len();
             in_the_way(&conn, &mut blockers);
@@ -353,7 +784,7 @@ fn shove(
             }
         };
         apply(&mut q, &conn);
-        let again = route_once(&q, &Scope::Nets(blockers.iter().cloned().collect()), &sub, hooks)?;
+        let again = route_once(&q, &Scope::Nets(blockers.iter().cloned().collect()), &sub, hooks, Soft::No)?;
         apply(&mut q, &again);
         if unrouted(&q, &blockers) > unrouted(p, &blockers) {
             continue;
@@ -372,7 +803,7 @@ fn shove(
         st.completion = (st.routed as f64 * 1000.0 / st.connections.max(1) as f64).round() / 10.0;
         st.tracks = out.tracks.len();
         st.vias = out.vias.len();
-        st.length = Nm(out.tracks.iter().map(|t| P::of(t.start).dist(P::of(t.end))).sum::<f64>().round() as i64);
+        st.length = tracks_length(&out.tracks);
         return Ok(out);
     }
     for c in first.connections.iter_mut().filter(|c| c.status == ConnStatus::Failed) {
@@ -382,7 +813,13 @@ fn shove(
 }
 
 /// One routing run (see [`route`]).
-fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
+fn route_once(
+    p: &Project,
+    scope: &Scope,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+    soft: Soft,
+) -> Result<RouteResult, RouteError> {
     let start = Instant::now();
     let slots = routing_slots(p, &opts.layers)?;
     (hooks.progress)(0, None, "preparing");
@@ -424,7 +861,8 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
     };
     let items = geo_board::copper_items(p);
     let isl = geo_board::islands(&items);
-    let rb = RouterBoard::build(p, &items, &isl);
+    let mut rb = RouterBoard::build(p, &items, &isl);
+    soften(&mut rb, soft);
     let mut routes = plan(&rb, scope)?;
     if (hooks.cancelled)() {
         return Err(RouteError::Cancelled);
@@ -620,6 +1058,7 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
     }
     // ---- rip-up and retry: a net that still fails takes the room of the nets in its way,
     // which are routed again around it; kept only when fewer connections fail overall ----
+    let mut sideways = SIDEWAYS;
     for _ in 0..RETRY_ROUNDS {
         let mut improved = false;
         let failing: Vec<usize> =
@@ -654,7 +1093,12 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
                 ok &= eng.route_net(&mut sc, &mut routes[j], Mode::Hard).is_ok();
                 eng.commit(&mut routes[j]);
             }
-            if ok && fails(&routes) < before {
+            // Kept when fewer connections fail, or (a few times) when as many fail but the
+            // failure moved to another net, which gets its own retry next.
+            let after = fails(&routes);
+            let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
+            if ok && (after < before || moved) {
+                sideways -= usize::from(moved);
                 improved = true;
                 continue;
             }
@@ -671,6 +1115,10 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
         if !improved {
             break;
         }
+    }
+    // ---- via minimization: nets with vias are routed again with dear vias ----
+    if !stop() {
+        stats.vias_removed += minimize_vias(&mut eng, &mut sc, &mut routes, &stop, hooks)?;
     }
     stats.budget_exhausted = exhausted;
     (hooks.progress)(0, None, "optimizing");
@@ -737,6 +1185,43 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
             post::insert(&mut index, routes[ri].net, &mut geoms[ri], pr.hw, pr.rv);
         }
     }
+    // Gridless refinement, then the usual cleanup of the new corners.
+    if opts.gridless.unwrap_or(GRIDLESS_DEFAULT) {
+        for ri in 0..routes.len() {
+            if (hooks.cancelled)() {
+                return Err(RouteError::Cancelled);
+            }
+            let pr = rb.profile(routes[ri].net);
+            post::remove(&mut index, &mut geoms[ri]);
+            {
+                let ck = Checker { rb: &rb, index: &index };
+                let net = routes[ri].net;
+                let free = |layer: usize, a: P, b: P| ck.seg(layer, a, b, net).is_none();
+                for path in &mut geoms[ri].paths {
+                    if gridless::refine(path, net, &ck, pitch, opts.any_angle) {
+                        post::optimize_path(path, &free, pitch, passes, opts.any_angle);
+                    }
+                }
+            }
+            post::insert(&mut index, routes[ri].net, &mut geoms[ri], pr.hw, pr.rv);
+        }
+    }
+    // Arc corners, last: nothing after this step moves vertices.
+    if opts.arcs {
+        let max_r = opts.arc_radius.map_or(ARC_RADIUS, |r| r.0 as f64);
+        for ri in 0..routes.len() {
+            if (hooks.cancelled)() {
+                return Err(RouteError::Cancelled);
+            }
+            let pr = rb.profile(routes[ri].net);
+            post::remove(&mut index, &mut geoms[ri]);
+            {
+                let ck = Checker { rb: &rb, index: &index };
+                arcs::round(&mut geoms[ri], routes[ri].net, &ck, 2.0 * pr.hw, max_r.max(2.0 * pr.hw));
+            }
+            post::insert(&mut index, routes[ri].net, &mut geoms[ri], pr.hw, pr.rv);
+        }
+    }
 
     // ---- verification ----
     let mut drc_reason: BTreeMap<(usize, usize), String> = BTreeMap::new();
@@ -749,7 +1234,8 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
         proj.board_mut().tracks.retain(|t| !gone.contains(&t.id));
         proj.board_mut().tracks.extend(out.tracks.iter().cloned());
         proj.board_mut().vias.extend(out.vias.iter().cloned());
-        let diags = crate::drc::check(&proj);
+        // Soft runs overlap movable copper on purpose (push-and-shove moves it next).
+        let diags = if soft == Soft::No { crate::drc::check(&proj) } else { vec![] };
         let mut bad: BTreeSet<(usize, usize)> = BTreeSet::new();
         for d in diags.iter().filter(|d| d.severity == crate::diag::Severity::Error && d.code != "drc.unrouted") {
             for s in &d.subjects {
@@ -861,7 +1347,7 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
     out.vias = fan_vias;
     stats.tracks = out.tracks.len();
     stats.vias = out.vias.len();
-    stats.length = Nm(out.tracks.iter().map(|t| P::of(t.start).dist(P::of(t.end))).sum::<f64>().round() as i64);
+    stats.length = tracks_length(&out.tracks);
     (hooks.progress)(1, Some(1), "done");
     Ok(RouteResult {
         tracks: out.tracks,
@@ -872,6 +1358,78 @@ fn route_once(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>
         removed_vias: vec![],
         rerouted: vec![],
     })
+}
+
+/// Via cost of [`minimize_vias`] (grid steps; negotiation uses `Costs::via`).
+const MIN_VIA_COST: f32 = 40.0;
+
+/// Rounds of [`minimize_vias`].
+const MIN_VIA_ROUNDS: usize = 1;
+
+/// Most extra length (share of the old length, plus `MIN_VIA_SLACK` grid steps per via saved)
+/// [`minimize_vias`] accepts.
+const MIN_VIA_STRETCH: f64 = 0.1;
+const MIN_VIA_SLACK: f64 = 8.0;
+
+/// Via minimization: every net with vias is ripped and routed again, without sharing, with
+/// vias four times as dear; the new routing is kept when it has fewer vias, no more failed
+/// connections and is at most a little longer. Other nets do not move, so the result stays
+/// legal. Returns the number of vias saved.
+fn minimize_vias(
+    eng: &mut Engine<'_>,
+    sc: &mut Scratch,
+    routes: &mut [NetRoute],
+    stop: &dyn Fn() -> bool,
+    hooks: &Hooks<'_>,
+) -> Result<usize, RouteError> {
+    let mut saved = 0;
+    let base = eng.costs;
+    let n = routes.len();
+    for ri in (0..MIN_VIA_ROUNDS).flat_map(|_| 0..n) {
+        if (hooks.cancelled)() {
+            eng.costs = base;
+            return Err(RouteError::Cancelled);
+        }
+        if stop() {
+            break;
+        }
+        let (vias, len) = wire_stats(eng, &routes[ri].wires);
+        if vias == 0 {
+            continue;
+        }
+        let fails = |r: &NetRoute| r.failed.iter().filter(|f| f.is_some()).count();
+        let before = fails(&routes[ri]);
+        let old = (routes[ri].wires.clone(), routes[ri].failed.clone());
+        eng.uncommit(&mut routes[ri]);
+        eng.costs = Costs { via: MIN_VIA_COST, ..base };
+        let res = eng.route_net(sc, &mut routes[ri], Mode::Hard);
+        eng.costs = base;
+        let (nv, nl) = wire_stats(eng, &routes[ri].wires);
+        let ok = res.is_ok()
+            && fails(&routes[ri]) <= before
+            && nv < vias
+            && nl <= len * (1.0 + MIN_VIA_STRETCH) + MIN_VIA_SLACK * eng.grid.g * (vias - nv) as f64;
+        if ok {
+            saved += vias - nv;
+        } else {
+            routes[ri].wires = old.0;
+            routes[ri].failed = old.1;
+        }
+        eng.commit(&mut routes[ri]);
+    }
+    Ok(saved)
+}
+
+/// Vias and track length (nm) of wires.
+fn wire_stats(eng: &Engine<'_>, wires: &[engine::Wire]) -> (usize, f64) {
+    let mut vias = 0;
+    let mut len = 0.0;
+    for w in wires {
+        let (segs, v) = eng.wire_geometry(w);
+        vias += v.len();
+        len += segs.iter().map(|(_, a, b)| a.dist(*b)).sum::<f64>();
+    }
+    (vias, len)
 }
 
 /// Routes a batch of nets whose regions do not meet: every net is ripped up, all are routed
@@ -1255,11 +1813,12 @@ fn build_items(p: &Project, rb: &RouterBoard, routes: &[NetRoute], geoms: &[post
         let key = rb.profile(r.net).key;
         let net = Some(rb.nets[r.net as usize].clone());
         for path in &g.paths {
-            for w in path.pts.windows(2) {
+            for (k, w) in path.pts.windows(2).enumerate() {
                 let (a, b) = (w[0].to_point(), w[1].to_point());
                 if a == b {
                     continue;
                 }
+                let mid = path.mids.get(k).copied().flatten().map(P::to_point);
                 let id: ObjectId = alloc.alloc_id();
                 out.owner.insert(("track".into(), id.0), (ri, path.wire));
                 out.tracks.push(Track {
@@ -1269,7 +1828,7 @@ fn build_items(p: &Project, rb: &RouterBoard, routes: &[NetRoute], geoms: &[post
                     net: net.clone(),
                     start: a,
                     end: b,
-                    mid: None,
+                    mid,
                     locked: false,
                 });
             }

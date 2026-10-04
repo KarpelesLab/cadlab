@@ -362,6 +362,33 @@ search; PCBWay sources by MPN.
 that is both permitted and reproducible. Header recognition plus explicit mapping survives export format
 changes without guessing, and reading values only for passives keeps parametric matching (D26) honest.
 
+### D34. Router M6 phase 2: shove geometry, keep the grid search, refine off the grid (2026-10-04)
+The grid router of D22/D28 stays the search engine; phase 2 adds geometric stages around it, each checked
+exactly and by the DRC, so none can make a result illegal. *Push-and-shove* (`router::shove`) works on board
+geometry, not on the grid: unlocked straight tracks of other nets become lines between anchors, obstacles are grown
+into convex hulls widened by an octagon whose inradius is the required distance (+0.5 µm), lines are walked around
+hulls (hull boundary between first entry and last exit) and vias pushed out of them, moved items push in turn
+(FIFO, bounded), then spring back (original geometry if legal, else 45° pull-tight). Locked items, pads, arcs,
+mixed-width lines and the pushing net's own copper never move; a fixed end or a crossing in the way is a failure
+with a code, the item and a hint, never a silent partial result. It serves `route.track` (waypoints; modes shove,
+walkaround, strict), `route.connection` (routed again against *softened* movable copper, first touching allowed,
+then centerline only, then shoved; the D28 rip-and-reroute stays as fallback) and the leftovers of `route.all` /
+`route.nets` (one attempt each within the budget). *Gridless refinement* is a post-pass, not a new search: a
+visibility graph over the clearance hulls near each stretch of a path, A* with lazily checked octilinear (or
+straight, with `any_angle`) edges, replacing the stretch only when shorter; it is the default because the
+benchmark showed shorter tracks and fewer segments on every board with no completion or DRC change. *Via
+minimization* reroutes nets with vias after legalization with vias four times as dear and keeps the result only
+if it has fewer vias, no new failures and bounded extra length; raising the via cost during negotiation instead
+lost completion on the STM32, QFP and BGA boards. *Arcs* are optional corner rounding (`arcs`, `arc_radius`), checked as chords
+within 0.1 µm with that much extra clearance and stored as the track's midpoint, which every writer already
+exports. Escape planning retries a component with the pads that found no exit first. Everything is sequential
+or batch-deterministic: results do not depend on the thread count.
+*Why:* the benchmark gaps were local (one blocked escape, one congestion leftover, cheap vias), and the
+interactive use case (agents adding one track without destroying the rest) needs geometric shove, which does not
+fit a grid occupancy model. Refining off the grid gives most of a gridless router's quality (hugging minimum
+clearance, true shortest corridors) without giving up the grid search's robustness and exact sampling (D22);
+a gridless search remains on the roadmap.
+
 ### D36. 3D models come from oxideav-mesh3d (2026-10-04)
 cadlab reads 3D model files only through the **oxideav-mesh3d** crate family (MIT): the typed `Scene3D` model with
 its `Mesh3DDecoder` trait and `Mesh3DRegistry`, and the format crates `oxideav-stl`, `oxideav-obj`,

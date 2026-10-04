@@ -17,6 +17,8 @@ pub(crate) struct Path {
     pub pinned: Vec<bool>,
     /// Wire (index in the net's wires) it comes from.
     pub wire: usize,
+    /// Per segment, the midpoint of an arc (`arcs`); empty when every segment is straight.
+    pub mids: Vec<Option<P>>,
 }
 
 /// Final geometry of a net.
@@ -69,7 +71,7 @@ pub(crate) fn geometry(e: &Engine<'_>, nr: &NetRoute) -> NetGeom {
                         g.vias.push((p, wi));
                         g.paths.push(done);
                     }
-                    let mut path = Path { layer, pts: vec![], pinned: vec![], wire: wi };
+                    let mut path = Path { layer, pts: vec![], pinned: vec![], wire: wi, mids: vec![] };
                     if k == 0
                         && let Some(st) = &w.start
                     {
@@ -162,7 +164,11 @@ pub(crate) fn absorb(g: &mut NetGeom, layer: usize, pts: &[P]) -> bool {
 pub(crate) fn insert(index: &mut Index, net: u32, g: &mut NetGeom, hw: f64, rv: f64) {
     g.ids.clear();
     for p in &g.paths {
-        for w in p.pts.windows(2) {
+        for (k, w) in p.pts.windows(2).enumerate() {
+            if let Some(Some(m)) = p.mids.get(k) {
+                g.ids.extend(super::arcs::insert_arc(index, net, p.layer, w[0], *m, w[1], hw));
+                continue;
+            }
             let id = index
                 .insert(Item::Seg { net, layer: p.layer as u8, a: w[0], b: w[1] }, BoxF::of2(w[0], w[1]).expand(hw));
             g.ids.push(id);
@@ -253,7 +259,7 @@ fn collinear(a: P, b: P, c: P) -> bool {
     cross.abs() < 1.0 && dot > 0.0
 }
 
-fn merge(p: &mut Path) {
+pub(crate) fn merge(p: &mut Path) {
     let mut i = 1;
     while i + 1 < p.pts.len() {
         if !p.pinned[i] && (collinear(p.pts[i - 1], p.pts[i], p.pts[i + 1]) || p.pts[i] == p.pts[i - 1]) {
@@ -267,7 +273,7 @@ fn merge(p: &mut Path) {
 
 /// The two-segment octilinear connections from `a` to `b` (straight then diagonal, diagonal
 /// then straight); a single point when one segment suffices.
-fn octilinear(a: P, b: P) -> Vec<Vec<P>> {
+pub(crate) fn octilinear(a: P, b: P) -> Vec<Vec<P>> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let (ax, ay) = (dx.abs(), dy.abs());
     if ax < 1.0 || ay < 1.0 || (ax - ay).abs() < 1.0 {
@@ -288,7 +294,7 @@ fn len(pts: &[P]) -> f64 {
 const WINDOW: usize = 24;
 
 /// 45° pull-tight: replaces runs of vertices by a shorter octilinear connection when legal.
-fn pull_tight(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
+fn pull_tight(p: &mut Path, free: SegOk<'_>) -> bool {
     let mut any = false;
     let mut i = 0;
     while i + 2 < p.pts.len() {
@@ -311,7 +317,7 @@ fn pull_tight(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
                 if len(&cand) >= cur - 1.0 && !(cand.len() < j - i + 1 && len(&cand) <= cur + 1.0) {
                     continue;
                 }
-                if cand.windows(2).all(|w| ck.seg(p.layer, w[0], w[1], net).is_none()) {
+                if cand.windows(2).all(|w| free(p.layer, w[0], w[1])) {
                     let n_mid = mid.len();
                     p.pts.splice(i + 1..j, mid);
                     p.pinned.splice(i + 1..j, std::iter::repeat_n(false, n_mid));
@@ -332,7 +338,7 @@ fn pull_tight(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
 }
 
 /// Cuts 90° corners with a 45° segment.
-fn chamfer(p: &mut Path, net: u32, ck: &Checker<'_>, g: f64) {
+fn chamfer(p: &mut Path, free: SegOk<'_>, g: f64) {
     let mut i = 1;
     while i + 1 < p.pts.len() {
         if p.pinned[i] {
@@ -351,7 +357,7 @@ fn chamfer(p: &mut Path, net: u32, ck: &Checker<'_>, g: f64) {
         while d >= g / 4.0 {
             let b1 = P::new(b.x + (a.x - b.x) / l1 * d, b.y + (a.y - b.y) / l1 * d);
             let b2 = P::new(b.x + (c.x - b.x) / l2 * d, b.y + (c.y - b.y) / l2 * d);
-            if ck.seg(p.layer, b1, b2, net).is_none() {
+            if free(p.layer, b1, b2) {
                 p.pts.splice(i..=i, [b1, b2]);
                 p.pinned.splice(i..=i, [false, false]);
                 applied = true;
@@ -365,7 +371,7 @@ fn chamfer(p: &mut Path, net: u32, ck: &Checker<'_>, g: f64) {
 
 /// Any-angle shortcuts: replaces a run of vertices by one straight segment when it is shorter
 /// and legal (furthest reachable vertex first).
-fn shortcut(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
+fn shortcut(p: &mut Path, free: SegOk<'_>) -> bool {
     let mut any = false;
     let mut i = 0;
     while i + 2 < p.pts.len() {
@@ -379,7 +385,7 @@ fn shortcut(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
                 continue;
             }
             let (a, b) = (p.pts[i], p.pts[j]);
-            if a.dist(b) < len(&p.pts[i..=j]) - 1.0 && ck.seg(p.layer, a, b, net).is_none() {
+            if a.dist(b) < len(&p.pts[i..=j]) - 1.0 && free(p.layer, a, b) {
                 p.pts.drain(i + 1..j);
                 p.pinned.drain(i + 1..j);
                 any = true;
@@ -397,23 +403,33 @@ fn shortcut(p: &mut Path, net: u32, ck: &Checker<'_>) -> bool {
 /// Post-processes a net's polylines in place: collinear merging, 45° pull-tight (`passes`
 /// rounds), 90° corners mitered, and with `any_angle` straight shortcuts at any angle.
 pub(crate) fn optimize(g: &mut NetGeom, net: u32, ck: &Checker<'_>, grid: f64, passes: usize, any_angle: bool) {
+    let free = |layer: usize, a: P, b: P| ck.seg(layer, a, b, net).is_none();
     for p in &mut g.paths {
+        optimize_path(p, &free, grid, passes, any_angle);
+    }
+}
+
+/// Whether a track segment (stackup layer, from, to) is legal; the clearance checks of a
+/// [`Checker`] or of the shove world (`shove`).
+pub(crate) type SegOk<'a> = &'a dyn Fn(usize, P, P) -> bool;
+
+/// [`optimize`] for one polyline with any legality check.
+pub(crate) fn optimize_path(p: &mut Path, free: SegOk<'_>, grid: f64, passes: usize, any_angle: bool) {
+    merge(p);
+    for _ in 0..passes {
+        if !pull_tight(p, free) {
+            break;
+        }
         merge(p);
+    }
+    chamfer(p, free, grid);
+    merge(p);
+    if any_angle {
         for _ in 0..passes {
-            if !pull_tight(p, net, ck) {
+            if !shortcut(p, free) {
                 break;
             }
             merge(p);
-        }
-        chamfer(p, net, ck, grid);
-        merge(p);
-        if any_angle {
-            for _ in 0..passes {
-                if !shortcut(p, net, ck) {
-                    break;
-                }
-                merge(p);
-            }
         }
     }
 }

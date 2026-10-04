@@ -140,11 +140,16 @@ Details in [ROUTER.md](ROUTER.md).
 
 ## M6 — Autorouter v2: freerouting parity (XL)
 
-- [ ] Gridless, shape-based router (free-space decomposition, expansion rooms)
-- [ ] Any-angle / 45° optimized output, arc support (done: 45° pull-tight over longer runs, mitered corners,
-      a second optimization round, escape junctions smoothed, optional any-angle shortcuts; to do: arcs)
-- [ ] Push-and-shove for incremental and interactive (API-driven) routing (done: `route.connection` reroutes
-      the unlocked nets in its way and keeps the result only if they lose nothing; to do: segment-level shove)
+- [ ] Gridless, shape-based router (free-space decomposition, expansion rooms) (done: gridless refinement of
+      grid routes, a visibility graph over clearance hulls, on by default (DECISIONS D34); to do: a gridless search)
+- [x] Any-angle / 45° optimized output, arc support: 45° pull-tight over longer runs, mitered corners, a second
+      optimization round, escape junctions smoothed, optional any-angle shortcuts, gridless refinement hugging
+      minimum clearance, optional arc corners (`arcs`, exported as arcs)
+- [x] Push-and-shove for incremental and interactive (API-driven) routing: segment-level walkaround, shove and
+      spring-back of unlocked tracks and vias (`route.track` along waypoints, `route.connection`, leftovers of
+      `route.all` / `route.nets`), locked items never move, DRC-checked (DECISIONS D34)
+- [x] Close the benchmark gaps: STM32 boards at 100 % (escape retries, push-and-shove of leftovers), via
+      minimization pass (4–33 % fewer vias)
 - [x] BGA/fine-pitch fanout, escape routing: dog-bone quadrant fanout of area arrays, staggered escapes for
       off-grid fine-pitch pads, `route.fanout` (DECISIONS D28)
 - [x] Parallel routing (independent regions/nets) with deterministic merge: level-scheduled batches of nets

@@ -260,56 +260,112 @@ pub(crate) fn escape(
         if !needed {
             continue;
         }
-        for (t, layer, axis, half_len, lat) in fine {
-            let term = &rb.terminals[t];
-            let pr = rb.profile(term.net);
-            // Candidate end cells beyond the pad, shallowest first.
-            let area = BoxF::of2(term.at, term.at).expand(half_len + 8.0 * g);
-            let Some((x0, y0, x1, y1)) = grid.crange(&area) else { continue };
-            let mut cands: Vec<(i64, i64, i32, i32)> = Vec::new();
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    let e = grid.cell(x, y);
-                    let d = P::new(e.x - term.at.x, e.y - term.at.y);
-                    let along = d.x * axis.x + d.y * axis.y;
-                    let side = d.x * lat.x + d.y * lat.y;
-                    if side.abs() > 2.0 * g || along < half_len - g || along < side.abs() {
-                        continue;
+        // Greedy in pad order; pads left without an escape go first in another attempt (up to
+        // `ESCAPE_ATTEMPTS`), and the attempt with the most escapes is kept.
+        let mut order: Vec<usize> = (0..fine.len()).collect();
+        let mut best: Vec<Escape> = Vec::new();
+        for attempt in 0..ESCAPE_ATTEMPTS {
+            let mut mine: Vec<Escape> = Vec::new();
+            let mut ids: Vec<u32> = Vec::new();
+            let mut missed: Vec<usize> = Vec::new();
+            for &k in &order {
+                let (t, layer, axis, half_len, lat) = fine[k];
+                match escape_one(rb, grid, index, open, &out, &mine, t, layer, axis, half_len, lat) {
+                    Some(pts) => {
+                        let term = &rb.terminals[t];
+                        ids.extend(insert_escape(rb, index, term.net, layer, &pts));
+                        mine.push(Escape { net: term.net, layer, pts, label: term.label.clone() });
                     }
-                    cands.push(((along / 1_000.0).round() as i64, (side.abs() / 1_000.0).round() as i64, x, y));
+                    None => missed.push(k),
                 }
             }
-            cands.sort_unstable();
-            let ck = Checker { rb, index };
-            let found = cands.into_iter().find_map(|(_, _, x, y)| {
-                let e = grid.cell(x, y);
-                let d = P::new(e.x - term.at.x, e.y - term.at.y);
-                let side = (d.x * lat.x + d.y * lat.y).abs();
-                let along = d.x * axis.x + d.y * axis.y;
-                let mut pts = vec![term.at];
-                if side > 1.0 {
-                    pts.push(P::new(term.at.x + axis.x * (along - side), term.at.y + axis.y * (along - side)));
-                }
-                pts.push(e);
-                pts.dedup_by(|a, b| a.dist(*b) < 1.0);
-                let step = (axis.x as i32, axis.y as i32);
-                let ok = pts.len() > 1
-                    && open(term.net, layer, (x, y), step)
-                    && pts.windows(2).all(|s| ck.seg(layer, s[0], s[1], term.net).is_none())
-                    && out.iter().all(|o: &Escape| apart(rb, grid, o, term.net, layer, &pts));
-                ok.then_some(pts)
-            });
-            let Some(pts) = found else { continue };
-            for s in pts.windows(2) {
-                index.insert(
-                    Item::Seg { net: term.net, layer: layer as u8, a: s[0], b: s[1] },
-                    BoxF::of2(s[0], s[1]).expand(pr.hw),
-                );
+            for id in ids {
+                index.remove(id);
             }
-            out.push(Escape { net: term.net, layer, pts, label: term.label.clone() });
+            if attempt == 0 || mine.len() > best.len() {
+                best = mine;
+            }
+            if missed.is_empty() {
+                break;
+            }
+            let rest: Vec<usize> = order.iter().copied().filter(|k| !missed.contains(k)).collect();
+            order = missed;
+            order.extend(rest);
         }
+        for e in &best {
+            insert_escape(rb, index, e.net, e.layer, &e.pts);
+        }
+        out.extend(best);
     }
     out
+}
+
+/// Adds an escape's segments to the index; returns their ids.
+fn insert_escape(rb: &RouterBoard, index: &mut Index, net: u32, layer: usize, pts: &[P]) -> Vec<u32> {
+    let hw = rb.profile(net).hw;
+    pts.windows(2)
+        .map(|s| {
+            index.insert(Item::Seg { net, layer: layer as u8, a: s[0], b: s[1] }, BoxF::of2(s[0], s[1]).expand(hw))
+        })
+        .collect()
+}
+
+/// Attempts per component in [`escape`].
+const ESCAPE_ATTEMPTS: usize = 4;
+
+/// The escape of one pad: the shallowest legal end cell (see [`escape`]), or `None`.
+#[allow(clippy::too_many_arguments)]
+fn escape_one(
+    rb: &RouterBoard,
+    grid: &Grid,
+    index: &Index,
+    open: &dyn Fn(u32, usize, (i32, i32), (i32, i32)) -> bool,
+    done: &[Escape],
+    mine: &[Escape],
+    t: usize,
+    layer: usize,
+    axis: P,
+    half_len: f64,
+    lat: P,
+) -> Option<Vec<P>> {
+    let g = grid.g;
+    let term = &rb.terminals[t];
+    // Candidate end cells beyond the pad, shallowest first.
+    let area = BoxF::of2(term.at, term.at).expand(half_len + 8.0 * g);
+    let (x0, y0, x1, y1) = grid.crange(&area)?;
+    let mut cands: Vec<(i64, i64, i32, i32)> = Vec::new();
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let e = grid.cell(x, y);
+            let d = P::new(e.x - term.at.x, e.y - term.at.y);
+            let along = d.x * axis.x + d.y * axis.y;
+            let side = d.x * lat.x + d.y * lat.y;
+            if side.abs() > 2.0 * g || along < half_len - g || along < side.abs() {
+                continue;
+            }
+            cands.push(((along / 1_000.0).round() as i64, (side.abs() / 1_000.0).round() as i64, x, y));
+        }
+    }
+    cands.sort_unstable();
+    let ck = Checker { rb, index };
+    cands.into_iter().find_map(|(_, _, x, y)| {
+        let e = grid.cell(x, y);
+        let d = P::new(e.x - term.at.x, e.y - term.at.y);
+        let side = (d.x * lat.x + d.y * lat.y).abs();
+        let along = d.x * axis.x + d.y * axis.y;
+        let mut pts = vec![term.at];
+        if side > 1.0 {
+            pts.push(P::new(term.at.x + axis.x * (along - side), term.at.y + axis.y * (along - side)));
+        }
+        pts.push(e);
+        pts.dedup_by(|a, b| a.dist(*b) < 1.0);
+        let step = (axis.x as i32, axis.y as i32);
+        let ok = pts.len() > 1
+            && open(term.net, layer, (x, y), step)
+            && pts.windows(2).all(|s| ck.seg(layer, s[0], s[1], term.net).is_none())
+            && done.iter().chain(mine).all(|o: &Escape| apart(rb, grid, o, term.net, layer, &pts));
+        ok.then_some(pts)
+    })
 }
 
 /// Whether a new escape `pts` of `net` keeps clear of escape `o` with the router's margins:

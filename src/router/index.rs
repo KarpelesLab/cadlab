@@ -119,11 +119,17 @@ impl Checker<'_> {
     /// First thing a track of `net` (half width from its profile) on stackup layer `layer`
     /// along `a`–`b` would violate, ignoring copper of its own net.
     pub fn seg(&self, layer: usize, a: P, b: P, net: u32) -> Option<Blocker> {
+        self.seg_margin(layer, a, b, net, 0.0)
+    }
+
+    /// [`Checker::seg`] keeping `extra` more than the rules require (for chords standing for
+    /// an arc).
+    pub fn seg_margin(&self, layer: usize, a: P, b: P, net: u32, extra: f64) -> Option<Blocker> {
         let pr = self.rb.profile(net);
         if !self.rb.inside(a) || !self.rb.inside(b) {
             return Some(Blocker::Outside);
         }
-        let q = BoxF::of2(a, b).expand(pr.hw + self.index.reach);
+        let q = BoxF::of2(a, b).expand(pr.hw + extra + self.index.reach);
         let bit = 1u64 << layer.min(63);
         for (_, it) in self.index.query(&q) {
             match it {
@@ -133,7 +139,7 @@ impl Checker<'_> {
                     {
                         continue;
                     }
-                    let req = pr.hw + ob.clear.with(pr.c);
+                    let req = pr.hw + ob.clear.with(pr.c) + extra;
                     if !ob.bbox.expand(req).intersects(&BoxF::of2(a, b)) {
                         continue;
                     }
@@ -146,7 +152,7 @@ impl Checker<'_> {
                         continue;
                     }
                     let po = self.rb.profile(m);
-                    if seg_seg_dist(a, b, c, d) < pr.hw + po.hw + pr.c.max(po.c) - TOL {
+                    if seg_seg_dist(a, b, c, d) < pr.hw + po.hw + pr.c.max(po.c) + extra - TOL {
                         return Some(Blocker::Net(m, Some(l)));
                     }
                 }
@@ -155,7 +161,7 @@ impl Checker<'_> {
                         continue;
                     }
                     let po = self.rb.profile(m);
-                    if point_seg_d2(at, a, b).sqrt() < pr.hw + po.rv + pr.c.max(po.c) - TOL {
+                    if point_seg_d2(at, a, b).sqrt() < pr.hw + po.rv + pr.c.max(po.c) + extra - TOL {
                         return Some(Blocker::Net(m, None));
                     }
                 }

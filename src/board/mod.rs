@@ -199,6 +199,18 @@ pub fn track_shape(t: &Track) -> PolygonSet {
     polyclip::offset_paths(&vec![Path(path)], t.width.0 / 2, Join::Round, EndCap::Round, COPPER_TOL).unwrap_or_default()
 }
 
+/// Length of a track: along its arc for an arc track.
+pub fn track_length(t: &Track) -> Nm {
+    let len = |pts: &[Point]| -> f64 {
+        pts.windows(2).map(|w| ((w[1].x.0 - w[0].x.0) as f64).hypot((w[1].y.0 - w[0].y.0) as f64)).sum()
+    };
+    let l = match t.mid {
+        None => len(&[t.start, t.end]),
+        Some(m) => len(&arc_points(t.start, m, t.end, 10)),
+    };
+    Nm(l.round() as i64)
+}
+
 /// Points along the arc through `a`, `m`, `b`, with chord error at most `tol` nm.
 pub fn arc_points(a: Point, m: Point, b: Point, tol: i64) -> Vec<Point> {
     let f = |p: Point| (p.x.0 as f64, p.y.0 as f64);
