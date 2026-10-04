@@ -480,15 +480,7 @@ pub fn measure(router: &str, r: &Registry, s: &mut Session, ms: u128, drc_before
     let o = &st["output"];
     let p = s.project.as_ref().unwrap();
     let (sharp, any) = shape_counts(p);
-    let length: f64 = p
-        .board()
-        .tracks
-        .iter()
-        .map(|t| {
-            let (dx, dy) = ((t.end.x.0 - t.start.x.0) as f64, (t.end.y.0 - t.start.y.0) as f64);
-            (dx * dx + dy * dy).sqrt()
-        })
-        .sum();
+    let length: f64 = p.board().tracks.iter().map(|t| cadlab::board::track_length(t).0 as f64).sum();
     Metrics {
         router: router.into(),
         connections: o["connections"].as_u64().unwrap(),

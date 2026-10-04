@@ -556,6 +556,81 @@ fn shove_reroutes_blocking_nets() {
 }
 
 #[test]
+fn shove_pushes_vias_apart() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    // A VIN wall across the board between U1 and C2 with a gap between two vias too narrow
+    // for 3V3 (U1.5 to C2.1) on F.Cu: push-and-shove moves the vias apart.
+    exec(
+        &r,
+        &mut s,
+        "track.add",
+        json!({"net": "VIN", "layer": "F.Cu", "points": [["12.5mm", "0.6mm"], ["12.5mm", "8.6mm"]]}),
+    );
+    exec(&r, &mut s, "via.add", json!({"net": "VIN", "at": ["12.5mm", "8.6mm"]}));
+    exec(
+        &r,
+        &mut s,
+        "track.add",
+        json!({"net": "VIN", "layer": "F.Cu", "points": [["12.5mm", "9.4mm"], ["12.5mm", "14.4mm"]]}),
+    );
+    exec(&r, &mut s, "via.add", json!({"net": "VIN", "at": ["12.5mm", "9.4mm"]}));
+    drc_clean(&s);
+    let vin_before = unrouted(&r, &mut s, "VIN");
+    let o = exec(&r, &mut s, "route.connection", json!({"from": "U1.VOUT", "to": "C2.1", "layers": ["F.Cu"]}));
+    eprintln!("{}", o["summary"]);
+    assert_eq!(o["output"]["connections"][0]["status"], "routed");
+    assert_eq!(o["output"]["rerouted"], json!(["VIN"]));
+    render(&r, &mut s, "shove-vias");
+    drc_clean(&s);
+    assert_eq!(unrouted(&r, &mut s, "3V3"), 0);
+    assert_eq!(unrouted(&r, &mut s, "VIN"), vin_before);
+    // The vias moved apart, the walls still reach the board edges.
+    let b = s.project.as_ref().unwrap().board();
+    assert_eq!(b.vias.len(), 2);
+    let ys: Vec<i64> = b.vias.iter().map(|v| v.at.y.0).collect();
+    assert!((ys[0] - ys[1]).abs() > 1_200_000, "room for the track between the vias: {ys:?}");
+    for end in [cadlab::Nm::from_um(600), cadlab::Nm::from_um(14_400)] {
+        assert!(b.tracks.iter().any(|t| t.net.as_deref() == Some("VIN") && (t.start.y == end || t.end.y == end)));
+    }
+}
+
+#[test]
+fn arc_corners_are_drc_clean_and_exported() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let dir = new_project(&r, &mut s);
+    common::boards::build_board(&r, &mut s);
+    exec(&r, &mut s, "board.outline", json!({"width": "40mm", "height": "30mm", "corner_radius": "2mm"}));
+    exec(&r, &mut s, "place.auto", json!({"spacing": "1.5mm"}));
+    let o = exec(&r, &mut s, "route.all", json!({"seed": 1, "arcs": true, "arc_radius": "0.8mm"}));
+    report("attiny arcs", &o, 0);
+    assert_eq!(completion(&o), 100.0);
+    drc_clean(&s);
+    render(&r, &mut s, "arcs");
+    let b = s.project.as_ref().unwrap().board();
+    let arcs = b.tracks.iter().filter(|t| t.mid.is_some()).count();
+    assert!(arcs > 5, "{arcs} arcs");
+    let total: i64 = b.tracks.iter().map(|t| cadlab::board::track_length(t).0).sum();
+    // route.status measures arcs along the arc.
+    let st = exec(&r, &mut s, "route.status", json!({}));
+    assert_eq!(st["output"]["length"], json!(cadlab::Nm(total)));
+    // Exported as true arcs.
+    exec(&r, &mut s, "export.gerber", json!({"dir": dir.path().join("gbr")}));
+    let mut circular = false;
+    for e in std::fs::read_dir(dir.path().join("gbr")).unwrap() {
+        let text = std::fs::read_to_string(e.unwrap().path()).unwrap_or_default();
+        circular |= text.contains("Copper") && (text.contains("G02*") || text.contains("G03*"));
+    }
+    assert!(circular, "copper layers with circular interpolation");
+    exec(&r, &mut s, "board.export_kicad", json!({"path": dir.path().join("k/board")}));
+    let pcb = std::fs::read_to_string(dir.path().join("k/board.kicad_pcb")).unwrap();
+    assert!(pcb.contains("(arc (start"), "KiCad arcs");
+}
+
+#[test]
 fn identical_for_any_thread_count() {
     let r = Registry::with_builtins();
     let mut results = Vec::new();
@@ -690,4 +765,97 @@ fn bench_generated_boards() {
         );
         render(&r, &mut s, &format!("bench-{}", name.split_whitespace().next().unwrap()));
     }
+}
+
+/// Ratsnest lines of a net.
+fn unrouted(r: &Registry, s: &mut Session, net: &str) -> u64 {
+    let st = exec(r, s, "route.status", json!({}));
+    st["output"]["unrouted_by_net"].get(net).and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+fn drc_clean(s: &Session) {
+    let errors: Vec<String> = drc_errors(s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+    assert_eq!(errors, Vec::<String>::new());
+}
+
+#[test]
+fn route_track_shoves_and_walks_around() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    // A free VIN track along y = 3 mm, then a GND track just above it: VIN is pushed down.
+    exec(&r, &mut s, "track.add", json!({"net": "VIN", "layer": "F.Cu", "points": [["3mm", "3mm"], ["17mm", "3mm"]]}));
+    let vin_before = unrouted(&r, &mut s, "VIN");
+    let strict = r
+        .execute(
+            &mut s,
+            "route.track",
+            json!({"net": "GND", "layer": "F.Cu", "points": [["6mm", "3.1mm"], ["14mm", "3.1mm"]], "mode": "strict"}),
+            RunOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(strict.error.diagnostic.code, "route.track_blocked", "{}", strict.error);
+    assert!(strict.error.diagnostic.subjects.contains(&cadlab::ObjectRef::Net("VIN".into())), "{}", strict.error);
+    let o = exec(
+        &r,
+        &mut s,
+        "route.track",
+        json!({"net": "GND", "layer": "F.Cu", "points": [["6mm", "3.1mm"], ["14mm", "3.1mm"]]}),
+    );
+    eprintln!("{}", o["summary"]);
+    assert_eq!(o["output"]["shoved"], json!(["VIN"]));
+    assert_eq!(o["output"]["segments"], 1, "the GND track stays where it was asked");
+    drc_clean(&s);
+    assert_eq!(unrouted(&r, &mut s, "VIN"), vin_before, "the shoved track keeps its connections");
+    let b = s.project.as_ref().unwrap().board();
+    let vin: Vec<_> = b.tracks.iter().filter(|t| t.net.as_deref() == Some("VIN")).collect();
+    assert!(vin.len() > 1, "VIN was bent around the GND track");
+    assert!(vin.iter().any(|t| t.start.y < cadlab::Nm::from_um(3_000)), "pushed downwards");
+    render(&r, &mut s, "route-track-shove");
+    // Undo, lock VIN: shove mode now walks GND around it instead (VIN never moves).
+    exec(&r, &mut s, "history.undo", json!({}));
+    for t in s.project.as_mut().unwrap().board_mut().tracks.iter_mut() {
+        if t.net.as_deref() == Some("VIN") {
+            t.locked = true;
+        }
+    }
+    let locked: Vec<_> = s.project.as_ref().unwrap().board().tracks.clone();
+    let err = r
+        .execute(
+            &mut s,
+            "route.track",
+            json!({"net": "GND", "layer": "F.Cu", "points": [["6mm", "3.1mm"], ["14mm", "3.1mm"]]}),
+            RunOptions::default(),
+        )
+        .unwrap_err();
+    eprintln!("{}", err.error);
+    assert_eq!(err.error.diagnostic.code, "route.track_blocked");
+    assert!(err.error.diagnostic.hint.as_deref().unwrap().contains("unlock"), "{}", err.error);
+    // Ends clear of it: the GND track walks around the locked VIN track's end.
+    let o = exec(
+        &r,
+        &mut s,
+        "route.track",
+        json!({"net": "GND", "layer": "F.Cu", "points": [["14mm", "3.6mm"], ["18mm", "2.4mm"]]}),
+    );
+    eprintln!("{}", o["summary"]);
+    assert_eq!(o["output"]["shoved"], json!(null));
+    assert_eq!(o["output"]["walked"], true);
+    let b = s.project.as_ref().unwrap().board();
+    for t in locked.iter().filter(|t| t.locked) {
+        assert!(b.tracks.contains(t), "locked tracks never move");
+    }
+    drc_clean(&s);
+    // Walkaround: a track crossing pads of other nets detours around them.
+    let o = exec(
+        &r,
+        &mut s,
+        "route.track",
+        json!({"net": "GND", "layer": "F.Cu", "points": [["2mm", "9mm"], ["8mm", "9mm"]], "mode": "walkaround"}),
+    );
+    eprintln!("{}", o["summary"]);
+    assert_eq!(o["output"]["walked"], true);
+    drc_clean(&s);
+    render(&r, &mut s, "route-track-walk");
 }

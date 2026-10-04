@@ -1068,7 +1068,7 @@ pub enum TrackPoint {
     At(Point),
 }
 
-fn resolve_point(p: &Project, tp: &TrackPoint) -> Result<(Point, Option<String>), CommandError> {
+pub(crate) fn resolve_point(p: &Project, tp: &TrackPoint) -> Result<(Point, Option<String>), CommandError> {
     match tp {
         TrackPoint::At(pt) => Ok((*pt, None)),
         TrackPoint::Pin(s) => {
@@ -1088,7 +1088,7 @@ fn resolve_point(p: &Project, tp: &TrackPoint) -> Result<(Point, Option<String>)
     }
 }
 
-fn net_width(p: &Project, net: Option<&str>) -> Nm {
+pub(crate) fn net_width(p: &Project, net: Option<&str>) -> Nm {
     net.and_then(|n| p.circuit().nets.get(n))
         .and_then(|n| n.class.as_ref())
         .and_then(|c| p.circuit().netclasses.get(c))

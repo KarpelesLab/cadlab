@@ -84,6 +84,8 @@ pub(crate) struct Obstacle {
     pub label: String,
     /// Component owning it (pads), for hints.
     pub owner: Option<String>,
+    /// An unlocked straight track or unlocked via: something push-and-shove may move.
+    pub movable: Option<ItemRef>,
 }
 
 /// A drilled hole (vias keep `hole_to_hole` from it).
@@ -91,6 +93,8 @@ pub(crate) struct Obstacle {
 pub(crate) struct Hole {
     pub at: P,
     pub r: f64,
+    /// The via drilling it, if any.
+    pub via: Option<crate::id::ObjectId>,
 }
 
 /// Where a stub to a terminal ends.
@@ -203,9 +207,13 @@ impl RouterBoard {
             if matches!(it.item, ItemRef::Zone(..)) {
                 continue; // fills are derived: they make room for new tracks when refilled
             }
+            let mut movable = None;
             let (shape, anchor) = match &it.item {
                 ItemRef::Track(id) => {
                     let t = board.tracks.iter().find(|t| t.id == *id).expect("track");
+                    if !t.locked && t.mid.is_none() {
+                        movable = Some(it.item.clone());
+                    }
                     let (a, b) = (P::of(t.start), P::of(t.end));
                     let shape = if t.mid.is_none() {
                         Shape::Capsule { a, b, r: t.width.0 as f64 / 2.0 }
@@ -216,6 +224,9 @@ impl RouterBoard {
                 }
                 ItemRef::Via(id) => {
                     let v = board.vias.iter().find(|v| v.id == *id).expect("via");
+                    if !v.locked {
+                        movable = Some(it.item.clone());
+                    }
                     let c = P::of(v.at);
                     (Shape::Capsule { a: c, b: c, r: v.diameter.0 as f64 / 2.0 }, Anchor::Center(c))
                 }
@@ -257,6 +268,7 @@ impl RouterBoard {
                 kind,
                 label,
                 owner,
+                movable,
             });
         }
         // Holes.
@@ -264,7 +276,7 @@ impl RouterBoard {
         for pp in &pads {
             if let Some((d, plated)) = pp.hole {
                 let c = P::of(pp.center);
-                holes.push(Hole { at: c, r: d.0 as f64 / 2.0 });
+                holes.push(Hole { at: c, r: d.0 as f64 / 2.0, via: None });
                 if !plated {
                     let shape = Shape::Capsule { a: c, b: c, r: d.0 as f64 / 2.0 };
                     obstacles.push(Obstacle {
@@ -277,12 +289,13 @@ impl RouterBoard {
                         kind: ObKind::Npth,
                         label: format!("hole of {}", pp.refdes),
                         owner: Some(pp.refdes.clone()),
+                        movable: None,
                     });
                 }
             }
         }
         for v in &board.vias {
-            holes.push(Hole { at: P::of(v.at), r: v.drill.0 as f64 / 2.0 });
+            holes.push(Hole { at: P::of(v.at), r: v.drill.0 as f64 / 2.0, via: Some(v.id) });
         }
         // Outline: edges keep copper_to_edge; inside test on the rings.
         let mut outer = None;
@@ -306,6 +319,7 @@ impl RouterBoard {
                     kind: ObKind::Edge,
                     label: if k == 0 { "board edge".into() } else { "board cutout".into() },
                     owner: None,
+                    movable: None,
                 });
             }
             let poly = Poly::new(vec![ring]);
@@ -333,6 +347,7 @@ impl RouterBoard {
                 kind: ObKind::Keepout,
                 label: format!("keep-out `{}`", k.name),
                 owner: None,
+                movable: None,
             });
         }
         RouterBoard {
