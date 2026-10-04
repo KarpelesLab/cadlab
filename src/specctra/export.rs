@@ -149,6 +149,20 @@ fn round_rect(w: Nm, h: Nm, r: Nm) -> Vec<Point> {
 
 /// Copper shape of a pad on `layer`, pad rotation applied, and a name for it.
 fn pad_shape(shape: &PadShape, rotation: Angle, layer: &str) -> (String, Shape) {
+    if let PadShape::Polygon { points } = shape {
+        // Any outline: named by a hash of its rotated vertices (FNV-1a, deterministic).
+        let pts: Vec<Point> = points.iter().map(|p| p.rotated(rotation.normalized())).collect();
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for p in &pts {
+            for v in [p.x.0, p.y.0] {
+                for b in v.to_le_bytes() {
+                    hash = (hash ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        let shape = Shape::Polygon { layer: layer.to_string(), width: Nm::ZERO, points: pts };
+        return (format!("poly_{hash:016x}"), shape);
+    }
     // Pad shapes are symmetric under a half turn; a quarter turn swaps the sides.
     let mut rot = Angle(rotation.normalized().0 % 180_000);
     let (mut w, mut h) = shape.size();
@@ -195,6 +209,7 @@ fn pad_shape(shape: &PadShape, rotation: Angle, layer: &str) -> (String, Shape) 
                 Shape::Path { layer, width: minor, points: ends.iter().map(|p| p.rotated(rot)).collect() },
             )
         }
+        PadShape::Polygon { .. } => unreachable!("handled above"),
     }
 }
 

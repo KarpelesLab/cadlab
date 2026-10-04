@@ -279,6 +279,9 @@ pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
             ]
         };
         match p.shape {
+            PadShape::Polygon { ref points } => {
+                s.fill(points.iter().map(|q| (cx + mm(q.x), cy + mm(q.y))).collect(), copper, None)
+            }
             PadShape::Rect { w, h } => s.fill(rect(mm(w), mm(h)), copper, None),
             PadShape::RoundRect { w, h, r } => s.fill(round_rect(cx, cy, mm(w), mm(h), mm(r)), copper, None),
             PadShape::Oval { w, h } => {

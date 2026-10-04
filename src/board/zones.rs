@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! fill = zone outline ∩ board area (outline − cutouts, shrunk by copper-to-edge)
-//!        − other-net copper on the layer, inflated by max(zone clearance, item's net-class clearance)
+//!        − other-net copper on the layer, inflated by max(zone clearance, the DRC clearance of
+//!          the item's net and of the zone's net: net class, else rules)
 //!        − NPTH holes, inflated by the zone clearance
 //!        − higher-priority fills of other nets, inflated by the larger of both clearances
 //!        − keep-outs forbidding pours
@@ -387,11 +388,14 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
     }
     let rules = &board.rules;
     let area = board_area(p, rules.copper_to_edge);
-    // Per item: its net-class clearance (resolved once).
+    // Per item: the clearance DRC requires around its net (its class's, else the rules'),
+    // resolved once. A zone with a smaller clearance of its own still keeps this much, so a
+    // fill never violates the DRC.
+    let net_c = |n: Option<&str>| class_clearance(p, n).unwrap_or(rules.clearance);
     let mut class_c: BTreeMap<Option<&str>, Nm> = BTreeMap::new();
     for it in base {
         let n = it.net.as_deref();
-        class_c.entry(n).or_insert_with(|| class_clearance(p, n).unwrap_or(Nm::ZERO));
+        class_c.entry(n).or_insert_with(|| net_c(n));
     }
     // Zones interact only within a layer (priorities), so layers fill independently, in
     // parallel; within a layer, higher priority first (ties: board order).
@@ -416,7 +420,9 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
         let mut grown: BTreeMap<(usize, i64), PolygonSet> = BTreeMap::new();
         for &(zi, li) in jobs {
             let z = &board.zones[zi];
-            let prm = zone_params(p, z);
+            let mut prm = zone_params(p, z);
+            // The DRC clearance of the zone's own net applies to its copper too.
+            prm.clearance = prm.clearance.max(net_c(z.net.as_deref()));
             let mut fill = ZoneFill {
                 zone: z.id,
                 name: z.name.clone(),
@@ -451,7 +457,13 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
                         && (k.layers.is_empty() || k.layers.iter().any(|l| l == layer))
                         && k.outline.len() >= 3
                     {
-                        keepaway.push(Polygon::new(k.outline.iter().map(|&q| q.into()).collect::<Vec<_>>(), vec![]));
+                        // Counter-clockwise, as every other keep-away region (an outline drawn
+                        // clockwise would cancel what it overlaps in the non-zero union).
+                        let mut ring: Ring = k.outline.iter().map(|&q| q.into()).collect::<Vec<_>>().into();
+                        if !ring.is_ccw() {
+                            ring.reverse_orientation();
+                        }
+                        keepaway.push(Polygon::new(ring, vec![]));
                     }
                 }
                 let outline: Vec<poly::Point> = z.outline.iter().map(|&q| q.into()).collect();

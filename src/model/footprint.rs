@@ -10,7 +10,7 @@ use crate::geom::Point;
 use crate::units::{Angle, Nm};
 
 /// Pad copper shape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 pub enum PadShape {
     /// Rectangle.
@@ -41,14 +41,26 @@ pub enum PadShape {
         /// Height (Y).
         h: Nm,
     },
+    /// Any outline (KiCad custom pads, solder jumpers): a simple polygon, vertices relative to
+    /// the pad center before the pad rotation, curves already approximated.
+    Polygon {
+        /// Vertices (not repeating the first).
+        points: Vec<Point>,
+    },
 }
 
 impl PadShape {
-    /// Width and height of the bounding box (before pad rotation).
+    /// Width and height of the bounding box (before pad rotation), centered on the pad center
+    /// (a polygon off center gets the box around it that is symmetric about the center).
     pub fn size(&self) -> (Nm, Nm) {
         match *self {
             PadShape::Rect { w, h } | PadShape::RoundRect { w, h, .. } | PadShape::Oval { w, h } => (w, h),
             PadShape::Circle { d } => (d, d),
+            PadShape::Polygon { ref points } => {
+                let ex = points.iter().map(|q| q.x.0.abs()).max().unwrap_or(0);
+                let ey = points.iter().map(|q| q.y.0.abs()).max().unwrap_or(0);
+                (Nm(2 * ex), Nm(2 * ey))
+            }
         }
     }
 }

@@ -596,15 +596,32 @@ fn write_pad(
         PadKind::Tht { .. } => ("thru_hole", vec!["*.Cu".into(), "*.Mask".into()]),
         PadKind::Npth { .. } => ("np_thru_hole", vec!["*.Cu".into(), "*.Mask".into()]),
     };
-    let (shape, size, rr) = match (pad.kind, pad.shape) {
+    // A polygon pad is a custom pad: a 1 µm circular anchor at the center plus the outline as a
+    // filled polygon primitive, in KiCad's pad coordinates (Y down; mirrored on the bottom side).
+    let custom = match (&pad.kind, &pad.shape) {
+        (PadKind::Npth { .. }, _) => None,
+        (_, PadShape::Polygon { points }) => Some(
+            points
+                .iter()
+                .map(|q| match f.pf.side {
+                    BoardSide::Top => format!("(xy {} {})", mm(q.x), mm(-q.y)),
+                    BoardSide::Bottom => format!("(xy {} {})", mm(-q.x), mm(-q.y)),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        _ => None,
+    };
+    let (shape, size, rr) = match (pad.kind, &pad.shape) {
         (PadKind::Npth { drill }, _) => ("circle", (drill, drill), None),
-        (_, PadShape::Rect { w, h }) => ("rect", (w, h), None),
-        (_, PadShape::RoundRect { w, h, r }) => {
+        (_, PadShape::Polygon { .. }) => ("custom", (Nm(1_000), Nm(1_000)), None),
+        (_, &PadShape::Rect { w, h }) => ("rect", (w, h), None),
+        (_, &PadShape::RoundRect { w, h, r }) => {
             let m = w.0.min(h.0).max(1) as f64;
             ("roundrect", (w, h), Some((r.0 as f64 / m).clamp(0.0, 0.5)))
         }
-        (_, PadShape::Oval { w, h }) => ("oval", (w, h), None),
-        (_, PadShape::Circle { d }) => ("circle", (d, d), None),
+        (_, &PadShape::Oval { w, h }) => ("oval", (w, h), None),
+        (_, &PadShape::Circle { d }) => ("circle", (d, d), None),
     };
     let layers: Vec<String> = layers.iter().map(|l| q(l)).collect();
     let mut s = format!(
@@ -621,6 +638,12 @@ fn write_pad(
         PadKind::Smd => {}
     }
     let _ = write!(s, "(layers {})", layers.join(" "));
+    if let Some(pts) = &custom {
+        let _ = write!(
+            s,
+            " (options (clearance outline) (anchor circle)) (primitives (gr_poly (pts {pts}) (width 0) (fill yes)))"
+        );
+    }
     if let Some(r) = rr {
         let _ = write!(s, " (roundrect_rratio {})", ratio(r));
     }
@@ -910,7 +933,9 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
                 },
                 "meta": {"version": 2},
                 "rules": {
-                    "min_clearance": mmf(r.clearance),
+                    // KiCad floors every clearance at the board minimum; cadlab lets a class go
+                    // below the rules clearance, so the minimum is the smallest of them.
+                    "min_clearance": mmf(circuit.netclasses.values().filter_map(|c| c.clearance).fold(r.clearance, Nm::min)),
                     "min_connection": 0.0,
                     "min_copper_edge_clearance": mmf(r.copper_to_edge),
                     "min_hole_clearance": mmf(r.clearance),
@@ -918,7 +943,7 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
                     "min_microvia_diameter": 0.2,
                     "min_microvia_drill": 0.1,
                     "min_resolved_spokes": 2,
-                    "min_silk_clearance": 0.0,
+                    "min_silk_clearance": mmf(r.silk_to_pad),
                     "min_text_height": 0.8,
                     "min_text_thickness": 0.08,
                     "min_through_hole_diameter": mmf(r.min_drill),

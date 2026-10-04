@@ -155,7 +155,9 @@ fn gap<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> Option<(f64,
     Some((c.sq.distance_f64(), from_f((c.a.x + c.b.x) / 2.0, (c.a.y + c.b.y) / 2.0)))
 }
 
-/// Overlap of two regions with a positive area: its centroid.
+/// Overlap of two regions wider than [`TOLERANCE`] somewhere (it survives shrinking by half of
+/// it on every side): its centroid. Shapes that touch overlap by up to the outward arc
+/// approximation (1 µm each) or by rotated-vertex rounding; that is touching, not overlapping.
 fn overlap<A, B>(a: &A, b: &B) -> Option<Point>
 where
     A: polyclip::RingSource + Geometry + ?Sized,
@@ -166,6 +168,11 @@ where
     }
     let inter = polyclip::boolean(Op::Intersection, a, b, FillRule::NonZero).ok()?;
     if polyclip::area2(&inter) <= 0 {
+        return None;
+    }
+    let tol = polyclip::ArcTol::new(1_000, polyclip::Side::Outside);
+    let core = polyclip::offset(&inter, -(TOLERANCE.0 / 2), Join::Round, tol).ok()?;
+    if core.is_empty() {
         return None;
     }
     polyclip::centroid(&inter).map(|c| from_f(c.x, c.y))
@@ -832,7 +839,14 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
         }
         let ((owner, side, shape), pp) = (&silk[i], &pads[j - ns]);
         let layer = if *side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
-        if !pp.layers.iter().any(|l| l == layer) || !polyclip::distance_less_than(shape, &pp.shape, limit) {
+        // A minimum within the tolerance only forbids overlaps, which must then be wider than the
+        // tolerance (silk touching a pad overlaps it by the outward arc approximation).
+        let close = if min > TOLERANCE {
+            polyclip::distance_less_than(shape, &pp.shape, limit)
+        } else {
+            overlap(shape, &pp.shape).is_some()
+        };
+        if !pp.layers.iter().any(|l| l == layer) || !close {
             continue;
         }
         let (dist, at) = gap(shape, &pp.shape).unwrap_or((0.0, pp.center));
@@ -973,10 +987,16 @@ mod tests {
 
     #[test]
     fn overlap_needs_area() {
-        let a: Ring = [(0, 0), (10, 0), (10, 10), (0, 10)].into();
-        let touching: Ring = [(10, 0), (20, 0), (20, 10), (10, 10)].into();
-        let crossing: Ring = [(5, 5), (15, 5), (15, 15), (5, 15)].into();
+        let um = 1_000;
+        let a: Ring = [(0, 0), (10 * um, 0), (10 * um, 10 * um), (0, 10 * um)].into();
+        let touching: Ring = [(10 * um, 0), (20 * um, 0), (20 * um, 10 * um), (10 * um, 10 * um)].into();
+        let crossing: Ring = [(5 * um, 5 * um), (15 * um, 5 * um), (15 * um, 15 * um), (5 * um, 15 * um)].into();
+        // Within the 2 µm tolerance: touching (arc approximation, rotated vertices).
+        let grazing: Ring = [(9 * um, 0), (20 * um, 0), (20 * um, 10 * um), (9 * um, 10 * um)].into();
+        let deeper: Ring = [(7 * um, 0), (20 * um, 0), (20 * um, 10 * um), (7 * um, 10 * um)].into();
         assert!(overlap(&a, &touching).is_none());
-        assert_eq!(overlap(&a, &crossing), Some(from_f(7.5, 7.5)));
+        assert!(overlap(&a, &grazing).is_none());
+        assert!(overlap(&a, &deeper).is_some());
+        assert_eq!(overlap(&a, &crossing), Some(from_f(7.5 * um as f64, 7.5 * um as f64)));
     }
 }

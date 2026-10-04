@@ -13,16 +13,19 @@
 //! - **Outline** from Edge.Cuts (lines, arcs, circles, rectangles, polygons, curves; also inside
 //!   footprints), chained into closed contours: the largest is the outer edge, contours inside it
 //!   are cutouts.
-//! - **Footprints** become project footprints (pads of every shape: custom and trapezoid pads as
-//!   their bounding rectangle, chamfers as rounded corners, slots as round holes, each reported;
+//! - **Footprints** become project footprints (pads of every shape: custom pads as polygon pads,
+//!   trapezoids as their bounding rectangle, chamfers as rounded corners, slots as round holes,
+//!   each reported;
 //!   paste-only apertures as paste windows; silkscreen, fab and courtyard drawings) and
 //!   placements (position, rotation, side, lock). Identical footprints are shared; a footprint
 //!   equal to one in the project (within the few nanometers rotated exports leave) reuses it.
 //! - **Mounting holes** (one round hole pad, `MountingHole` footprints or `H`/`MH` designators)
-//!   become board holes.
+//!   become board holes; board-only footprints made of round holes become vias (stitching vias)
+//!   or holes.
 //! - **Tracks** (segments and arcs), **vias**, **zones** (outline, net, layers, priority,
 //!   clearance, minimum width, pad connection, thermal settings; fills are recomputed) and
-//!   **rule areas** (keep-outs), **graphics and texts** on non-copper layers.
+//!   **rule areas** (keep-outs; several outlines: one item per part, holes joined by cuts),
+//!   **graphics and texts** on non-copper layers (project text variables substituted).
 //! - **Nets:** with a circuit in the project, footprints are matched by designator and pads to
 //!   pins through the part's pin map, and board nets take the circuit's names; without one, the
 //!   circuit is built from the footprints and pad nets through the netlist importer
@@ -247,6 +250,8 @@ pub(super) struct Ctx {
     origin: K,
     copper: Vec<String>,
     nets_by_num: BTreeMap<String, String>,
+    /// Project text variables.
+    vars: BTreeMap<String, String>,
 }
 
 impl Ctx {
@@ -316,8 +321,22 @@ impl Notes {
     }
 
     /// A note repeated per occurrence, reported once per `(code, key)` with a count.
+    /// The aggregated diagnostic names every distinct subject.
     pub(super) fn agg(&mut self, code: &str, key: &str, d: Diagnostic) {
-        self.agg.entry((code.to_string(), key.to_string())).or_insert((d, 0)).1 += 1;
+        match self.agg.entry((code.to_string(), key.to_string())) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert((d, 1));
+            }
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                let (first, n) = e.get_mut();
+                *n += 1;
+                for s in d.subjects {
+                    if !first.subjects.contains(&s) {
+                        first.subjects.push(s);
+                    }
+                }
+            }
+        }
     }
 
     /// An item not imported, aggregated.
@@ -449,6 +468,10 @@ pub fn import(
     report.copper_layers = stackup.copper_layers;
     report.thickness = stackup.thickness;
 
+    if let Some(su) = root.get("setup") {
+        local_overrides(su, &ObjectRef::Name("setup".into()), &mut notes);
+    }
+
     // Origin.
     let aux = root.get("setup").and_then(|s| child_xy(s, "aux_axis_origin")).filter(|(x, y)| x.0 != 0 || y.0 != 0);
     let edge_ll = edge_bbox(&root).map(|b| (b.min.x, b.max.y));
@@ -466,7 +489,8 @@ pub fn import(
             Some((it.get(1)?.atom()?.to_string(), it.get(2).and_then(Sexpr::atom).unwrap_or("").to_string()))
         })
         .collect();
-    let ctx = Ctx { origin, copper: copper.clone(), nets_by_num };
+    let vars = opts.rules.as_ref().map(|k| k.text_variables.clone()).unwrap_or_default();
+    let ctx = Ctx { origin, copper: copper.clone(), nets_by_num, vars };
 
     // A fresh board: setup and rules first.
     let rules_now = p.board().rules.clone();
@@ -546,7 +570,7 @@ pub fn import(
             }
             "zone" => {
                 fills |= item.get("filled_polygon").is_some();
-                if let Some(r) = read_zone(item, &ctx, uuid, &mut notes) {
+                for r in read_zone(item, &ctx, uuid, &mut notes) {
                     raw.push(r);
                 }
             }
@@ -601,6 +625,51 @@ pub fn import(
         }
         if let Some(h) = as_hole(c, matched && p.circuit().components.contains_key(&refdes)) {
             holes.push((h, c.pads.first().and_then(|n| n.net.clone()), c));
+            continue;
+        }
+        let board_only = c.attrs.contains("board_only")
+            || !valid_refdes(&refdes)
+            || (matched && !p.circuit().components.contains_key(&refdes));
+        if board_only && let Some(hs) = board_only_holes(c) {
+            // One plated hole on a net: a stitching via footprint, so a via.
+            if let [(h, Some(net))] = hs.as_slice()
+                && let (Some(d), Some(first), Some(last)) = (h.pad, copper.first(), copper.last())
+            {
+                notes.agg(
+                    "import.footprint_as_via",
+                    "via",
+                    Diagnostic::info(
+                        "import.footprint_as_via",
+                        "board-only footprints with one plated hole on a net (stitching vias) become vias",
+                    )
+                    .with_subject(ObjectRef::Name(c.refdes.clone())),
+                );
+                let v = Via {
+                    id: crate::id::ObjectId(0),
+                    at: h.at,
+                    drill: h.drill,
+                    diameter: d,
+                    net: None,
+                    from: first.clone(),
+                    to: last.clone(),
+                    locked: c.placement.locked,
+                };
+                let uuid = c.uuids.iter().find(|(_, w)| w == "fp").map(|(u, _)| u.clone());
+                raw.push(RawItem::Via { v, net: Some(net.clone()), uuid });
+                continue;
+            }
+            notes.agg(
+                "import.footprint_as_holes",
+                "holes",
+                Diagnostic::info(
+                    "import.footprint_as_holes",
+                    "board-only footprints made of round holes (stitching vias, mouse bites) become board holes, one per pad",
+                )
+                .with_subject(ObjectRef::Name(c.refdes.clone())),
+            );
+            for (h, net) in hs {
+                holes.push((h, net, c));
+            }
             continue;
         }
         let subject = ObjectRef::Name(c.refdes.clone());
@@ -701,6 +770,7 @@ pub fn import(
     for (mut h, net, c) in holes {
         let mut name = c.refdes.trim().to_string();
         if name.is_empty()
+            || !valid_refdes(&name.to_uppercase())
             || hole_names.contains(&name)
             || p.board().footprints.contains_key(&name)
             || p.circuit().components.contains_key(&name)
@@ -1103,7 +1173,22 @@ fn read_text(
     notes: &mut Notes,
 ) {
     let layer = layer_of(e).unwrap_or("").to_string();
-    let text = e.value().unwrap_or("").to_string();
+    let mut text = e.value().unwrap_or("").to_string();
+    // Project text variables become their values (cadlab texts have no variables).
+    for (k, v) in &ctx.vars {
+        let var = format!("${{{k}}}");
+        if text.contains(&var) {
+            text = text.replace(&var, v);
+            notes.agg(
+                "import.text_variable",
+                "var",
+                Diagnostic::info(
+                    "import.text_variable",
+                    "project text variables in board texts are replaced by their values from the .kicad_pro",
+                ),
+            );
+        }
+    }
     let Some((at, rotation)) = at_of(e) else {
         notes.not_imported(
             Diagnostic::warning("import.drawing_invalid", "a board text without position; not imported")
@@ -1180,7 +1265,7 @@ fn read_via(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Via> {
     })
 }
 
-fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> Option<RawItem> {
+fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> Vec<RawItem> {
     let name = e.child_value("name").unwrap_or("").to_string();
     let subject =
         ObjectRef::Named { kind: "zone".into(), name: if name.is_empty() { "?".into() } else { name.clone() } };
@@ -1192,12 +1277,13 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> O
         layers.extend(ls.items().iter().skip(1).filter_map(Sexpr::atom).flat_map(|x| ctx.expand_layer(x)));
     }
     let copper: Vec<String> = ctx.copper.iter().filter(|c| layers.contains(c)).cloned().collect();
-    let polys: Vec<&Sexpr> = e.all("polygon").collect();
-    let outline: Vec<Point> = polys
-        .first()
-        .and_then(|p| pts_of(p))
-        .map(|v| v.into_iter().map(|k| ctx.frame(k)).collect())
-        .unwrap_or_default();
+    let rings: Vec<Vec<Point>> = e
+        .all("polygon")
+        .filter_map(pts_of)
+        .map(|v| v.into_iter().map(|k| ctx.frame(k)).collect::<Vec<Point>>())
+        .filter(|v| v.len() >= 3)
+        .collect();
+    let outline: Vec<Point> = rings.first().cloned().unwrap_or_default();
     if outline.len() < 3 || copper.is_empty() {
         notes.not_imported(
             Diagnostic::warning(
@@ -1210,19 +1296,66 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> O
             .with_subject(subject)
             .with_hint("zones on drawing layers have no cadlab counterpart; redraw what matters as board graphics"),
         );
-        return None;
+        return Vec::new();
     }
-    if polys.len() > 1 {
-        notes.push(
-            Diagnostic::warning(
-                "import.zone_outlines",
-                format!("zone `{name}` has {} outlines; only the first is imported", polys.len()),
-            )
-            .with_subject(subject.clone())
-            .at(outline[0])
-            .with_hint("split it into one zone per outline (`zone.add`)"),
-        );
-    }
+    // Several outlines: separate areas, or holes (a polygon inside another). cadlab zones and
+    // keep-outs have one outline without holes, so the area (even-odd) becomes one item per
+    // separate part, each hole joined to its outline by a zero-width cut.
+    let outlines: Vec<Vec<Point>> = if rings.len() == 1 {
+        rings
+    } else {
+        match zone_regions(&rings) {
+            Ok(parts) if !parts.is_empty() => {
+                notes.push(
+                    Diagnostic::info(
+                        "import.zone_outlines",
+                        format!(
+                            "zone `{name}` has {} outlines (separate areas or holes); imported as {} item(s), holes joined to their outline by zero-width cuts",
+                            rings.len(),
+                            parts.len()
+                        ),
+                    )
+                    .with_subject(subject.clone())
+                    .at(outline[0]),
+                );
+                parts
+            }
+            _ => {
+                notes.push(
+                    Diagnostic::warning(
+                        "import.zone_outlines",
+                        format!(
+                            "zone `{name}` has {} outlines that do not form an area; only the first is imported",
+                            rings.len()
+                        ),
+                    )
+                    .with_subject(subject.clone())
+                    .at(outline[0])
+                    .with_hint("split it into one zone per outline (`zone.add`)"),
+                );
+                vec![outline.clone()]
+            }
+        }
+    };
+    // One item per outline; the UUID maps to the first.
+    let split = |item: RawItem| -> Vec<RawItem> {
+        let mut out = Vec::with_capacity(outlines.len());
+        for (i, o) in outlines.iter().enumerate() {
+            out.push(match &item {
+                RawItem::Keepout { k, uuid } => RawItem::Keepout {
+                    k: Keepout { outline: o.clone(), ..k.clone() },
+                    uuid: if i == 0 { uuid.clone() } else { None },
+                },
+                RawItem::Zone { z, net, uuid } => RawItem::Zone {
+                    z: Zone { outline: o.clone(), ..z.clone() },
+                    net: net.clone(),
+                    uuid: if i == 0 { uuid.clone() } else { None },
+                },
+                _ => unreachable!("zones and keep-outs only"),
+            });
+        }
+        out
+    };
     if let Some(k) = e.get("keepout") {
         let forbidden = |h: &str| k.child_value(h) == Some("not_allowed");
         let ko = Keepout {
@@ -1256,9 +1389,9 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> O
                 .with_subject(subject)
                 .with_hint("add a keep-out (`keepout.add`) if it should keep something out"),
             );
-            return None;
+            return Vec::new();
         }
-        return Some(RawItem::Keepout { k: ko, uuid });
+        return split(RawItem::Keepout { k: ko, uuid });
     }
     let cp = e.get("connect_pads");
     let pads = match cp.and_then(|c| c.items().get(1)).and_then(Sexpr::atom) {
@@ -1296,7 +1429,85 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> O
         thermal_gap: fill.and_then(|f| f.child_value("thermal_gap")).and_then(mm),
         thermal_spoke: fill.and_then(|f| f.child_value("thermal_bridge_width")).and_then(mm),
     };
-    Some(RawItem::Zone { z, net: ctx.raw_net(e), uuid })
+    split(RawItem::Zone { z, net: ctx.raw_net(e), uuid })
+}
+
+/// Per-item settings cadlab has no counterpart for, on a footprint, a pad or the board setup:
+/// solder mask and paste margins (mask and paste openings come out equal to the pads, plus the
+/// fab export's mask expansion), local clearances and zone connections (the net's clearance and
+/// the zone's connection apply). Reported once per kind with every subject, never dropped
+/// silently.
+pub(super) fn local_overrides(e: &Sexpr, subject: &ObjectRef, notes: &mut Notes) {
+    const KINDS: &[(&str, &str, &str)] = &[
+        (
+            "solder_mask_margin",
+            "solder mask margins are not kept: mask openings equal the pads (plus the fab export's mask expansion)",
+            "check the mask openings, or set the expansion at export (`export.gerber --mask-expansion`)",
+        ),
+        (
+            "pad_to_mask_clearance",
+            "the board's solder mask expansion is not kept: mask openings equal the pads (plus the fab export's mask expansion)",
+            "set the expansion at export (`export.gerber --mask-expansion`)",
+        ),
+        (
+            "solder_paste_margin",
+            "solder paste margins are not kept: paste openings equal the pads",
+            "check the paste layer; exposed pads can get paste windows (`footprint.generate`)",
+        ),
+        (
+            "solder_paste_margin_ratio",
+            "solder paste margin ratios are not kept: paste openings equal the pads",
+            "check the paste layer; exposed pads can get paste windows (`footprint.generate`)",
+        ),
+        (
+            "solder_paste_ratio",
+            "solder paste margin ratios are not kept: paste openings equal the pads",
+            "check the paste layer; exposed pads can get paste windows (`footprint.generate`)",
+        ),
+        (
+            "pad_to_paste_clearance",
+            "the board's paste margin is not kept: paste openings equal the pads",
+            "check the paste layer",
+        ),
+        (
+            "pad_to_paste_clearance_ratio",
+            "the board's paste margin ratio is not kept: paste openings equal the pads",
+            "check the paste layer",
+        ),
+        (
+            "clearance",
+            "local clearances of pads and footprints are not kept: the net (class) clearance applies",
+            "set a net class clearance (`netclass.set`) if the design needs it",
+        ),
+        (
+            "zone_connect",
+            "pad and footprint zone connection overrides are not kept: the zone's pad connection applies",
+            "set the zone's pad connection (`zone.set --pads`)",
+        ),
+    ];
+    for &(head, msg, hint) in KINDS {
+        let Some(v) = e.child_value(head) else { continue };
+        // Zero margins and clearances are KiCad's defaults (nothing to keep); a zone connection
+        // of 0 means "not connected".
+        if head != "zone_connect" && v.parse::<f64>().is_ok_and(|x| x == 0.0) {
+            continue;
+        }
+        notes.agg(
+            head,
+            "local",
+            Diagnostic::warning("import.local_setting", msg).with_subject(subject.clone()).with_hint(hint),
+        );
+    }
+}
+
+/// The area of several zone outlines under the even-odd rule (a polygon inside another is a
+/// hole), as hole-free outlines: one per separate part, holes joined by zero-width cuts.
+fn zone_regions(rings: &[Vec<Point>]) -> Result<Vec<Vec<Point>>, crate::geom::poly::Error> {
+    use crate::geom::poly::{self, FillRule, Ring};
+    let rs: Vec<Ring> =
+        rings.iter().map(|r| Ring::from(r.iter().map(|&q| q.into()).collect::<Vec<poly::Point>>())).collect();
+    let set = poly::union_all(&rs, FillRule::EvenOdd)?;
+    set.iter().map(|pg| poly::fracture(pg).map(|ring| ring.0.iter().map(|&q| q.into()).collect())).collect()
 }
 
 /// Leaves unset the zone settings equal to what cadlab would use by default.
@@ -1490,6 +1701,36 @@ fn as_hole(c: &Converted, in_circuit: bool) -> Option<Hole> {
     };
     let at = transform(&c.placement)(pad.at);
     Some(Hole { id: crate::id::ObjectId(0), name: String::new(), at, drill, pad: padd, net: None })
+}
+
+/// A footprint that cannot be a circuit component (KiCad's board-only footprints: not in the
+/// netlist, or with a designator cadlab cannot use, such as stitching vias that all share one, or
+/// `mouse-bite` hole patterns) made of round holes only: one board hole per pad (plated with its
+/// pad and net, or non-plated), so no copper or drill is lost. Names are set by the caller.
+fn board_only_holes(c: &Converted) -> Option<Vec<(Hole, Option<String>)>> {
+    if c.fp.pads.is_empty() {
+        return None;
+    }
+    let tf = transform(&c.placement);
+    let mut out = Vec::new();
+    for pad in &c.fp.pads {
+        let round = match pad.shape {
+            PadShape::Circle { d } => Some(d),
+            PadShape::Oval { w, h } if w == h => Some(w),
+            _ => None,
+        };
+        let (drill, padd) = match (pad.kind, round) {
+            (PadKind::Npth { drill }, _) => (drill, None),
+            (PadKind::Tht { drill }, Some(d)) if d > drill => (drill, Some(d)),
+            _ => return None,
+        };
+        let net = padd.and(c.pads.iter().find(|n| n.number == pad.number).and_then(|n| n.net.clone()));
+        out.push((
+            Hole { id: crate::id::ObjectId(0), name: String::new(), at: tf(pad.at), drill, pad: padd, net: None },
+            net,
+        ));
+    }
+    Some(out)
 }
 
 /// A footprint without pads (logo, marking): its drawings become board graphics.

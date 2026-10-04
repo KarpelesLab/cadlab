@@ -332,8 +332,8 @@ Coordinates are parsed from decimal millimeters to `Nm` exactly and converted wi
 cadlab board comes back equal. Footprints embedded in the board are the user's design data and become project
 footprints; KiCad's libraries are still never read or converted (D7). Identical instances share one footprint,
 and a footprint equal (within 3 nm, any item order) to a project footprint reuses it. Shapes cadlab cannot
-represent are approximated conservatively (custom and trapezoid pads as bounding rectangles, slots as round
-holes) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
+represent are approximated conservatively (trapezoid pads as bounding rectangles, slots as round holes; custom
+pads were bounding rectangles until the corpus, D35, made them polygon pads) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
 project it wins: footprints match by designator, pads to pins through the part's pin map, board nets take the
 circuit's names, and disagreements are reported for the user to fix; footprints the circuit lacks are not
 placed. Without one, the circuit is built from the board through the netlist importer (D27), so parts are
@@ -361,6 +361,27 @@ search; PCBWay sources by MPN.
 *Why:* the fab profile already orders JLCPCB parts by LCSC SKU, and a user-provided list is the only source
 that is both permitted and reproducible. Header recognition plus explicit mapping survives export format
 changes without guessing, and reading values only for passives keeps parametric matching (D26) honest.
+
+### D35. Open-source corpus: pinned, fetched, never vendored; differences explained or counted (2026-10-04)
+Third-party KiCad projects test the importers and the oracle cross-checks on real boards. Selection: KiCad 6+
+board files (with the root schematic when there is one), a license that allows redistribution (permissive or
+open hardware: MIT, 0BSD, Apache-2.0, Unlicense, CERN-OHL-P/-W, SHL; recorded per project; no GPL code
+projects), varied on purpose (2 to 6 layers, KiCad 6 to 10 formats, SMD and THT, BGAs, pours, keep-outs,
+custom pads, net ties, custom rules, board-only and hierarchical designs, one board without a schematic).
+Each is pinned to a full commit SHA in `tests/corpus/projects.toml` with the sparse paths to check out;
+`scripts/fetch-corpus.sh` does a shallow, blobless, sparse fetch of exactly that commit, verifies `HEAD`, and
+puts it outside the tracked files (`target/corpus`, or CI's cache keyed by the manifest's hash). Tests never
+download and skip without `CADLAB_CORPUS_DIR`; they work on a copy, so a checkout is never modified. Updating a
+pin is a reviewed manifest change. Every difference between cadlab and KiCad must be matched, covered by a
+global allowance with a reason (rules only one tool has, report granularity, report truncation, rules the
+project sets to ignore), or listed for that board with its reason and an exact maximum count; stale entries
+fail, so the manifest follows fixes. Gerber copper is gated without pours (each tool fills differently);
+silkscreen and routing completion are reported only. The corpus job is informative (`continue-on-error`) like
+the oracle job.
+*Why:* real boards exercise what generated ones do not (custom pads, holes in keep-outs, net ties, stitching
+vias, mask margins), and they found eleven genuine bugs in the first pass. Pinning makes results
+reproducible per KiCad minor version; not vendoring keeps third-party designs and their licenses out of the
+repository (D7); exact counts turn known differences into regression tests instead of a blanket allowlist.
 
 ## Open questions
 

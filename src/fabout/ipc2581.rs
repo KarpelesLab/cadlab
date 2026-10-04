@@ -115,7 +115,9 @@ fn xy(p: Point) -> [(&'static str, String); 2] {
 }
 
 /// A primitive element: name and attributes.
-type Primitive = (&'static str, Vec<(&'static str, String)>);
+/// A dictionary primitive: element name and attributes, or (for a polygon pad) the outline of a
+/// `Contour` (element name empty).
+type Primitive = (&'static str, Vec<(&'static str, String)>, Vec<Point>);
 
 /// Dictionaries collected while writing features.
 #[derive(Default)]
@@ -130,6 +132,22 @@ impl Dict {
     /// The standard primitive of a pad shape, or `None` for an empty shape.
     fn prim(&mut self, shape: PadShape) -> Option<String> {
         let (id, el, attrs) = match shape {
+            PadShape::Polygon { points } => {
+                if points.len() < 3 {
+                    return None;
+                }
+                // Identical outlines share one entry; ids follow first use.
+                let id = match self.standard.iter().find(|(_, (_, _, c))| *c == points) {
+                    Some((id, _)) => id.clone(),
+                    None => {
+                        let n = self.standard.values().filter(|(_, _, c)| !c.is_empty()).count();
+                        let id = format!("CONTOUR_{}", n + 1);
+                        self.standard.insert(id.clone(), ("", Vec::new(), points));
+                        id
+                    }
+                };
+                return Some(id);
+            }
             PadShape::Circle { d } => {
                 if d.0 <= 0 {
                     return None;
@@ -174,7 +192,7 @@ impl Dict {
                 )
             }
         };
-        self.standard.entry(id.clone()).or_insert((el, attrs));
+        self.standard.entry(id.clone()).or_insert((el, attrs, Vec::new()));
         Some(id)
     }
 
@@ -386,6 +404,11 @@ impl Ctx<'_> {
         pad_rotation(pp, fp_rotation(self.p, &pp.refdes))
     }
 
+    /// The pad's shape and rotation on the board ([`super::oriented`]).
+    fn oriented(&self, pp: &PlacedPad) -> (PadShape, Angle) {
+        super::oriented(pp, fp_rotation(self.p, &pp.refdes))
+    }
+
     fn is_component(&self, pp: &PlacedPad) -> bool {
         !board::holes::is_hole(self.p, &pp.refdes)
     }
@@ -435,7 +458,8 @@ fn copper_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, layer: &str, items: &[
         if !np.is_empty() || !nt.is_empty() || !nf.is_empty() {
             x.open("Set", &net_attrs(net));
             for pp in &np {
-                pad(x, d, pp.center, pp.pad.shape, c.rotation(pp), c.pin(pp));
+                let (s, r) = c.oriented(pp);
+                pad(x, d, pp.center, s, r, c.pin(pp));
             }
             if !nt.is_empty() || !nf.is_empty() {
                 x.open("Features", &[]);
@@ -510,7 +534,8 @@ fn mask_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
     x.open("LayerFeature", &[a("layerRef", side_layer(side, "F.Mask"))]);
     x.open("Set", &[]);
     for pp in pads {
-        pad(x, d, pp.center, grow(pp.pad.shape, c.o.mask_expansion.0), c.rotation(pp), c.pin(pp));
+        let (s, r) = c.oriented(pp);
+        pad(x, d, pp.center, grow(s, c.o.mask_expansion.0), r, c.pin(pp));
     }
     x.close("Set");
     x.close("LayerFeature");
@@ -539,7 +564,10 @@ fn paste_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
                     pad(x, d, tf(local), PadShape::Rect { w: size.0, h: size.1 }, r, c.pin(pp));
                 }
             }
-            _ => pad(x, d, pp.center, pp.pad.shape, r, c.pin(pp)),
+            _ => {
+                let (s, r) = c.oriented(pp);
+                pad(x, d, pp.center, s, r, c.pin(pp))
+            }
         }
     }
     x.close("Set");
@@ -690,7 +718,7 @@ fn package(x: &mut Xml, d: &mut Dict, fp: &Footprint) {
     x.open("LandPattern", &[]);
     for p in &fp.pads {
         let pin = (!p.number.is_empty()).then_some((None, p.number.as_str()));
-        pad(x, d, p.at, p.shape, p.rotation, pin);
+        pad(x, d, p.at, p.shape.clone(), p.rotation, pin);
     }
     x.close("LandPattern");
     if let Some(b) = fp.body {
@@ -711,7 +739,7 @@ fn package(x: &mut Xml, d: &mut Dict, fp: &Footprint) {
             continue;
         }
         seen.push(&p.number);
-        let Some(id) = d.prim(p.shape) else { continue };
+        let Some(id) = d.prim(p.shape.clone()) else { continue };
         let kind = if matches!(p.kind, PadKind::Smd) { "SURFACE" } else { "THRU" };
         let el = if matches!(p.kind, PadKind::Npth { .. }) { "MECHANICAL" } else { "ELECTRICAL" };
         x.open("Pin", &[a("number", p.number.clone()), a("type", kind), a("electricalType", el)]);
@@ -972,9 +1000,23 @@ pub fn document(p: &Project, o: &Options) -> OutFile {
     }
     x.close("DictionaryLineDesc");
     x.open("DictionaryStandard", &[a("units", "MILLIMETER")]);
-    for (id, (el, attrs)) in &d.standard {
+    for (id, (el, attrs, contour)) in &d.standard {
         x.open("EntryStandard", &[a("id", id.clone())]);
-        x.empty(el, attrs);
+        if contour.is_empty() {
+            x.empty(el, attrs);
+        } else {
+            // The outline joins holes by zero-width cuts; IPC-2581 has cutouts for them.
+            let ring: Vec<polyclip::Point> = contour.iter().map(|&q| q.into()).collect();
+            let set = polyclip::union_all(&ring, polyclip::FillRule::NonZero).unwrap_or_default();
+            for pg in &set {
+                x.open("Contour", &[]);
+                ring_polygon(&mut x, "Polygon", &pg.outer);
+                for h in &pg.holes {
+                    ring_polygon(&mut x, "Cutout", h);
+                }
+                x.close("Contour");
+            }
+        }
         x.close("EntryStandard");
     }
     x.close("DictionaryStandard");

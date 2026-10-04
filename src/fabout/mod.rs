@@ -258,6 +258,36 @@ pub(crate) fn grow(shape: PadShape, d: i64) -> PadShape {
         PadShape::RoundRect { w, h, r } => PadShape::RoundRect { w: g(w), h: g(h), r: Nm((r.0 + d).max(0)) },
         PadShape::Circle { d: dd } => PadShape::Circle { d: g(dd) },
         PadShape::Oval { w, h } => PadShape::Oval { w: g(w), h: g(h) },
+        PadShape::Polygon { points } if d != 0 => {
+            use crate::geom::poly::{self, ArcTol, Join, Side};
+            let ring: Vec<poly::Point> = points.iter().map(|&q| q.into()).collect();
+            let grown = poly::Polygon::new(ring, vec![]);
+            let tol = ArcTol::new(1_000, if d > 0 { Side::Outside } else { Side::Inside });
+            let out = poly::offset(&vec![grown], d, Join::Round, tol).unwrap_or_default();
+            let points = out
+                .into_iter()
+                .max_by_key(|pg| pg.outer.signed_area2())
+                .map(|pg| pg.outer.0.iter().map(|&q| q.into()).collect())
+                .unwrap_or_default();
+            PadShape::Polygon { points }
+        }
+        s @ PadShape::Polygon { .. } => s,
+    }
+}
+
+/// A placed pad's shape relative to its center and the rotation to draw it with: standard
+/// shapes keep the pad's own shape and its board rotation ([`pad_rotation`]); a polygon pad
+/// comes out in board orientation (rotation and bottom-side mirroring applied, from the pad's
+/// board copper) with no further rotation.
+pub(crate) fn oriented(pp: &PlacedPad, fp_rotation: Angle) -> (PadShape, Angle) {
+    match &pp.pad.shape {
+        PadShape::Polygon { .. } => {
+            // Holes joined back to the outline (the board copper keeps them apart).
+            let ring = crate::geom::poly::fracture(&pp.shape).unwrap_or_else(|_| pp.shape.outer.clone());
+            let points = ring.0.iter().map(|&q| Point::from(q) - pp.center).collect();
+            (PadShape::Polygon { points }, Angle::ZERO)
+        }
+        s => (s.clone(), pad_rotation(pp, fp_rotation)),
     }
 }
 

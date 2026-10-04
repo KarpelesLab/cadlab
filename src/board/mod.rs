@@ -109,6 +109,13 @@ fn pad_shape_local(shape: &PadShape) -> Result<Polygon, polyclip::Error> {
             Circle { center: polyclip::Point::new(0, 0), radius: d.0 / 2 }.to_ring(COPPER_TOL)?,
             vec![],
         )),
+        PadShape::Polygon { ref points } => {
+            // Normalized (any orientation, self-touching outlines); a degenerate outline is
+            // no copper.
+            let ring: Vec<polyclip::Point> = points.iter().map(|&q| pt(q)).collect();
+            let set = polyclip::union_all(&ring, polyclip::FillRule::NonZero)?;
+            Ok(set.into_iter().max_by_key(|pg| pg.outer.signed_area2()).unwrap_or_else(|| Polygon::new(vec![], vec![])))
+        }
     }
 }
 
@@ -164,10 +171,17 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
                 let lp = Point::new(Nm(q.x), Nm(q.y)).rotated(pad.rotation) + pad.at;
                 pt(tf(lp))
             };
-            let shape = Polygon::new(
+            let mut shape = Polygon::new(
                 local.outer.0.iter().map(|q| place(*q)).collect::<Vec<_>>(),
                 local.holes.iter().map(|h| h.0.iter().map(|q| place(*q)).collect::<Vec<_>>().into()).collect(),
             );
+            // The bottom side mirrors: restore the outer ring's counter-clockwise orientation
+            // (and the holes' clockwise one), or a union of shapes under the non-zero rule (zone
+            // keep-away offsets) would cancel where a bottom pad overlaps a track.
+            if pf.side == BoardSide::Bottom {
+                shape.outer.reverse_orientation();
+                shape.holes.iter_mut().for_each(|h| h.reverse_orientation());
+            }
             let (layers, hole) = match pad.kind {
                 PadKind::Smd => (vec![side_layer(pf.side, "F.Cu")], None),
                 PadKind::Tht { drill } => (copper.clone(), Some((drill, true))),

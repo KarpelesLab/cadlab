@@ -57,8 +57,9 @@ router agree on what copper exists:
 For each zone and each of its layers, in priority order (higher first, ties in board order):
 
 1. Area = zone outline ∩ board outline (outer contour minus cutouts, shrunk by `copper_to_edge`).
-2. Minus every other-net copper item on the layer (netless items too) inflated by max(zone clearance, the item's
-   net-class clearance); NPTH holes inflated by the zone clearance; higher-priority fills of other nets inflated by
+2. Minus every other-net copper item on the layer (netless items too) inflated by max(zone clearance, the DRC
+   clearance of the item's net and of the zone's net: class clearance, else the rules'), so a zone clearance set
+   below the rules (as KiCad zones often are) never makes the fill violate the DRC; NPTH holes inflated by the zone clearance; higher-priority fills of other nets inflated by
    the larger of both zones' clearances; keep-outs with `no_pours` on that layer.
 3. Same-net pads: `solid` merges them; `thermal` keeps a `thermal_gap` around the pad (default: the clearance) and
    adds spokes of width `thermal_spoke` (default: max(net track width, 0.25 mm)) in the four axis directions;
@@ -186,15 +187,21 @@ the library stay).
 | Edge.Cuts lines, arcs, circles, rectangles, polygons, curves (also inside footprints) | `outline`: chained into closed contours (ends up to 10 µm apart joined), the largest is the outer edge, contours inside it cutouts; open chains and contours outside are reported |
 | embedded footprint | a project footprint (shared by identical instances, reusing a project footprint equal within 3 nm) and a placement: position, rotation, side, lock |
 | pads: rect, circle, oval, roundrect | the same shapes (rounded corner = ratio × shorter side) |
-| pads: custom, trapezoid, chamfered | bounding rectangle, rounded corners (`import.pad_approximated`) |
+| pads: custom | polygon pads: anchor ∪ primitives (filled polygons, stroked lines and arcs, circles, rectangles; curves within 1 µm outside), holes joined by zero-width cuts; only the largest part of a pad in separate parts (`import.pad_approximated`) |
+| pads: trapezoid, chamfered | bounding rectangle, rounded corners (`import.pad_approximated`) |
 | oval drill (slot), drill offset | round hole of the slot's width, centered (`import.pad_approximated`) |
 | paste-only apertures | paste windows of the copper pad they sit on |
-| silkscreen, fab and courtyard drawings of the footprint's side | footprint graphics (arcs as polylines); the courtyard is the last closed courtyard polygon, else courtyard lines forming one loop, else their bounding box; none: 0.25 mm around the pads |
+| silkscreen, fab and courtyard drawings of the footprint's side | footprint graphics (arcs as polylines); the courtyard replaces the courtyard drawings: one closed polygon as is, a circle as a polygon around it, lines forming one loop, several closed shapes as their union when it is one polygon, else the bounding box; none: 0.25 mm around the pads (`import.courtyard_generated`, listing every footprint) |
 | `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
+| board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad (`import.footprint_as_via`, `import.footprint_as_holes`) |
+| solder mask / paste margins, local clearances, pad zone connections (pad, footprint, board setup) | not kept: the mask follows the pads (plus the export's expansion), the net's clearance and the zone's connection apply (`import.local_setting`, every subject listed) |
+| `net_tie_pad_groups` | an ordinary footprint: the tied nets are shorts for cadlab's DRC (`import.net_tie`) |
+| project text variables (`${NAME}` in board texts) | replaced by their `.kicad_pro` values |
 | footprints without pads (logos) | board graphics |
 | `segment`, `arc`, `via` (through, blind, micro) | tracks (arcs keep their mid point), vias |
 | copper `zone` | zone: outline, net, layers, priority, clearance, minimum width, pad connection, thermal gap and spoke; fills recomputed; values equal to cadlab's defaults left unset |
 | rule area (`keepout`) | keep-out: tracks, vias, copper pour, footprints (all copper layers = no layer list) |
+| zone or rule area with several `polygon` outlines | their area under the even-odd rule (a polygon inside another is a hole): one zone or keep-out per separate part, holes joined to the outline by zero-width cuts (`import.zone_outlines`) |
 | `gr_line`/`gr_arc`/`gr_circle`/`gr_rect`/`gr_poly`, `gr_text` on non-copper layers | board graphics (lines, arcs and circles as polylines; texts with size and angle) |
 
 Nets: with a circuit in the project, footprints are matched by designator, pads to pins through the part's
@@ -211,13 +218,14 @@ Default class give `board.rules` (clearance = the larger of `min_clearance` and 
 other classes become net classes (values equal to the board's are inherited), patterns and explicit
 assignments give nets their class, custom rules without condition tighten board minimums and `A.NetClass ==
 'X'` width and clearance rules tighten the class. Other rules are reported (`import.rule_unsupported`), zero
-minimums keep cadlab's value (`import.rule_zero`).
+minimums keep cadlab's value (`import.rule_zero`), except `min_silk_clearance`, which becomes `silk_to_pad` even
+at zero (silkscreen may then touch pads but not cover them, as KiCad checks it).
 
 Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
 notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
 (members are imported), footprint texts, 3D models, copper drawings, zones inside footprints, pads on the other
-side of their footprint, per-layer pad stacks, zone outlines with holes (first outline only), hatched fills
-(solid). The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
+side of their footprint, per-layer pad stacks, hatched fills (solid), teardrop zone attributes (teardrops are
+ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
 can be read against the imported project.
 
 ## Placement (`src/board/place.rs`)
@@ -260,7 +268,8 @@ shortest link wins.
 on errors). Each has the objects involved (pins `U1.3`, `track#12`, `via#4`, `net:GND`, designators), a board
 location and a fix hint. Clearance and track width come from the net's class when it sets them, else from
 `board.rules`. Distances are exact between the shared polygon shapes; since arcs are approximated outward by up
-to 1 µm, distance rules accept a 2 µm deficit.
+to 1 µm, distance rules accept a 2 µm deficit, and area rules (courtyard overlaps, keep-outs, holes in
+courtyards) count an overlap only where it is wider than 2 µm.
 
 | Code | Severity | Rule |
 |---|---|---|
