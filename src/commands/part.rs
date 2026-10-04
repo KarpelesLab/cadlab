@@ -352,6 +352,8 @@ impl Command for Create {
                 group: p.group.clone(),
                 side: p.side,
                 at: None,
+                unit: None,
+                alternates: Vec::new(),
             })
             .collect();
         if pins.is_empty() {

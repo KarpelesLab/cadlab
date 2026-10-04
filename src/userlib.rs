@@ -640,6 +640,7 @@ mod tests {
             body: None,
             generator: None,
             model: None,
+            provenance: None,
         }
     }
 

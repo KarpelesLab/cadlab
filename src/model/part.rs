@@ -356,12 +356,40 @@ pub struct Pin {
     /// Pin end position on the symbol (schematic units); filled by the symbol generator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<Point>,
+    /// Unit (gate) of a multi-unit part the pin belongs to, from 1 (`1` = unit A); absent for
+    /// single-unit parts and for pins shared by every unit (supplies). Symbols are drawn as one
+    /// body for now; the generator keeps each unit's pins together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<u32>,
+    /// Alternate functions of the pin (`USART1_TX` on `PA9`), as KiCad symbols list them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<PinAlternate>,
+}
+
+/// An alternate function of a pin: another name and electrical type it can take.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PinAlternate {
+    /// Name of the function (`USART1_TX`).
+    pub name: String,
+    /// Electrical type in that function.
+    #[serde(default)]
+    pub kind: PinKind,
 }
 
 impl Pin {
     /// A pin with the given number, name and kind.
     pub fn new(number: impl Into<String>, name: impl Into<String>, kind: PinKind) -> Self {
-        Pin { number: number.into(), name: name.into(), kind, group: None, side: None, at: None }
+        Pin {
+            number: number.into(),
+            name: name.into(),
+            kind,
+            group: None,
+            side: None,
+            at: None,
+            unit: None,
+            alternates: Vec::new(),
+        }
     }
 
     /// The name, or the number when there is no name.

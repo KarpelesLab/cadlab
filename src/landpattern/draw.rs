@@ -161,5 +161,6 @@ pub(super) fn finish(
         body: Some(body),
         generator: None,
         model: None,
+        provenance: None,
     })
 }

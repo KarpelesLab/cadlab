@@ -85,7 +85,13 @@ pub fn generate(category: Category, mut pins: Vec<Pin>) -> Symbol {
         } else {
             idx.sort_by(|&a, &b| {
                 let (pa, pb) = (&pins[a], &pins[b]);
-                let key = |p: &Pin| p.group.clone().unwrap_or_else(|| name_group(p.label()));
+                // Pins of one unit (gate) of a multi-unit part stay together.
+                let key = |p: &Pin| {
+                    p.group
+                        .clone()
+                        .or_else(|| p.unit.map(|u| format!("~unit{u:05}")))
+                        .unwrap_or_else(|| name_group(p.label()))
+                };
                 // Top/bottom: by name; left/right: by group, then name.
                 if matches!(side, Side::Top | Side::Bottom) {
                     natural_cmp(pa.label(), pb.label())

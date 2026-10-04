@@ -223,6 +223,11 @@ pub struct Footprint {
     /// dimensions (`footprint.model_set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<crate::model::model3d::Model3d>,
+    /// Where it came from, for footprints imported from library files
+    /// (`footprint.import_kicad`): the source file and the license the user gave. Absent for
+    /// generated footprints and footprints taken from boards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<crate::model::part::Provenance>,
 }
 
 impl Footprint {
