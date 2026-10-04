@@ -17,14 +17,18 @@
 //!
 //! Obstacles are approximated outward and the fill boundary inward ([`OBSTACLE_TOL`],
 //! [`FILL_TOL`]), and obstacle inflation carries a [`SAFETY`] margin covering the snap rounding
-//! of booleans, so the approximation never creates a clearance violation. Fills are derived
-//! data: recomputed on demand and never stored on disk; the last few results are reused in process
-//! when every input is identical ([`fill_zones`]). Timings in `docs/BOARD.md`.
+//! of booleans, so the approximation never creates a clearance violation. Each zone only
+//! receives what can reach its outline (items from a per-layer [`RTree`], holes, keep-outs, and
+//! the parts of earlier fills near it); farther shapes cannot change the result (D42). Fills
+//! are derived data: recomputed on demand and never stored on disk; the last few results are
+//! reused in process when every input is identical ([`fill_zones`]). Timings in
+//! `docs/BOARD.md`.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use crate::board::{CopperItem, ItemRef, contour_ring, placed_pads};
+use crate::geom::RTree;
 use crate::geom::poly::{self, ArcTol, Boolean, Circle, FillRule, Geometry, Join, Op, Polygon, PolygonSet, Ring, Side};
 use crate::id::ObjectId;
 use crate::model::Project;
@@ -141,6 +145,38 @@ fn same_net(a: Option<&str>, b: Option<&str>) -> bool {
     a.is_some() && a == b
 }
 
+/// Whether an obstacle with bounding box `b`, inflated by `d` (arcs approximated outward,
+/// plus [`SAFETY`]), can reach into `area`.
+fn reaches(b: &poly::Rect, d: i64, area: &poly::Rect) -> bool {
+    b.expand(d + OBSTACLE_TOL.tolerance + SAFETY + 1).intersects(area)
+}
+
+/// `set` without what cannot matter where `near` holds: polygons whose outer box is not
+/// `near` are dropped, holes whose box is not `near` are filled. Within the boxes `near`
+/// accepts, the region is unchanged, so clipping it to them (or growing it, when `near` is
+/// grown by the growth distance) gives the same result as with `set`. Also returns a key
+/// naming what was kept: per kept polygon, its index, its number of kept holes and their
+/// indices.
+fn cull_selection(set: &PolygonSet, near: impl Fn(&poly::Rect) -> bool) -> (Vec<u32>, PolygonSet) {
+    let mut sel = Vec::new();
+    let mut out = Vec::new();
+    for (i, p) in set.iter().enumerate() {
+        if !p.outer.bbox().is_some_and(|b| near(&b)) {
+            continue;
+        }
+        let holes: Vec<u32> =
+            (0..p.holes.len() as u32).filter(|&h| p.holes[h as usize].bbox().is_some_and(|b| near(&b))).collect();
+        sel.push(i as u32);
+        sel.push(holes.len() as u32);
+        sel.extend(&holes);
+        out.push(Polygon {
+            outer: p.outer.clone(),
+            holes: holes.iter().map(|&h| p.holes[h as usize].clone()).collect(),
+        });
+    }
+    (sel, out)
+}
+
 /// Fills one zone layer. The result is canonical (deterministic).
 pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
     let prm = &input.params;
@@ -166,19 +202,27 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
     let mut soft_groups: BTreeMap<i64, Vec<Polygon>> = BTreeMap::new();
     let mut thermal: Vec<&CopperItem> = Vec::new();
     let mut same: Vec<&CopperItem> = Vec::new();
+    // Shapes far from the area are left out: they cannot change it (see `reaches`).
+    let (gap, w) = (prm.thermal_gap.0, prm.thermal_spoke.0);
     for &(it, c) in &input.items {
         if same_net(it.net.as_deref(), input.net) {
             same.push(it);
             if let ItemRef::Pad(..) = it.item {
+                let Some(b) = it.shape.bbox() else { continue };
                 let d = match prm.pads {
                     PadConnection::Solid => continue,
                     PadConnection::Thermal => {
-                        thermal.push(it);
-                        prm.thermal_gap.0
+                        // A spoke stays inside its pad's window; outside the area it is never kept.
+                        if b.expand(gap + w + 1).intersects(&abox) {
+                            thermal.push(it);
+                        }
+                        gap
                     }
                     PadConnection::None => prm.clearance.0,
                 };
-                soft_groups.entry(d).or_default().extend(it.shape.iter().cloned());
+                if reaches(&b, d, &abox) {
+                    soft_groups.entry(d).or_default().extend(it.shape.iter().cloned());
+                }
             }
             continue;
         }
@@ -218,18 +262,14 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
     // each test only scans local edges.
     let mut kept: Vec<Polygon> = Vec::new();
     if !thermal.is_empty() && !fill.is_empty() {
-        let (gap, w) = (prm.thermal_gap.0, prm.thermal_spoke.0);
-        let windows: Vec<Polygon> = thermal
-            .iter()
-            .filter_map(|it| it.shape.bbox())
-            .map(|b| {
-                let b = b.expand(gap + w + 1);
-                rect(b.min.x, b.min.y, b.max.x, b.max.y)
-            })
-            .collect();
+        let boxes: Vec<poly::Rect> =
+            thermal.iter().filter_map(|it| it.shape.bbox()).map(|b| b.expand(gap + w + 1)).collect();
+        let windows: Vec<Polygon> = boxes.iter().map(|b| rect(b.min.x, b.min.y, b.max.x, b.max.y)).collect();
+        let index = RTree::new(boxes.iter().map(|b| Some(*b)));
+        // Rings meeting no window cannot change the clipped sets: they are left out first.
         let clip = |set: &PolygonSet| {
             Boolean::new()
-                .subject(set, FillRule::NonZero)
+                .subject(&cull_selection(set, |b| index.any(b)).1, FillRule::NonZero)
                 .clip(&windows, FillRule::NonZero)
                 .op(Op::Intersection)
                 .execute()
@@ -414,15 +454,23 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
             .filter(|it| it.layers.iter().any(|l| l == layer))
             .map(|it| (it, class_c[&it.net.as_deref()]))
             .collect();
+        let index = RTree::new(items_on.iter().map(|(it, _)| it.shape.bbox()));
+        let max_c = items_on.iter().map(|(_, c)| c.0).max().unwrap_or(0);
         let mut done: Vec<(usize, usize, ZoneFill)> = Vec::new();
-        // Earlier fills grown by a keep-away distance, by (index in `done`, distance): later
-        // zones of the layer often need the same ones.
-        let mut grown: BTreeMap<(usize, i64), PolygonSet> = BTreeMap::new();
+        // Earlier fills grown by a keep-away distance, by (index in `done`, distance, kept
+        // rings): later zones of the layer often need the same ones.
+        let mut grown: BTreeMap<(usize, i64, Vec<u32>), PolygonSet> = BTreeMap::new();
         for &(zi, li) in jobs {
             let z = &board.zones[zi];
             let mut prm = zone_params(p, z);
             // The DRC clearance of the zone's own net applies to its copper too.
             prm.clearance = prm.clearance.max(net_c(z.net.as_deref()));
+            // Everything that can change the fill lies near the zone outline: items, holes,
+            // earlier fills and keep-outs farther away are left out (`fill_layer` would ignore
+            // them or subtract them where there is nothing to subtract from).
+            let outline: Vec<poly::Point> = z.outline.iter().map(|&q| q.into()).collect();
+            let window = poly::Rect::of_points(&outline);
+            let near = |b: &poly::Rect, d: i64| window.is_none_or(|w| reaches(b, d, &w));
             let mut fill = ZoneFill {
                 zone: z.id,
                 name: z.name.clone(),
@@ -439,15 +487,23 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
                 };
                 let mut keepaway: Vec<Polygon> = Vec::new();
                 for &(c, r) in npth {
-                    let ring = Circle::new(c, r + prm.clearance.0 + SAFETY).to_ring(OBSTACLE_TOL)?;
+                    let r = r + prm.clearance.0 + SAFETY;
+                    if !near(&poly::Rect::new(c, c), r) {
+                        continue;
+                    }
+                    let ring = Circle::new(c, r).to_ring(OBSTACLE_TOL)?;
                     keepaway.push(Polygon::new(ring, vec![]));
                 }
                 for (k, (_, _, f)) in done.iter().enumerate() {
                     if !same_net(f.net.as_deref(), z.net.as_deref()) && !f.fill.is_empty() {
                         let c = prm.clearance.max(f.clearance).0 + SAFETY;
-                        let g = match grown.entry((k, c)) {
+                        let (sel, part) = cull_selection(&f.fill, |b| near(b, c));
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let g = match grown.entry((k, c, sel)) {
                             Entry::Occupied(e) => e.into_mut(),
-                            Entry::Vacant(e) => e.insert(poly::offset(&f.fill, c, Join::Round, OBSTACLE_TOL)?),
+                            Entry::Vacant(e) => e.insert(poly::offset(&part, c, Join::Round, OBSTACLE_TOL)?),
                         };
                         keepaway.extend(g.iter().cloned());
                     }
@@ -460,18 +516,29 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
                         // Counter-clockwise, as every other keep-away region (an outline drawn
                         // clockwise would cancel what it overlaps in the non-zero union).
                         let mut ring: Ring = k.outline.iter().map(|&q| q.into()).collect::<Vec<_>>().into();
+                        if !ring.bbox().is_some_and(|b| near(&b, 0)) {
+                            continue;
+                        }
                         if !ring.is_ccw() {
                             ring.reverse_orientation();
                         }
                         keepaway.push(Polygon::new(ring, vec![]));
                     }
                 }
-                let outline: Vec<poly::Point> = z.outline.iter().map(|&q| q.into()).collect();
                 fill_layer(&LayerInput {
                     net: z.net.as_deref(),
                     outline: &outline,
                     board: barea,
-                    items: items_on.clone(),
+                    items: match window {
+                        Some(w) => {
+                            // Every distance `fill_layer` grows an item by, plus the arc and
+                            // rounding margins of `reaches`.
+                            let d = max_c.max(prm.clearance.0).max(prm.thermal_gap.0 + prm.thermal_spoke.0);
+                            let q = w.expand(d + OBSTACLE_TOL.tolerance + SAFETY + 1);
+                            index.query(&q).into_iter().map(|i| items_on[i as usize]).collect()
+                        }
+                        None => items_on.clone(),
+                    },
                     keepaway,
                     params: prm,
                 })

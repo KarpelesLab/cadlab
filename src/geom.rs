@@ -15,6 +15,9 @@ use crate::units::{Angle, Nm};
 /// Polygon geometry (booleans, offsets, arcs, queries). Coordinates are nanometers.
 pub use polyclip as poly;
 
+pub mod rtree;
+pub use rtree::RTree;
+
 /// A point (or vector) in board or schematic space. Y points up.
 ///
 /// Serialized as a two-element array of lengths: `["12.7mm", "8.4mm"]`.

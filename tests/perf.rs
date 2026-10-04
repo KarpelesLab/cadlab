@@ -11,6 +11,8 @@ use cadlab::{Nm, Point};
 
 #[path = "common/bigboard.rs"]
 mod bigboard;
+#[path = "common/fill_reference.rs"]
+mod fill_reference;
 
 /// Connectivity as it was computed before the indexed version: every pair of items with
 /// overlapping bounding boxes and a shared layer tested with `intersects`.
@@ -104,6 +106,98 @@ fn generated_boards_match_references() {
         assert!(!rats.is_empty(), "the generated boards are partly unrouted");
         assert_eq!(rats, ratsnest_reference(&items, &isl), "ratsnest, seed {seed}");
         assert_eq!(rats, board::ratsnest_from(&items, &isl));
+    }
+}
+
+/// The fills as comparable values.
+fn fill_values(fills: &[board::zones::ZoneFill]) -> Vec<(String, String, Nm, &poly::PolygonSet, Option<String>)> {
+    fills.iter().map(|f| (f.name.clone(), f.layer.clone(), f.clearance, &f.fill, f.error.clone())).collect()
+}
+
+/// Adds what exercises every per-zone culling path to a generated board: small zones of
+/// several nets and priorities spread over a layer (like teardrops), a pour keep-out, and
+/// non-plated holes.
+fn add_culling_cases(p: &mut cadlab::model::Project) {
+    use cadlab::model::board::{Hole, Keepout, PadConnection, Zone};
+    let ring = board::contour_ring(&p.board().outline.contours[0], board::zones::FILL_TOL);
+    let bb = poly::Rect::of_points(&ring).unwrap();
+    let (x0, y0, x1, y1) = (bb.min.x, bb.min.y, bb.max.x, bb.max.y);
+    let at = |fx: i64, fy: i64| Point::new(Nm(x0 + (x1 - x0) * fx / 100), Nm(y0 + (y1 - y0) * fy / 100));
+    let nets = ["GND", "3V3", "1V8"];
+    for k in 0..24i64 {
+        let (fx, fy) = (5 + (k % 6) * 15, 10 + (k / 6) * 20);
+        let (a, b) = (at(fx, fy), at(fx + 9, fy + 12));
+        let id = p.alloc_id();
+        p.board_mut().zones.push(Zone {
+            id,
+            name: format!("small{k}"),
+            net: Some(nets[k as usize % 3].into()),
+            layers: vec![if k % 2 == 0 { "In1.Cu" } else { "In2.Cu" }.into()],
+            outline: vec![a, Point::new(b.x, a.y), b, Point::new(a.x, b.y)],
+            priority: (k % 3) as u32,
+            clearance: None,
+            min_width: None,
+            pads: if k % 4 == 0 { PadConnection::None } else { PadConnection::Thermal },
+            thermal_gap: None,
+            thermal_spoke: None,
+        });
+    }
+    let id = p.alloc_id();
+    p.board_mut().keepouts.push(Keepout {
+        id,
+        name: "K".into(),
+        layers: vec![],
+        outline: vec![at(40, 40), at(48, 40), at(48, 47), at(40, 47)],
+        no_tracks: false,
+        no_vias: false,
+        no_pours: true,
+        no_footprints: false,
+    });
+    for (k, (fx, fy)) in [(3, 3), (97, 3), (50, 55), (75, 30)].into_iter().enumerate() {
+        let id = p.alloc_id();
+        p.board_mut().holes.push(Hole {
+            id,
+            name: format!("MH{k}"),
+            at: at(fx, fy),
+            drill: Nm::from_um(3_200),
+            pad: None,
+            net: None,
+        });
+    }
+}
+
+#[test]
+fn zone_fills_match_reference() {
+    for seed in 1..=2 {
+        let (_dir, _r, mut s) = bigboard::build(bigboard::Spec::small(seed));
+        let p = s.project.as_mut().unwrap();
+        if seed == 2 {
+            add_culling_cases(p);
+        }
+        let base = board::base_copper_items(p);
+        let fills = board::zones::fill_zones_uncached(p, &base);
+        let want = fill_reference::fill_zones(p, &base);
+        let n = fills.iter().filter(|f| !f.fill.is_empty()).count();
+        eprintln!("seed {seed}: {n} of {} zone layers filled", fills.len());
+        assert!(n >= 3, "seed {seed}: {n} pours filled");
+        assert_eq!(fill_values(&fills), fill_values(&want), "zone fills, seed {seed}");
+    }
+}
+
+/// Zone fills of the large board and of the corpus boards (`CADLAB_CORPUS_DIR`) against the
+/// reference. Slow in debug builds.
+#[test]
+#[ignore = "slow; run in release with --ignored"]
+fn large_zone_fills_match_reference() {
+    let (_dir, _r, mut s) = bigboard::build(bigboard::Spec::default());
+    let p = s.project.as_mut().unwrap();
+    add_culling_cases(p);
+    let mut boards = vec![("synthetic".to_string(), p.clone())];
+    boards.extend(bigboard::corpus_boards(&[]).into_iter().map(|(n, p, _)| (n, p)));
+    for (name, p) in boards {
+        let base = board::base_copper_items(&p);
+        let fills = board::zones::fill_zones_uncached(&p, &base);
+        assert_eq!(fill_values(&fills), fill_values(&fill_reference::fill_zones(&p, &base)), "{name}");
     }
 }
 
