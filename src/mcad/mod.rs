@@ -3,8 +3,9 @@
 //! - [`step`]: ISO 10303-21 (STEP) with the AP214 schema (`AUTOMOTIVE_DESIGN`): the board
 //!   solid and simple component bodies as an assembly.
 //! - [`idf`]: IDF 3.0 board (`.emn`) and library (`.emp`) files.
+//! - [`idx`]: IDX (ProSTEP iViP EDMD) baseline for incremental ECAD-MCAD collaboration.
 //!
-//! Both start from the same data, built here: the outline as closed loops of lines and arcs
+//! All start from the same data, built here: the outline as closed loops of lines and arcs
 //! ([`board_profile`]), the drilled holes, and component bodies as boxes taken from the
 //! footprint's package dimensions ([`bodies`]). See `docs/MANUFACTURING.md`.
 //!
@@ -12,6 +13,7 @@
 //! lines up with the Gerber and drill files. The board's bottom face is at Z = 0.
 
 pub mod idf;
+pub mod idx;
 pub mod step;
 
 use crate::board::{self, footprint_for};

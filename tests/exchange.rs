@@ -1,7 +1,8 @@
-//! Exchange outputs (M9): IPC-2581 rev C, STEP AP214 and IDF 3.0. Golden files
+//! Exchange outputs (M9): IPC-2581 rev C, STEP AP214, IDF 3.0 and IDX (EDMD). Golden files
 //! (`CADLAB_BLESS=1`), structural checks that parse the files back (independent of the writers),
 //! commands, and optional oracles: FreeCAD reads the STEP file (`CADLAB_ORACLE_FREECAD`), xmllint
-//! validates the IPC-2581 file against a schema the user supplies (`CADLAB_IPC2581_XSD`).
+//! validates the IPC-2581 and IDX files against schemas the user supplies (`CADLAB_IPC2581_XSD`,
+//! `CADLAB_IDX_XSD`).
 
 mod common;
 mod fab_support;
@@ -82,6 +83,8 @@ struct El {
     name: String,
     attrs: BTreeMap<String, String>,
     children: Vec<El>,
+    /// Text content (unescaped, untrimmed), empty when there is none.
+    text: String,
 }
 
 impl El {
@@ -136,14 +139,19 @@ fn unescape(s: &str) -> String {
 
 fn parse_xml(xml: &str) -> El {
     let xml = xml.strip_prefix("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n").expect("XML declaration");
-    let mut stack: Vec<El> = vec![El { name: "#doc".into(), attrs: BTreeMap::new(), children: vec![] }];
+    let mut stack: Vec<El> =
+        vec![El { name: "#doc".into(), attrs: BTreeMap::new(), children: vec![], text: String::new() }];
     let mut rest = xml;
     loop {
         let Some(i) = rest.find('<') else {
             assert!(rest.trim().is_empty(), "text outside elements: {rest:?}");
             break;
         };
-        assert!(rest[..i].trim().is_empty(), "unexpected text: {:?}", &rest[..i]);
+        if !rest[..i].trim().is_empty() {
+            let top = stack.last_mut().unwrap();
+            assert!(top.name != "#doc" && top.children.is_empty(), "mixed content: {:?}", &rest[..i]);
+            top.text.push_str(&unescape(&rest[..i]));
+        }
         let j = rest[i..].find('>').expect("unterminated tag") + i;
         let tag = &rest[i + 1..j];
         rest = &rest[j + 1..];
@@ -170,7 +178,7 @@ fn parse_xml(xml: &str) -> El {
             assert!(attrs.insert(key.clone(), val).is_none(), "duplicate attribute {key}");
             a = a[close + 1..].trim_start();
         }
-        let el = El { name: name.to_string(), attrs, children: vec![] };
+        let el = El { name: name.to_string(), attrs, children: vec![], text: String::new() };
         if empty {
             stack.last_mut().unwrap().children.push(el);
         } else {
@@ -193,6 +201,7 @@ fn ipc2581_structure() {
     assert_eq!(root.name, "IPC-2581");
     assert_eq!(root.attr("revision"), "C");
     assert_eq!(root.attr("xmlns"), "http://webstds.ipc.org/2581");
+    assert!(root.all().iter().all(|e| e.text.is_empty()), "attributes only");
     let top: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(top, ["Content", "LogisticHeader", "Bom", "Ecad"]);
 
@@ -570,6 +579,280 @@ fn idf_structure() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// IDX (ProSTEP iViP EDMD).
+
+/// The exchange board plus two keep-outs: one forbidding everything on all layers, one
+/// forbidding top-side components only.
+fn idx_board() -> (tempfile::TempDir, Registry, Session) {
+    let (d, r, mut s) = board();
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "mech", "outline": {"rect": {"from": ["20mm", "10mm"], "to": ["24mm", "14mm"]}}}),
+    );
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "tall", "layers": ["F.Cu"], "no_footprints": true,
+               "outline": [["14mm", "1mm"], ["18mm", "1mm"], ["18mm", "4mm"], ["14mm", "4mm"]]}),
+    );
+    (d, r, s)
+}
+
+/// Elements whose text is a reference (`xs:IDREF`) to another element's `id`.
+const IDX_REFS: &[&str] = &[
+    "foundation:System",
+    "foundation:SystemScope",
+    "foundation:GlobalUnitLength",
+    "property:Unit",
+    "pdm:Item",
+    "pdm:Shape",
+    "pdm:ShapeElement",
+    "pdm:DefiningShape",
+    "pdm:Stratum",
+    "d2:Point",
+    "d2:StartPoint",
+    "d2:EndPoint",
+    "d2:Center",
+    "d2:Curve",
+    "d2:DetailedGeometricModelElement",
+];
+
+#[test]
+fn idx_golden_and_deterministic() {
+    let (_d, _r, s) = idx_board();
+    let (_d2, _r2, s2) = idx_board();
+    let out = mcad::idx::export(s.project.as_ref().unwrap(), &mcad_options()).unwrap();
+    common::golden::assert_golden(&golden("tiny.idx"), &out.content);
+    assert_eq!(out.content, mcad::idx::export(s2.project.as_ref().unwrap(), &mcad_options()).unwrap().content);
+}
+
+#[test]
+fn idx_structure() {
+    let (_d, _r, s) = idx_board();
+    let p = s.project.as_ref().unwrap();
+    let out = mcad::idx::export(p, &mcad_options()).unwrap();
+    let root = parse_xml(&out.content);
+    assert_eq!(root.name, "foundation:EDMDDataSet");
+    assert_eq!(root.attr("xmlns:foundation"), "http://www.prostep.org/ecad-mcad/edmd/4.0/foundation");
+    let top: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(top, ["foundation:Header", "foundation:Body", "foundation:ProcessInstruction"]);
+    assert_eq!(
+        root.kid("foundation:ProcessInstruction").attr("xsi:type"),
+        "computational:EDMDProcessInstructionSendInformation"
+    );
+    let header = root.kid("foundation:Header");
+    assert_eq!(header.kid("foundation:CreationDateTime").text, "1970-01-01T00:00:00Z");
+    assert_eq!(header.kid("foundation:Description").text, "tiny");
+
+    // Ids are unique and every reference resolves.
+    let all = root.all();
+    let mut ids: BTreeMap<&str, &El> = BTreeMap::new();
+    for e in &all {
+        if let Some(id) = e.attrs.get("id") {
+            assert!(ids.insert(id, e).is_none(), "duplicate id {id}");
+        }
+    }
+    for e in &all {
+        if IDX_REFS.contains(&e.name.as_str()) && e.children.is_empty() && e.name != "foundation:System" {
+            assert!(ids.contains_key(e.text.as_str()), "<{}> {} does not resolve", e.name, e.text);
+        }
+    }
+    assert!(ids.contains_key(header.kid("foundation:System").text.as_str()));
+    let get = |id: &str| *ids.get(id).unwrap_or_else(|| panic!("no {id}"));
+    let body = root.kid("foundation:Body");
+
+    // Top-level occurrences by geometry type.
+    let occ: Vec<&El> = body.kids("foundation:Item").filter(|i| i.attrs.contains_key("GeometryType")).collect();
+    let mut by_type: BTreeMap<&str, usize> = BTreeMap::new();
+    for o in &occ {
+        *by_type.entry(o.attr("GeometryType")).or_default() += 1;
+        assert_eq!(o.kid("pdm:ItemType").text, "assembly");
+        assert_eq!(o.kids("pdm:ItemInstance").count(), 1);
+        let single = get(&o.kid("pdm:ItemInstance").kid("pdm:Item").text);
+        assert_eq!(single.kid("pdm:ItemType").text, "single");
+        assert_eq!(single.kid("pdm:Identifier").kid("foundation:SystemScope").text, "CADLAB");
+    }
+    // Board; J1's two plated pin holes and the non-plated mounting hole; U1, C2, J1 (C1 is
+    // DNP); "mech" forbids routing, vias, pours and components on both sides, "tall" top-side
+    // components.
+    assert_eq!(
+        by_type,
+        [
+            ("BOARD_OUTLINE", 1),
+            ("COMPONENT", 3),
+            ("HOLE_NON_PLATED", 1),
+            ("HOLE_PLATED", 2),
+            ("KEEPOUT_AREA_COMPONENT", 3),
+            ("KEEPOUT_AREA_OTHER", 1),
+            ("KEEPOUT_AREA_ROUTING", 1),
+            ("KEEPOUT_AREA_VIA", 1),
+        ]
+        .into()
+    );
+    assert_eq!((out.components, out.holes, out.keepouts), (3, 3, 6));
+    let numbers: BTreeSet<&str> =
+        all.iter().filter(|e| e.name == "pdm:Identifier").map(|e| e.kid("foundation:Number").text.as_str()).collect();
+    assert_eq!(numbers.len(), all.iter().filter(|e| e.name == "pdm:Identifier").count(), "unique numbers");
+
+    let curve_set = |shape_element: &El| get(&shape_element.kid("pdm:DefiningShape").text);
+    let bound = |cs: &El, b: &str| cs.kids(b).next().map(|e| e.kid("property:Value").text.clone());
+    fn instance(o: &El) -> &El {
+        o.kid("pdm:ItemInstance")
+    }
+    let single_of = |o: &El| get(&instance(o).kid("pdm:Item").text);
+    let prop = |e: &El, k: &str| {
+        e.kids("foundation:UserProperty")
+            .find(|u| u.kid("property:Key").kid("foundation:ObjectName").text == k)
+            .map(|u| u.kid("property:Value").text.clone())
+    };
+
+    // Board: a stratum with the outline (four 90° arcs) and the inverted cutout, 1.6 mm thick.
+    let board = occ.iter().find(|o| o.attr("GeometryType") == "BOARD_OUTLINE").unwrap();
+    assert_eq!(prop(instance(board), "THICKNESS").as_deref(), Some("1.6"));
+    let stratum = get(&single_of(board).kid("pdm:Shape").text);
+    assert_eq!(stratum.name, "foundation:Stratum");
+    let ses: Vec<&El> = stratum.kids("pdm:ShapeElement").map(|e| get(&e.text)).collect();
+    assert_eq!(ses.iter().map(|s| s.kid("pdm:Inverted").text.as_str()).collect::<Vec<_>>(), ["false", "true"]);
+    for se in &ses {
+        let cs = curve_set(se);
+        assert_eq!((bound(cs, "d2:LowerBound"), bound(cs, "d2:UpperBound")), (Some("0".into()), Some("1.6".into())));
+    }
+    let outline = get(&curve_set(ses[0]).kid("d2:DetailedGeometricModelElement").text);
+    assert_eq!(outline.name, "foundation:CompositeCurve");
+    let arcs: Vec<&El> =
+        outline.kids("d2:Curve").map(|c| get(&c.text)).filter(|c| c.name == "foundation:Arc").collect();
+    assert_eq!(arcs.len(), 4);
+    for a in arcs {
+        assert_eq!(a.kid("d2:IncludeAngle").kid("property:Value").text, "90", "counter-clockwise outline");
+    }
+
+    // Holes: circles of the drill diameter at their position, cut through the board.
+    let holes = fabout::holes(p);
+    for o in occ.iter().filter(|o| o.attr("GeometryType").starts_with("HOLE_")) {
+        let t = instance(o).kid("pdm:Transformation");
+        assert_eq!(t.kid("pdm:TransformationType").text, "d2");
+        let (x, y) = (&t.kid("pdm:tx").kid("property:Value").text, &t.kid("pdm:ty").kid("property:Value").text);
+        let isf = get(&single_of(o).kid("pdm:Shape").text);
+        assert_eq!(isf.kid("pdm:Stratum").text, stratum.attr("id"));
+        let plated = o.attr("GeometryType") == "HOLE_PLATED";
+        assert_eq!(isf.kid("pdm:InterStratumFeatureType").text, if plated { "PlatedCutout" } else { "Cutout" });
+        let se = get(&isf.kid("pdm:ShapeElement").text);
+        assert_eq!(se.kid("pdm:Inverted").text, "true");
+        let circle = get(&curve_set(se).kid("d2:DetailedGeometricModelElement").text);
+        let d = &circle.kid("d2:Diameter").kid("property:Value").text;
+        assert!(
+            holes.iter().any(|h| fabout::gerber::mm(h.at.x.0) == *x
+                && fabout::gerber::mm(h.at.y.0) == *y
+                && fabout::gerber::mm(h.diameter.0) == *d
+                && h.plated == plated),
+            "hole at {x} {y}"
+        );
+    }
+
+    // Keep-outs: routing/via/plane through the board, components from a surface outward.
+    for o in occ.iter().filter(|o| o.attr("GeometryType").starts_with("KEEPOUT_")) {
+        let ko = get(&single_of(o).kid("pdm:Shape").text);
+        assert_eq!(ko.name, "foundation:KeepOut");
+        let cs = curve_set(get(&ko.kid("pdm:ShapeElement").text));
+        let bounds = (bound(cs, "d2:LowerBound"), bound(cs, "d2:UpperBound"));
+        match (o.attr("GeometryType"), prop(instance(o), "SIDE").as_deref()) {
+            ("KEEPOUT_AREA_COMPONENT", Some("TOP")) => {
+                assert_eq!(ko.kid("pdm:Purpose").text, "ComponentPlacement");
+                assert_eq!(bounds, (Some("1.6".into()), None));
+            }
+            ("KEEPOUT_AREA_COMPONENT", Some("BOTTOM")) => assert_eq!(bounds, (None, Some("0".into()))),
+            (g, None) => {
+                let purpose =
+                    [("KEEPOUT_AREA_ROUTING", "Route"), ("KEEPOUT_AREA_VIA", "Via"), ("KEEPOUT_AREA_OTHER", "Plane")]
+                        .iter()
+                        .find(|(t, _)| *t == g)
+                        .unwrap()
+                        .1;
+                assert_eq!(ko.kid("pdm:Purpose").text, purpose);
+                assert_eq!(bounds, (Some("0".into()), Some("1.6".into())));
+            }
+            other => panic!("unexpected keep-out {other:?}"),
+        }
+    }
+
+    // Components: body rectangle extruded to the package height, placed by a 3D transform.
+    let (bodies, _) = mcad::bodies(p);
+    for o in occ.iter().filter(|o| o.attr("GeometryType") == "COMPONENT") {
+        let refdes = &instance(o).kid("foundation:Name").text;
+        let b = bodies.iter().find(|b| &b.refdes == refdes).unwrap();
+        assert_eq!(prop(instance(o), "REFDES").as_ref(), Some(refdes));
+        let single = single_of(o);
+        assert_eq!(prop(single, "PARTNUM").as_ref(), Some(&b.part_number));
+        assert_eq!(single.kid("pdm:PackageName").kid("foundation:ObjectName").text, b.footprint);
+        let ac = get(&single.kid("pdm:Shape").text);
+        assert_eq!(ac.kid("pdm:AssemblyComponentType").text, "Physical");
+        let cs = curve_set(get(&ac.kid("pdm:ShapeElement").text));
+        let height = fabout::gerber::mm(b.height.0);
+        assert_eq!(bound(cs, "d2:UpperBound"), Some(height.clone()));
+        assert_eq!(prop(single, "HEIGHT"), Some(height));
+        let rect = get(&cs.kid("d2:DetailedGeometricModelElement").text);
+        let pts: Vec<&El> = rect.kids("d2:Point").map(|p| get(&p.text)).collect();
+        assert_eq!(pts.len(), 5);
+        let xs: BTreeSet<&str> = pts.iter().map(|p| p.kid("d2:X").kid("property:Value").text.as_str()).collect();
+        let w = |s: &str| s.parse::<f64>().unwrap();
+        let span = xs.iter().map(|s| w(s)).fold(f64::NEG_INFINITY, f64::max)
+            - xs.iter().map(|s| w(s)).fold(f64::INFINITY, f64::min);
+        assert!((span - b.width.0 as f64 / 1e6).abs() < 1e-9);
+        let t = instance(o).kid("pdm:Transformation");
+        assert_eq!(t.kid("pdm:TransformationType").text, "d3");
+        let v = |k: &str| t.kid(k).text.clone();
+        let tz = t.kid("pdm:tz").kid("property:Value").text.clone();
+        if refdes == "C2" {
+            // Bottom, 90°: turned over (X → -X, Z → -Z), then rotated.
+            assert_eq!(prop(instance(o), "SIDE").as_deref(), Some("BOTTOM"));
+            assert_eq!([v("pdm:xx"), v("pdm:xy"), v("pdm:yx"), v("pdm:yy"), v("pdm:zz")], ["0", "-1", "-1", "0", "-1"]);
+            assert_eq!(tz, "0");
+        } else {
+            assert_eq!(v("pdm:zz"), "1");
+            assert_eq!(tz, "1.6");
+        }
+    }
+}
+
+/// Optional schema validation: the IDX (EDMD) schema is published free of charge by the
+/// prostep ivip Association (PSI 5 download, `PSI5_IDXv4.5_Schema.zip`) and not redistributed
+/// here; point `CADLAB_IDX_XSD` at the directory holding its `foundation.xsd`.
+#[test]
+fn idx_schema_oracle() {
+    let Some(dir) = std::env::var_os("CADLAB_IDX_XSD") else {
+        eprintln!("skipping: set CADLAB_IDX_XSD to the directory of the IDX schema files");
+        return;
+    };
+    let Some(xmllint) = oracle::optional(Oracle::Xmllint) else { return };
+    let dir = std::path::PathBuf::from(dir);
+    let (d, _r, s) = idx_board();
+    let out = mcad::idx::export(s.project.as_ref().unwrap(), &mcad_options()).unwrap();
+    let path = d.path().join("tiny.idx");
+    std::fs::write(&path, &out.content).unwrap();
+    // The process instruction types live in a schema `foundation.xsd` does not import: a
+    // wrapper imports both.
+    let ns = "http://www.prostep.org/ecad-mcad/edmd/4.0/";
+    let mut wrapper = String::from(
+        "<?xml version=\"1.0\"?>\n<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" \
+         targetNamespace=\"urn:cadlab:idx-test\">\n",
+    );
+    for (n, file) in [("foundation", "foundation.xsd"), ("computational", "computational.xsd")] {
+        let loc = dir.join(file);
+        assert!(loc.is_file(), "{} missing", loc.display());
+        let p = loc.to_string_lossy().replace('\\', "/");
+        let url = if p.starts_with('/') { format!("file://{p}") } else { format!("file:///{p}") };
+        wrapper.push_str(&format!("  <xs:import namespace=\"{ns}{n}\" schemaLocation=\"{url}\"/>\n"));
+    }
+    wrapper.push_str("</xs:schema>\n");
+    let xsd = d.path().join("idx-wrapper.xsd");
+    std::fs::write(&xsd, wrapper).unwrap();
+    oracle::run(&xmllint, &["--noout", "--schema", &xsd.to_string_lossy(), &path.to_string_lossy()]);
+}
+
 #[test]
 fn export_commands() {
     let (dir, r, mut s) = board();
@@ -594,6 +877,17 @@ fn export_commands() {
     assert!(root.join("out").join("mcad").join("tiny.emp").is_file());
     assert_eq!(o["output"]["components"], 3);
 
+    let o = exec(&r, &mut s, "export.idx", json!({}));
+    assert_eq!((o["output"]["components"].as_u64(), o["output"]["holes"].as_u64()), (Some(3), Some(3)));
+    assert_eq!(o["output"]["keepouts"], 0);
+    let path = o["output"]["path"].as_str().unwrap();
+    assert!(Path::new(path).ends_with(Path::new("out").join("mcad").join("tiny.idx")));
+    assert!(root.join("out").join("mcad").join("tiny.idx").is_file());
+    let o = exec(&r, &mut s, "export.idx", json!({"path": "m/collab", "vias": true, "components": false}));
+    assert_eq!((o["output"]["components"].as_u64(), o["output"]["holes"].as_u64()), (Some(0), Some(5)));
+    let text = std::fs::read_to_string(root.join("m").join("collab.idx")).unwrap();
+    assert_eq!(text.matches("GeometryType=\"VIA\"").count(), 2);
+
     // export.all includes the IPC-2581 file.
     let o = exec(&r, &mut s, "export.all", json!({"dir": "all"}));
     assert!(o["output"]["files"].as_array().unwrap().iter().any(|f| f["function"] == "IPC-2581C"));
@@ -615,7 +909,7 @@ fn export_commands() {
 
     // No outline: a conflict with a hint.
     s.project.as_mut().unwrap().board_mut().outline.contours.clear();
-    for cmd in ["export.step", "export.idf"] {
+    for cmd in ["export.step", "export.idf", "export.idx"] {
         let e = r.execute(&mut s, cmd, json!({}), RunOptions::default()).unwrap_err();
         assert_eq!(e.error.diagnostic.code, "board.no_outline", "{cmd}");
         assert!(e.error.diagnostic.hint.is_some());

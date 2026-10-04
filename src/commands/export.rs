@@ -1,5 +1,5 @@
 //! `export.*`: generic manufacturing outputs (Gerber X2/X3, XNC drill, pick-and-place,
-//! IPC-D-356A, IPC-2581), mechanical CAD outputs (STEP, IDF) and the Specctra DSN design for
+//! IPC-D-356A, IPC-2581), mechanical CAD outputs (STEP, IDF, IDX) and the Specctra DSN design for
 //! external autorouters. Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
 
 use std::path::{Path, PathBuf};
@@ -24,6 +24,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<All>()
         .register::<Step>()
         .register::<Idf>()
+        .register::<Idx>()
         .register::<ExportDsn>()
         .register::<Spice>();
 }
@@ -492,6 +493,66 @@ impl Command for Idf {
             s.push_str(&format!("\n  {} ({})", f.path, f.function));
         }
         s
+    }
+}
+
+/// Write an IDX (ProSTEP iViP EDMD) baseline for ECAD-MCAD collaboration: board outline and
+/// cutouts, drilled holes, keep-outs and component placements with body outlines and heights.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Idx {
+    /// Output file (default `out/mcad/<project>.idx`, relative to the project; `.idx` is
+    /// appended if missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Also write the vias (default: component and mounting holes only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vias: bool,
+    /// Include component placements (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<bool>,
+}
+
+/// Result of `export.idx`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct IdxExported {
+    /// File written.
+    pub path: String,
+    /// Components placed.
+    pub components: usize,
+    /// Drilled holes written.
+    pub holes: usize,
+    /// Keep-out items written (one per forbidden kind, and per side for footprint keep-outs).
+    pub keepouts: usize,
+}
+
+impl Command for Idx {
+    const NAME: &'static str = "export.idx";
+    const SUMMARY: &'static str = "Write an IDX (ProSTEP EDMD) baseline for ECAD-MCAD collaboration";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = IdxExported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<IdxExported, CommandError> {
+        check_placed(ctx)?;
+        let p = ctx.project()?;
+        let stem = fabout::file_stem(&p.manifest().name);
+        let out = mcad::idx::export(p, &mcad_options(self.vias, self.components)).ok_or_else(no_outline)?;
+        let path = resolve(ctx, self.path.as_deref(), mcad_dir().join(format!("{stem}.idx")));
+        let path = with_ext(path, "idx");
+        let file = OutFile { name: String::new(), function: "IDX".into(), content: out.content };
+        let written = write(vec![(path, file)])?;
+        report_no_body(ctx, out.no_body);
+        Ok(IdxExported {
+            path: written.files[0].path.clone(),
+            components: out.components,
+            holes: out.holes,
+            keepouts: out.keepouts,
+        })
+    }
+
+    fn summarize(o: &IdxExported) -> String {
+        format!("wrote {} ({} components, {} holes, {} keep-outs)", o.path, o.components, o.holes, o.keepouts)
     }
 }
 

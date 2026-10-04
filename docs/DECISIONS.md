@@ -362,6 +362,30 @@ search; PCBWay sources by MPN.
 that is both permitted and reproducible. Header recognition plus explicit mapping survives export format
 changes without guessing, and reading values only for passives keeps parametric matching (D26) honest.
 
+### D37. IDX baseline export; no ODB++ (2026-10-04)
+`export.idx` writes an IDX (ProSTEP iViP PSI 5, EDMD schema V4.5, namespaces `.../edmd/4.0/...`) baseline
+(`SendInformation`) from the free recommendation, implementation guidelines and schema, which prostep ivip
+publishes "for anyone to use", duplicable "for use in the context of creating software". It lives in
+`src/mcad/idx.rs` on the shared outline loops, hole list and package bodies (D31). Choices: every feature is an
+assembly item with the IDX 4.0 `GeometryType` *and* a single item whose shape is the classic classification
+object (`Stratum`, `InterStratumFeature`, `KeepOut`, `AssemblyComponent`), so readers of either method work;
+components use absolute 3D transforms (top face, or turned over on the bottom face) rather than the layer-relative
+"passive" model, since cadlab sends no layer stack-up; a cadlab keep-out becomes one item per forbidden kind
+(routing, via, plane, and component placement per side, unbounded away from the board); holes share padstack items
+per kind and diameter; identifiers are derived from names (designators, hole and keep-out names) so successive
+baselines agree; time stamps and creator fields are fixed or empty. Components without package body data are
+reported and left out, as in STEP and IDF. The schema is not vendored (redistribution only unchanged, with its
+notice); an optional test validates with `xmllint` against a user-supplied copy (`CADLAB_IDX_XSD`). Incremental
+`SendChanges` messages wait until cadlab can track and accept MCAD-side changes.
+**ODB++ is not implemented**: the Siemens specification (8.1 update 4, 2024) is confidential documentation that
+"may not be used in any way not expressly authorized by Siemens", downloading it "does not grant a license to
+develop software interfaces" (v7 notice), and the only license offered (ODB++ Solutions Development Partnership)
+is nontransferable, non-sublicensable and tied to the partner's products. Quotes and URLs in MANUFACTURING.md.
+*Why:* IDX is the open, incremental ECAD-MCAD exchange MCAD tools (Creo, NX, SolidWorks PCB and others) import, and
+a validated baseline is the part cadlab can produce faithfully today. ODB++ would bind cadlab, and everyone who
+reuses its MIT code, to a proprietary license it cannot pass on; IPC-2581 (D31) carries the same fab data openly.
+KiCad's ODB++ export is not an oracle to build against for the same reason (D7).
+
 ## Open questions
 
 None currently.

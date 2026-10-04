@@ -15,9 +15,9 @@ published specifications.
 | Pick and place | CSV (generic + per-fab column layouts), Gerber X3 | export | M4, done (`export.pnp`; per-fab layouts in `fab.export`) |
 | Assembly BOM | CSV / XLSX (generic + per-fab layouts) | export | M1/M4, CSV done (`bom.export`, `fab.export`) |
 | Intelligent fab data | **IPC-2581** (rev C) | export | M9, done (`export.ipc2581`) |
-| Intelligent fab data | ODB++ (check spec license terms first) | export | later |
+| Intelligent fab data | ODB++ | — | not implemented: Siemens' terms do not permit it (below, D37) |
 | Routing exchange | **Specctra DSN / SES** | DSN export, SES import (DSN reader as library) | M5, done (`export.dsn`, `route.import_ses`; [ROUTER.md](ROUTER.md)) |
-| Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | M9: IDF 3.0 done (`export.idf`); IDX later |
+| Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | M9, done (`export.idf`, `export.idx` baseline) |
 | 3D | **STEP** AP214/AP242 (export), STEP/VRML models (import) | both | M9: AP214 export done (`export.step`); model import later |
 | Simulation | SPICE netlist (ngspice dialect) | export | M8 |
 | Documentation | SVG, PNG, PDF | export | M3/M4 |
@@ -45,11 +45,11 @@ Implemented from the Ucamco Gerber Layer Format Specification (rev. 2026.05) and
 board coordinates unchanged (`.SameCoordinates`). Fab-specific names,
 origins and rotation offsets are applied by fab profiles at export (D12).
 
-### Exchange outputs: IPC-2581, STEP, IDF (M9)
+### Exchange outputs: IPC-2581, STEP, IDF, IDX (M9)
 
-All three are deterministic (fixed or no dates), in board coordinates (mm, Y up), and written by hand from the
+All four are deterministic (fixed or no dates), in board coordinates (mm, Y up), and written by hand from the
 published specifications with no new dependency. Algorithm code: `src/fabout/ipc2581.rs` and `src/mcad/`
-(STEP and IDF share the outline loops, hole list and component bodies built in `mcad`).
+(STEP, IDF and IDX share the outline loops, hole list and component bodies built in `mcad`).
 
 **IPC-2581 revision C** (`export.ipc2581 [path] [--mask-expansion]`, default `out/fab/<project>-ipc2581.xml`,
 also part of `export.all`). One XML file, namespace `http://webstds.ipc.org/2581`, function mode `ASSEMBLY`:
@@ -93,8 +93,50 @@ the body rectangle with its height). Bottom-side parts: the library outline mirr
 rotated counter-clockwise, as cadlab places them (for the centered body rectangles any mirror axis gives the
 same result). Header dates are fixed (`1970/01/01.00:00:00`).
 
+**IDX** (`export.idx [path] [--vias] [--components false]`, default `out/mcad/<project>.idx`): the ProSTEP iViP
+PSI 5 "ECAD/MCAD Collaboration" format, written from the free V4.5 recommendation, implementation guidelines
+and schema (prostep ivip, `https://www.prostep.org/fileadmin/prod-download/PSI5_IDXv4.5_release.zip`, schema
+namespaces `http://www.prostep.org/ecad-mcad/edmd/4.0/...`). The recommendation is "available for anyone to
+use" and may be duplicated "for use in the context of creating software"; its schema is not shipped (it may only
+be redistributed unchanged with its notice; tests take it from `CADLAB_IDX_XSD`). One `EDMDDataSet` with a
+`SendInformation` process instruction: the **baseline** that starts (or resets) a collaboration. Change and
+response messages (`SendChanges`) are not written or read yet.
+
+| Item (`GeometryType`) | Shape | Placement |
+|---|---|---|
+| `BOARD_OUTLINE` | `Stratum` (`DesignLayerStratum`, `PrimarySurface`): the outline curve (polylines, arcs with included angles, or a circle) from Z 0 to the thickness, cutouts as inverted shape elements; `THICKNESS` property | none (board coordinates) |
+| `HOLE_PLATED`, `HOLE_NON_PLATED`, `VIA` (vias with `vias`) | `InterStratumFeature` (`PlatedCutout`, `Cutout`, `Via`) on the board stratum: a circle of the finished diameter through the board, inverted; one padstack item per kind and diameter (`PTH_1`, `NPTH_2.2`) | 2D transform at the hole; `PADSTACK` property |
+| `KEEPOUT_AREA_ROUTING`, `_VIA`, `_OTHER` | `KeepOut` with purpose `Route`, `Via`, `Plane` (a cadlab keep-out's `no_tracks`, `no_vias`, `no_pours`), Z 0 to the thickness; the layers in the description | none |
+| `KEEPOUT_AREA_COMPONENT` | `KeepOut` (`ComponentPlacement`) for `no_footprints`, one per side its copper layers touch (all layers: both): from the top face up, or the bottom face down, unbounded | none; `SIDE` property |
+| `COMPONENT` | `AssemblyComponent` (`Physical`): the package body rectangle from Z 0 to the body height, one item per footprint and part number with `PackageName` (footprint), `PARTNUM` (MPN or part ID) and `HEIGHT` | 3D transform: on the top face rotated counter-clockwise; on the bottom face turned over (X → -X, Z → -Z), then rotated, so the body hangs below; `REFDES`, `SIDE` properties |
+
+Every top-level item is an `assembly` item with the IDX 4.0 `GeometryType` attribute and one instance of a
+`single` item whose shape is the classic classification object (both methods of the guidelines at once, so
+readers of either work). Identifiers use system scope `CADLAB` and stable numbers from names (`BOARD`,
+`HOLE:J1.1`, `HOLE:H1`, `VIA:<id>`, `KEEPOUT:<name>:ROUTING`, `COMPONENT:U1`, `PACKAGE:<footprint>:<part>`), so
+a later baseline names the same objects the same way. Z = 0 is the board's bottom face (the IDX convention);
+matrices are `x' = xx·x + xy·y + xz·z + tx`. Creator name and company are empty (projects store no people), the
+creation and modification time stamps fixed (`1970-01-01T00:00:00Z`). Heights come from the footprint's
+package body; components without one are reported (`export.no_body`) and left out, DNP parts too. No 3D model
+references (`Model3D`) until model import exists. Checked by the published XSD with `xmllint` (oracle above).
+
+**ODB++ is not implemented.** The ODB++ Design Format Specification (Siemens, release 8.1 update 4, August 2024,
+`https://odbplusplus.com/wp-content/uploads/sites/2/2024/08/odb_spec_user.pdf`) is free to download, but its
+notice reads: "This Documentation contains trade secrets or otherwise confidential information owned by Siemens
+[...] This Documentation may not be copied, distributed, or otherwise disclosed by Customer without the express
+written permission of Siemens, and may not be used in any way not expressly authorized by Siemens." The
+format description v7 (Mentor Graphics,
+`https://odbplusplus.com/wp-content/uploads/sites/2/2020/03/ODB_Format_Description_v7.pdf`) states that downloading the specification "does not grant a license to develop software
+interfaces based on the format specification"; developers are directed to the ODB++ Solutions Development
+Partnership, whose terms (`https://odbplusplus.com/design/?p=712000`) grant "a nontransferable, nonexclusive
+license to use the ODB++ Format solely to develop, test and support an interface with the Participant
+Products", without sublicensing, against promotional obligations and terminable by Siemens. A license that
+cannot pass to the users and forks of an MIT crate is not compatible with cadlab's license, and implementing the
+format from observed files (KiCad's exporter, for instance) would sidestep the same terms. IPC-2581 (an open
+IPC standard, `export.ipc2581`) covers the same intelligent-fab-data need. See DECISIONS D37.
+
 Not yet: package bodies other than boxes (pins, chamfers, cylinders), STEP/VRML model import (M9), AP242,
-IDF `.PLACE_OUTLINE`/keep-outs and the IDX (EDMD) exchange.
+IDF `.PLACE_OUTLINE`/keep-outs, IDX change and response messages.
 
 Design standards used as rule and geometry sources (from the standards themselves, never from another tool's
 implementation):

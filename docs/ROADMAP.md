@@ -192,10 +192,14 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
       bodies from package dimensions as an assembly; FreeCAD oracle; D31)
 - [x] IPC-2581 rev C output (`export.ipc2581`, also in `export.all`: BOM, stackup, profile, packages,
       components, logical nets, copper/mask/paste/legend/drill features; D31)
-- [ ] ODB++ if spec terms allow
+- [x] ODB++ if spec terms allow: they do not (Siemens' specification may not be used to develop interfaces
+      without a non-sublicensable partnership license), so it is not implemented; IPC-2581 covers the need
+      (MANUFACTURING.md, D37)
 - [x] IDF 3.0 export for MCAD (`export.idf`: `.emn` board with outline, cutouts, holes and placement, `.emp`
       library of body outlines; D31)
-- [ ] IDX (ProSTEP EDMD) export
+- [x] IDX (ProSTEP EDMD) export (`export.idx`: V4.5 baseline with board outline and cutouts, holes, keep-outs
+      and component placements with body heights; validated against the published schema; D37). Change and
+      response messages later
 
 ---
 

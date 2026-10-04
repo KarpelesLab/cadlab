@@ -161,14 +161,19 @@ ROUTER.md). Not in the CI oracle job, which installs no Java. Example:
 
 ### Exchange outputs (`tests/exchange.rs`)
 
-IPC-2581, STEP and IDF have golden files (`tests/golden/exchange/`) and structural checks that parse the files
-back: a minimal XML reader (references to dictionaries and layers resolve, counts match the board), a Part 21
-reader (every `#ref` defined, every B-rep shell closed: each edge used once in each direction) and an IDF section
-reader. Two optional oracles skip when the tool is missing even with `CADLAB_ORACLES=1`:
+IPC-2581, STEP, IDF and IDX have golden files (`tests/golden/exchange/`) and structural checks that parse the
+files back: a minimal XML reader (references to dictionaries and layers resolve, counts match the board; for IDX
+every `id` is unique, every IDREF resolves, and holes, keep-out bounds, body heights and transforms match the
+board), a Part 21 reader (every `#ref` defined, every B-rep shell closed: each edge used once in each direction)
+and an IDF section reader. Three optional oracles skip when the tool or schema is missing even with
+`CADLAB_ORACLES=1`:
 `CADLAB_ORACLE_FREECAD` (`freecadcmd`, e.g. `/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd`) must
 read the STEP file as valid closed solids whose volumes match the outline minus cutouts and holes, and the bodies'
 boxes; `CADLAB_IPC2581_XSD` (a local copy of IPC's `IPC-2581C.xsd`, not shipped) validates the XML with
-`xmllint --schema`. Example:
+`xmllint --schema`; `CADLAB_IDX_XSD` (the directory of the IDX schema files from prostep ivip's free
+`PSI5_IDXv4.5_release.zip`, not shipped) validates the IDX file the same way (verified with the V4.5 schema,
+2026-10-04). No ODB++ or IDX reader is available as an oracle: KiCad exports ODB++ but not IDX, and cadlab
+writes no ODB++ (DECISIONS D37). Example:
 `CADLAB_ORACLES=1 CADLAB_ORACLE_FREECAD=/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd cargo test --test exchange`.
 
 ### Oracle availability

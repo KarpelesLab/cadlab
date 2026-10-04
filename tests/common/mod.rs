@@ -32,7 +32,8 @@ pub mod oracle {
         /// FreeCAD's command-line interpreter: reads our STEP files (optional: tests skip
         /// when it is missing).
         FreeCad,
-        /// xmllint: XML schema validation (optional, with an IPC-2581 schema the user supplies).
+        /// xmllint: XML schema validation (optional, with IPC-2581 or IDX schemas the user
+        /// supplies).
         Xmllint,
     }
 

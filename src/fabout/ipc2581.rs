@@ -45,7 +45,7 @@ use crate::units::{Angle, Nm};
 pub const NAMESPACE: &str = "http://webstds.ipc.org/2581";
 
 /// Escapes text for an XML attribute value.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

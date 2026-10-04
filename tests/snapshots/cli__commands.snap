@@ -127,6 +127,7 @@ expression: names
   "export.all",
   "export.step",
   "export.idf",
+  "export.idx",
   "export.dsn",
   "export.spice",
   "fab.list",

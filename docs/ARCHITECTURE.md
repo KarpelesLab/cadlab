@@ -29,7 +29,7 @@ reader for KiCad files), `netlist::import` (D27) and `kicad_import` (`.kicad_pcb
 added `electrical` (impedance, IPC-2152 current), `spice` (SPICE netlist export) and `lint` (design lint beyond
 ERC), see [ELECTRICAL.md](ELECTRICAL.md). Modules to come: `erc` (M2),
 `schematic` and `render` (M3), `board`, `drc`, `io` and `fab` (M4), `router` and `specctra`
-(DSN/SES exchange) (M5), `mcad` (STEP and IDF export, M9). Spin-off candidates: the
+(DSN/SES exchange) (M5), `mcad` (STEP, IDF and IDX export, M9). Spin-off candidates: the
 router, Gerber/Excellon I/O, the footprint generator (`landpattern`).
 
 Dependency direction between modules is strictly downward, and enforced by review:
