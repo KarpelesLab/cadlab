@@ -113,10 +113,8 @@ impl Rect {
     }
 }
 
-fn dist(a: Point, b: Point) -> f64 {
-    let (dx, dy) = ((a.x.0 - b.x.0) as f64, (a.y.0 - b.y.0) as f64);
-    (dx * dx + dy * dy).sqrt()
-}
+mod mst;
+use mst::dist;
 
 fn snap(v: i64) -> i64 {
     (v as f64 / GRID as f64).round() as i64 * GRID
@@ -412,32 +410,7 @@ impl<'a> Engine<'a> {
     /// Minimum spanning tree length of a net over its placed pins.
     fn net_cost(&self, n: usize) -> f64 {
         let pts: Vec<Point> = self.net_pins[n].iter().filter_map(|&pin| self.pin_pos(pin)).collect();
-        if pts.len() < 2 {
-            return 0.0;
-        }
-        let mut best = vec![f64::INFINITY; pts.len()];
-        let mut done = vec![false; pts.len()];
-        best[0] = 0.0;
-        let mut total = 0.0;
-        for _ in 0..pts.len() {
-            let mut u = usize::MAX;
-            for v in 0..pts.len() {
-                if !done[v] && (u == usize::MAX || best[v] < best[u]) {
-                    u = v;
-                }
-            }
-            done[u] = true;
-            total += best[u];
-            for v in 0..pts.len() {
-                if !done[v] {
-                    let d = dist(pts[u], pts[v]);
-                    if d < best[v] {
-                        best[v] = d;
-                    }
-                }
-            }
-        }
-        total
+        mst::mst_length(&pts)
     }
 
     fn nets_cost(&self, nets: &[usize]) -> f64 {
@@ -446,7 +419,12 @@ impl<'a> Engine<'a> {
 
     /// Improvement cost around `parts`: ratsnest of `nets` plus the tethers touching them.
     fn local_cost(&self, parts: &[usize], nets: &[usize]) -> f64 {
-        let mut c = self.nets_cost(nets);
+        self.local_cost_with(parts, self.nets_cost(nets))
+    }
+
+    /// [`Engine::local_cost`] with the ratsnest of the nets given.
+    fn local_cost_with(&self, parts: &[usize], nets_cost: f64) -> f64 {
+        let mut c = nets_cost;
         for &(i, k, target, w) in &self.tethers {
             let touches = parts.contains(&i) || matches!(target, Pin::Part(j, _) if parts.contains(&j));
             if touches && let (Some(a), Some(b)) = (self.pin_pos(Pin::Part(i, k)), self.pin_pos(target)) {
@@ -1036,6 +1014,9 @@ fn improve(e: &mut Engine, passes: usize) {
                 improved = true;
             }
         }
+        // Net costs of the current poses, kept until a part of the net moves (the same values
+        // `local_cost` would compute again for every pair).
+        let mut cached: Vec<Option<f64>> = vec![None; e.net_names.len()];
         for i in 0..n {
             for j in i + 1..n {
                 let (Some(a), Some(b)) = (e.poses[i], e.poses[j]) else { continue };
@@ -1046,12 +1027,19 @@ fn improve(e: &mut Engine, passes: usize) {
                 nets.extend(e.part_nets[j].iter().copied());
                 nets.sort_unstable();
                 nets.dedup();
-                let before = e.local_cost(&[i, j], &nets);
+                let mut sum = 0.0;
+                for &k in &nets {
+                    sum += *cached[k].get_or_insert_with(|| e.net_cost(k));
+                }
+                let before = e.local_cost_with(&[i, j], sum);
                 e.poses[i] = Some(b);
                 e.poses[j] = Some(a);
                 let after = e.local_cost(&[i, j], &nets);
                 if after < before - EPS && e.valid(i, &b) && e.valid(j, &a) {
                     improved = true;
+                    for &k in &nets {
+                        cached[k] = None;
+                    }
                 } else {
                     e.poses[i] = Some(a);
                     e.poses[j] = Some(b);
