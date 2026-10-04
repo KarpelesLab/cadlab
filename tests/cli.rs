@@ -255,3 +255,37 @@ fn user_settings_for_digikey() {
     assert!(o.status.success());
     assert_eq!(json_of(&run(&["config", "show", "--json"], ""))["digikey"], Value::Null);
 }
+
+#[test]
+fn electrical_commands_from_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    cadlab(dir.path(), &["project", "new", "p"]);
+    let p = dir.path().join("p");
+    let ok = |o: &Output| {
+        assert!(o.status.success(), "{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    };
+    ok(&cadlab(&p, &["board", "dielectric", "--gap", "1", "--thickness", "0.2mm", "--er", "4.4"]));
+    let o = cadlab(&p, &["board", "stackup"]);
+    ok(&o);
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(text.contains("gap 1  0.2mm εr 4.4"), "{text}");
+    let o = cadlab(&p, &["impedance", "solve", "50", "--layer", "F.Cu", "--netclass", "rf", "--json"]);
+    ok(&o);
+    assert_eq!(json_of(&o)["output"]["netclass"], "rf");
+    let o = cadlab(&p, &["impedance", "calc", "0.2mm", "--gap", "0.15mm"]);
+    ok(&o);
+    assert!(String::from_utf8_lossy(&o.stdout).contains("Zdiff"));
+    let o = cadlab(&p, &["current", "width", "2A", "--temp-rise", "20C", "--json"]);
+    ok(&o);
+    assert_eq!(json_of(&o)["output"]["temp_rise"], "20°C");
+    ok(&cadlab(&p, &["circuit", "add", "R 10k 1% 0402", "--count", "2"]));
+    ok(&cadlab(&p, &["net", "connect", "VIN", "R1.1"]));
+    ok(&cadlab(&p, &["net", "connect", "OUT", "R1.2", "R2.1"]));
+    ok(&cadlab(&p, &["net", "connect", "GND", "R2.2"]));
+    ok(&cadlab(&p, &["net", "set", "VIN", "--voltage", "3.3V", "--current", "100mA"]));
+    let o = cadlab(&p, &["export", "spice", "--supplies", "--json"]);
+    ok(&o);
+    assert_eq!(json_of(&o)["output"]["sources"]["VIN"], "3.3V");
+    assert!(p.join("out/spice/p.cir").is_file());
+    ok(&cadlab(&p, &["circuit", "lint"]));
+}

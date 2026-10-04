@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::geom::Point;
 use crate::id::ObjectId;
 use crate::units::{Angle, Nm};
+use crate::value::Quantity;
 
 /// Board side of a footprint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
@@ -49,7 +50,30 @@ pub struct Stackup {
     /// Silkscreen color preferences.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub silk_color: Vec<String>,
+    /// Dielectric layers between copper layers, top to bottom (`copper_layers − 1` entries:
+    /// the first is between `F.Cu` and the next copper layer). Empty: not specified; the
+    /// impedance calculator then assumes [`Stackup::effective_dielectrics`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dielectrics: Vec<Dielectric>,
 }
+
+/// A dielectric layer of the stackup (core or prepreg), between two copper layers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Dielectric {
+    /// Thickness, copper to copper.
+    pub thickness: Nm,
+    /// Relative permittivity (dielectric constant) at the frequency of interest, as an exact
+    /// decimal (`"4.5"`).
+    pub er: Quantity,
+    /// Material or construction, for information (`FR-4 7628 prepreg`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+}
+
+/// Relative permittivity assumed when the stackup gives none: 4.5, a common nominal value for
+/// FR-4 around 1 GHz (laminate datasheets give 4.2 to 4.8). Not a fab value.
+pub const DEFAULT_ER: Quantity = Quantity::from_parts(45, -1, crate::value::Unit::None);
 
 impl Default for Stackup {
     fn default() -> Self {
@@ -61,11 +85,30 @@ impl Default for Stackup {
             finish: Vec::new(),
             mask_color: Vec::new(),
             silk_color: Vec::new(),
+            dielectrics: Vec::new(),
         }
     }
 }
 
 impl Stackup {
+    /// The dielectrics in effect, top to bottom, and whether they were assumed: the stored
+    /// ones when there is one per gap between copper layers, else the material thickness
+    /// (board thickness minus copper) split equally over the gaps, at [`DEFAULT_ER`].
+    pub fn effective_dielectrics(&self) -> (Vec<Dielectric>, bool) {
+        let n = self.copper_layers.max(1) as i64;
+        let gaps = (n - 1) as usize;
+        if self.dielectrics.len() == gaps {
+            return (self.dielectrics.clone(), false);
+        }
+        if gaps == 0 {
+            return (Vec::new(), true);
+        }
+        let copper = self.outer_copper.0 * 2.min(n) + self.inner_copper.0 * (n - 2).max(0);
+        let each = Nm(((self.thickness.0 - copper).max(0)) / gaps as i64);
+        let d = Dielectric { thickness: each, er: DEFAULT_ER, material: None };
+        (vec![d; gaps], true)
+    }
+
     /// Copper layer names, top to bottom: `F.Cu`, `In1.Cu`, ..., `B.Cu`.
     pub fn copper_names(&self) -> Vec<String> {
         let n = self.copper_layers.max(1) as usize;

@@ -237,6 +237,29 @@ replaced and board placements of components that come back are kept. `kicad-cli`
 placeholder is one `bom.replace` away from a real part. Matching only on exact IDs, MPNs and value plus
 footprint keeps the result deterministic and explainable.
 
+### D29. Electrical calculations: published closed forms, exact stored values, heuristics as warnings (2026-10-04)
+Impedance comes from published closed-form models, not a field solver: Hammerstad–Jensen for surface
+microstrip, Wheeler (as given by Wadell) for stripline with a parallel-combination approximation for
+asymmetric striplines, IPC-2141A for embedded microstrip and the IPC-2141 coupling formulas for edge-coupled
+differential pairs; each formula, its source and its accuracy range are listed in docs/ELECTRICAL.md, and
+inputs outside a range give a warning. Outer layers are microstrips over the adjacent layer, inner layers
+striplines between their neighbours, all neighbours taken as planes. The stackup gains optional
+`dielectrics` (thickness, εr as an exact decimal, material); when absent, an equal split at εr 4.5 is assumed
+and every result based on it says so. Nets gain optional `voltage`, `current` and `temp_rise`, net classes
+`impedance` and `diff_impedance` targets, all exact `Quantity` values; these additive optional fields need no
+schema migration. Track width for a current uses a published curve fit of the IPC-2152 chart (marked
+approximate, no modifiers), with IPC-2221 as an option. The SPICE export writes the ngspice dialect from part
+data and never invents models for active parts: a part without `spice_model` is written commented out with a
+warning, and only diodes get SPICE's default model (with a warning). The design lint is a separate command
+(and an opt-in `circuit.erc --lint`) whose findings are heuristics on categories and names, so they are
+warnings or notes, never errors.
+*Why:* closed forms are fast, deterministic, license-clean and accurate to a few percent, which is what a
+design-time width needs; fabs re-tune impedance-controlled widths with their own solvers anyway. Storing exact
+inputs and targets (not computed floats) keeps files deterministic and diffable. A simulation that silently
+used made-up models for ICs would mislead; a visible placeholder is one `part.set` away from a real model.
+Keeping lint out of the default ERC keeps ERC results (and the M2 exit test) stable while making the lint
+available to agents in one call.
+
 ## Open questions
 
 None currently.

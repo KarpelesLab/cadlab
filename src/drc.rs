@@ -55,6 +55,8 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     keepouts(&ctx, &courtyards, &mut out);
     unrouted(&items, &mut out);
     out.extend(netclass_conflicts(p));
+    out.extend(crate::electrical::current_check(p));
+    out.extend(crate::electrical::impedance_check(p));
     out.sort_by(|a, b| {
         let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
         (a.code.as_ref(), loc(a), &a.message).cmp(&(b.code.as_ref(), loc(b), &b.message))

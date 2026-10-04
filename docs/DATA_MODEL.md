@@ -80,7 +80,9 @@ cadlab net connect "DATA[0..7]" U1.PA0..PA7 J2.1..8   # bus: ranges spread over 
 cadlab net set VBUS --driven                      # powered from a connector (ERC)
 cadlab net no-connect U2.PB4                      # intentionally open
 cadlab block create status_led R2 D1               # capture; then: block instantiate status_led LED2
+cadlab net set VBUS --voltage 5V --current 1.5A   # electrical properties (SPICE, IPC-2152 DRC check)
 cadlab circuit erc                                # exit code 3 on errors
+cadlab circuit lint                               # design lint: decoupling, I²C pull-ups, USB ESD, ...
 cadlab circuit export out/board.net               # KiCad netlist; --format json
 cadlab circuit import kicad.net                   # KiCad netlist in (kicad-cli sch export netlist); --replace
 ```

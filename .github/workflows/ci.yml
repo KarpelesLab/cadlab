@@ -46,7 +46,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   oracles:
-    name: Oracle tests (KiCad 10, gerbv)
+    name: Oracle tests (KiCad 10, gerbv, ngspice)
     runs-on: ubuntu-24.04
     # Informative for now: KiCad comes from a Launchpad PPA (not pinned to a patch release, and a
     # few minutes to install). Make it blocking once it has proven stable (docs/TESTING.md).
@@ -58,14 +58,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: oracles
-      - name: Install KiCad 10 and gerbv
+      - name: Install KiCad 10, gerbv and ngspice
         run: |
           sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
           sudo apt-get update
           # No recommends: the symbol/footprint/3D libraries are not needed (and are large).
-          sudo apt-get install --yes --no-install-recommends kicad gerbv xvfb xauth
+          sudo apt-get install --yes --no-install-recommends kicad gerbv ngspice xvfb xauth
           kicad-cli version
           gerbv --version
+          ngspice --version
       - name: Oracle tests
         env:
           CADLAB_ORACLES: "1"
@@ -73,7 +74,7 @@ jobs:
         run: >-
           xvfb-run -a cargo test --all-features
           --test oracle --test kicad_oracle --test kicad_pcb_oracle --test gerber_oracle
-          --test drc_crosscheck --test gerber_crosscheck -- --nocapture
+          --test drc_crosscheck --test gerber_crosscheck --test electrical -- --nocapture
       - name: Keep reports and renders
         if: always()
         uses: actions/upload-artifact@v4

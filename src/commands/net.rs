@@ -12,6 +12,7 @@ use crate::model::part::PinKind;
 use crate::refs::ObjectRef;
 use crate::suggest::did_you_mean;
 use crate::units::Nm;
+use crate::value::{Quantity, Unit};
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<Connect>()
@@ -77,20 +78,48 @@ pub struct NetInfo {
     /// Externally powered.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub driven: bool,
+    /// Nominal voltage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage: Option<Quantity>,
+    /// Continuous current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<Quantity>,
+    /// Allowed temperature rise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_rise: Option<Quantity>,
 }
 
 fn info(p: &Project, name: &str) -> NetInfo {
     let n = &p.circuit().nets[name];
-    NetInfo { name: name.to_string(), pins: n.pins.iter().cloned().collect(), class: n.class.clone(), driven: n.driven }
+    NetInfo {
+        name: name.to_string(),
+        pins: n.pins.iter().cloned().collect(),
+        class: n.class.clone(),
+        driven: n.driven,
+        voltage: n.voltage,
+        current: n.current,
+        temp_rise: n.temp_rise,
+    }
 }
 
 fn line(n: &NetInfo) -> String {
     let pins: Vec<String> = n.pins.iter().map(ToString::to_string).collect();
+    let mut props = Vec::new();
+    if let Some(v) = n.voltage {
+        props.push(v.to_string());
+    }
+    if let Some(i) = n.current {
+        props.push(match n.temp_rise {
+            Some(r) => format!("{i} at +{r}"),
+            None => i.to_string(),
+        });
+    }
     format!(
-        "{}{}{}: {}",
+        "{}{}{}{}: {}",
         n.name,
         n.class.as_ref().map(|c| format!(" [{c}]")).unwrap_or_default(),
         if n.driven { " [driven]" } else { "" },
+        if props.is_empty() { String::new() } else { format!(" [{}]", props.join(", ")) },
         pins.join(" ")
     )
 }
@@ -390,6 +419,31 @@ pub struct Set {
     /// Powered from outside the circuit (connector, external supply); satisfies ERC power checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driven: Option<bool>,
+    /// Nominal voltage ("3.3V"), used by the SPICE export and the design lint; empty clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage: Option<String>,
+    /// Continuous (RMS) current ("2A"): the DRC checks track widths against IPC-2152; empty clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// Allowed temperature rise for `current` ("10C", default 10 °C); empty clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_rise: Option<String>,
+}
+
+/// Parses an optional electrical value: `None` keeps, `""` clears.
+fn parse_opt(s: &Option<String>, unit: Unit, field: &str) -> Result<Option<Option<Quantity>>, CommandError> {
+    let Some(s) = s else { return Ok(None) };
+    if s.trim().is_empty() {
+        return Ok(Some(None));
+    }
+    let q = Quantity::parse_as(s, unit).map_err(|e| {
+        CommandError::invalid_args("net.invalid_value", format!("`{field}`: {e}"))
+            .with_hint(format!("give a value in {} (e.g. \"3.3V\", \"2A\", \"10C\")", unit.symbol()))
+    })?;
+    if q.to_f64() <= 0.0 && unit != Unit::Volt {
+        return Err(CommandError::invalid_args("net.invalid_value", format!("`{field}` must be positive")));
+    }
+    Ok(Some(Some(q)))
 }
 
 /// Nets after the change.
@@ -401,7 +455,7 @@ pub struct NetList {
 
 impl Command for Set {
     const NAME: &'static str = "net.set";
-    const SUMMARY: &'static str = "Set nets' class, or mark them driven (externally powered)";
+    const SUMMARY: &'static str = "Set nets' class, driven mark (externally powered), voltage, current";
     const KIND: CommandKind = CommandKind::Mutation;
     const POSITIONAL: &'static [&'static str] = &["nets"];
     type Output = NetList;
@@ -420,9 +474,21 @@ impl Command for Set {
                 .with_suggestions(&s)
                 .with_hint_if_none("create it with `netclass.set`"));
         }
+        let voltage = parse_opt(&self.voltage, Unit::Volt, "voltage")?;
+        let current = parse_opt(&self.current, Unit::Ampere, "current")?;
+        let temp_rise = parse_opt(&self.temp_rise, Unit::Celsius, "temp_rise")?;
         let c = ctx.project_mut()?.circuit_mut();
         for n in &names {
             let net = c.nets.get_mut(n).expect("found above");
+            if let Some(v) = voltage {
+                net.voltage = v;
+            }
+            if let Some(v) = current {
+                net.current = v;
+            }
+            if let Some(v) = temp_rise {
+                net.temp_rise = v;
+            }
             if let Some(cl) = &self.class {
                 net.class = (!cl.is_empty()).then(|| cl.clone());
             }
@@ -578,6 +644,13 @@ pub struct ClassSet {
     /// Differential pair gap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_pair_gap: Option<Nm>,
+    /// Target single-ended impedance ("50ohm"); the DRC warns about tracks more than 10 % off
+    /// (`impedance.solve --netclass` sets it with the width).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impedance: Option<Quantity>,
+    /// Target differential impedance ("90ohm").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_impedance: Option<Quantity>,
 }
 
 /// A net class and its nets.
@@ -654,6 +727,11 @@ fn class_line(c: &ClassInfo) -> String {
             parts.push(format!("{label} {v}"));
         }
     }
+    for (label, v) in [("Z0", k.impedance), ("Zdiff", k.diff_impedance)] {
+        if let Some(v) = v {
+            parts.push(format!("{label} {v}"));
+        }
+    }
     format!(
         "{}: {}{}",
         c.name,
@@ -707,7 +785,21 @@ impl Command for ClassSet {
                 "via_diameter must be larger than via_drill",
             ));
         }
+        let impedance = match self.impedance {
+            Some(q) => Some(super::electrical::expect_unit(q, Unit::Ohm, "impedance")?),
+            None => None,
+        };
+        let diff_impedance = match self.diff_impedance {
+            Some(q) => Some(super::electrical::expect_unit(q, Unit::Ohm, "diff_impedance")?),
+            None => None,
+        };
         let c = ctx.project_mut()?.circuit_mut().netclasses.entry(name.clone()).or_default();
+        if impedance.is_some() {
+            c.impedance = impedance;
+        }
+        if diff_impedance.is_some() {
+            c.diff_impedance = diff_impedance;
+        }
         if self.description.is_some() {
             c.description = self.description.filter(|d| !d.is_empty());
         }

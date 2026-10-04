@@ -98,6 +98,8 @@ fn mcp_session() {
             "place",
             "track",
             "via",
+            "impedance",
+            "current",
             "lib",
             "drc",
             "zone",
@@ -182,6 +184,15 @@ fn mcp_session() {
     assert!(r["content"][0]["text"].as_str().unwrap().contains("supplier"), "{r}");
     let r = c.tool("fab", json!({"action": "substitute", "args": {"fab": "jlcpcb", "part": "x"}}));
     assert_eq!(r["isError"], true, "{r}");
+
+    // Impedance and current calculators (M8).
+    let r = c.tool("impedance", json!({"action": "solve", "args": {"target": "50", "netclass": "rf"}}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["output"]["target"], "50Ω");
+    let r = c.tool("netclass", json!({"action": "show", "args": {"name": "rf"}}));
+    assert_eq!(r["structuredContent"]["output"]["impedance"], "50Ω", "{r}");
+    let r = c.tool("current", json!({"action": "width", "args": {"current": "1A", "layer": "F.Cu"}}));
+    assert_eq!(r["structuredContent"]["output"]["widths"][0]["layer"], "F.Cu", "{r}");
 
     // Invalid arguments are tool errors (visible to the model), with a hint.
     let r = c.tool("project", json!({"action": "set", "args": {"nmae": "x"}}));

@@ -165,6 +165,20 @@ impl Quantity {
         Quantity { mantissa: m, exp: e, unit }
     }
 
+    /// `mantissa × 10^exp` in `unit`, already normalized (the mantissa has no trailing zero),
+    /// for constants.
+    pub const fn from_parts(mantissa: i64, exp: i8, unit: Unit) -> Self {
+        assert!(mantissa % 10 != 0 || mantissa == 0 && exp == 0, "not normalized");
+        Quantity { mantissa, exp, unit }
+    }
+
+    /// The nearest value with `decimals` digits after the point (in `unit`), from a float
+    /// computed by an algorithm (impedances, currents); `None` for NaN or infinite input.
+    pub fn from_f64(v: f64, decimals: i8, unit: Unit) -> Option<Self> {
+        let scaled = (v * 10f64.powi(decimals as i32)).round();
+        (scaled.is_finite() && scaled.abs() < 9e17).then(|| Quantity::new(scaled as i64, -decimals, unit))
+    }
+
     /// Integer value in `unit`.
     pub fn int(v: i64, unit: Unit) -> Self {
         Self::new(v, 0, unit)
