@@ -458,10 +458,8 @@ impl Command for FootprintSet {
         let p = ctx.project()?;
         let name = util::footprint(p, &self.name)?.name.clone();
         let bad = |code: &'static str, msg: String| CommandError::invalid_args(code, msg);
-        for (field, v) in [("clearance", self.clearance)] {
-            if v.is_some_and(|v| v < Nm::ZERO) {
-                return Err(bad("footprint.invalid_setting", format!("`{field}` cannot be negative")));
-            }
+        if self.clearance.is_some_and(|v| v < Nm::ZERO) {
+            return Err(bad("footprint.invalid_setting", "`clearance` cannot be negative".into()));
         }
         if self.paste_ratio.is_some_and(|r| r.0 <= -500_000 || r.0 >= 1_000_000) {
             return Err(bad(
