@@ -33,8 +33,12 @@
 //!
 //! Anything that cannot be represented is reported with a diagnostic (code, subject, hint),
 //! never dropped silently.
+//!
+//! The user's own footprint and symbol libraries (`.kicad_mod`, `.pretty`, `.kicad_sym`) are
+//! read by [`library`] (DECISIONS D41), with the same footprint conversion.
 
 mod footprint;
+pub mod library;
 pub mod rules;
 
 use std::collections::{BTreeMap, BTreeSet};

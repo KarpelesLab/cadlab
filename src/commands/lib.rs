@@ -113,7 +113,7 @@ fn change_of(e: &Existing) -> Change {
 }
 
 /// The library named `spec` (a name or a directory path), or the first one (the user library).
-fn select(libs: &Libraries, spec: Option<&str>) -> Result<UserLibrary, CommandError> {
+pub(super) fn select(libs: &Libraries, spec: Option<&str>) -> Result<UserLibrary, CommandError> {
     match spec {
         None => libs.list.first().cloned().ok_or_else(|| LibError::NoDataDir.into()),
         Some(s) => libs.select(s).ok_or_else(|| {

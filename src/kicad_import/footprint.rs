@@ -1,4 +1,5 @@
-//! Footprints embedded in a `.kicad_pcb` → cadlab footprints and placements.
+//! Footprints embedded in a `.kicad_pcb` → cadlab footprints and placements; the same conversion
+//! reads library footprints (`.kicad_mod`, [`convert_library`]).
 //!
 //! KiCad stores each placed footprint with its children in footprint-local coordinates (Y down,
 //! unrotated, already flipped for bottom-side footprints) and pad and text angles as absolute
@@ -124,15 +125,11 @@ impl Local {
     }
 }
 
-/// Converts a `(footprint ...)` element. Returns `None` (with a diagnostic) when it has no
-/// position.
+/// Converts a `(footprint ...)` element of a board. Returns `None` (with a diagnostic) when it
+/// has no position.
 pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Converted> {
-    let lib_id = e.value().unwrap_or("").to_string();
-    let side = match e.child_value("layer") {
-        Some("B.Cu") => BoardSide::Bottom,
-        _ => BoardSide::Top,
-    };
     let Some((at_k, orient)) = at_of(e) else {
+        let lib_id = e.value().unwrap_or("");
         notes.not_imported(
             Diagnostic::warning(
                 "import.footprint_invalid",
@@ -141,6 +138,38 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
             .with_hint("open and save the board in KiCad, then import it again"),
         );
         return None;
+    };
+    Some(convert_at(e, ctx, notes, at_k, orient, None))
+}
+
+/// Converts the footprint of a library file (`.kicad_mod`) named `name` into a cadlab
+/// footprint, with the same conversion as footprints embedded in boards. Library footprints
+/// have no position: an `at` is ignored and pad angles are taken as they are written, the way
+/// KiCad reads library files (`kicad-cli fp upgrade` keeps them so). Board outline drawings in
+/// them are reported, not kept.
+pub(super) fn convert_library(e: &Sexpr, name: &str, notes: &mut Notes) -> Footprint {
+    let ctx = Ctx {
+        origin: (Nm::ZERO, Nm::ZERO),
+        copper: vec!["F.Cu".into(), "B.Cu".into()],
+        nets_by_num: BTreeMap::new(),
+        vars: BTreeMap::new(),
+    };
+    let mut c = convert_at(e, &ctx, notes, (Nm::ZERO, Nm::ZERO), Angle::ZERO, Some(name));
+    c.fp.name = name.to_string();
+    if c.fp.description.is_empty()
+        && let Some(d) = c.props.get("Description")
+    {
+        c.fp.description = d.trim().to_string();
+    }
+    c.fp
+}
+
+/// The shared conversion: `library` is the footprint name for library files (`None` on boards).
+fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, library: Option<&str>) -> Converted {
+    let lib_id = e.value().unwrap_or("").to_string();
+    let side = match e.child_value("layer") {
+        Some("B.Cu") => BoardSide::Bottom,
+        _ => BoardSide::Top,
     };
     let orient = orient.normalized();
     let at = ctx.frame(at_k);
@@ -199,7 +228,10 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
         }
     }
     let refdes = refdes.trim().to_string();
-    let subject = ObjectRef::Name(if refdes.is_empty() { lib_id.clone() } else { refdes.clone() });
+    let subject = match library {
+        Some(name) => ObjectRef::Named { kind: "footprint".into(), name: name.to_string() },
+        None => ObjectRef::Name(if refdes.is_empty() { lib_id.clone() } else { refdes.clone() }),
+    };
     super::local_overrides(e, &subject, notes);
     if e.get("net_tie_pad_groups").is_some() {
         notes.agg(
@@ -251,6 +283,20 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
             );
             continue;
         };
+        if layer == "Edge.Cuts" && library.is_some() {
+            notes.not_imported_agg(
+                "import.footprint_layer",
+                layer,
+                Diagnostic::warning(
+                    "import.footprint_layer",
+                    "board outline drawings (Edge.Cuts) in library footprints are not imported: cadlab footprints have no board edge",
+                )
+                .with_subject(subject.clone())
+                .with_subject(ObjectRef::Layer(layer.to_string()))
+                .with_hint("draw the cutout in the board outline (`board.outline`) where the part is placed"),
+            );
+            continue;
+        }
         if layer == "Edge.Cuts" {
             match &geom {
                 GraphicGeometry::Circle { center, radius, .. } => {
@@ -377,6 +423,19 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
     };
     for m in e.all("model") {
         let _ = m;
+        if library.is_some() {
+            notes.agg(
+                "import.footprint_model",
+                "model",
+                Diagnostic::info(
+                    "import.footprint_model",
+                    "3D model references are not imported (KiCad model paths point at files outside the project)",
+                )
+                .with_subject(subject.clone())
+                .with_hint("attach a model file you may use with `footprint.model_set <footprint> <file>`"),
+            );
+            continue;
+        }
         notes.agg(
             "import.footprint_model",
             "model",
@@ -405,8 +464,9 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
         body: None,
         generator: None,
         model: None,
+        provenance: None,
     };
-    Some(Converted {
+    Converted {
         refdes,
         value,
         lib_id,
@@ -417,7 +477,7 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
         pads: pad_nets,
         edges,
         uuids,
-    })
+    }
 }
 
 /// Geometry of a footprint drawing in cadlab footprint-local coordinates.

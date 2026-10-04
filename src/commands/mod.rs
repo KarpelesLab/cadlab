@@ -12,6 +12,7 @@ pub mod export;
 pub mod fab;
 pub mod footprint;
 pub mod history;
+pub mod kicad_lib;
 pub mod kicad_pcb;
 pub mod lib;
 pub mod net;
@@ -45,6 +46,7 @@ pub fn register_all(r: &mut Registry) {
     route::register(r);
     render::register(r);
     kicad_pcb::register(r);
+    kicad_lib::register(r);
     export::register(r);
     fab::register(r);
     history::register(r);

@@ -15,7 +15,7 @@ pub(crate) fn register(r: &mut Registry) {
     r.register::<ExportKicad>().register::<ImportKicad>().register::<ImportKicadRules>();
 }
 
-fn to_error(e: ImportError) -> CommandError {
+pub(super) fn to_error(e: ImportError) -> CommandError {
     let mut err = match e.kind {
         ImportErrorKind::Invalid => CommandError::invalid_args(e.code, e.message),
         ImportErrorKind::Conflict => CommandError::conflict(e.code, e.message),
@@ -27,14 +27,14 @@ fn to_error(e: ImportError) -> CommandError {
     err
 }
 
-fn resolve(ctx: &Context<'_>, path: &Path) -> PathBuf {
+pub(super) fn resolve(ctx: &Context<'_>, path: &Path) -> PathBuf {
     match ctx.session.root() {
         Some(root) if path.is_relative() => root.join(path),
         _ => path.to_path_buf(),
     }
 }
 
-fn read(path: &Path) -> Result<String, CommandError> {
+pub(super) fn read(path: &Path) -> Result<String, CommandError> {
     std::fs::read_to_string(path)
         .map_err(|e| CommandError::from(crate::model::ModelError::Io { path: path.to_path_buf(), source: e }))
 }
