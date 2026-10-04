@@ -153,10 +153,16 @@ Details in [ROUTER.md](ROUTER.md).
 
 KiCad writers and oracle checks already exist from M2–M4. This milestone adds import for migrating user projects.
 
-- [ ] `.kicad_pcb` import, `.kicad_pro` rules import, user `.kicad_sym` / `.kicad_mod` import
+- [x] `.kicad_pcb` import (`board.import_kicad`: setup, outline, footprints, copper, zones, keep-outs, holes,
+  graphics; circuit matched or built from the board, DECISIONS D32)
+- [x] `.kicad_pro` / `.kicad_dru` rules import (`board.import_kicad_rules`, also run by `board.import_kicad`)
+- [ ] User `.kicad_sym` / `.kicad_mod` import
 - [x] KiCad netlist import (circuits come in as netlists; no `.kicad_sch` parser, see DECISIONS D13):
   `circuit.import`, parts matched or created per DECISIONS D27, oracle round trip through `kicad-cli`
-- [ ] Round-trip and oracle tests on open-source projects fetched in CI
+- [x] Round-trip and oracle tests: cadlab boards → `.kicad_pcb` → import (model and DRC equal), the same after
+  `kicad-cli pcb upgrade`, KiCad DRC of the export vs cadlab DRC of the import (`tests/kicad_pcb_import.rs`,
+  `tests/drc_crosscheck.rs`)
+- [ ] Open-source projects fetched in CI (the test reads `CADLAB_KICAD_PCB_FIXTURES`; fetching is not set up)
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
 

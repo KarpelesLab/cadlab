@@ -302,6 +302,27 @@ oracle that must read the STEP file as valid closed solids with the expected vol
 mechanical engineers ask for; hand-written text keeps the crate small and the output byte-for-byte deterministic,
 and exact geometry with explicit skips keeps the files trustworthy.
 
+### D32. KiCad board import: exact geometry, the circuit stays the source of truth (2026-10-04)
+`board.import_kicad` (next to `board.export_kicad`) reads `.kicad_pcb` files of KiCad 6 to 10 with the shared
+S-expression reader, plus the `.kicad_pro` / `.kicad_dru` next to them (`board.import_kicad_rules` alone).
+Coordinates are parsed from decimal millimeters to `Nm` exactly and converted with the exporter's inverse frame
+(origin: the auxiliary axis when set, as cadlab's export writes it, else the outline's lower-left corner), so a
+cadlab board comes back equal. Footprints embedded in the board are the user's design data and become project
+footprints; KiCad's libraries are still never read or converted (D7). Identical instances share one footprint,
+and a footprint equal (within 3 nm, any item order) to a project footprint reuses it. Shapes cadlab cannot
+represent are approximated conservatively (custom and trapezoid pads as bounding rectangles, slots as round
+holes) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
+project it wins: footprints match by designator, pads to pins through the part's pin map, board nets take the
+circuit's names, and disagreements are reported for the user to fix; footprints the circuit lacks are not
+placed. Without one, the circuit is built from the board through the netlist importer (D27), so parts are
+matched or created the same way as from a netlist. Zone fills are recomputed; zone settings and net class
+values equal to cadlab's defaults are left unset so they keep following the rules. KiCad's rule areas map to
+keep-outs, its Default class and board minimums to `board.rules`, other classes to net classes.
+*Why:* migration is only useful if nothing moves: exact parsing and the inverse of the tested exporter make the
+round trip lossless, and the KiCad DRC cross-check on imported boards proves it. Keeping the circuit
+authoritative (D2) means an import never silently rewires a design; building it from the board covers users who
+have only a board.
+
 ### D33. Mouser and Nexar providers; LCSC/JLCPCB through imported parts lists (2026-10-04)
 Mouser (Search API key) and Nexar/Octopart (GraphQL, client credentials) are network providers like DigiKey:
 behind `net`, cached, credentials entered only through `cadlab config mouser|nexar` (D17), implemented from

@@ -101,6 +101,16 @@ The board references components and nets from the circuit. When the circuit chan
 
 There is no separate "update PCB from schematic" step to forget. Sync is automatic and diagnostics report what changed.
 
+### Importing from KiCad
+
+A KiCad project comes in as a netlist (`circuit.import`, D13/D27) and a board (`board.import_kicad`, D32).
+Importing the netlist first gives the circuit with the schematic's net names and parts; the board import then
+matches footprints by designator and pads to pins, and reports where board and circuit disagree. Importing the
+board alone builds the circuit from its pad nets. Board footprints become project footprints (the user's
+design data, never KiCad's libraries); a placement whose footprint differs from its part's preferred one uses
+the placement's `footprint` override. Coordinates are converted exactly (KiCad's decimal millimeters are parsed
+to `Nm` without floats; Y is flipped around the chosen origin).
+
 ### Provider independence
 
 Nothing in the project names a fab or a supplier as a requirement: rules, board spec and BOM express intent, and

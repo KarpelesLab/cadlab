@@ -74,7 +74,7 @@ jobs:
         run: >-
           xvfb-run -a cargo test --all-features
           --test oracle --test kicad_oracle --test kicad_pcb_oracle --test gerber_oracle
-          --test drc_crosscheck --test gerber_crosscheck --test electrical -- --nocapture
+          --test drc_crosscheck --test gerber_crosscheck --test electrical --test kicad_pcb_import -- --nocapture
       - name: Keep reports and renders
         if: always()
         uses: actions/upload-artifact@v4

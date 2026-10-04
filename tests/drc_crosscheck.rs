@@ -18,6 +18,9 @@
 //! Every unmatched finding on either side must be covered by an [`ALLOW`] entry with a reason;
 //! every entry must be used. Runs only with `CADLAB_ORACLES=1` (KiCad is an external process,
 //! DECISIONS D7). Reports are kept in `$CARGO_TARGET_TMPDIR/drc_crosscheck/<case>/`.
+//!
+//! A second test checks the `.kicad_pcb` importer the same way: KiCad's DRC of each export
+//! against cadlab's DRC of the board imported back from it into an empty project (D32).
 
 mod common;
 mod crosscheck;
@@ -329,6 +332,90 @@ fn kicad_drc(cli: &Path, pcb: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap()
 }
 
+/// Compares KiCad's DRC report on the export of a cross-check case with cadlab's DRC on `p`
+/// (the case's project, or the project imported back from the export). `uuids` maps KiCad
+/// UUIDs to `p`'s objects and `frame` KiCad coordinates to `p`'s.
+fn compare_case(
+    case: &crosscheck::Case,
+    p: &Project,
+    report: &Value,
+    uuids: &BTreeMap<String, String>,
+    frame: &Frame,
+    used: &mut [bool],
+    problems: &mut Vec<String>,
+) {
+    let ours = cadlab_findings(p);
+    let theirs = kicad_findings(report, uuids, frame);
+    let mut log = vec![format!("=== {} ({})", case.name, case.what)];
+    macro_rules! fail {
+        ($msg:expr) => {{
+            let msg: String = $msg;
+            log.push(format!("  !! {msg}"));
+            problems.push(format!("{}: {msg}", case.name));
+        }};
+    }
+
+    // Every expected code is reported by cadlab.
+    for code in case.expect {
+        if !ours.iter().any(|f| f.code == *code) {
+            fail!(format!("cadlab did not report {code}"));
+        }
+    }
+
+    // One-to-one matching, KiCad findings first.
+    let mut taken = vec![false; ours.len()];
+    for k in &theirs {
+        for (label, at) in &k.anchors {
+            if let Some(want) = anchor_of(p, label) {
+                let d = (want.x.0 - at.x.0).abs().max((want.y.0 - at.y.0).abs());
+                if d > POS_TOL {
+                    fail!(format!("KiCad puts {label} at {at:?}, cadlab at {want:?}"));
+                }
+            }
+        }
+        let hit = ours.iter().enumerate().position(|(i, c)| !taken[i] && same(k, c));
+        match hit {
+            Some(i) => {
+                taken[i] = true;
+                let c = &ours[i];
+                log.push(format!("  ok  {}  <->  {}", c.text, k.text));
+                if let (Some(a), Some(b)) = (k.value, c.value)
+                    && (a - b).abs() > VALUE_TOL
+                {
+                    fail!(format!("measured {b} mm by cadlab, {a} mm by KiCad: {} / {}", c.text, k.text));
+                }
+            }
+            None => match allowed(case.name, Side::Kicad, k) {
+                Some(a) => {
+                    log.push(format!("  allowed (KiCad only)  {}{}", k.text, why(a, used)));
+                }
+                None => fail!(format!("only KiCad reports: {}", k.text)),
+            },
+        }
+    }
+    for (i, c) in ours.iter().enumerate() {
+        if taken[i] {
+            continue;
+        }
+        match allowed(case.name, Side::Cadlab, c) {
+            Some(a) => {
+                log.push(format!("  allowed (cadlab only)  {}{}", c.text, why(a, used)));
+            }
+            None => fail!(format!("only cadlab reports: {} {:?}", c.text, c.items)),
+        }
+    }
+    eprintln!("{}", log.join("\n"));
+}
+
+/// Every allowlist entry must have been used.
+fn unused_entries(used: &[bool], problems: &mut Vec<String>) {
+    for (a, u) in ALLOW.iter().zip(used) {
+        if !u {
+            problems.push(format!("unused allowlist entry {:?} {} ({:?})", a.side, a.rule, a.case));
+        }
+    }
+}
+
 #[test]
 fn kicad_and_cadlab_drc_agree() {
     let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
@@ -341,75 +428,38 @@ fn kicad_and_cadlab_drc_agree() {
         let export = cadlab::kicad_pcb::export(p, "board");
         let pcb = crosscheck::export_kicad(p, &dir);
         let report = kicad_drc(&cli, &pcb);
-        let frame = Frame::of(p);
-        let ours = cadlab_findings(p);
-        let theirs = kicad_findings(&report, &export.uuids, &frame);
-        let mut log = vec![format!("=== {} ({})", case.name, case.what)];
-        macro_rules! fail {
-            ($msg:expr) => {{
-                let msg: String = $msg;
-                log.push(format!("  !! {msg}"));
-                problems.push(format!("{}: {msg}", case.name));
-            }};
-        }
-
-        // Every expected code is reported by cadlab.
-        for code in case.expect {
-            if !ours.iter().any(|f| f.code == *code) {
-                fail!(format!("cadlab did not report {code}"));
-            }
-        }
-
-        // One-to-one matching, KiCad findings first.
-        let mut taken = vec![false; ours.len()];
-        for k in &theirs {
-            for (label, at) in &k.anchors {
-                if let Some(want) = anchor_of(p, label) {
-                    let d = (want.x.0 - at.x.0).abs().max((want.y.0 - at.y.0).abs());
-                    if d > POS_TOL {
-                        fail!(format!("KiCad puts {label} at {at:?}, cadlab at {want:?}"));
-                    }
-                }
-            }
-            let hit = ours.iter().enumerate().position(|(i, c)| !taken[i] && same(k, c));
-            match hit {
-                Some(i) => {
-                    taken[i] = true;
-                    let c = &ours[i];
-                    log.push(format!("  ok  {}  <->  {}", c.text, k.text));
-                    if let (Some(a), Some(b)) = (k.value, c.value)
-                        && (a - b).abs() > VALUE_TOL
-                    {
-                        fail!(format!("measured {b} mm by cadlab, {a} mm by KiCad: {} / {}", c.text, k.text));
-                    }
-                }
-                None => match allowed(case.name, Side::Kicad, k) {
-                    Some(a) => {
-                        log.push(format!("  allowed (KiCad only)  {}{}", k.text, why(a, &mut used)));
-                    }
-                    None => fail!(format!("only KiCad reports: {}", k.text)),
-                },
-            }
-        }
-        for (i, c) in ours.iter().enumerate() {
-            if taken[i] {
-                continue;
-            }
-            match allowed(case.name, Side::Cadlab, c) {
-                Some(a) => {
-                    log.push(format!("  allowed (cadlab only)  {}{}", c.text, why(a, &mut used)));
-                }
-                None => fail!(format!("only cadlab reports: {} {:?}", c.text, c.items)),
-            }
-        }
-        eprintln!("{}", log.join("\n"));
+        compare_case(&case, p, &report, &export.uuids, &Frame::of(p), &mut used, &mut problems);
     }
-    for (a, u) in ALLOW.iter().zip(&used) {
-        if !u {
-            problems.push(format!("unused allowlist entry {:?} {} ({:?})", a.side, a.rule, a.case));
-        }
-    }
+    unused_entries(&used, &mut problems);
     assert!(problems.is_empty(), "DRC cross-check differences:\n{}", problems.join("\n"));
+}
+
+/// The same comparison with cadlab's side checked on the board imported back from the export
+/// into an empty project (`board.import_kicad`, circuit built from the board, D32): KiCad's DRC
+/// of the original export must match cadlab's DRC of the import, finding by finding, through
+/// the import's UUID table.
+#[test]
+fn kicad_drc_of_export_matches_cadlab_drc_of_import() {
+    use cadlab::kicad_import::{self, BoardImportOptions, rules};
+    let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
+    let mut problems = Vec::new();
+    let mut used = vec![false; ALLOW.len()];
+    for case in crosscheck::cases() {
+        let (_d, _r, s) = crosscheck::build(&case);
+        let p = crosscheck::project(&s);
+        let dir = crosscheck::keep_dir("drc_crosscheck_import", case.name);
+        let pcb = crosscheck::export_kicad(p, &dir);
+        let report = kicad_drc(&cli, &pcb);
+        let read = |ext: &str| std::fs::read_to_string(pcb.with_extension(ext)).ok();
+        let (k, _) = rules::parse(read("kicad_pro").as_deref(), read("kicad_dru").as_deref()).unwrap();
+        let opts = BoardImportOptions { rules: Some(k), ..Default::default() };
+        let mut q = Project::new("imported");
+        let (imported, _) = kicad_import::import(&mut q, &std::fs::read_to_string(&pcb).unwrap(), &opts).unwrap();
+        let frame = Frame { origin: imported.origin };
+        compare_case(&case, &q, &report, &imported.uuids, &frame, &mut used, &mut problems);
+    }
+    unused_entries(&used, &mut problems);
+    assert!(problems.is_empty(), "DRC cross-check differences (imported boards):\n{}", problems.join("\n"));
 }
 
 #[test]

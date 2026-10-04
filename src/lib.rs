@@ -45,6 +45,7 @@ pub mod fab;
 pub mod fabout;
 pub mod geom;
 pub mod id;
+pub mod kicad_import;
 pub mod kicad_pcb;
 pub mod landpattern;
 pub mod lint;
