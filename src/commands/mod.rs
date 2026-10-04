@@ -5,6 +5,7 @@ pub mod board;
 pub mod bom;
 pub mod catalog;
 pub mod circuit;
+pub mod diffpair;
 pub mod drc;
 pub mod electrical;
 pub mod export;
@@ -31,6 +32,7 @@ pub fn register_all(r: &mut Registry) {
     footprint::register(r);
     circuit::register(r);
     net::register(r);
+    diffpair::register(r);
     block::register(r);
     bom::register(r);
     board::register(r);

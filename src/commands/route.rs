@@ -13,8 +13,8 @@ use crate::geom::Point;
 use crate::model::Project;
 use crate::refs::ObjectRef;
 use crate::router::{
-    self, ConnStatus, ConnectionReport, Effort, Hooks, PlaceMode, RouteError, RouteOptions, RouteStats, Scope,
-    TrackRequest,
+    self, ConnStatus, ConnectionReport, Effort, GroupTuned, Hooks, MeanderStyle, PairReport, PairStatus, PlaceMode,
+    RouteError, RouteOptions, RouteStats, Scope, SkewTuned, TrackRequest, TuneOptions,
 };
 use crate::units::Nm;
 
@@ -26,6 +26,8 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<RouteFanout>()
         .register::<RouteRip>()
         .register::<RouteStatus>()
+        .register::<RouteDiffpair>()
+        .register::<RouteTune>()
         .register::<ImportSes>();
 }
 
@@ -150,6 +152,9 @@ pub struct Routed {
     /// Nets whose unlocked routing was pushed aside or rerouted to make room (`shove`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rerouted: Vec<String>,
+    /// Differential pairs, routed first as coupled traces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pairs: Vec<PairReport>,
 }
 
 fn summary(o: &Routed) -> String {
@@ -160,6 +165,9 @@ fn summary(o: &Routed) -> String {
     );
     if !o.rerouted.is_empty() {
         out.push_str(&format!("; moved {} to make room", o.rerouted.join(", ")));
+    }
+    for pr in &o.pairs {
+        out.push_str(&format!("\n{}", pair_line(pr)));
     }
     for c in o.connections.iter().filter(|c| c.status == ConnStatus::Failed) {
         out.push_str(&format!(
@@ -190,7 +198,108 @@ fn route_error(e: RouteError) -> CommandError {
         RouteError::Endpoint(m) => CommandError::invalid_args("route.invalid_endpoint", m)
             .with_hint("give two placed pins of the same net, e.g. U1.3 and C2.1"),
         RouteError::Cancelled => CommandError::new(ErrorKind::Cancelled, "cancelled", "operation cancelled"),
+        RouteError::UnknownPair(n) => {
+            CommandError::not_found("diffpair.not_found", format!("no differential pair `{n}`"))
+                .with_subject(ObjectRef::Named { kind: "diffpair".into(), name: n })
+                .with_hint("list pairs with `diffpair.list`; define one with `diffpair.add`")
+        }
+        RouteError::UnknownGroup(n) => {
+            CommandError::not_found("lengthgroup.not_found", format!("no length group `{n}`"))
+                .with_subject(ObjectRef::Named { kind: "lengthgroup".into(), name: n })
+                .with_hint("list groups with `lengthgroup.list`; define one with `lengthgroup.set`")
+        }
     }
+}
+
+/// One line about a pair.
+fn pair_line(pr: &PairReport) -> String {
+    let status = match pr.status {
+        PairStatus::Routed => "routed coupled",
+        PairStatus::Partial => "partly routed coupled",
+        PairStatus::Failed => "not routed coupled",
+        PairStatus::Nothing => "nothing to route coupled",
+    };
+    let mut s = format!(
+        "pair {} ({}/{}): {status} ({}/{} connection(s){}), {} wide, {} gap; lengths {} / {}, skew {}, uncoupled {}",
+        pr.name,
+        pr.p,
+        pr.n,
+        pr.routed,
+        pr.connections,
+        if pr.layers.is_empty() { String::new() } else { format!(" on {}", pr.layers.join(", ")) },
+        pr.width,
+        pr.gap,
+        pr.length_p,
+        pr.length_n,
+        pr.skew,
+        pr.uncoupled
+    );
+    for f in &pr.failures {
+        s.push_str(&format!("\n  failed {} -> {}: {}", f.from, f.to, f.reason.as_deref().unwrap_or("unknown reason")));
+    }
+    s
+}
+
+/// Warnings about pairs: failures, skew or uncoupled length over the pair's limits, and
+/// connections left to the ordinary router.
+fn report_pairs(ctx: &mut Context<'_>, pairs: &[PairReport], left_hint: bool) -> Result<(), CommandError> {
+    let c = ctx.project()?.circuit().clone();
+    for pr in pairs {
+        let subj = || ObjectRef::Named { kind: "diffpair".into(), name: pr.name.clone() };
+        for f in &pr.failures {
+            let mut d = Diagnostic::warning(
+                "route.diffpair_failed",
+                format!("pair {}: {} -> {}: {}", pr.name, f.from, f.to, f.reason.as_deref().unwrap_or("not routed")),
+            )
+            .with_subject(subj())
+            .with_hint(f.hints.first().cloned().unwrap_or_else(|| "move the parts to give the pair room".into()));
+            if let Some(at) = f.at {
+                d = d.at(at);
+            }
+            ctx.report(d);
+        }
+        let Some(dp) = c.diffpairs.get(&pr.name) else { continue };
+        if let Some(m) = dp.max_skew
+            && pr.routed > 0
+            && pr.skew > m
+        {
+            ctx.report(
+                Diagnostic::warning(
+                    "route.diffpair_skew",
+                    format!("pair {}: skew {} is over its {} limit", pr.name, pr.skew, m),
+                )
+                .with_subject(subj())
+                .with_hint("run route.tune, or give the shorter net room for skew bumps"),
+            );
+        }
+        if let Some(m) = dp.max_uncoupled
+            && pr.routed > 0
+            && pr.uncoupled > m
+        {
+            ctx.report(
+                Diagnostic::warning(
+                    "route.diffpair_uncoupled",
+                    format!("pair {}: {} runs uncoupled, over its {} limit", pr.name, pr.uncoupled, m),
+                )
+                .with_subject(subj())
+                .with_hint("place the pair's pads closer together and in line, or raise max_uncoupled"),
+            );
+        }
+        if left_hint && pr.left > 0 {
+            ctx.report(
+                Diagnostic::info(
+                    "route.diffpair_left",
+                    format!(
+                        "pair {}: {} connection(s) of {}/{} are not part of the coupled routing (pads without a partner)",
+                        pr.name, pr.left, pr.p, pr.n
+                    ),
+                )
+                .with_subject(subj())
+                .with_hint(format!("route them with route.nets {} {} (or route.all)", pr.p, pr.n)),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn options(budget_ms: Option<u64>, layers: &[String], effort: Option<Effort>, seed: Option<u64>) -> RouteOptions {
@@ -263,7 +372,8 @@ fn run_router(ctx: &mut Context<'_>, scope: Scope, opts: RouteOptions) -> Result
         }
         ctx.report(d);
     }
-    Ok(Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted })
+    report_pairs(ctx, &result.pairs, false)?;
+    Ok(Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted, pairs: result.pairs })
 }
 
 /// Route every unrouted connection on the board.
@@ -300,6 +410,10 @@ pub struct RouteAll {
     /// Largest arc radius with `arcs` (default 1mm); smaller where the rules require.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arc_radius: Option<Nm>,
+    /// Route differential pairs first, as coupled traces, and compensate their skew
+    /// (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairs: Option<bool>,
 }
 
 impl Command for RouteAll {
@@ -312,6 +426,7 @@ impl Command for RouteAll {
         let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
+        opts.pairs = self.pairs;
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         run_router(ctx, Scope::All, opts)
     }
@@ -357,6 +472,10 @@ pub struct RouteNets {
     /// Largest arc radius with `arcs` (default 1mm); smaller where the rules require.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arc_radius: Option<Nm>,
+    /// Route differential pairs whose two nets are listed first, as coupled traces (default
+    /// true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairs: Option<bool>,
 }
 
 impl Command for RouteNets {
@@ -388,6 +507,7 @@ impl Command for RouteNets {
         let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
+        opts.pairs = self.pairs;
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         run_router(ctx, Scope::Nets(nets), opts)
     }
@@ -866,6 +986,238 @@ impl Command for RouteStatus {
                 a.nets.join(", "),
                 a.components.join(", ")
             ));
+        }
+        s
+    }
+}
+
+/// Route differential pairs as coupled traces: each pair's connections are routed as one
+/// centerline at the pair's width and gap (net class `diff_pair_width` / `diff_pair_gap`, as
+/// `impedance.solve` writes them), split into the two tracks, with short breakouts at the pads;
+/// on one layer, no vias. Then the skew is compensated with small bumps on the shorter net.
+/// Pads without a partner (a pull-up on one net) are left to `route.nets` / `route.all`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteDiffpair {
+    /// Pairs to route (default: all).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pairs: Vec<String>,
+    /// Copper layers the pairs may use (default: all; each connection stays on one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
+    /// Time budget in milliseconds (default 60000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
+    /// Compensate the skew with small bumps on the shorter net (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skew: Option<bool>,
+}
+
+/// What `route.diffpair` did.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PairsRouted {
+    /// Per pair: outcome, width, gap, lengths, skew, coupled and uncoupled length.
+    pub pairs: Vec<PairReport>,
+    /// Track segments added.
+    pub tracks: usize,
+    /// Track segments replaced.
+    pub tracks_removed: usize,
+}
+
+impl Command for RouteDiffpair {
+    const NAME: &'static str = "route.diffpair";
+    const SUMMARY: &'static str =
+        "Route differential pairs as coupled traces at their width and gap, then fix their skew";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["pairs"];
+    type Output = PairsRouted;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<PairsRouted, CommandError> {
+        let p = ctx.project()?;
+        if p.circuit().diffpairs.is_empty() {
+            return Err(CommandError::conflict("diffpair.none", "the circuit has no differential pairs")
+                .with_hint("define one with diffpair.add (diffpair.suggest finds them by net names)"));
+        }
+        let mut opts = options(self.budget_ms, &self.layers, None, None);
+        opts.skew = self.skew;
+        let result = {
+            let progress = |done: u64, total: Option<u64>, msg: &str| ctx.progress(done, total, msg);
+            let cancelled = || ctx.check_cancelled().is_err();
+            router::route_diffpairs(p, &self.pairs, &opts, &Hooks { progress: &progress, cancelled: &cancelled })
+                .map_err(route_error)?
+        };
+        let pm = ctx.project_mut()?;
+        pm.board_mut().tracks.retain(|t| !result.removed_tracks.contains(&t.id));
+        let (tracks, tracks_removed) = (result.tracks.len(), result.removed_tracks.len());
+        for mut t in result.tracks {
+            t.id = pm.alloc_id();
+            pm.board_mut().tracks.push(t);
+        }
+        report_pairs(ctx, &result.pairs, true)?;
+        Ok(PairsRouted { pairs: result.pairs, tracks, tracks_removed })
+    }
+
+    fn summarize(o: &PairsRouted) -> String {
+        let mut s = format!("added {} track segment(s)", o.tracks);
+        for p in &o.pairs {
+            s.push_str(&format!("\n{}", pair_line(p)));
+        }
+        s
+    }
+}
+
+/// Length tuning: add meanders so every length group member reaches its target (or the
+/// longest member) within the tolerance, and compensate the skew of differential pairs with
+/// small bumps on the shorter net. Pairs are meandered as pairs (both tracks together).
+/// Meanders are checked exactly and by the DRC; a member whose meanders the DRC flags is
+/// left as it was and reported. Tuning only adds length.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteTune {
+    /// Length group to tune (default: all groups, and the skew of every pair).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Meander shape: trombone (default; U bumps on one side), accordion (U bumps alternating
+    /// sides) or sawtooth (triangular teeth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<MeanderStyle>,
+    /// Largest bump height (default 1mm, at least 2.5 spacings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amplitude: Option<Nm>,
+    /// Center distance between neighboring meander legs (default 4 track widths, at least
+    /// width + clearance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing: Option<Nm>,
+    /// Corner size: chamfer or arc radius (default a quarter of the spacing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner: Option<Nm>,
+    /// Round meander corners with arcs (default false: 45° chamfers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arcs: Option<bool>,
+    /// Compensate differential pair skew (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skew: Option<bool>,
+}
+
+/// What `route.tune` achieved.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Tuned {
+    /// Per length group: target, range, and per member the length before and after and the
+    /// residual error.
+    pub groups: Vec<GroupTuned>,
+    /// Per differential pair: skew before and after.
+    pub pairs: Vec<SkewTuned>,
+    /// Track segments added.
+    pub tracks: usize,
+    /// Track segments replaced.
+    pub tracks_removed: usize,
+}
+
+impl Command for RouteTune {
+    const NAME: &'static str = "route.tune";
+    const SUMMARY: &'static str = "Length tuning: meanders to bring length groups to target and fix pair skew";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["group"];
+    type Output = Tuned;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Tuned, CommandError> {
+        for (label, v) in [("amplitude", self.amplitude), ("spacing", self.spacing), ("corner", self.corner)] {
+            if v.is_some_and(|v| v <= Nm::ZERO) {
+                return Err(CommandError::invalid_args("route.invalid_meander", format!("`{label}` must be positive"))
+                    .with_hint("leave it out for the default"));
+            }
+        }
+        let p = ctx.project()?;
+        let c = p.circuit();
+        if c.length_groups.is_empty() && c.diffpairs.is_empty() {
+            return Err(CommandError::conflict("route.nothing_to_tune", "no length groups and no differential pairs")
+                .with_hint("define a group with lengthgroup.set or a pair with diffpair.add"));
+        }
+        let opts = TuneOptions {
+            style: self.style.unwrap_or_default(),
+            amplitude: self.amplitude,
+            spacing: self.spacing,
+            corner: self.corner,
+            arcs: self.arcs.unwrap_or(false),
+            skew: self.skew.unwrap_or(true),
+        };
+        let res = router::tune(p, self.group.as_deref(), &opts).map_err(route_error)?;
+        for g in &res.groups {
+            for m in &g.members {
+                if let (Some(e), Some(why)) = (m.error, &m.reason)
+                    && e != Nm::ZERO
+                {
+                    ctx.report(
+                        Diagnostic::warning(
+                            "route.tune_unmet",
+                            format!(
+                                "length group {}: {} {} is {} off its range: {why}",
+                                g.name,
+                                m.kind,
+                                m.name,
+                                e.abs()
+                            ),
+                        )
+                        .with_subject(ObjectRef::Named { kind: "lengthgroup".into(), name: g.name.clone() })
+                        .with_subject(ObjectRef::Name(m.name.clone()))
+                        .with_hint(
+                            "raise amplitude or lower spacing, move nearby copper, or rip and route the member again",
+                        ),
+                    );
+                }
+            }
+        }
+        for s in &res.pairs {
+            if let Some(why) = &s.reason {
+                ctx.report(
+                    Diagnostic::warning("route.tune_skew", format!("pair {}: skew {} left: {why}", s.name, s.after))
+                        .with_subject(ObjectRef::Named { kind: "diffpair".into(), name: s.name.clone() })
+                        .with_hint("move nearby copper away from the shorter net, or route the pair again"),
+                );
+            }
+        }
+        let pm = ctx.project_mut()?;
+        pm.board_mut().tracks.retain(|t| !res.removed_tracks.contains(&t.id));
+        let (tracks, tracks_removed) = (res.tracks.len(), res.removed_tracks.len());
+        for mut t in res.tracks {
+            t.id = pm.alloc_id();
+            pm.board_mut().tracks.push(t);
+        }
+        Ok(Tuned { groups: res.groups, pairs: res.pairs, tracks, tracks_removed })
+    }
+
+    fn summarize(o: &Tuned) -> String {
+        let mut s = format!("added {} track segment(s), replaced {}", o.tracks, o.tracks_removed);
+        let opt = |v: Option<Nm>| v.map_or("-".to_string(), |x| x.to_string());
+        for g in &o.groups {
+            s.push_str(&format!(
+                "\ngroup {}: target {} (range {} .. {})",
+                g.name,
+                opt(g.target),
+                opt(g.min),
+                opt(g.max)
+            ));
+            for m in &g.members {
+                s.push_str(&format!(
+                    "\n  {} {}: {} -> {}{}{}",
+                    m.kind,
+                    m.name,
+                    opt(m.before),
+                    opt(m.after),
+                    match m.error {
+                        Some(e) if e != Nm::ZERO => format!(" ({} off)", e),
+                        Some(_) => " (ok)".to_string(),
+                        None => String::new(),
+                    },
+                    if m.meanders > 0 { format!(", {} meander(s)", m.meanders) } else { String::new() }
+                ));
+            }
+        }
+        for p in &o.pairs {
+            s.push_str(&format!("\npair {}: skew {} -> {}", p.name, p.before, p.after));
+            if p.bumps > 0 {
+                s.push_str(&format!(" ({} bump(s))", p.bumps));
+            }
         }
         s
     }

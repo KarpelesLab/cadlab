@@ -437,6 +437,33 @@ a validated baseline is the part cadlab can produce faithfully today. ODB++ woul
 reuses its MIT code, to a proprietary license it cannot pass on; IPC-2581 (D31) carries the same fab data openly.
 KiCad's ODB++ export is not an oracle to build against for the same reason (D7).
 
+### D38. Differential pairs routed as one centerline; length tuning by closed-form meanders (2026-10-04)
+Differential pairs and length groups are circuit data (`circuit.json` `diffpairs`, `length_groups`; optional
+fields, no migration), provider-agnostic, with lengths and limits in `Nm`. A pair's geometry comes from a net
+class (`diff_pair_width`/`diff_pair_gap`, written by `impedance.solve`), so the impedance solved for a layer is
+what gets routed; pair nets use the pair width everywhere and the DRC accepts the pair gap between the two
+nets. Pairs are routed by a dedicated A* on the pair's centerline (fat capsule including the 45° miter reach,
+0°/45° moves, polarity in the state) and split by offsetting, rather than by routing two nets and pulling them
+together: coupling is then exact by construction (gap within nanometers) and skew only comes from bends and
+breakouts. A pair stays on one layer with no vias in v1, since the impedance and the via transition (two vias,
+return path) need more than the grid router models; breakouts are straight stubs priced at twice their length.
+The pair's topology is planned once for both nets (pads matched into ends, spanning tree over ends,
+flow-through links on one component first) so both nets follow the same path. `route.all` routes pairs
+first, and push-and-shove never moves pair copper. Length tuning inserts trombone, accordion or sawtooth bumps
+on straight tracks, exact-checked and halved until they fit, with the last bump's height solved from the closed
+form of its added length, so targets are met to vertex rounding; pairs are meandered on their centerline
+(both nets gain the same length), skew is compensated by 45° bumps on the shorter net near where it lost
+length. Lengths are tracks along arcs plus via spans between the outermost layers used, through the stackup
+(the effective dielectrics, assumed when unspecified like the impedance calculator), so they are
+deterministic and need no extra user input; a net's length counts all its copper. Pair and length checks are
+DRC warnings with stable codes (`drc.diffpair_gap`, `_width`, `_uncoupled`, `_skew`, `drc.length_mismatch`):
+they are design intent, not manufacturability. Everything is sequential and deterministic, and the DRC still
+has the last word (flagged pair connections and meanders are removed and reported).
+*Why:* agents need pairs that come out right the first time at the solved geometry and a single command that
+closes length budgets with a report of what remains; a centerline router reuses the exact checks and index of
+D22/D34 with little new machinery, and closed-form meanders make the residual error negligible instead of
+iterating on measured lengths.
+
 ## Open questions
 
 None currently.

@@ -171,6 +171,43 @@ pub struct NetClass {
     pub diff_impedance: Option<Quantity>,
 }
 
+/// A differential pair: two nets routed as coupled traces (`diffpair.add`, docs/ROUTER.md).
+/// Width and gap come from the net class `class` (default: the positive net's class):
+/// `diff_pair_width` and `diff_pair_gap`, as written by `impedance.solve`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiffPair {
+    /// Positive net (`USB_DP`).
+    pub p: String,
+    /// Negative net (`USB_DM`).
+    pub n: String,
+    /// Net class with the pair's width, gap and impedance (default: the class of `p`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// Largest allowed length difference between the two nets (intra-pair skew).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_skew: Option<Nm>,
+    /// Largest allowed uncoupled length of either net (breakouts from pads, skew bumps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_uncoupled: Option<Nm>,
+}
+
+/// A length-matching group: nets and differential pairs whose routed lengths must agree
+/// (`lengthgroup.set`). With `target`, every member must be within `tolerance` of it;
+/// without, within `tolerance` below the longest member.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LengthGroup {
+    /// Members: net names, or differential pair names (a pair counts as the mean length of
+    /// its two nets).
+    pub members: Vec<String>,
+    /// Absolute target length (default: match the longest member).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Nm>,
+    /// Allowed deviation.
+    pub tolerance: Nm,
+}
+
 /// A reusable subcircuit: components with local designators, nets with local names, and the
 /// nets exposed as ports.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -224,9 +261,58 @@ pub struct Circuit {
     /// Block instances: instance name → block name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<String, String>,
+    /// Differential pairs by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub diffpairs: BTreeMap<String, DiffPair>,
+    /// Length-matching groups by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub length_groups: BTreeMap<String, LengthGroup>,
 }
 
 impl Circuit {
+    /// The differential pair a net belongs to: (pair name, pair).
+    pub fn diffpair_of(&self, net: &str) -> Option<(&str, &DiffPair)> {
+        self.diffpairs.iter().find(|(_, d)| d.p == net || d.n == net).map(|(k, d)| (k.as_str(), d))
+    }
+
+    /// The net class giving a pair's width and gap: its own `class`, else the positive net's.
+    pub fn diffpair_class(&self, d: &DiffPair) -> Option<&NetClass> {
+        let name = d.class.as_ref().or_else(|| self.nets.get(&d.p).and_then(|n| n.class.as_ref()))?;
+        self.netclasses.get(name)
+    }
+
+    /// Follows a net rename in differential pairs and length groups.
+    pub fn rename_net_refs(&mut self, from: &str, to: &str) {
+        for d in self.diffpairs.values_mut() {
+            for n in [&mut d.p, &mut d.n] {
+                if n == from {
+                    *n = to.to_string();
+                }
+            }
+        }
+        for g in self.length_groups.values_mut() {
+            for m in &mut g.members {
+                if m == from {
+                    *m = to.to_string();
+                }
+            }
+        }
+    }
+
+    /// Drops the pairs using a removed net, and the net (and those pairs) from length groups.
+    /// Returns the names of the pairs removed.
+    pub fn forget_net(&mut self, net: &str) -> Vec<String> {
+        let gone: Vec<String> =
+            self.diffpairs.iter().filter(|(_, d)| d.p == net || d.n == net).map(|(k, _)| k.clone()).collect();
+        for k in &gone {
+            self.diffpairs.remove(k);
+        }
+        for g in self.length_groups.values_mut() {
+            g.members.retain(|m| m != net && !gone.contains(m));
+        }
+        gone
+    }
+
     /// Reference designators in natural order (`R2` before `R10`).
     pub fn refdes_sorted(&self) -> Vec<&str> {
         let mut v: Vec<&str> = self.components.keys().map(String::as_str).collect();

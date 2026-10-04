@@ -48,6 +48,7 @@ pub mod id;
 pub mod kicad_import;
 pub mod kicad_pcb;
 pub mod landpattern;
+pub mod lengths;
 pub mod lint;
 pub mod mcad;
 pub mod model;

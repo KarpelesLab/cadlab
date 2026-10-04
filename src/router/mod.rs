@@ -32,6 +32,10 @@
 //!    with the unlocked copper of other nets pushed aside (walkaround, shove, spring-back);
 //!    [`place_track`] places a track along waypoints the same way.
 //!
+//! Differential pairs (`pairs`) are routed before everything else as coupled traces
+//! ([`route_diffpairs`]), their skew compensated with small bumps; [`tune`] adds meanders to
+//! bring length groups to their targets.
+//!
 //! Deterministic for a given input, options and seed (unless the time budget cuts it short).
 
 mod arcs;
@@ -42,8 +46,12 @@ mod grid;
 mod gridless;
 mod index;
 mod model;
+mod pairs;
 mod post;
 mod shove;
+mod tune;
+
+pub use tune::{GroupTuned, MeanderStyle, MemberTuned, SkewTuned, TuneOptions, TuneResult, tune};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -114,6 +122,10 @@ pub struct RouteOptions {
     pub arcs: bool,
     /// Largest arc radius with `arcs` (default 1 mm).
     pub arc_radius: Option<Nm>,
+    /// Route the differential pairs in scope first, as coupled traces (default on).
+    pub pairs: Option<bool>,
+    /// Compensate the skew of the pairs just routed with small bumps (default on).
+    pub skew: Option<bool>,
 }
 
 /// Result of [`fanout`].
@@ -256,6 +268,80 @@ pub struct RouteResult {
     /// Nets whose routing was pushed aside or rerouted to make room (`shove`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rerouted: Vec<String>,
+    /// Differential pairs routed first, as coupled traces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pairs: Vec<PairReport>,
+}
+
+/// Outcome of a differential pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairStatus {
+    /// Every coupled connection routed.
+    Routed,
+    /// Some coupled connections routed.
+    Partial,
+    /// None routed.
+    Failed,
+    /// Nothing to route coupled (already connected, or no pads to pair up).
+    Nothing,
+}
+
+/// What happened to a differential pair, with its measured geometry afterwards.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PairReport {
+    /// Pair name.
+    pub name: String,
+    /// Positive net.
+    pub p: String,
+    /// Negative net.
+    pub n: String,
+    /// Outcome.
+    pub status: PairStatus,
+    /// Track width used.
+    pub width: Nm,
+    /// Gap used.
+    pub gap: Nm,
+    /// Coupled connections attempted.
+    pub connections: usize,
+    /// Coupled connections routed.
+    pub routed: usize,
+    /// Layers routed on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
+    /// Routed length of the positive net (tracks and vias).
+    pub length_p: Nm,
+    /// Routed length of the negative net.
+    pub length_n: Nm,
+    /// Length difference after skew compensation.
+    pub skew: Nm,
+    /// Skew bumps added to the shorter net.
+    pub skew_bumps: usize,
+    /// Coupled track length (the smaller of the two nets').
+    pub coupled: Nm,
+    /// Largest uncoupled track length of the two nets (breakouts, skew bumps).
+    pub uncoupled: Nm,
+    /// Connections of the two nets outside the coupled routing (pads without a partner,
+    /// such as a pull-up), left to the ordinary router.
+    pub left: usize,
+    /// Failed coupled connections, with reasons, locations and hints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<ConnectionReport>,
+}
+
+/// Result of [`route_diffpairs`]: tracks to add (IDs allocated in order from the project's
+/// allocator) and remove, and a report per pair.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PairsResult {
+    /// New tracks.
+    pub tracks: Vec<Track>,
+    /// Existing tracks replaced (skew compensation of routing already there).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_tracks: Vec<ObjectId>,
+    /// Per pair.
+    pub pairs: Vec<PairReport>,
+    /// The routed coupled connections, one per net.
+    pub connections: Vec<ConnectionReport>,
 }
 
 /// Router errors.
@@ -276,6 +362,12 @@ pub enum RouteError {
     /// Cancelled through the hook.
     #[error("routing cancelled")]
     Cancelled,
+    /// A differential pair does not exist.
+    #[error("no differential pair `{0}`")]
+    UnknownPair(String),
+    /// A length group does not exist.
+    #[error("no length group `{0}`")]
+    UnknownGroup(String),
 }
 
 /// The best negotiation state: (overused points, wires per net, failures per net).
@@ -292,8 +384,15 @@ fn costs(effort: Effort) -> Costs {
     }
 }
 
-/// Routes the connections in `scope`. The project is not modified.
+/// Routes the connections in `scope`. The project is not modified. Differential pairs whose
+/// two nets are in scope are routed first, coupled (unless `opts.pairs` is `Some(false)`).
 pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
+    if opts.pairs != Some(false) {
+        let names = pairs_in_scope(p, scope);
+        if !names.is_empty() {
+            return route_pairs_first(p, scope, &names, opts, hooks);
+        }
+    }
     let start = Instant::now();
     let first = route_once(p, scope, opts, hooks, Soft::No)?;
     if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
@@ -306,6 +405,281 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
         return Ok(r);
     }
     shove(p, scope, opts, hooks, first)
+}
+
+/// The differential pairs a scope routes coupled: every pair for [`Scope::All`], the pairs
+/// whose two nets are listed for [`Scope::Nets`].
+fn pairs_in_scope(p: &Project, scope: &Scope) -> Vec<String> {
+    let c = p.circuit();
+    let ok = |n: &str| c.nets.contains_key(n);
+    c.diffpairs
+        .iter()
+        .filter(|(_, d)| ok(&d.p) && ok(&d.n))
+        .filter(|(_, d)| match scope {
+            Scope::All => true,
+            Scope::Nets(list) => list.contains(&d.p) && list.contains(&d.n),
+            Scope::Connection { .. } => false,
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// Adds result items to a project (new IDs from its allocator), removing what they replace.
+fn apply_items(
+    q: &mut Project,
+    tracks: &[Track],
+    vias: &[Via],
+    removed_tracks: &[ObjectId],
+    removed_vias: &[ObjectId],
+) {
+    let b = q.board_mut();
+    b.tracks.retain(|t| !removed_tracks.contains(&t.id));
+    b.vias.retain(|v| !removed_vias.contains(&v.id));
+    for t in tracks {
+        let id = q.alloc_id();
+        q.board_mut().tracks.push(Track { id, ..t.clone() });
+    }
+    for v in vias {
+        let id = q.alloc_id();
+        q.board_mut().vias.push(Via { id, ..v.clone() });
+    }
+}
+
+/// What is on `q` and not on `p` (renumbered from `p`'s allocator), and what `q` dropped:
+/// (tracks, vias, removed tracks, removed vias).
+fn difference(p: &Project, q: &Project) -> (Vec<Track>, Vec<Via>, Vec<ObjectId>, Vec<ObjectId>) {
+    let (old_t, old_v): (BTreeSet<ObjectId>, BTreeSet<ObjectId>) =
+        (p.board().tracks.iter().map(|t| t.id).collect(), p.board().vias.iter().map(|v| v.id).collect());
+    let (new_t, new_v): (BTreeSet<ObjectId>, BTreeSet<ObjectId>) =
+        (q.board().tracks.iter().map(|t| t.id).collect(), q.board().vias.iter().map(|v| v.id).collect());
+    let mut alloc = p.clone();
+    let mut tracks: Vec<Track> = q.board().tracks.iter().filter(|t| !old_t.contains(&t.id)).cloned().collect();
+    let mut vias: Vec<Via> = q.board().vias.iter().filter(|v| !old_v.contains(&v.id)).cloned().collect();
+    for t in &mut tracks {
+        t.id = alloc.alloc_id();
+    }
+    for v in &mut vias {
+        v.id = alloc.alloc_id();
+    }
+    (tracks, vias, old_t.difference(&new_t).copied().collect(), old_v.difference(&new_v).copied().collect())
+}
+
+/// Recomputes the counts of a result from its connections and items.
+fn restat(out: &mut RouteResult) {
+    let st = &mut out.stats;
+    st.connections = out.connections.len();
+    st.routed = out.connections.iter().filter(|c| c.status == ConnStatus::Routed).count();
+    st.failed = st.connections - st.routed;
+    st.completion =
+        if st.connections == 0 { 100.0 } else { (st.routed as f64 * 1000.0 / st.connections as f64).round() / 10.0 };
+    st.tracks = out.tracks.len();
+    st.vias = out.vias.len();
+    st.length = tracks_length(&out.tracks);
+}
+
+/// Routes the pairs `names` coupled, then the rest of `scope` around them.
+fn route_pairs_first(
+    p: &Project,
+    scope: &Scope,
+    names: &[String],
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+) -> Result<RouteResult, RouteError> {
+    let start = Instant::now();
+    let pr = route_diffpairs(p, names, opts, hooks)?;
+    let mut q = p.clone();
+    apply_items(&mut q, &pr.tracks, &[], &pr.removed_tracks, &[]);
+    let sub = RouteOptions {
+        pairs: Some(false),
+        budget: opts.budget.map(|b| b.saturating_sub(start.elapsed()).max(Duration::from_millis(100))),
+        ..opts.clone()
+    };
+    let rest = route(&q, scope, &sub, hooks)?;
+    let mut q2 = q.clone();
+    apply_items(&mut q2, &rest.tracks, &rest.vias, &rest.removed_tracks, &rest.removed_vias);
+    let (tracks, vias, removed_tracks, removed_vias) = difference(p, &q2);
+    let mut out = rest;
+    out.tracks = tracks;
+    out.vias = vias;
+    out.removed_tracks = removed_tracks;
+    out.removed_vias = removed_vias;
+    let mut conns = pr.connections;
+    conns.append(&mut out.connections);
+    out.connections = conns;
+    out.pairs = pr.pairs;
+    restat(&mut out);
+    Ok(out)
+}
+
+/// Routes differential pairs (`names`, all when empty) as coupled traces on the board as it
+/// is, then compensates their skew (unless `opts.skew` is `Some(false)`). Only the coupled
+/// connections are routed: pads of the two nets without a partner pad (a pull-up, say) are
+/// left to the ordinary router. Every new track is checked by the DRC; a connection with a
+/// flagged track is taken out and reported. The project is not modified.
+pub fn route_diffpairs(
+    p: &Project,
+    names: &[String],
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+) -> Result<PairsResult, RouteError> {
+    let start = Instant::now();
+    let slots = routing_slots(p, &opts.layers)?;
+    let deadline = opts.budget.map(|b| start + b);
+    let outs = pairs::route_pairs(p, names, &slots, deadline, hooks)?;
+    let mut q = p.clone();
+    let mut owner: BTreeMap<u64, (usize, usize)> = BTreeMap::new();
+    for (pi, po) in outs.iter().enumerate() {
+        for (ci, t) in &po.tracks {
+            let id = q.alloc_id();
+            owner.insert(id.0, (pi, *ci));
+            q.board_mut().tracks.push(Track { id, ..t.clone() });
+        }
+    }
+    // Verification: connections with a track in a DRC error are taken out.
+    let mut drc_failed: BTreeMap<(usize, usize), String> = BTreeMap::new();
+    for _ in 0..4 {
+        let bad = drc_owners(&q, &owner);
+        if bad.is_empty() {
+            break;
+        }
+        for (k, why) in bad {
+            drc_failed.entry(k).or_insert(why);
+        }
+        q.board_mut().tracks.retain(|t| owner.get(&t.id.0).is_none_or(|k| !drc_failed.contains_key(k)));
+    }
+    // Skew compensation, pair by pair, kept only when DRC-clean.
+    let mut skews: BTreeMap<String, SkewTuned> = BTreeMap::new();
+    if opts.skew != Some(false) {
+        let topts = TuneOptions { skew: true, ..Default::default() };
+        for (pi, po) in outs.iter().enumerate() {
+            let routed = (0..po.conns.len()).any(|ci| po.conns[ci].ok && !drc_failed.contains_key(&(pi, ci)));
+            if !routed {
+                continue;
+            }
+            let before = q.clone();
+            let ids: BTreeSet<u64> = q.board().tracks.iter().map(|t| t.id.0).collect();
+            let st = tune::compensate_pairs(&mut q, std::slice::from_ref(&po.name), &topts);
+            let new: BTreeMap<u64, (usize, usize)> =
+                q.board().tracks.iter().filter(|t| !ids.contains(&t.id.0)).map(|t| (t.id.0, (pi, 0))).collect();
+            if !new.is_empty() && !drc_owners(&q, &new).is_empty() {
+                q = before;
+                continue;
+            }
+            if let Some(s) = st.into_iter().next() {
+                skews.insert(po.name.clone(), s);
+            }
+        }
+    }
+    // Reports.
+    let c = q.circuit();
+    let mut reports = Vec::new();
+    let mut connections = Vec::new();
+    for (pi, po) in outs.iter().enumerate() {
+        let d = &c.diffpairs[&po.name];
+        let cp = crate::lengths::coupling(&q, d, po.rules.gap);
+        let mut rep = PairReport {
+            name: po.name.clone(),
+            p: d.p.clone(),
+            n: d.n.clone(),
+            status: PairStatus::Nothing,
+            width: po.rules.width,
+            gap: po.rules.gap,
+            connections: po.conns.len(),
+            routed: 0,
+            layers: vec![],
+            length_p: cp.length_p.total,
+            length_n: cp.length_n.total,
+            skew: cp.skew,
+            skew_bumps: skews.get(&po.name).map_or(0, |s| s.bumps),
+            coupled: cp.coupled_p.min(cp.coupled_n),
+            uncoupled: cp.uncoupled,
+            left: po.left,
+            failures: vec![],
+        };
+        for (ci, co) in po.conns.iter().enumerate() {
+            let drc = drc_failed.get(&(pi, ci));
+            let ok = co.ok && drc.is_none();
+            let mk = |net: &str, from: &str, to: &str| ConnectionReport {
+                net: net.to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                status: if ok { ConnStatus::Routed } else { ConnStatus::Failed },
+                reason: None,
+                at: None,
+                layer: None,
+                hints: vec![],
+                subjects: vec![],
+            };
+            if ok {
+                rep.routed += 1;
+                if let Some(l) = &co.layer
+                    && !rep.layers.contains(l)
+                {
+                    rep.layers.push(l.clone());
+                }
+                connections.push(mk(&d.p, &co.labels[0], &co.labels[1]));
+                connections.push(mk(&d.n, &co.labels[2], &co.labels[3]));
+            } else {
+                let mut f = mk(&d.p, &co.labels[0], &co.labels[1]);
+                f.to = format!("{} (with {} -> {})", co.labels[1], co.labels[2], co.labels[3]);
+                f.reason = match drc {
+                    Some(why) => Some(format!("coupled route removed after verification ({why})")),
+                    None => co.reason.clone(),
+                };
+                f.at = co.at.map(P::to_point);
+                f.layer = co.layer.clone();
+                f.hints = co.hints.clone();
+                f.subjects = vec![
+                    ObjectRef::Named { kind: "diffpair".into(), name: po.name.clone() },
+                    ObjectRef::Net(d.p.clone()),
+                    ObjectRef::Net(d.n.clone()),
+                ];
+                rep.failures.push(f);
+            }
+        }
+        if let Some(e) = &po.error {
+            rep.status = PairStatus::Failed;
+            rep.failures.push(ConnectionReport {
+                net: d.p.clone(),
+                from: d.p.clone(),
+                to: d.n.clone(),
+                status: ConnStatus::Failed,
+                reason: Some(e.clone()),
+                at: None,
+                layer: None,
+                hints: vec!["create the nets, or fix the pair with diffpair.add".into()],
+                subjects: vec![ObjectRef::Named { kind: "diffpair".into(), name: po.name.clone() }],
+            });
+        } else if rep.connections > 0 {
+            rep.status = match rep.routed {
+                0 => PairStatus::Failed,
+                r if r == rep.connections => PairStatus::Routed,
+                _ => PairStatus::Partial,
+            };
+        }
+        reports.push(rep);
+    }
+    let (tracks, _, removed_tracks, _) = difference(p, &q);
+    Ok(PairsResult { tracks, removed_tracks, pairs: reports, connections })
+}
+
+/// Owners of the tracks named in DRC errors (other than unrouted connections).
+fn drc_owners(q: &Project, owner: &BTreeMap<u64, (usize, usize)>) -> BTreeMap<(usize, usize), String> {
+    let mut bad = BTreeMap::new();
+    for d in crate::drc::check(q) {
+        if d.severity != crate::diag::Severity::Error || d.code == "drc.unrouted" {
+            continue;
+        }
+        for s in &d.subjects {
+            if let ObjectRef::Item { kind, index } = s
+                && kind == "track"
+                && let Some(&k) = owner.get(index)
+            {
+                bad.entry(k).or_insert_with(|| format!("{}: {}", d.code, d.message));
+            }
+        }
+    }
+    bad
 }
 
 /// Connections left unrouted by a full run get one more chance each: push-and-shove on the
@@ -1357,6 +1731,7 @@ fn route_once(
         removed_tracks: vec![],
         removed_vias: vec![],
         rerouted: vec![],
+        pairs: vec![],
     })
 }
 

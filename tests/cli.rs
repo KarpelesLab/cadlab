@@ -377,3 +377,33 @@ fn electrical_commands_from_the_cli() {
     assert!(p.join("out/spice/p.cir").is_file());
     ok(&cadlab(&p, &["circuit", "lint"]));
 }
+
+#[test]
+fn diffpair_and_length_commands_from_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    cadlab(dir.path(), &["project", "new", "p"]);
+    let p = dir.path().join("p");
+    let ok = |o: &Output| {
+        assert!(o.status.success(), "{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    };
+    ok(&cadlab(&p, &["circuit", "add", "R 10k 1% 0402", "--count", "4"]));
+    ok(&cadlab(&p, &["net", "connect", "USB_D+", "R1.1", "R2.1"]));
+    ok(&cadlab(&p, &["net", "connect", "USB_D-", "R3.1", "R4.1"]));
+    let o = cadlab(&p, &["diffpair", "suggest"]);
+    ok(&o);
+    assert!(String::from_utf8_lossy(&o.stdout).contains("cadlab diffpair add USB_D+ USB_D- --name USB_D"));
+    ok(&cadlab(&p, &["impedance", "solve", "90", "--gap", "0.15mm", "--netclass", "usb"]));
+    let o = cadlab(&p, &["diffpair", "add", "USB_D+", "USB_D-", "--class", "usb", "--max-skew", "0.1mm", "--json"]);
+    ok(&o);
+    let v = json_of(&o);
+    assert_eq!(v["output"]["name"], "USB_D");
+    assert_eq!(v["output"]["rules"]["gap"], "0.15mm");
+    let o = cadlab(&p, &["lengthgroup", "set", "BUS", "USB_D", "--target", "20mm", "--json"]);
+    ok(&o);
+    assert_eq!(json_of(&o)["output"]["group"]["tolerance"], "0.1mm");
+    let o = cadlab(&p, &["diffpair", "list"]);
+    ok(&o);
+    assert!(String::from_utf8_lossy(&o.stdout).contains("USB_D: USB_D+ / USB_D-"));
+    let o = cadlab(&p, &["route", "tune", "nope"]);
+    assert!(!o.status.success());
+}

@@ -216,6 +216,120 @@ with no more unrouted connections than before. `route.all` and `route.nets` give
 unrouted one push-and-shove attempt on the routed board, within the time budget (this closed the last STM32 gap).
 The result lists the nets moved (`rerouted`) and replaces their old copper.
 
+### Differential pairs (`pairs`, M8)
+
+A pair is a circuit-level definition (`diffpair.add P N [--name] [--class] [--max-skew] [--max-uncoupled]`,
+stored in `circuit.json` under `diffpairs`); `diffpair.suggest` proposes pairs from net names (`X_P`/`X_N`,
+`X+`/`X-`, `XDP`/`XDM` or `XDN`, `XP`/`XN`; nets already paired are skipped), `diffpair.list` shows each pair
+with its rules and measured lengths, skew and coupling. Width and gap come from the pair's net class (its
+`class`, else the positive net's): `diff_pair_width` and `diff_pair_gap`, which `impedance.solve --gap
+--netclass` writes for a differential impedance target (ELECTRICAL.md); without them the class track width
+and clearance are used (`diffpair.no_class_rules` note). Nets of a pair use the pair width everywhere (the
+router's profile, `track.add`'s default and the DRC's class width check), and the DRC allows the pair's gap
+between its two nets where it is smaller than the clearance.
+
+`route.diffpair {pairs?, layers?, budget_ms?, skew?}` (`router::route_diffpairs`):
+
+1. **Plan.** Each pad of the positive net is matched with the nearest free pad of the negative net (greedy
+   by distance, at most 10 mm apart): an *end*. Ends are joined by a minimum spanning tree over their
+   midpoints (Kruskal; an edge is taken only when it joins new islands of both nets), so both nets get the same
+   topology. Ends on one component (an ESD array whose lines pass through it, pins 1/6 and 3/4) are joined
+   first by a straight *flow-through* link per net. Pads without a partner (a pull-up on one net) are left to
+   the ordinary router and counted in the report (`left`, `route.diffpair_left` note).
+2. **Search.** Each coupled connection is routed as one fat path: the centerline, by A* on a grid (pitch a
+   quarter of the fat width plus clearance, at least half the pair pitch) over states (cell, direction,
+   polarity) with 0°/45° moves only (45° bends cost 0.6 steps; no 90° bends, no vias: the pair stays on one
+   layer, the one its impedance was solved for). A move is legal when a capsule of radius `gap/2 + width`
+   grown by the outer-corner reach of a 45° bend (`(width + gap)/2 · (1/cos 22.5° − 1)`) keeps the clearance:
+   exact checks against the obstacle index, cached per cell and direction. The pair's own pads are obstacles
+   for the centerline, so it starts clear of them.
+3. **Breakout.** Sources and targets are the grid states near each end (within 1.2 × the pads' distance plus
+   the pair width, at least 1.5 mm) from which straight stubs from both pads to the two offset points are
+   legal: exact clearance checks, the stubs keep the gap from each other and from the other track's first
+   step, and never double back (interior angle at the junction ≥ 90°). They are priced at twice their length
+   (uncoupled track is dearer than coupled), so breakouts stay short. The polarity (positive net left or right
+   of the centerline) is part of the state, fixed at the source; when no target fits but the opposite
+   polarity would, the failure says the nets swap sides between the ends (`polarity: ...`, with hints: rotate
+   a part, swap pins; a pad row tapped from one side reverses a pair).
+4. **Split.** The centerline is offset by `±(width + gap)/2` with mitered corners (45° turns only, and each
+   grid step is at least the miter's length, so offsets never invert); the stubs join the pad centers. Both
+   tracks are checked exactly (clearance to everything, the gap between them), inserted in the index for the
+   next connection, and the result goes through the DRC: a connection with a flagged track is taken out and
+   reported.
+5. **Skew** (`skew`, default on): see length tuning below; kept only when DRC-clean.
+
+The report per pair (`PairReport`): status (`routed`, `partial`, `failed`, `nothing`), width, gap, layers,
+lengths of both nets, skew, coupled length, largest uncoupled length, skew bumps, and per failed connection a
+reason, location and hints (`route.diffpair_failed`); `route.diffpair_skew` / `route.diffpair_uncoupled`
+warn when the pair's limits are exceeded. `route.all` (and `route.nets` naming both nets of a pair) routes the
+pairs first, then everything else around them (`pairs: false` turns this off); push-and-shove never moves
+pair copper, so the coupling stays. Coupled connections that failed are then routed by the ordinary router,
+uncoupled (the pair report and the DRC show it).
+
+### Length tuning (`tune`, M8)
+
+Length groups (`lengthgroup.set NAME MEMBERS... [--target] [--tolerance]`, `circuit.json` `length_groups`):
+nets and pairs (a pair counts as the mean of its two nets) that must be within `tolerance` (default 0.1 mm) of
+`target`, or without a target within `tolerance` below the longest member. Lengths (`crate::lengths`) are
+track lengths along arcs plus, for each via, the distance between the centers of the outermost copper layers
+where the net's tracks meet it, from the stackup (dielectrics in effect, as the impedance calculator assumes
+them; ELECTRICAL.md). A net's length is all of its copper, branches included.
+
+`route.tune {group?, style?, amplitude?, spacing?, corner?, arcs?, skew?}` (`router::tune`):
+
+- **Meanders** replace parts of a member's straight tracks, longest first: *trombone* (U bumps on one side;
+  the side that worked last is tried first), *accordion* (U bumps alternating sides) or *sawtooth* (triangular
+  teeth). Legs are `spacing` apart (default 4 track widths, at least width + clearance), at most `amplitude`
+  high (default 1 mm, at least 2.5 spacings), corners 45° chamfers of `corner` (default spacing/4) or, with
+  `arcs`, tangent arcs of that radius. Each bump is checked exactly against other nets (clearance, arcs as
+  chords with 0.1 µm margin) and the net's own other copper (clearance as spacing); a bump that does not fit
+  is halved until it does or becomes smaller than the track. The last bump's height is solved from the closed
+  form of what a bump adds (U bump: `2h − (8 − 4√2)c` chamfered, `2h − (8 − 2π)r` with arcs; tooth:
+  `2√((s/2)² + h²) − s`), so the target is met to within vertex rounding (nanometers).
+- **Pairs** are tuned as pairs: bumps on the centerline of a coupled straight stretch (both tracks parallel at
+  the gap), offset to both tracks (concentric arcs, mitered chamfers). A U bump turns left and right equally
+  often, so both nets gain the same length and the skew does not change; the legs are far enough apart that
+  neighbouring legs are not taken as coupled (more than 1.5 gaps).
+- **Skew compensation** (all pairs, or the pairs in the group): when the two nets differ by more than 2 µm, 45°
+  triangular bumps (height at most max(width, gap), adding `(2√2 − 2)h` each) go on the shorter net, away from
+  its partner, on the coupled stretches nearest the bends where it is the inner track (where it lost length),
+  sliding along a stretch past places where they do not fit.
+- Tuning only adds length: members above their range are reported (`route.tune_unmet`), as are members without
+  room. Everything is DRC-checked at the end; a member (or a pair's skew bumps) whose new copper the DRC flags
+  is put back as it was, with any later change on the same nets.
+
+The output gives, per group, target and range, and per member the length before and after, the residual error
+and the bumps added; per pair the skew before and after.
+
+### DRC checks for pairs and groups
+
+All warnings (the board is manufacturable either way); `crate::lengths::checks`, run by `drc.run`:
+
+| Code | When |
+|---|---|
+| `drc.diffpair_gap` | a coupled section's edge-to-edge gap differs from the pair's by more than 10 % (at least 5 µm), worst per layer |
+| `drc.diffpair_width` | a track in a coupled section is not the pair width |
+| `drc.diffpair_uncoupled` | a net's track length outside coupled sections exceeds `max_uncoupled` |
+| `drc.diffpair_skew` | the routed lengths (vias included) differ by more than `max_skew` (fully routed pairs only) |
+| `drc.length_mismatch` | a fully routed group member is outside its range, with how much too short or long |
+| `drc.diffpair_invalid` | a pair names a net that does not exist |
+
+Coupled sections are pairs of parallel segments (within about 0.6°) of the two nets on one layer whose edges
+are at most 1.5 gaps apart, measured over their overlap; arcs are measured as chords of at most 5°, so
+concentric arcs of a pair give parallel chords.
+
+### Results (pairs and tuning)
+
+`tests/diffpair.rs`: a USB 2.0 device on four layers (0.2 mm prepreg): USB-C receptacle → flow-through ESD
+array (SOT-23-6) → TSSOP-20 MCU, class `usb` solved for 90 Ω at 0.15 mm gap (0.259 mm wide). `route.diffpair`
+routes the pair as three connections (coupled J1 → U2, flow-through U2, coupled U2 → U1), every coupled section
+at 0.15 mm ± 2 nm, skew compensated to 0 with three small bumps, DRC-clean, in well under a second in a debug
+build; `route.all` routes the pair first and completes the board around it (after the ESD's GND and VBUS vias
+are placed by hand: those pins sit between the flow-through lines). Eight DQ nets of 20–31 mm are matched to
+the longest within 0.1 mm with trombones, accordion meanders with arcs and sawtooth teeth, and to an absolute
+33 mm ± 0.05 mm, DRC-clean; the USB pair in a length group is lengthened 3 mm with coupled meanders, keeping
+its gap and skew. Results are identical for 1 and 4 threads.
+
 ### v1 limits
 
 - Through vias only; no blind/buried vias, no via-in-pad (dog bones only).
@@ -229,6 +343,12 @@ The result lists the nets moved (`rerouted`) and replaces their old copper.
 - A track crossing a pour can split it; the refill keeps DRC clean but the zone's net may show new ratsnest lines
   (route again).
 - Hole-to-hole between vias of the same net in *one* wire of a search is left to the final DRC.
+- Differential pairs: one layer per coupled connection, no vias in a pair (no layer change, no polarity swap),
+  0°/45° centerlines only (no arcs while routing; meanders may use arcs), straight breakout stubs. Pads tapped
+  from one side reverse a pair (reported as a polarity failure): such parts need flow-through pins or a route
+  past them with stubs. Pads enclosed by a flow-through pair (an ESD array's GND) need a via placed first.
+- Tuning adds length only, on straight tracks (arcs are never meandered), and does not reroute to make room;
+  a net's length counts every branch.
 - Parallelism is per batch of nets with disjoint regions: compact boards, where most nets meet near the same
   parts, get little of it. Memory is a few bytes per double-grid point per layer and profile, plus one search
   scratch (17 bytes per node) per thread.
@@ -319,7 +439,8 @@ copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC
   for incremental routing via API ("add this one net without destroying the rest"). *Done:* `route.track`,
   `route.connection` and leftovers of `route.all` / `route.nets` (above).
 - Fanout strategies for BGA/QFN (dog-bone, via-in-pad when allowed). *Done:* dog bones and escapes (D28).
-- Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8).
+- Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
+  `route.tune` (above, D38).
 
 ## API surface
 
@@ -333,6 +454,8 @@ copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC
 | `route.optimize` | post-process existing copper only (to come) |
 | `route.rip` | remove routing (net, area, all non-locked) |
 | `route.status` | unrouted connections, completion %, problem areas |
+| `route.diffpair` | route differential pairs coupled at their width and gap, then compensate skew |
+| `route.tune` | meanders to bring length groups to target, pair skew compensation |
 
 Options: time budget, max iterations, seed, layer restrictions per net class, via cost, allowed angles,
 keep/rip existing copper, effort level.

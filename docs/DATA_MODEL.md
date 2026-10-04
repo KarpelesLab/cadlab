@@ -45,7 +45,9 @@ Project
 │   ├── components  refdes → part, properties, block membership
 │   ├── nets        name → set of pins, net class
 │   ├── blocks      reusable hierarchical subcircuits and their instances
-│   └── netclasses  rule sets referenced by nets
+│   ├── netclasses  rule sets referenced by nets
+│   ├── diffpairs   differential pairs (two nets, class, skew/uncoupled limits)
+│   └── length_groups  nets/pairs to length-match (target or longest, tolerance)
 ├── schematic       OPTIONAL presentation: symbol positions/hints; regenerated when absent
 ├── board
 │   ├── stackup     layers, thicknesses, materials, copper weights, board spec (finish/color preferences)

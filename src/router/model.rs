@@ -151,7 +151,10 @@ pub(crate) fn profile_key(p: &Project, net: Option<&str>) -> ProfileKey {
     let r = &p.board().rules;
     let cl = net.and_then(|n| class_of(p, n));
     ProfileKey {
-        width: cl.and_then(|c| c.track_width).unwrap_or(r.track_width),
+        width: net
+            .and_then(|n| crate::lengths::pair_width(p.circuit(), n))
+            .or_else(|| cl.and_then(|c| c.track_width))
+            .unwrap_or(r.track_width),
         clear: cl.and_then(|c| c.clearance).unwrap_or(r.clearance),
         via_drill: cl.and_then(|c| c.via_drill).unwrap_or(r.via_drill),
         via_dia: cl.and_then(|c| c.via_diameter).unwrap_or(r.via_diameter),
@@ -211,7 +214,9 @@ impl RouterBoard {
             let (shape, anchor) = match &it.item {
                 ItemRef::Track(id) => {
                     let t = board.tracks.iter().find(|t| t.id == *id).expect("track");
-                    if !t.locked && t.mid.is_none() {
+                    // Differential pair copper stays coupled: push-and-shove never moves it.
+                    let paired = t.net.as_deref().is_some_and(|n| p.circuit().diffpair_of(n).is_some());
+                    if !t.locked && t.mid.is_none() && !paired {
                         movable = Some(it.item.clone());
                     }
                     let (a, b) = (P::of(t.start), P::of(t.end));
@@ -224,7 +229,8 @@ impl RouterBoard {
                 }
                 ItemRef::Via(id) => {
                     let v = board.vias.iter().find(|v| v.id == *id).expect("via");
-                    if !v.locked {
+                    let paired = v.net.as_deref().is_some_and(|n| p.circuit().diffpair_of(n).is_some());
+                    if !v.locked && !paired {
                         movable = Some(it.item.clone());
                     }
                     let c = P::of(v.at);

@@ -92,6 +92,8 @@ fn mcp_session() {
             "circuit",
             "net",
             "netclass",
+            "diffpair",
+            "lengthgroup",
             "block",
             "bom",
             "board",
@@ -161,6 +163,26 @@ fn mcp_session() {
     let r = c.tool("project", json!({"action": "info"}));
     assert_eq!(r["structuredContent"]["output"]["name"], "batched");
     assert_eq!(r["structuredContent"]["output"]["undo_depth"], 1);
+
+    // Differential pairs and length groups through their tools.
+    let r = c.tool(
+        "batch",
+        json!({"steps": [
+            {"cmd": "circuit.add", "args": {"part": "R 10k 1% 0402", "count": 2}},
+            {"cmd": "net.connect", "args": {"net": "CLK_P", "pins": ["R1.1"]}},
+            {"cmd": "net.connect", "args": {"net": "CLK_N", "pins": ["R2.1"]}}
+        ]}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    let r = c.tool("diffpair", json!({"action": "suggest"}));
+    assert_eq!(r["structuredContent"]["output"]["pairs"][0]["name"], "CLK", "{r}");
+    let r = c.tool("diffpair", json!({"action": "add", "args": {"p": "CLK_P", "n": "CLK_N", "max_skew": "0.1mm"}}));
+    assert_eq!(r["isError"], false, "{r}");
+    let r =
+        c.tool("lengthgroup", json!({"action": "set", "args": {"name": "G", "members": ["CLK"], "target": "10mm"}}));
+    assert_eq!(r["structuredContent"]["output"]["group"]["members"], json!(["CLK"]), "{r}");
+    let r = c.tool("route", json!({"action": "tune", "args": {"group": "nope"}}));
+    assert_eq!(r["structuredContent"]["error"]["code"], "lengthgroup.not_found");
 
     // A second project, then address the first by path.
     let path2 = dir.path().join("board2");

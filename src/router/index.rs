@@ -125,6 +125,12 @@ impl Checker<'_> {
     /// [`Checker::seg`] keeping `extra` more than the rules require (for chords standing for
     /// an arc).
     pub fn seg_margin(&self, layer: usize, a: P, b: P, net: u32, extra: f64) -> Option<Blocker> {
+        self.seg_ext(layer, a, b, net, extra, None)
+    }
+
+    /// [`Checker::seg_margin`] that also ignores the copper of net `skip` (the other net of a
+    /// differential pair, checked separately against the pair's gap).
+    pub fn seg_ext(&self, layer: usize, a: P, b: P, net: u32, extra: f64, skip: Option<u32>) -> Option<Blocker> {
         let pr = self.rb.profile(net);
         if !self.rb.inside(a) || !self.rb.inside(b) {
             return Some(Blocker::Outside);
@@ -135,8 +141,8 @@ impl Checker<'_> {
             match it {
                 Item::Static(o) => {
                     let ob = &self.rb.obstacles[o as usize];
-                    if ob.tracks & bit == 0 || (ob.net == Some(net) && matches!(ob.kind, ObKind::Pad | ObKind::Copper))
-                    {
+                    let own = ob.net == Some(net) || (skip.is_some() && ob.net == skip);
+                    if ob.tracks & bit == 0 || (own && matches!(ob.kind, ObKind::Pad | ObKind::Copper)) {
                         continue;
                     }
                     let req = pr.hw + ob.clear.with(pr.c) + extra;
@@ -148,7 +154,7 @@ impl Checker<'_> {
                     }
                 }
                 Item::Seg { net: m, layer: l, a: c, b: d } => {
-                    if m == net || l as usize != layer {
+                    if m == net || Some(m) == skip || l as usize != layer {
                         continue;
                     }
                     let po = self.rb.profile(m);
@@ -157,7 +163,7 @@ impl Checker<'_> {
                     }
                 }
                 Item::Via { net: m, at } => {
-                    if m == net {
+                    if m == net || Some(m) == skip {
                         continue;
                     }
                     let po = self.rb.profile(m);

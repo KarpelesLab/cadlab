@@ -1089,6 +1089,9 @@ pub(crate) fn resolve_point(p: &Project, tp: &TrackPoint) -> Result<(Point, Opti
 }
 
 pub(crate) fn net_width(p: &Project, net: Option<&str>) -> Nm {
+    if let Some(w) = net.and_then(|n| crate::lengths::pair_width(p.circuit(), n)) {
+        return w;
+    }
     net.and_then(|n| p.circuit().nets.get(n))
         .and_then(|n| n.class.as_ref())
         .and_then(|c| p.circuit().netclasses.get(c))

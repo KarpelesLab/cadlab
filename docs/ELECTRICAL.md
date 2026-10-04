@@ -5,8 +5,11 @@ stackup, track width for a current, a SPICE netlist for simulation, and a design
 `src/electrical/` (impedance, current, DRC checks), `src/spice.rs`, `src/lint.rs`; commands in
 `src/commands/electrical.rs`, `export.spice` and `circuit.lint`. Decisions: DECISIONS D29.
 
-Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md)); this document covers
-the numbers they route to.
+Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md), "Differential pairs"
+and "Length tuning", D38); this document covers the numbers they route to. A pair (`diffpair.add`) routes at
+its class's `diff_pair_width` / `diff_pair_gap`, the values `impedance.solve --gap --netclass` writes, and
+routed lengths include vias measured through the stackup's dielectrics (the same effective stackup as the
+impedance calculator).
 
 ## Stored data
 

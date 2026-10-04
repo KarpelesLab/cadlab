@@ -57,6 +57,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     out.extend(netclass_conflicts(p));
     out.extend(crate::electrical::current_check(p));
     out.extend(crate::electrical::impedance_check(p));
+    out.extend(crate::lengths::checks(p, &items));
     out.sort_by(|a, b| {
         let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
         (a.code.as_ref(), loc(a), &a.message).cmp(&(b.code.as_ref(), loc(b), &b.message))
@@ -279,7 +280,14 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
         if shared == 0 || a.net == b.net {
             continue;
         }
-        let required = clear[i].max(clear[j]);
+        let mut required = clear[i].max(clear[j]);
+        // The two nets of a differential pair may run at the pair's gap.
+        if ctx.classes
+            && let (Some(na), Some(nb)) = (&a.net, &b.net)
+            && let Some(g) = crate::lengths::pair_gap(ctx.p.circuit(), na, nb)
+        {
+            required = required.min(g.0);
+        }
         let (Some(ba), Some(bb)) = (boxes[i], boxes[j]) else { continue };
         if !ba.expand(required).intersects(&bb) {
             continue;
@@ -341,7 +349,9 @@ fn track_widths(ctx: &Ctx, out: &mut Vec<Diagnostic>) {
             Some(n) => d.with_subject(ObjectRef::Net(n.clone())),
             None => d,
         };
-        let class_width = ctx.class(t.net.as_deref()).and_then(|c| c.track_width);
+        let pair_width =
+            t.net.as_deref().filter(|_| ctx.classes).and_then(|n| crate::lengths::pair_width(ctx.p.circuit(), n));
+        let class_width = pair_width.or_else(|| ctx.class(t.net.as_deref()).and_then(|c| c.track_width));
         if t.width < ctx.rules.min_track_width {
             out.push(with_net(
                 Diagnostic::error(

@@ -357,6 +357,7 @@ impl Command for Rename {
                 c.nets.insert(to.clone(), net);
             }
         }
+        c.rename_net_refs(&from, to);
         // Board copper follows the rename.
         let b = ctx.project_mut()?.board_mut();
         let rename = |n: &mut Option<String>| {
@@ -396,8 +397,19 @@ impl Command for Remove {
             names.push(net_name(ctx.project()?, n)?);
         }
         let c = ctx.project_mut()?.circuit_mut();
+        let mut pairs = Vec::new();
         for n in &names {
             c.nets.remove(n);
+            pairs.extend(c.forget_net(n));
+        }
+        if !pairs.is_empty() {
+            ctx.report(
+                Diagnostic::info(
+                    "diffpair.removed",
+                    format!("differential pair(s) {} removed with their net", pairs.join(", ")),
+                )
+                .with_hint("define them again with diffpair.add if the nets come back"),
+            );
         }
         Ok(Touched { nets: names })
     }
@@ -917,6 +929,11 @@ impl Command for ClassRemove {
         }
         let c = ctx.project_mut()?.circuit_mut();
         c.netclasses.remove(&self.name);
+        for d in c.diffpairs.values_mut() {
+            if d.class.as_deref() == Some(self.name.as_str()) {
+                d.class = None;
+            }
+        }
         let mut nets = Vec::new();
         for (k, n) in c.nets.iter_mut() {
             if n.class.as_deref() == Some(self.name.as_str()) {

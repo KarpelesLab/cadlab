@@ -178,7 +178,9 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 
 ## M8 — Advanced electrical (L)
 
-- [ ] Differential pairs (routing + rules), length/skew matching with meanders
+- [x] Differential pairs (routing + rules), length/skew matching with meanders (`diffpair.*`, `lengthgroup.*`,
+      `route.diffpair`, `route.tune`, pair-first `route.all`, `drc.diffpair_*` / `drc.length_mismatch`;
+      [ROUTER.md](ROUTER.md), D38)
 - [x] Impedance calculator from stackup (microstrip/stripline) → width per net class (stackup dielectrics,
       `board.dielectric`, `impedance.calc/solve`, `drc.impedance`; [ELECTRICAL.md](ELECTRICAL.md), D29)
 - [x] SPICE netlist export (ngspice), simulation hooks (`export.spice`: supplies, analysis and `.control` lines;
