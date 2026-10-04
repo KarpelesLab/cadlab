@@ -130,6 +130,7 @@ randomized annealing.
 *Why:* a mounting hole is a mechanical board feature that agents add while designing the board, and making it a
 pad reuses every consumer of pads. A deterministic heuristic is reviewable and stable across runs, which matters
 more for an agent-driven flow than squeezing the last millimeters of ratsnest.
+
 ### D21. Fab profiles: sourced data, temporary rules, check before export (2026-10-04)
 Fab profiles are TOML files (`fab-profiles/`, embedded; user files in `<config dir>/fab-profiles/` merge onto
 them table by table). Every value is taken from the fab's own published pages, listed in `sources` with a
@@ -143,6 +144,7 @@ built from the profile and net class values ignored, so the project's rules are 
 unless `force`, and writes a deterministic zip (fixed timestamps) and a `fab-lock.json` with SHA-256 file hashes.
 *Why:* fab data goes stale and is easy to misremember, so provenance must be visible per value; reusing the DRC
 keeps one geometry engine; a deterministic bundle and lock make an order reproducible and diffable.
+
 ### D22. Router v1: exact sampled grid, PathFinder negotiation, DRC as the last word (2026-10-04)
 The M5 router is a grid maze router designed from published work only (Lee/A* maze routing, PathFinder by
 McMurchie and Ebeling 1995; D7). Legality is sampled on a half-pitch grid with obstacles inflated by
@@ -153,6 +155,7 @@ and reported, never returned silently. Results are deterministic for a given inp
 cuts a run short trades that for a best-so-far legal result.
 *Why:* correctness first (agents act on the output), with simple data structures that are easy to test; the
 gridless push-and-shove router of M6 can reuse the model, index, checks and reports.
+
 ### D23. Large-board speedups never change results (2026-10-04)
 Performance work on shared geometry (connectivity, ratsnest, DRC, zone fill, rendering) must produce
 byte-identical outputs: indexes and shortcuts only skip work whose answer is known, and exact queries still
@@ -165,6 +168,7 @@ thread count.
 the same answer from the same design on any machine. Approximate speedups (tiling a pour, clipping keep-aways
 to a window) would move vertices by snap rounding and are not taken, so the remaining zone fill time is spent
 in `polyclip`'s offsets (docs/BOARD.md, "Performance").
+
 ### D24. Rendered schematics span several sheets; the KiCad export stays one sheet (2026-10-04)
 The schematic layout is built from groups (one per IC/connector with what attaches to it, leftover chains,
 and one titled frame per block instance), which are packed onto sheets and never split. `render.schematic`
@@ -175,6 +179,7 @@ interchange target here: a multi-sheet KiCad schematic needs a root sheet with s
 global labels for every net crossing sheets, and per-sheet instance paths, all of which the ERC and netlist
 oracles would then test instead of the layout. One flat sheet keeps local labels and the exported netlist
 exactly cadlab's; hierarchical export can come later if humans need it.
+
 ### D25. Specctra: DSN out, SES in, written from the spec and checked against freerouting (2026-10-04)
 cadlab exchanges routing with external autorouters through Specctra files, implemented from the Specctra
 Design Language Reference and its session file description (`src/specctra/`, an algorithm module with its own
@@ -237,57 +242,6 @@ replaced and board placements of components that come back are kept. `kicad-cli`
 placeholder is one `bom.replace` away from a real part. Matching only on exact IDs, MPNs and value plus
 footprint keeps the result deterministic and explainable.
 
-### D30. 3D view: own z-buffer rasterizer, bodies from package specs, realistic render as face texture (2026-10-04)
-`render.board3d` is a separate command (not a `render.board` option: none of its layer, ratsnest, marker or crop
-options apply). It renders an orthographic view (isometric by default, any azimuth/elevation, top or turned-over
-bottom) with a small software z-buffer rasterizer, 3×3 supersampled, flat-shaded with one camera-relative
-directional light. The board faces reuse the realistic 2D render as a texture, with coverage from the outline and
-drill holes so holes are see-through; walls are extruded from the outline, cutouts and holes. Component bodies are
-convex solids generated from the footprint's stored `PackageSpec` (leads placed at the pads), a body box, or a grey
-courtyard box when there is neither. Output is deterministic (fixed draw order, strict depth test, independent
-bands); tests check identical bytes for identical input and probe pixels at projected component positions instead of
-storing golden images, whose floating-point rounding could differ between platforms.
-*Why:* no GPU or 3D engine dependency, MIT-clean, fast (tens of ms for the STM32 test board), and agents get a
-recognizable picture of the assembly from data cadlab already has. A z-buffer is simpler and more robust than a
-painter's algorithm with polygon splitting; supersampling gives anti-aliasing for free. Accurate bodies from STEP/VRML
-remain a separate roadmap item.
-### D33. Mouser and Nexar providers; LCSC/JLCPCB through imported parts lists (2026-10-04)
-Mouser (Search API key) and Nexar/Octopart (GraphQL, client credentials) are network providers like DigiKey:
-behind `net`, cached, credentials entered only through `cadlab config mouser|nexar` (D17), implemented from
-Mouser's published OpenAPI description and Nexar's documentation and published schema. Network providers send
-requests through a `supplier::http::Transport`, so tests use a mock transport and fixtures. Nexar returns one
-candidate per seller offer with a `<seller>:<sku>` SKU, brokers excluded and unauthorized sellers opt-in;
-neither Mouser's suggested replacement nor Octopart's similar parts count as drop-ins (D26). LCSC and JLCPCB
-have APIs, but only for approved partners, with non-public documentation and (LCSC) terms forbidding sharing
-technical aspects with third parties: cadlab ships no client and never scrapes. `catalog.import` instead turns a
-CSV parts list the user downloads into an offline `lcsc` catalog, matched by header names (neither publishes a
-stable export format), with explicit mapping for anything else and parameters of passives read from the
-description; it writes to the user catalog directory, outside projects. PCBWay's partner API has no parts
-search; PCBWay sources by MPN.
-*Why:* the fab profile already orders JLCPCB parts by LCSC SKU, and a user-provided list is the only source
-that is both permitted and reproducible. Header recognition plus explicit mapping survives export format
-changes without guessing, and reading values only for passives keeps parametric matching (D26) honest.
-### D31. Exchange outputs: IPC-2581C, STEP AP214 and IDF 3.0 written by hand, boxes for bodies (2026-10-04)
-`export.ipc2581`, `export.step` and `export.idf` write their formats directly from the published
-specifications, without XML or CAD-kernel dependencies: the files are text, the subset needed is small, and a
-kernel (OpenCASCADE) would bring a large C++ LGPL dependency. IPC-2581 lives with the other fab outputs
-(`src/fabout/ipc2581.rs`, included in `export.all`); STEP and IDF in a new algorithm module `src/mcad/` that
-shares one description of the board: outline loops of lines and exact arcs (arc centers recovered from the
-stored mid points, snapped to the roundest whole-nanometer center that fits), the drilled holes, and component
-bodies. Choices: bodies are boxes from the footprint's package dimensions (`body`), centered on the footprint
-origin, the only 3D data cadlab has until model import; components without one are reported, never guessed.
-The STEP board is an exact B-rep (planes and cylinders), not a faceted mesh, so MCAD tools measure holes and
-arcs exactly; holes that would touch the edge, a cutout or another hole are skipped with a warning rather than
-producing an invalid solid, and vias are opt-in. The STEP file is an assembly (one product per footprint body,
-instances named by designator) so MCAD trees show designators. IPC-2581 writes pads per layer with dictionary
-primitives (no padstack definitions), uses placeholder logistic data (projects store no people), and leaves out
-`HistoryRecord`/`Avl`, which need dates; STEP and IDF headers carry fixed dates. The IPC-2581 schema is not
-vendored (IPC's terms; not freely downloadable at the time of writing): structure is checked by tests that parse
-the output, and by `xmllint` against a user-supplied XSD when available. FreeCAD (`freecadcmd`) is an optional
-oracle that must read the STEP file as valid closed solids with the expected volumes.
-*Why:* MCAD and fab exchange are needed to finish a product, and these three formats cover what fabs and
-mechanical engineers ask for; hand-written text keeps the crate small and the output byte-for-byte deterministic,
-and exact geometry with explicit skips keeps the files trustworthy.
 ### D29. Electrical calculations: published closed forms, exact stored values, heuristics as warnings (2026-10-04)
 Impedance comes from published closed-form models, not a field solver: Hammerstad–Jensen for surface
 microstrip, Wheeler (as given by Wadell) for stripline with a parallel-combination approximation for
@@ -310,6 +264,60 @@ inputs and targets (not computed floats) keeps files deterministic and diffable.
 used made-up models for ICs would mislead; a visible placeholder is one `part.set` away from a real model.
 Keeping lint out of the default ERC keeps ERC results (and the M2 exit test) stable while making the lint
 available to agents in one call.
+
+### D30. 3D view: own z-buffer rasterizer, bodies from package specs, realistic render as face texture (2026-10-04)
+`render.board3d` is a separate command (not a `render.board` option: none of its layer, ratsnest, marker or crop
+options apply). It renders an orthographic view (isometric by default, any azimuth/elevation, top or turned-over
+bottom) with a small software z-buffer rasterizer, 3×3 supersampled, flat-shaded with one camera-relative
+directional light. The board faces reuse the realistic 2D render as a texture, with coverage from the outline and
+drill holes so holes are see-through; walls are extruded from the outline, cutouts and holes. Component bodies are
+convex solids generated from the footprint's stored `PackageSpec` (leads placed at the pads), a body box, or a grey
+courtyard box when there is neither. Output is deterministic (fixed draw order, strict depth test, independent
+bands); tests check identical bytes for identical input and probe pixels at projected component positions instead of
+storing golden images, whose floating-point rounding could differ between platforms.
+*Why:* no GPU or 3D engine dependency, MIT-clean, fast (tens of ms for the STM32 test board), and agents get a
+recognizable picture of the assembly from data cadlab already has. A z-buffer is simpler and more robust than a
+painter's algorithm with polygon splitting; supersampling gives anti-aliasing for free. Accurate bodies from STEP/VRML
+remain a separate roadmap item.
+
+### D31. Exchange outputs: IPC-2581C, STEP AP214 and IDF 3.0 written by hand, boxes for bodies (2026-10-04)
+`export.ipc2581`, `export.step` and `export.idf` write their formats directly from the published
+specifications, without XML or CAD-kernel dependencies: the files are text, the subset needed is small, and a
+kernel (OpenCASCADE) would bring a large C++ LGPL dependency. IPC-2581 lives with the other fab outputs
+(`src/fabout/ipc2581.rs`, included in `export.all`); STEP and IDF in a new algorithm module `src/mcad/` that
+shares one description of the board: outline loops of lines and exact arcs (arc centers recovered from the
+stored mid points, snapped to the roundest whole-nanometer center that fits), the drilled holes, and component
+bodies. Choices: bodies are boxes from the footprint's package dimensions (`body`), centered on the footprint
+origin, the only 3D data cadlab has until model import; components without one are reported, never guessed.
+The STEP board is an exact B-rep (planes and cylinders), not a faceted mesh, so MCAD tools measure holes and
+arcs exactly; holes that would touch the edge, a cutout or another hole are skipped with a warning rather than
+producing an invalid solid, and vias are opt-in. The STEP file is an assembly (one product per footprint body,
+instances named by designator) so MCAD trees show designators. IPC-2581 writes pads per layer with dictionary
+primitives (no padstack definitions), uses placeholder logistic data (projects store no people), and leaves out
+`HistoryRecord`/`Avl`, which need dates; STEP and IDF headers carry fixed dates. The IPC-2581 schema is not
+vendored (IPC's terms; not freely downloadable at the time of writing): structure is checked by tests that parse
+the output, and by `xmllint` against a user-supplied XSD when available. FreeCAD (`freecadcmd`) is an optional
+oracle that must read the STEP file as valid closed solids with the expected volumes.
+*Why:* MCAD and fab exchange are needed to finish a product, and these three formats cover what fabs and
+mechanical engineers ask for; hand-written text keeps the crate small and the output byte-for-byte deterministic,
+and exact geometry with explicit skips keeps the files trustworthy.
+
+### D33. Mouser and Nexar providers; LCSC/JLCPCB through imported parts lists (2026-10-04)
+Mouser (Search API key) and Nexar/Octopart (GraphQL, client credentials) are network providers like DigiKey:
+behind `net`, cached, credentials entered only through `cadlab config mouser|nexar` (D17), implemented from
+Mouser's published OpenAPI description and Nexar's documentation and published schema. Network providers send
+requests through a `supplier::http::Transport`, so tests use a mock transport and fixtures. Nexar returns one
+candidate per seller offer with a `<seller>:<sku>` SKU, brokers excluded and unauthorized sellers opt-in;
+neither Mouser's suggested replacement nor Octopart's similar parts count as drop-ins (D26). LCSC and JLCPCB
+have APIs, but only for approved partners, with non-public documentation and (LCSC) terms forbidding sharing
+technical aspects with third parties: cadlab ships no client and never scrapes. `catalog.import` instead turns a
+CSV parts list the user downloads into an offline `lcsc` catalog, matched by header names (neither publishes a
+stable export format), with explicit mapping for anything else and parameters of passives read from the
+description; it writes to the user catalog directory, outside projects. PCBWay's partner API has no parts
+search; PCBWay sources by MPN.
+*Why:* the fab profile already orders JLCPCB parts by LCSC SKU, and a user-provided list is the only source
+that is both permitted and reproducible. Header recognition plus explicit mapping survives export format
+changes without guessing, and reading values only for passives keeps parametric matching (D26) honest.
 
 ## Open questions
 
