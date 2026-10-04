@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/KarpelesLab/cadlab/compare/v0.0.1...v0.0.2) - 2026-10-04
+
+### Other
+
+- gridless search over expansion rooms (`router: grid|gridless|auto`), neck-downs, small dog-bone vias (D39)
+- plain check instead of a one-element loop (clippy 1.99)
+- Corpus manifest and docs follow the modeled import gaps (D40)
+- Tests for local settings, net ties, slots and custom rules; crosscheck board
+- model local pad settings, net ties, back pads, copper drawings, slots, custom rules (D40)
+- D42, spatial index done, performance tables, polyclip wishlist
+- Corpus timings in the ignored perf test; polyclip reproduction example
+- one-pass Prim and cached net costs in the improvement loop
+- skip primitives and region rings that leave no pixel
+- index the board outline's segments for edge and containment checks
+- Zone fill cache compares its inputs instead of serializing them
+- Packed R-tree for shape boxes; zone fill culls obstacles per zone
+- polyclip 0.0.4
+- Bench harness: corpus boards as optional input, output dumps for before/after comparisons
+- run the KiCad library import oracle in the oracle job
+- KiCad library import (PARTS, DATA_MODEL, TESTING, D41, roadmap)
+- import the user's KiCad footprint and symbol libraries (D41)
+- pin units and alternate functions, footprint provenance
+- release v0.0.1 ([#1](https://github.com/KarpelesLab/cadlab/pull/1))
+
 ## [0.0.1](https://github.com/KarpelesLab/cadlab/releases/tag/v0.0.1) - 2026-10-04
 
 ### Other
