@@ -86,7 +86,7 @@ fn write_dir(ctx: &Context<'_>, dir: Option<&Path>, files: Vec<OutFile>) -> Resu
 }
 
 fn options(mask_expansion: Option<Nm>) -> Options {
-    Options { mask_expansion: mask_expansion.unwrap_or(Nm::ZERO), ..Options::default() }
+    Options { mask_expansion, ..Options::default() }
 }
 
 /// Warnings shared by board outputs.
@@ -140,7 +140,7 @@ pub struct Gerber {
     /// Output directory (default out/fab, relative to the project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<PathBuf>,
-    /// Solder mask opening growth per side (default 0: openings equal pads).
+    /// Solder mask opening growth per side for this export, instead of the board's `mask_expansion` (pads and footprints with their own margin keep it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_expansion: Option<Nm>,
 }
@@ -261,7 +261,7 @@ pub struct Ipc2581 {
     /// Output file (default `out/fab/<project>-ipc2581.xml`, relative to the project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
-    /// Solder mask opening growth per side (default 0: openings equal pads).
+    /// Solder mask opening growth per side for this export, instead of the board's `mask_expansion` (pads and footprints with their own margin keep it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_expansion: Option<Nm>,
 }
@@ -294,7 +294,7 @@ pub struct All {
     /// Output directory (default out/fab, relative to the project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<PathBuf>,
-    /// Solder mask opening growth per side (default 0: openings equal pads).
+    /// Solder mask opening growth per side for this export, instead of the board's `mask_expansion` (pads and footprints with their own margin keep it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_expansion: Option<Nm>,
 }

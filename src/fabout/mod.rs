@@ -31,16 +31,100 @@ pub use layers::{drill_gerbers, gerbers};
 /// Export options.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Solder mask opening growth beyond the pad, on every side (default 0: openings equal pads).
-    pub mask_expansion: Nm,
+    /// Solder mask opening growth beyond pads on every side, for this export, instead of the
+    /// board's `mask_expansion` (pads and footprints with their own margin keep it).
+    pub mask_expansion: Option<Nm>,
     /// Version written to `.GenerationSoftware` and file comments.
     pub version: String,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { mask_expansion: Nm::ZERO, version: env!("CARGO_PKG_VERSION").to_string() }
+        Options { mask_expansion: None, version: env!("CARGO_PKG_VERSION").to_string() }
     }
+}
+
+/// The solder mask margin of a pad: its own (or its footprint's), else the export's, else the
+/// board's `mask_expansion`.
+pub(crate) fn mask_margin(p: &Project, o: &Options, pp: &PlacedPad) -> i64 {
+    pp.overrides.mask_margin.or(o.mask_expansion).unwrap_or(p.board().rules.mask_expansion).0
+}
+
+/// Pads with a solder mask opening on `side` ([`PlacedPad::mask_on`]).
+pub(crate) fn mask_pads(pads: &[PlacedPad], side: BoardSide) -> impl Iterator<Item = &PlacedPad> {
+    pads.iter().filter(move |pp| pp.mask_on(side))
+}
+
+/// A pad's mask opening as drawn: shape and rotation ([`oriented`]) grown by the margin.
+pub(crate) fn mask_opening(p: &Project, o: &Options, pp: &PlacedPad) -> (PadShape, Angle) {
+    let (s, a) = oriented(pp, fp_rotation(p, &pp.refdes));
+    (grow(s, mask_margin(p, o, pp)), a)
+}
+
+/// Pads with solder paste on `side`: SMD pads facing it (unless `paste: none`), through-hole
+/// pads with `paste: pad` on their footprint's side.
+pub(crate) fn paste_pads(pads: &[PlacedPad], side: BoardSide) -> impl Iterator<Item = &PlacedPad> {
+    pads.iter().filter(move |pp| pp.pad.has_paste() && pp.pad_side == side)
+}
+
+/// A pad's paste opening growth along its X and Y axes (before rotation): the margin plus the
+/// ratio of the side, each from the pad, else its footprint, else the board.
+pub(crate) fn paste_growth(p: &Project, pp: &PlacedPad, shape: &PadShape) -> (i64, i64) {
+    let r = &p.board().rules;
+    let m = pp.overrides.paste_margin.unwrap_or(r.paste_margin).0;
+    let ratio = pp.overrides.paste_ratio.unwrap_or(r.paste_ratio).0 as i128;
+    let (w, h) = shape.size();
+    let part = |v: Nm| ((v.0 as i128 * ratio) as f64 / 1e6).round() as i64;
+    (m + part(w), m + part(h))
+}
+
+/// A pad's paste opening as drawn, when it is not a set of windows: shape and rotation
+/// ([`oriented`]) resized by the paste margins (a size change, not an offset: rectangles stay
+/// sharp and rounded rectangles keep their corner ratio, as KiCad plots paste).
+pub(crate) fn paste_opening(p: &Project, pp: &PlacedPad) -> (PadShape, Angle) {
+    let (s, a) = oriented(pp, fp_rotation(p, &pp.refdes));
+    let (dx, dy) = paste_growth(p, pp, &pp.pad.shape);
+    (resize_xy(s, dx, dy), a)
+}
+
+/// A paste window of `size` (exposed pad windows): drawn as designed, paste margins do not apply
+/// (KiCad plots its paste-only apertures unchanged too).
+pub(crate) fn paste_window(_p: &Project, _pp: &PlacedPad, size: (Nm, Nm)) -> PadShape {
+    PadShape::Rect { w: size.0, h: size.1 }
+}
+
+/// A pad shape `2 dx` wider and `2 dy` taller (smaller when negative), its corner radius
+/// scaled with the shorter side; polygons are offset by the smaller of the two.
+pub(crate) fn resize_xy(shape: PadShape, dx: i64, dy: i64) -> PadShape {
+    let gx = |v: Nm| Nm((v.0 + 2 * dx).max(0));
+    let gy = |v: Nm| Nm((v.0 + 2 * dy).max(0));
+    match shape {
+        PadShape::Rect { w, h } => PadShape::Rect { w: gx(w), h: gy(h) },
+        PadShape::RoundRect { w, h, r } => {
+            let (nw, nh) = (gx(w), gy(h));
+            let (old, new) = (w.0.min(h.0).max(1) as i128, nw.0.min(nh.0) as i128);
+            PadShape::RoundRect { w: nw, h: nh, r: Nm((r.0 as i128 * new / old) as i64) }
+        }
+        s => grow_xy(s, dx, dy),
+    }
+}
+
+/// Mask (or paste) drawings of footprints on `side` (`Mask` or `Paste` layer) as regions.
+pub(crate) fn footprint_openings(
+    p: &Project,
+    layer: crate::model::footprint::GraphicLayer,
+    side: BoardSide,
+) -> crate::geom::poly::PolygonSet {
+    let mut out = Vec::new();
+    for (refdes, pf) in &p.board().footprints {
+        let Some(fp) = footprint_for(p, refdes) else { continue };
+        for g in fp.graphics.iter().filter(|g| g.layer == layer) {
+            if board::pad_side(pf.side, g.back) == side {
+                out.extend(board::fp_graphic_shape(pf, g));
+            }
+        }
+    }
+    out
 }
 
 /// A generated file.
@@ -193,6 +277,8 @@ pub struct Hole {
     pub net: Option<String>,
     /// Component pad (designator, number), for pad holes.
     pub pad: Option<(String, String)>,
+    /// A slot: the centers of its end circles (`diameter` is its width).
+    pub slot: Option<(Point, Point)>,
 }
 
 /// Every hole: pad holes (by designator and pad order), then vias (board order).
@@ -214,6 +300,7 @@ pub fn holes(p: &Project) -> Vec<Hole> {
             },
             net: pp.net.clone(),
             pad: Some((pp.refdes.clone(), pp.number.clone())),
+            slot: pp.slot,
         });
     }
     let names = p.board().stackup.copper_names();
@@ -229,6 +316,7 @@ pub fn holes(p: &Project) -> Vec<Hole> {
             kind: HoleKind::Via,
             net: v.net.clone(),
             pad: None,
+            slot: None,
         });
     }
     out
@@ -250,14 +338,25 @@ pub(crate) fn fp_rotation(p: &Project, refdes: &str) -> Angle {
     p.board().footprints.get(refdes).map_or(Angle::ZERO, |f| f.rotation)
 }
 
-/// A pad shape grown by `d` on every side (shrunk when negative).
+/// A pad shape grown by `d` on every side (shrunk when negative). Growing is an exact offset:
+/// a rectangle grows into a rectangle with corners rounded by `d`.
 pub(crate) fn grow(shape: PadShape, d: i64) -> PadShape {
-    let g = |v: Nm| Nm((v.0 + 2 * d).max(0));
+    grow_xy(shape, d, d)
+}
+
+/// A pad shape grown by `dx` along its X axis and `dy` along Y on each end (shrunk when
+/// negative); polygons by the smaller of the two.
+pub(crate) fn grow_xy(shape: PadShape, dx: i64, dy: i64) -> PadShape {
+    let gx = |v: Nm| Nm((v.0 + 2 * dx).max(0));
+    let gy = |v: Nm| Nm((v.0 + 2 * dy).max(0));
+    let d = dx.min(dy);
     match shape {
-        PadShape::Rect { w, h } => PadShape::Rect { w: g(w), h: g(h) },
-        PadShape::RoundRect { w, h, r } => PadShape::RoundRect { w: g(w), h: g(h), r: Nm((r.0 + d).max(0)) },
-        PadShape::Circle { d: dd } => PadShape::Circle { d: g(dd) },
-        PadShape::Oval { w, h } => PadShape::Oval { w: g(w), h: g(h) },
+        PadShape::Rect { w, h } if dx == dy && d > 0 => PadShape::RoundRect { w: gx(w), h: gy(h), r: Nm(d) },
+        PadShape::Rect { w, h } => PadShape::Rect { w: gx(w), h: gy(h) },
+        PadShape::RoundRect { w, h, r } => PadShape::RoundRect { w: gx(w), h: gy(h), r: Nm((r.0 + d).max(0)) },
+        PadShape::Circle { d: dd } if dx == dy => PadShape::Circle { d: gx(dd) },
+        PadShape::Circle { d: dd } => PadShape::Oval { w: gx(dd), h: gy(dd) },
+        PadShape::Oval { w, h } => PadShape::Oval { w: gx(w), h: gy(h) },
         PadShape::Polygon { points } if d != 0 => {
             use crate::geom::poly::{self, ArcTol, Join, Side};
             let ring: Vec<poly::Point> = points.iter().map(|&q| q.into()).collect();

@@ -78,15 +78,14 @@ fn footprints_from_a_pretty_directory() {
     for c in [
         "import.footprint_layer",
         "import.pad_approximated",
-        "import.local_setting",
         "import.footprint_model",
         "import.footprint_text",
         "import.footprint_arc",
     ] {
         assert!(codes.iter().any(|x| x == c), "missing {c} in {codes:?}");
     }
-    // B.SilkS, F.Cu and Edge.Cuts drawings of CUSTOM_TEST.
-    assert_eq!(o["not_imported"], 3);
+    // B.SilkS and Edge.Cuts drawings of CUSTOM_TEST (its F.Cu line is a copper drawing, D40).
+    assert_eq!(o["not_imported"], 2);
 
     let lib = project(&s).library();
     use cadlab::model::footprint::{GraphicLayer, Mount, PadKind, PadShape, Paste};
@@ -124,7 +123,8 @@ fn footprints_from_a_pretty_directory() {
     assert_eq!(custom.mount, Mount::Tht);
     let pad = |n: &str| custom.pads.iter().find(|p| p.number == n).unwrap();
     assert_eq!(pad("1").kind, PadKind::Tht { drill: mm("0.8") });
-    assert_eq!(pad("2").kind, PadKind::Tht { drill: mm("0.6") }, "slot drilled as its width");
+    assert_eq!(pad("2").kind, PadKind::Tht { drill: mm("0.6") }, "the drill is the slot width");
+    assert_eq!(pad("2").slot, Some((mm("0.6"), mm("1.6"))), "the oval hole is a slot");
     assert_eq!(pad("2").rotation, cadlab::units::Angle::parse("90").unwrap());
     assert_eq!(pad("").kind, PadKind::Npth { drill: mm("1.2") });
     assert_eq!(
@@ -134,6 +134,8 @@ fn footprints_from_a_pretty_directory() {
     );
     assert_eq!(pad("4").shape, PadShape::Rect { w: mm("1.2"), h: mm("0.6") }, "trapezoid as its bounding box");
     assert_eq!(pad("5").paste, Some(Paste::None), "no F.Paste layer");
+    assert_eq!(pad("5").overrides.mask_margin, Some(mm("0.05")), "local mask margin kept");
+    assert_eq!(custom.graphics.iter().filter(|g| g.layer == GraphicLayer::Copper).count(), 1, "copper drawing kept");
     assert!(custom.courtyard.len() > 16, "circular courtyard as a polygon");
 
     // The same files again: nothing changes.

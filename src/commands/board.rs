@@ -15,12 +15,16 @@ use crate::id::ObjectId;
 use crate::model::Project;
 use crate::model::board::{BoardSide, Contour, PlacedFootprint, RULE_FIELDS, RulePreset, Rules, Segment, Track, Via};
 use crate::model::sections::natural_cmp;
-use crate::units::{Angle, Nm};
+use crate::suggest::did_you_mean;
+use crate::units::{Angle, Nm, Scale};
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<Setup>()
         .register::<Outline>()
         .register::<SetRules>()
+        .register::<CustomRuleSet>()
+        .register::<CustomRuleRemove>()
+        .register::<CustomRuleList>()
         .register::<Info>()
         .register::<Ratsnest>()
         .register::<PlaceSet>()
@@ -392,6 +396,23 @@ pub struct SetRules {
     /// IPC class (1, 2 or 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipc_class: Option<u8>,
+    /// Absolute minimum clearance: local pad and footprint clearances and custom rules never go
+    /// below it (0: no floor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_clearance: Option<Nm>,
+    /// Solder mask opening growth beyond pads per side (negative shrinks), unless a pad or
+    /// footprint sets its own margin (`footprint.set`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_expansion: Option<Nm>,
+    /// Solder mask minimum web: openings closer than this are merged (0: never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_min_web: Option<Nm>,
+    /// Solder paste opening growth beyond SMD pads per side (usually negative).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_margin: Option<Nm>,
+    /// Solder paste growth as a fraction of each pad side (`-0.05`), added to the margin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_ratio: Option<Scale>,
 }
 
 /// A rule value that changed.
@@ -498,16 +519,43 @@ impl Command for SetRules {
             }
             r.ipc_class = c;
         }
+        for (field, v) in [("min_clearance", self.min_clearance), ("mask_min_web", self.mask_min_web)] {
+            if v.is_some_and(|v| v < Nm::ZERO) {
+                return Err(CommandError::invalid_args("board.invalid_rule", format!("`{field}` cannot be negative")));
+            }
+        }
+        if self.paste_ratio.is_some_and(|x| x.0 <= -500_000 || x.0 >= 1_000_000) {
+            return Err(CommandError::invalid_args(
+                "board.invalid_rule",
+                "`paste_ratio` is a fraction of the pad side, between -0.5 and 1",
+            )
+            .with_hint("e.g. -0.05 for 5 % smaller openings"));
+        }
+        r.min_clearance = self.min_clearance.unwrap_or(r.min_clearance);
+        r.mask_expansion = self.mask_expansion.unwrap_or(r.mask_expansion);
+        r.mask_min_web = self.mask_min_web.unwrap_or(r.mask_min_web);
+        r.paste_margin = self.paste_margin.unwrap_or(r.paste_margin);
+        r.paste_ratio = self.paste_ratio.unwrap_or(r.paste_ratio);
         if r.via_drill >= r.via_diameter {
             return Err(CommandError::invalid_args("board.invalid_rule", "via diameter must exceed via drill"));
         }
-        let changed = before
+        let mut changed: Vec<RuleChange> = before
             .lengths()
             .iter()
             .zip(r.lengths())
             .filter(|(a, b)| a.1 != b.1)
             .map(|(a, b)| RuleChange { field: a.0.into(), from: a.1, to: b.1 })
             .collect();
+        for (field, a, b) in [
+            ("min_clearance", before.min_clearance, r.min_clearance),
+            ("mask_expansion", before.mask_expansion, r.mask_expansion),
+            ("mask_min_web", before.mask_min_web, r.mask_min_web),
+            ("paste_margin", before.paste_margin, r.paste_margin),
+        ] {
+            if a != b {
+                changed.push(RuleChange { field: field.into(), from: a, to: b });
+            }
+        }
         ctx.project_mut()?.board_mut().rules = r.clone();
         for d in crate::drc::netclass_conflicts(ctx.project()?) {
             ctx.report(d);
@@ -536,6 +584,207 @@ impl Command for SetRules {
             s += &format!("\n  {}: {} -> {}", c.field, c.from, c.to);
         }
         s
+    }
+}
+
+/// Add or replace a custom design rule for part of the board: a clearance and/or a track width
+/// for the copper items in its scope (item kinds, layer, footprint, courtyard, area), instead of
+/// the net class, local and board values. When several rules match an item the last one wins.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomRuleSet {
+    /// Rule name; an existing rule of that name is replaced in place.
+    pub name: String,
+    /// Item kinds: pad, track, via, zone, graphic (default: any).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<crate::model::board::ItemKind>,
+    /// Copper layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+    /// Pads and copper drawings of footprints matching this designator or footprint name
+    /// pattern (`*`, `?`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footprint: Option<String>,
+    /// Items touching the courtyard of footprints matching this pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_courtyard: Option<String>,
+    /// Items entirely inside this keep-out or rule area (`keepout.add --rule-area`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_area: Option<String>,
+    /// Clearance between items in scope and other nets' copper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance: Option<Nm>,
+    /// Track width tracks in scope need (instead of their net class width).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_width: Option<Nm>,
+}
+
+/// The board's custom rules.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CustomRules {
+    /// Rules, in board order (later ones win).
+    pub rules: Vec<crate::model::board::CustomRule>,
+}
+
+fn custom_rules_text(o: &CustomRules) -> String {
+    if o.rules.is_empty() {
+        return "no custom rules".into();
+    }
+    o.rules
+        .iter()
+        .map(|r| {
+            let s = &r.scope;
+            let mut scope = Vec::new();
+            if !s.kinds.is_empty() {
+                let k: Vec<String> = s
+                    .kinds
+                    .iter()
+                    .map(|k| {
+                        serde_json::to_value(k).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
+                    })
+                    .collect();
+                scope.push(k.join("/"));
+            }
+            if let Some(l) = &s.layer {
+                scope.push(format!("on {l}"));
+            }
+            if let Some(f) = &s.footprint {
+                scope.push(format!("of {f}"));
+            }
+            if let Some(f) = &s.in_courtyard {
+                scope.push(format!("in the courtyard of {f}"));
+            }
+            if let Some(a) = &s.in_area {
+                scope.push(format!("inside {a}"));
+            }
+            let mut v = Vec::new();
+            if let Some(c) = r.clearance {
+                v.push(format!("clearance {c}"));
+            }
+            if let Some(w) = r.track_width {
+                v.push(format!("track width {w}"));
+            }
+            let scope = if scope.is_empty() { "everything".to_string() } else { scope.join(" ") };
+            format!("rule {}: {} for {scope}", r.name, v.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl Command for CustomRuleSet {
+    const NAME: &'static str = "board.custom_rule";
+    const SUMMARY: &'static str = "Add or replace a custom rule: clearance / track width for pads, tracks, ... in a footprint, courtyard, area or layer";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = CustomRules;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<CustomRules, CommandError> {
+        use crate::model::board::{CustomRule, RuleScope};
+        let p = ctx.project()?;
+        let bad = |msg: String| CommandError::invalid_args("board.invalid_custom_rule", msg);
+        if self.name.trim().is_empty() {
+            return Err(bad("a custom rule needs a name".into()));
+        }
+        if self.clearance.is_none() && self.track_width.is_none() {
+            return Err(bad("the rule sets nothing".into()).with_hint("give `clearance` and/or `track_width`"));
+        }
+        if self.clearance.is_some_and(|c| c < Nm::ZERO) || self.track_width.is_some_and(|w| w <= Nm::ZERO) {
+            return Err(bad("clearance cannot be negative, track width must be positive".into()));
+        }
+        if let Some(l) = &self.layer
+            && !p.board().is_copper(l)
+        {
+            let names = p.board().stackup.copper_names();
+            let s = did_you_mean(l, names.iter().map(String::as_str), 3);
+            return Err(CommandError::not_found("board.invalid_layer", format!("`{l}` is not a copper layer"))
+                .with_suggestions(&s));
+        }
+        if let Some(a) = &self.in_area
+            && !p.board().keepouts.iter().any(|k| &k.name == a)
+        {
+            let s = did_you_mean(a, p.board().keepouts.iter().map(|k| k.name.as_str()), 3);
+            return Err(CommandError::not_found("keepout.not_found", format!("no keep-out or rule area `{a}`"))
+                .with_suggestions(&s)
+                .with_hint_if_none("add one with `keepout.add --rule-area`"));
+        }
+        let rule = CustomRule {
+            name: self.name.clone(),
+            scope: RuleScope {
+                kinds: self.kinds,
+                layer: self.layer,
+                footprint: self.footprint,
+                in_courtyard: self.in_courtyard,
+                in_area: self.in_area,
+            },
+            clearance: self.clearance,
+            track_width: self.track_width,
+        };
+        let rules = &mut ctx.project_mut()?.board_mut().custom_rules;
+        match rules.iter_mut().find(|r| r.name == self.name) {
+            Some(r) => *r = rule,
+            None => rules.push(rule),
+        }
+        Ok(CustomRules { rules: rules.clone() })
+    }
+
+    fn summarize(o: &CustomRules) -> String {
+        custom_rules_text(o)
+    }
+}
+
+/// Remove a custom rule.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomRuleRemove {
+    /// Rule name.
+    pub name: String,
+}
+
+impl Command for CustomRuleRemove {
+    const NAME: &'static str = "board.custom_rule_remove";
+    const SUMMARY: &'static str = "Remove a custom rule";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = CustomRules;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<CustomRules, CommandError> {
+        let p = ctx.project()?;
+        let Some(i) = p.board().custom_rules.iter().position(|r| r.name == self.name) else {
+            let s = did_you_mean(&self.name, p.board().custom_rules.iter().map(|r| r.name.as_str()), 3);
+            return Err(CommandError::not_found(
+                "board.custom_rule_not_found",
+                format!("no custom rule `{}`", self.name),
+            )
+            .with_suggestions(&s)
+            .with_hint_if_none("list them with `board.custom_rules`"));
+        };
+        let rules = &mut ctx.project_mut()?.board_mut().custom_rules;
+        rules.remove(i);
+        Ok(CustomRules { rules: rules.clone() })
+    }
+
+    fn summarize(o: &CustomRules) -> String {
+        custom_rules_text(o)
+    }
+}
+
+/// List the board's custom rules.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomRuleList {}
+
+impl Command for CustomRuleList {
+    const NAME: &'static str = "board.custom_rules";
+    const SUMMARY: &'static str = "List the board's custom rules";
+    const KIND: CommandKind = CommandKind::Query;
+    type Output = CustomRules;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<CustomRules, CommandError> {
+        Ok(CustomRules { rules: ctx.project()?.board().custom_rules.clone() })
+    }
+
+    fn summarize(o: &CustomRules) -> String {
+        custom_rules_text(o)
     }
 }
 

@@ -225,7 +225,8 @@ fn export_commands() {
     assert_eq!(o["output"]["files"].as_array().unwrap().len(), 11);
     let mask = std::fs::read_to_string(root.join("g/tiny-F_Mask.gbr")).unwrap();
     check_gerber("mask", &mask);
-    assert!(mask.contains("%ADD11R,1.8X1.8*%") && mask.contains("%ADD12C,1.8*%"), "grown pad apertures:\n{mask}");
+    // Grown by an exact offset: the square pad gets corners rounded by the expansion.
+    assert!(mask.contains("Pad 1.8x1.8 r0.05") && mask.contains("%ADD12C,1.8*%"), "grown pad apertures:\n{mask}");
 
     // Unplaced parts are reported.
     exec(&r, &mut s, "circuit.add", json!({"part": "C 1uF 16V X5R 0402"}));

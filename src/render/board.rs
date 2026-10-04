@@ -13,7 +13,7 @@ use crate::geom::Point;
 use crate::geom::poly::{ArcTol, FillRule, Polygon, PolygonSet, Side};
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind, PlacedFootprint};
-use crate::model::footprint::{Footprint, GraphicGeometry, GraphicLayer, PadKind, Paste};
+use crate::model::footprint::{Footprint, GraphicGeometry, GraphicLayer, Paste};
 use crate::units::{LengthUnit, Nm};
 
 use super::font::{self, HAlign, VAlign};
@@ -287,15 +287,10 @@ fn text(s: &mut Scene, t: &str, at: (f64, f64), size: f64, quarter_turns: u8, mi
 fn footprint_graphics(s: &mut Scene, pl: &Placed<'_>, layer: &str, color: Color) {
     let tf = geo::transform(pl.pf);
     let side = pl.pf.side;
-    let on = |gl: GraphicLayer| {
-        let front = match gl {
-            GraphicLayer::Silk => "F.SilkS",
-            GraphicLayer::Fab => "F.Fab",
-            GraphicLayer::Courtyard => "F.CrtYd",
-        };
-        geo::side_layer(side, front) == layer
+    let on = |g: &crate::model::footprint::Graphic| {
+        g.layer != GraphicLayer::Copper && geo::side_layer(geo::pad_side(side, g.back), g.layer.front_name()) == layer
     };
-    for g in pl.fp.graphics.iter().filter(|g| on(g.layer)) {
+    for g in pl.fp.graphics.iter().filter(|g| on(g)) {
         let w = mm(g.width).max(0.05);
         match &g.geometry {
             GraphicGeometry::Path { points } => s.line(points.iter().map(|&q| mp(tf(q))).collect(), w, color),
@@ -342,6 +337,7 @@ fn board_graphics(s: &mut Scene, p: &Project, layer: &str, color: Color) {
             GraphicKind::Line { points, width } => {
                 s.line(points.iter().map(|&q| mp(q)).collect(), mm(*width).max(0.05), color)
             }
+            GraphicKind::Polygon { points, .. } => s.fill(points.iter().map(|&q| mp(q)).collect(), color, None),
             GraphicKind::Text { text: t, at, size, rotation } => {
                 let qt = ((rotation.to_deg_f64() / 90.0).round().rem_euclid(4.0)) as u8;
                 let size = mm(*size);
@@ -367,11 +363,23 @@ fn outline_rings(p: &Project) -> Vec<Vec<(f64, f64)>> {
         .collect()
 }
 
-/// Drill holes: (center, diameter, plated).
-fn holes(p: &Project, pads: &[geo::PlacedPad]) -> Vec<((f64, f64), f64, bool)> {
-    let mut v: Vec<((f64, f64), f64, bool)> =
-        pads.iter().filter_map(|pp| pp.hole.map(|(d, plated)| (mp(pp.center), mm(d), plated))).collect();
-    v.extend(p.board().vias.iter().map(|vi| (mp(vi.at), mm(vi.drill), true)));
+/// A drill hole to draw: center, diameter, plated, and the outline of a slot.
+type HoleDraw = ((f64, f64), f64, bool, Option<Vec<(f64, f64)>>);
+
+/// Drill holes (slots with their stadium outline).
+fn holes(p: &Project, pads: &[geo::PlacedPad]) -> Vec<HoleDraw> {
+    let mut v: Vec<HoleDraw> = pads
+        .iter()
+        .filter_map(|pp| {
+            let (d, plated) = pp.hole?;
+            let slot = pp
+                .slot
+                .and_then(|_| pp.hole_shape())
+                .map(|s| s.outer.0.iter().map(|q| (q.x as f64 / 1e6, q.y as f64 / 1e6)).collect());
+            Some((mp(pp.center), mm(d), plated, slot))
+        })
+        .collect();
+    v.extend(p.board().vias.iter().map(|vi| (mp(vi.at), mm(vi.drill), true, None)));
     v
 }
 
@@ -492,9 +500,12 @@ fn layers(p: &Project, v: &BoardView, items: &[geo::CopperItem]) -> Scene {
 }
 
 fn draw_holes(s: &mut Scene, p: &Project, pads: &[geo::PlacedPad], hair: f64) {
-    for (c, d, plated) in holes(p, pads) {
+    for (c, d, plated, slot) in holes(p, pads) {
         let stroke = (!plated).then_some((hair, Color::hex(0x9a9a9a)));
-        s.circle(c, d / 2.0, Some(BACKGROUND), stroke);
+        match slot {
+            Some(ring) => s.fill(ring, BACKGROUND, stroke),
+            None => s.circle(c, d / 2.0, Some(BACKGROUND), stroke),
+        }
     }
 }
 
@@ -515,7 +526,7 @@ fn pad_openings(
         let outer = pp.layers.iter().any(|l| l == cu);
         let c = dim(color, lit.refdes(&pp.refdes) || lit.net(pp.net.as_deref()));
         if paste {
-            if !outer || !matches!(pp.pad.kind, PadKind::Smd) {
+            if !outer || !pp.pad.has_paste() {
                 continue;
             }
             match &pp.pad.paste {
@@ -535,9 +546,9 @@ fn pad_openings(
                         s.fill(corners, c.alpha(140), None);
                     }
                 }
-                None => fill_set(s, &vec![pp.shape.clone()], c.alpha(140)),
+                None | Some(Paste::Pad) => fill_set(s, &vec![pp.shape.clone()], c.alpha(140)),
             }
-        } else if outer || pp.hole.is_some() {
+        } else if pp.mask_on(if layer.starts_with("F.") { BoardSide::Top } else { BoardSide::Bottom }) {
             let ring: Vec<(f64, f64)> = pp.shape.outer.0.iter().map(|q| (q.x as f64 / 1e6, q.y as f64 / 1e6)).collect();
             s.outline(ring, hair, c);
         }
@@ -611,11 +622,17 @@ fn realistic(p: &Project, side: BoardSide, items: &[geo::CopperItem]) -> Scene {
     }
     board_graphics(&mut s, p, &silk, lk.silk);
     let pads = geo::placed_pads(p);
-    let exposed: Vec<Polygon> =
-        pads.iter().filter(|pp| pp.layers.iter().any(|l| l == cu)).map(|pp| pp.shape.clone()).collect();
+    let exposed: Vec<Polygon> = pads
+        .iter()
+        .filter(|pp| pp.mask_on(side) && pp.layers.iter().any(|l| l == cu))
+        .map(|pp| pp.shape.clone())
+        .collect();
     fill_set(&mut s, &union(exposed), lk.finish);
-    for (c, d, _) in holes(p, &pads) {
-        s.circle(c, d / 2.0, Some(REALISTIC_BG), None);
+    for (c, d, _, slot) in holes(p, &pads) {
+        match slot {
+            Some(ring) => s.fill(ring, REALISTIC_BG, None),
+            None => s.circle(c, d / 2.0, Some(REALISTIC_BG), None),
+        }
     }
     for r in rings {
         s.outline(r, 0.05, Color::hex(0x8a7a4a));

@@ -250,6 +250,9 @@ pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
             GraphicLayer::Silk => Color::hex(0xf2f2f2),
             GraphicLayer::Fab => Color::hex(0xb0a060),
             GraphicLayer::Courtyard => Color::hex(0xd040d0),
+            GraphicLayer::Copper => Color::hex(0xc83434),
+            GraphicLayer::Mask => Color::hex(0x40a040),
+            GraphicLayer::Paste => Color::hex(0x8a8a8a),
         };
         let w = mm(g.width).max(0.03);
         match &g.geometry {

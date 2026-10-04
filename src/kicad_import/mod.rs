@@ -19,6 +19,11 @@
 //!   paste-only apertures as paste windows; silkscreen, fab and courtyard drawings) and
 //!   placements (position, rotation, side, lock). Identical footprints are shared; a footprint
 //!   equal to one in the project (within the few nanometers rotated exports leave) reuses it.
+//! - **Local settings** (DECISIONS D40): pad and footprint mask and paste margins, clearances
+//!   and zone connections, net-tie pad groups, pads on the back of their footprint, mask
+//!   openings per side, slotted holes, paste-in-hole, copper, mask and paste drawings of
+//!   footprints, the board's mask and paste settings, copper drawings and texts, and
+//!   `.kicad_dru` rules with geometric conditions (custom rules and the rule areas they name).
 //! - **Mounting holes** (one round hole pad, `MountingHole` footprints or `H`/`MH` designators)
 //!   become board holes; board-only footprints made of round holes become vias (stitching vias)
 //!   or holes.
@@ -55,7 +60,7 @@ use crate::model::board::{
     Zone,
 };
 use crate::model::circuit::valid_refdes;
-use crate::model::footprint::{GraphicLayer, PadKind, PadShape};
+use crate::model::footprint::{GraphicGeometry, GraphicLayer, PadKind, PadShape};
 use crate::model::part::FootprintRef;
 use crate::model::sections::natural_cmp;
 use crate::netlist::import::{
@@ -256,6 +261,8 @@ pub(super) struct Ctx {
     nets_by_num: BTreeMap<String, String>,
     /// Project text variables.
     vars: BTreeMap<String, String>,
+    /// Rule area names custom rules refer to (`enclosedByArea`): kept as named areas.
+    areas: BTreeSet<String>,
 }
 
 impl Ctx {
@@ -472,9 +479,17 @@ pub fn import(
     report.copper_layers = stackup.copper_layers;
     report.thickness = stackup.thickness;
 
-    if let Some(su) = root.get("setup") {
-        local_overrides(su, &ObjectRef::Name("setup".into()), &mut notes);
-    }
+    // Board-level solder mask and paste settings (absent: 0).
+    let setup_len = |k: &str| root.get("setup").and_then(|s| s.child_value(k)).and_then(mm).unwrap_or(Nm::ZERO);
+    let mask_paste = (
+        setup_len("pad_to_mask_clearance"),
+        setup_len("solder_mask_min_width"),
+        setup_len("pad_to_paste_clearance"),
+        root.get("setup")
+            .and_then(|s| s.child_value("pad_to_paste_clearance_ratio"))
+            .and_then(|v| crate::units::Scale::parse(v).ok())
+            .unwrap_or(crate::units::Scale(0)),
+    );
 
     // Origin.
     let aux = root.get("setup").and_then(|s| child_xy(s, "aux_axis_origin")).filter(|(x, y)| x.0 != 0 || y.0 != 0);
@@ -494,10 +509,13 @@ pub fn import(
         })
         .collect();
     let vars = opts.rules.as_ref().map(|k| k.text_variables.clone()).unwrap_or_default();
-    let ctx = Ctx { origin, copper: copper.clone(), nets_by_num, vars };
+    let areas: BTreeSet<String> =
+        opts.rules.iter().flat_map(|k| k.custom.iter().filter_map(|r| r.scope.in_area.clone())).collect();
+    let ctx = Ctx { origin, copper: copper.clone(), nets_by_num, vars, areas };
 
     // A fresh board: setup and rules first.
-    let rules_now = p.board().rules.clone();
+    let mut rules_now = p.board().rules.clone();
+    (rules_now.mask_expansion, rules_now.mask_min_web, rules_now.paste_margin, rules_now.paste_ratio) = mask_paste;
     *p.board_mut() = Board { stackup, rules: rules_now, ..Board::default() };
     if let Some(k) = &opts.rules {
         let (r, d) = rules::apply(p, k);
@@ -1090,22 +1108,19 @@ fn read_drawing(
         }
         return;
     }
-    if ctx.is_copper(&layer) || layer.ends_with(".Cu") {
-        notes.not_imported_agg(
-            "import.copper_drawing",
-            &layer,
-            Diagnostic::warning(
-                "import.copper_drawing",
-                format!("drawings on copper layer `{layer}` are not imported"),
+    if ctx.is_copper(&layer) && ctx.raw_net(e).is_some_and(|n| !n.is_empty()) {
+        notes.agg(
+            "import.copper_drawing_net",
+            "net",
+            Diagnostic::info(
+                "import.copper_drawing_net",
+                "board drawings on copper layers carry no net in cadlab: the DRC checks them against every net",
             )
             .with_subject(ObjectRef::Layer(layer.clone()))
-            .with_hint(
-                "cadlab copper is tracks, pads and zones: redraw it as tracks (`track.add`) or a zone (`zone.add`)",
-            ),
+            .with_hint("replace them with tracks or zones on their net if they connect anything"),
         );
-        return;
     }
-    if !known.contains(&layer) {
+    if !known.contains(&layer) || (layer.ends_with(".Cu") && !ctx.is_copper(&layer)) {
         notes.not_imported_agg(
             "import.drawing_layer",
             &layer,
@@ -1118,16 +1133,8 @@ fn read_drawing(
         );
         return;
     }
-    if e.get("fill").and_then(Sexpr::value).is_some_and(|f| matches!(f, "solid" | "yes")) {
-        notes.agg(
-            "import.filled_drawing",
-            "fill",
-            Diagnostic::info(
-                "import.filled_drawing",
-                "filled board drawings are imported as their outline (cadlab board graphics are lines)",
-            ),
-        );
-    }
+    let filled = e.get("fill").and_then(Sexpr::value).is_some_and(|f| matches!(f, "solid" | "yes"))
+        && matches!(head, "gr_poly" | "gr_rect" | "gr_circle");
     let width = width_of(e);
     let points: Vec<Point> = if let Some((c, r)) = circle {
         let (east, west) = (c + Point::new(r, Nm::ZERO), c - Point::new(r, Nm::ZERO));
@@ -1164,8 +1171,16 @@ fn read_drawing(
         lp.push(points[1]);
         return;
     }
-    graphics
-        .push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind: GraphicKind::Line { points, width } }, uuid));
+    let kind = if filled {
+        let mut points = points;
+        if points.len() > 1 && points.first() == points.last() {
+            points.pop();
+        }
+        GraphicKind::Polygon { points, width }
+    } else {
+        GraphicKind::Line { points, width }
+    };
+    graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, uuid));
 }
 
 fn read_text(
@@ -1200,15 +1215,15 @@ fn read_text(
         );
         return;
     };
-    if layer.ends_with(".Cu") || !known.contains(&layer) {
+    if !known.contains(&layer) || (layer.ends_with(".Cu") && !ctx.is_copper(&layer)) {
         notes.not_imported(
             Diagnostic::warning(
                 "import.text_layer",
-                format!("text `{text}` on `{layer}` is not imported (texts are kept on non-copper layers only)"),
+                format!("text `{text}` on `{layer}` is not imported (unknown layer)"),
             )
             .with_subject(ObjectRef::Layer(layer.clone()))
             .at(ctx.frame(at))
-            .with_hint("copper text has no cadlab counterpart; put it on the silkscreen"),
+            .with_hint("move it to a standard layer in KiCad"),
         );
         return;
     }
@@ -1382,7 +1397,18 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> V
                 .with_hint("forbid footprints in the keep-out (`keepout.add --no-footprints`) if no part may sit there"),
             );
         }
-        if !(ko.no_tracks || ko.no_vias || ko.no_pours || ko.no_footprints) {
+        let named = ctx.areas.contains(&name);
+        if named && !(ko.no_tracks || ko.no_vias || ko.no_pours || ko.no_footprints) {
+            notes.push(
+                Diagnostic::info(
+                    "import.rule_area",
+                    format!(
+                        "rule area `{name}` forbids nothing; kept as a named area for the custom rules that refer to it"
+                    ),
+                )
+                .with_subject(subject.clone()),
+            );
+        } else if !(ko.no_tracks || ko.no_vias || ko.no_pours || ko.no_footprints) {
             notes.not_imported(
                 Diagnostic::warning(
                     "import.rule_area",
@@ -1401,16 +1427,7 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> V
     let pads = match cp.and_then(|c| c.items().get(1)).and_then(Sexpr::atom) {
         Some("yes") => PadConnection::Solid,
         Some("no") => PadConnection::None,
-        Some("thru_hole_only") => {
-            notes.push(
-                Diagnostic::info(
-                    "import.zone_connection",
-                    format!("zone `{name}` connects through-hole pads only with thermal reliefs; cadlab uses thermal reliefs for all pads"),
-                )
-                .with_subject(subject.clone()),
-            );
-            PadConnection::Thermal
-        }
+        Some("thru_hole_only") => PadConnection::ThtThermal,
         _ => PadConnection::Thermal,
     };
     let fill = e.get("fill");
@@ -1434,74 +1451,6 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> V
         thermal_spoke: fill.and_then(|f| f.child_value("thermal_bridge_width")).and_then(mm),
     };
     split(RawItem::Zone { z, net: ctx.raw_net(e), uuid })
-}
-
-/// Per-item settings cadlab has no counterpart for, on a footprint, a pad or the board setup:
-/// solder mask and paste margins (mask and paste openings come out equal to the pads, plus the
-/// fab export's mask expansion), local clearances and zone connections (the net's clearance and
-/// the zone's connection apply). Reported once per kind with every subject, never dropped
-/// silently.
-pub(super) fn local_overrides(e: &Sexpr, subject: &ObjectRef, notes: &mut Notes) {
-    const KINDS: &[(&str, &str, &str)] = &[
-        (
-            "solder_mask_margin",
-            "solder mask margins are not kept: mask openings equal the pads (plus the fab export's mask expansion)",
-            "check the mask openings, or set the expansion at export (`export.gerber --mask-expansion`)",
-        ),
-        (
-            "pad_to_mask_clearance",
-            "the board's solder mask expansion is not kept: mask openings equal the pads (plus the fab export's mask expansion)",
-            "set the expansion at export (`export.gerber --mask-expansion`)",
-        ),
-        (
-            "solder_paste_margin",
-            "solder paste margins are not kept: paste openings equal the pads",
-            "check the paste layer; exposed pads can get paste windows (`footprint.generate`)",
-        ),
-        (
-            "solder_paste_margin_ratio",
-            "solder paste margin ratios are not kept: paste openings equal the pads",
-            "check the paste layer; exposed pads can get paste windows (`footprint.generate`)",
-        ),
-        (
-            "solder_paste_ratio",
-            "solder paste margin ratios are not kept: paste openings equal the pads",
-            "check the paste layer; exposed pads can get paste windows (`footprint.generate`)",
-        ),
-        (
-            "pad_to_paste_clearance",
-            "the board's paste margin is not kept: paste openings equal the pads",
-            "check the paste layer",
-        ),
-        (
-            "pad_to_paste_clearance_ratio",
-            "the board's paste margin ratio is not kept: paste openings equal the pads",
-            "check the paste layer",
-        ),
-        (
-            "clearance",
-            "local clearances of pads and footprints are not kept: the net (class) clearance applies",
-            "set a net class clearance (`netclass.set`) if the design needs it",
-        ),
-        (
-            "zone_connect",
-            "pad and footprint zone connection overrides are not kept: the zone's pad connection applies",
-            "set the zone's pad connection (`zone.set --pads`)",
-        ),
-    ];
-    for &(head, msg, hint) in KINDS {
-        let Some(v) = e.child_value(head) else { continue };
-        // Zero margins and clearances are KiCad's defaults (nothing to keep); a zone connection
-        // of 0 means "not connected".
-        if head != "zone_connect" && v.parse::<f64>().is_ok_and(|x| x == 0.0) {
-            continue;
-        }
-        notes.agg(
-            head,
-            "local",
-            Diagnostic::warning("import.local_setting", msg).with_subject(subject.clone()).with_hint(hint),
-        );
-    }
 }
 
 /// The area of several zone outlines under the even-odd rule (a polygon inside another is a
@@ -1748,23 +1697,21 @@ fn footprint_drawings(
     let side = c.placement.side;
     let mut n = 0;
     for g in &c.fp.graphics {
-        let front = match g.layer {
-            GraphicLayer::Silk => "F.SilkS",
-            GraphicLayer::Fab => "F.Fab",
-            GraphicLayer::Courtyard => "F.CrtYd",
-        };
-        let points = footprint::to_board(&c.placement, &g.geometry);
+        let layer = side_layer(crate::board::pad_side(side, g.back), g.layer.front_name());
+        let mut points = footprint::to_board(&c.placement, &g.geometry);
         if points.len() < 2 {
             continue;
         }
-        graphics.push((
-            BoardGraphic {
-                id: crate::id::ObjectId(0),
-                layer: side_layer(side, front),
-                kind: GraphicKind::Line { points, width: g.width },
-            },
-            None,
-        ));
+        // Areas (copper, mask, paste polygons) stay filled.
+        let area = matches!(g.geometry, GraphicGeometry::Polygon { .. })
+            && matches!(g.layer, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste);
+        let kind = if area {
+            points.pop();
+            GraphicKind::Polygon { points, width: g.width }
+        } else {
+            GraphicKind::Line { points, width: g.width }
+        };
+        graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, None));
         n += 1;
     }
     let what = if c.refdes.is_empty() { c.lib_id.clone() } else { c.refdes.clone() };

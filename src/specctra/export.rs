@@ -216,6 +216,7 @@ fn pad_shape(shape: &PadShape, rotation: Angle, layer: &str) -> (String, Shape) 
 /// The padstack of a copper pad (`None` for a non-plated hole).
 fn pad_padstack(pad: &Pad, copper: &[String]) -> Option<Padstack> {
     let (prefix, layers): (String, Vec<String>) = match pad.kind {
+        PadKind::Smd if pad.back => ("smd_back".into(), vec![copper[copper.len() - 1].clone()]),
         PadKind::Smd => ("smd".into(), vec![copper[0].clone()]),
         PadKind::Tht { drill } => (format!("tht_d{}", um(drill)), copper.to_vec()),
         PadKind::Npth { .. } => return None,

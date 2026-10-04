@@ -17,15 +17,15 @@ use super::{Ctx, K, Notes, at_of, child_xy, layer_of, mm, pts_of, width_of, yes}
 use crate::board::arc_points;
 use crate::diag::Diagnostic;
 use crate::geom::{BBox, Point};
-use crate::model::board::{BoardSide, PlacedFootprint};
+use crate::model::board::{BoardSide, PadConnection, PlacedFootprint};
 use crate::model::footprint::{
-    Footprint, Graphic, GraphicGeometry, GraphicLayer, Mount, Pad, PadKind, PadShape, Paste,
+    Footprint, Graphic, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Overrides, Pad, PadKind, PadShape, Paste,
 };
 use crate::model::part::{PinKind, slugify, valid_id};
 use crate::netlist::import::pin_kind;
 use crate::refs::ObjectRef;
 use crate::sexpr::Sexpr;
-use crate::units::{Angle, Nm};
+use crate::units::{Angle, Nm, Scale};
 
 /// Arc approximation for footprint drawings (cadlab footprint graphics have no arcs).
 const DRAW_TOL: i64 = 5_000;
@@ -68,18 +68,56 @@ pub(super) struct Converted {
     pub uuids: Vec<(String, String)>,
 }
 
-/// Footprint layer of a KiCad layer name, for a footprint on `side`.
-fn fp_layer(layer: &str, side: BoardSide) -> Option<GraphicLayer> {
-    let front = match side {
-        BoardSide::Top => layer.strip_prefix("F.")?,
-        BoardSide::Bottom => layer.strip_prefix("B.")?,
+/// Footprint layer of a KiCad layer name, for a footprint on `side`, and whether it is on the
+/// footprint's other side (copper, mask and paste only; silkscreen, fab and courtyard drawings
+/// are kept on the footprint's side).
+fn fp_layer(layer: &str, side: BoardSide) -> Option<(GraphicLayer, bool)> {
+    let (own, other) = match side {
+        BoardSide::Top => ("F.", "B."),
+        BoardSide::Bottom => ("B.", "F."),
     };
-    Some(match front {
+    let (rest, back) = match (layer.strip_prefix(own), layer.strip_prefix(other)) {
+        (Some(r), _) => (r, false),
+        (None, Some(r)) => (r, true),
+        _ => return None,
+    };
+    let gl = match rest {
         "SilkS" | "Silkscreen" => GraphicLayer::Silk,
         "Fab" => GraphicLayer::Fab,
         "CrtYd" | "Courtyard" => GraphicLayer::Courtyard,
+        "Cu" => GraphicLayer::Copper,
+        "Mask" => GraphicLayer::Mask,
+        "Paste" => GraphicLayer::Paste,
         _ => return None,
-    })
+    };
+    let area = matches!(gl, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste);
+    (!back || area).then_some((gl, back))
+}
+
+/// Local settings of a pad or footprint (`(solder_mask_margin ...)`, ...). Zero margins and
+/// clearances are KiCad's "not set" (the footprint's or board's value applies); a zone
+/// connection is kept whatever its value.
+fn read_overrides(e: &Sexpr) -> Overrides {
+    let len = |h: &str| e.child_value(h).and_then(mm).filter(|v| v.0 != 0);
+    let ratio = e
+        .child_value("solder_paste_margin_ratio")
+        .or(e.child_value("solder_paste_ratio"))
+        .and_then(|v| Scale::parse(v).ok())
+        .filter(|r| r.0 != 0);
+    let zone_connection = e.child_value("zone_connect").and_then(|v| match v {
+        "0" => Some(PadConnection::None),
+        "1" => Some(PadConnection::Thermal),
+        "2" => Some(PadConnection::Solid),
+        "3" => Some(PadConnection::ThtThermal),
+        _ => None,
+    });
+    Overrides {
+        mask_margin: len("solder_mask_margin"),
+        paste_margin: len("solder_paste_margin"),
+        paste_ratio: ratio,
+        clearance: len("clearance"),
+        zone_connection,
+    }
 }
 
 /// Footprint name usable as a library ID.
@@ -153,6 +191,7 @@ pub(super) fn convert_library(e: &Sexpr, name: &str, notes: &mut Notes) -> Footp
         copper: vec!["F.Cu".into(), "B.Cu".into()],
         nets_by_num: BTreeMap::new(),
         vars: BTreeMap::new(),
+        areas: BTreeSet::new(),
     };
     let mut c = convert_at(e, &ctx, notes, (Nm::ZERO, Nm::ZERO), Angle::ZERO, Some(name));
     c.fp.name = name.to_string();
@@ -232,19 +271,20 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         Some(name) => ObjectRef::Named { kind: "footprint".into(), name: name.to_string() },
         None => ObjectRef::Name(if refdes.is_empty() { lib_id.clone() } else { refdes.clone() }),
     };
-    super::local_overrides(e, &subject, notes);
-    if e.get("net_tie_pad_groups").is_some() {
-        notes.agg(
-            "import.net_tie",
-            "net_tie",
-            Diagnostic::warning(
-                "import.net_tie",
-                "net-tie footprints are imported as ordinary footprints: cadlab has no net ties, so the copper joining their nets is a short for its DRC",
-            )
-            .with_subject(subject.clone())
-            .with_hint("keep the nets joined in the circuit, or replace the net tie with a 0 Ω part"),
-        );
-    }
+    let fp_overrides = read_overrides(e);
+    // Net ties: groups of pad numbers, `"1,2"` or `"1, 2"`.
+    let net_ties: Vec<Vec<String>> = e
+        .get("net_tie_pad_groups")
+        .map(|g| {
+            g.items()
+                .iter()
+                .skip(1)
+                .filter_map(Sexpr::atom)
+                .map(|s| s.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect::<Vec<_>>())
+                .filter(|g| g.len() >= 2)
+                .collect()
+        })
+        .unwrap_or_default();
 
     let attrs: BTreeSet<String> = e
         .get("attr")
@@ -271,7 +311,19 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         let layer = layer_of(c).unwrap_or("");
         let width = width_of(c);
         let filled = c.get("fill").and_then(Sexpr::value).is_some_and(|f| matches!(f, "solid" | "yes"));
-        let geom = local_geometry(head, c, &loc, filled);
+        let mut geom = local_geometry(head, c, &loc, filled);
+        // On copper, mask and paste a cadlab polygon is an area: an outline only becomes a
+        // closed polyline.
+        if let (
+            Some(GraphicGeometry::Polygon { points }),
+            Some((GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste, _)),
+        ) = (&geom, fp_layer(layer, side))
+            && !filled
+        {
+            let mut pts = points.clone();
+            pts.push(pts[0]);
+            geom = Some(GraphicGeometry::Path { points: pts });
+        }
         let Some(geom) = geom else {
             notes.not_imported(
                 Diagnostic::warning(
@@ -328,7 +380,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
             continue;
         }
         match fp_layer(layer, side) {
-            Some(gl) => {
+            Some((gl, back)) => {
                 if head == "fp_arc" || head == "fp_curve" {
                     notes.agg(
                         "import.footprint_arc",
@@ -339,19 +391,19 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                         ),
                     );
                 }
-                graphics.push(Graphic { layer: gl, width, geometry: geom });
+                graphics.push(Graphic { layer: gl, width, geometry: geom, back });
             }
             None => notes.not_imported_agg(
                 "import.footprint_layer",
                 layer,
                 Diagnostic::warning(
                     "import.footprint_layer",
-                    format!("footprint drawings on `{layer}` are not imported (cadlab footprints keep silkscreen, fab and courtyard of their own side)"),
+                    format!("footprint drawings on `{layer}` are not imported (cadlab footprints keep silkscreen, fab and courtyard of their own side, and copper, mask and paste of either side)"),
                 )
                 .with_subject(subject.clone())
                 .with_subject(ObjectRef::Layer(layer.to_string()))
                 .with_hint(if layer.ends_with(".Cu") {
-                    "copper drawings in footprints are not supported: make them pads, or board tracks or zones"
+                    "copper drawings on inner layers of footprints are not supported: make them board tracks or zones"
                 } else {
                     "drawings on other layers (or on the other side) are documentation cadlab footprints do not keep; add board graphics if they matter"
                 }),
@@ -365,7 +417,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
     // Pads.
     let mut pads: Vec<Pad> = Vec::new();
     let mut pad_nets = Vec::new();
-    let mut paste_only: Vec<Aperture> = Vec::new();
+    let mut paste_only: Vec<Pad> = Vec::new();
     let mut pad_has_paste: Vec<bool> = Vec::new();
     for c in e.all("pad") {
         let Some(conv) = convert_pad(c, &loc, ctx, &subject, notes) else { continue };
@@ -385,13 +437,21 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                 pads.push(conv.pad);
                 pad_has_paste.push(paste);
             }
-            PadRole::PasteOnly => {
-                let (w, h) = conv.pad.shape.size();
-                paste_only.push((conv.pad.at, conv.pad.rotation, (w, h)));
+            PadRole::Aperture { paste, mask } => {
+                if mask {
+                    graphics.push(Graphic::new(
+                        GraphicLayer::Mask,
+                        Nm::ZERO,
+                        GraphicGeometry::Polygon { points: pad_outline(&conv.pad) },
+                    ));
+                }
+                if paste {
+                    paste_only.push(conv.pad);
+                }
             }
         }
     }
-    attach_paste(&mut pads, &pad_has_paste, paste_only, &subject, notes);
+    graphics.extend(attach_paste(&mut pads, &pad_has_paste, paste_only, &subject, notes));
 
     let mount = if attrs.contains("through_hole") {
         Mount::Tht
@@ -465,6 +525,8 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         generator: None,
         model: None,
         provenance: None,
+        overrides: fp_overrides,
+        net_ties,
     };
     Converted {
         refdes,
@@ -534,6 +596,7 @@ fn merge_paths(gs: Vec<Graphic>) -> Vec<Graphic> {
     for g in gs {
         if let (Some(last), GraphicGeometry::Path { points: new }) = (out.last_mut(), &g.geometry)
             && last.layer == g.layer
+            && last.back == g.back
             && last.width == g.width
             && new.len() == 2
             && let GraphicGeometry::Path { points } = &mut last.geometry
@@ -766,8 +829,8 @@ fn pad_box(pads: &[Pad]) -> Vec<Point> {
 enum PadRole {
     /// A copper pad; `paste` when it has a paste opening of its own.
     Copper { paste: bool },
-    /// A paste aperture without copper (exposed pad paste windows).
-    PasteOnly,
+    /// A paste and/or mask aperture without copper (exposed pad paste windows, mask openings).
+    Aperture { paste: bool, mask: bool },
 }
 
 struct PadConv {
@@ -794,7 +857,7 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         skip("no position or size", notes);
         return None;
     };
-    super::local_overrides(c, &pad_subject, notes);
+    let mut on_back = false;
     let mut at = loc.pt(pos);
     let rotation = loc.pad_rot(a);
     let (w, h) = size;
@@ -902,14 +965,11 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         if child_xy(d, "offset").is_some_and(|(x, y)| x.0 != 0 || y.0 != 0) {
             approx("its drill offset is ignored (the hole is at the pad center)".into(), notes);
         }
-        if oval && a != b {
-            approx(
-                format!("an oval {}×{} slot is drilled as a round {} hole", Nm(a.0), Nm(b.0), Nm(a.0.min(b.0))),
-                notes,
-            );
-        }
-        Some(Nm(a.0.min(b.0)))
+        let slot = (oval && a != b).then_some((a, b));
+        Some((Nm(a.0.min(b.0)), slot))
     });
+    let slot = drill.and_then(|d| d.1);
+    let drill = drill.map(|d| d.0);
     let net = ctx.raw_net(c);
     let (pkind, role) = match kind {
         "thru_hole" => {
@@ -917,16 +977,16 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
                 skip("a through-hole pad without a drill", notes);
                 return None;
             };
-            if has(&format!("{front}Paste")) || has(&format!("{back}Paste")) {
+            if has(&format!("{back}Paste")) {
                 notes.agg(
                     "import.tht_paste",
                     "paste",
                     Diagnostic::warning(
                         "import.tht_paste",
-                        "through-hole pads with solder paste (paste-in-hole) get no paste: cadlab puts paste on SMD pads only",
+                        "through-hole pads with solder paste on the other side of their footprint get paste on the footprint's side only",
                     )
                     .with_subject(pad_subject.clone())
-                    .with_hint("add the paste in the paste layer after export if the assembly reflows these parts"),
+                    .with_hint("check the paste layers; cadlab puts paste-in-hole on the footprint's side"),
                 );
             }
             (PadKind::Tht { drill: d }, PadRole::Copper { paste: has(&format!("{front}Paste")) })
@@ -945,24 +1005,35 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
             let cu = has(&format!("{front}Cu"));
             let paste = has(&format!("{front}Paste")) && kind == "smd";
             if !cu && has(&format!("{back}Cu")) {
-                skip(
-                    "copper on the other side than the footprint (cadlab SMD pads are on the footprint's side)",
-                    notes,
-                );
-                return None;
-            }
-            if !cu {
-                if paste {
+                // A pad on the other side of its footprint (card-edge fingers, a heat sink pad
+                // soldered from the back).
+                on_back = true;
+                (PadKind::Smd, PadRole::Copper { paste: has(&format!("{back}Paste")) && kind == "smd" })
+            } else if !cu {
+                let mask_only = has(&format!("{front}Mask"));
+                if paste || mask_only {
                     return Some(PadConv {
-                        pad: Pad { number, at, rotation, shape: pshape, kind: PadKind::Smd, paste: None },
-                        role: PadRole::PasteOnly,
+                        pad: Pad {
+                            number,
+                            at,
+                            rotation,
+                            shape: pshape,
+                            kind: PadKind::Smd,
+                            paste: None,
+                            back: false,
+                            mask: Default::default(),
+                            slot: None,
+                            overrides: Default::default(),
+                        },
+                        role: PadRole::Aperture { paste, mask: mask_only },
                         net: None,
                     });
                 }
                 skip("no copper (mask or paste aperture only)", notes);
                 return None;
+            } else {
+                (PadKind::Smd, PadRole::Copper { paste })
             }
-            (PadKind::Smd, PadRole::Copper { paste })
         }
         other => {
             skip(&format!("unknown pad type `{other}`"), notes);
@@ -971,31 +1042,110 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
     };
     let paste = match (&pkind, &role) {
         (PadKind::Smd | PadKind::Tht { .. }, PadRole::Copper { paste: false }) => Some(Paste::None),
+        (PadKind::Tht { .. }, PadRole::Copper { paste: true }) => Some(Paste::Pad),
         _ => None,
     };
-    Some(PadConv { pad: Pad { number, at, rotation, shape: pshape, kind: pkind, paste }, role, net })
+    let slot = if matches!(pkind, PadKind::Smd) { None } else { slot };
+    // Mask openings: on the pad's side (both sides for a hole), one side, or none (tented).
+    let (mf, mb) = (has(&format!("{front}Mask")), has(&format!("{back}Mask")));
+    let mask = match (pkind, mf, mb) {
+        (PadKind::Smd, _, _) if has(&format!("{}Mask", if on_back { back } else { front })) => MaskOpening::Pad,
+        (PadKind::Smd, _, _) => MaskOpening::None,
+        (_, true, true) => MaskOpening::Pad,
+        (_, true, false) => MaskOpening::Front,
+        (_, false, true) => MaskOpening::Back,
+        (_, false, false) => MaskOpening::None,
+    };
+    let pad = Pad {
+        number,
+        at,
+        rotation,
+        shape: pshape,
+        kind: pkind,
+        paste,
+        back: on_back,
+        mask,
+        slot,
+        overrides: read_overrides(c),
+    };
+    Some(PadConv { pad, role, net })
 }
 
 /// A paste-only aperture: center, rotation and size, in footprint coordinates.
 type Aperture = (Point, Angle, (Nm, Nm));
 
-/// Turns paste-only apertures into paste windows of the copper pad they lie on.
-fn attach_paste(pads: &mut [Pad], has_paste: &[bool], windows: Vec<Aperture>, subject: &ObjectRef, notes: &mut Notes) {
-    let mut per_pad: BTreeMap<usize, Vec<Aperture>> = BTreeMap::new();
-    let mut lost = 0;
-    for w in windows {
+/// The outline of a pad shape in footprint coordinates (corners as polylines).
+fn pad_outline(p: &Pad) -> Vec<Point> {
+    let local: Vec<Point> = match &p.shape {
+        PadShape::Polygon { points } => points.clone(),
+        s => {
+            let (w, h) = s.size();
+            let r = match *s {
+                PadShape::RoundRect { r, .. } => r,
+                PadShape::Oval { .. } | PadShape::Circle { .. } => Nm(w.0.min(h.0) / 2),
+                _ => Nm::ZERO,
+            };
+            let (hw, hh) = (w.0 / 2, h.0 / 2);
+            if r.0 == 0 {
+                vec![
+                    Point::new(Nm(-hw), Nm(-hh)),
+                    Point::new(Nm(hw), Nm(-hh)),
+                    Point::new(Nm(hw), Nm(hh)),
+                    Point::new(Nm(-hw), Nm(hh)),
+                ]
+            } else {
+                // Each corner: a quarter arc around (±(hw − r), ±(hh − r)), counter-clockwise.
+                let mut v: Vec<Point> = Vec::new();
+                for (k, (sx, sy)) in [(1i64, -1i64), (1, 1), (-1, 1), (-1, -1)].into_iter().enumerate() {
+                    let (cx, cy) = (sx * (hw - r.0), sy * (hh - r.0));
+                    let a0 = -std::f64::consts::FRAC_PI_2 + std::f64::consts::FRAC_PI_2 * k as f64;
+                    for i in 0..=8 {
+                        let t = a0 + std::f64::consts::FRAC_PI_2 * i as f64 / 8.0;
+                        let q = Point::new(
+                            Nm(cx + (r.0 as f64 * t.cos()).round() as i64),
+                            Nm(cy + (r.0 as f64 * t.sin()).round() as i64),
+                        );
+                        if v.last() != Some(&q) {
+                            v.push(q);
+                        }
+                    }
+                }
+                v
+            }
+        }
+    };
+    local.into_iter().map(|q| q.rotated(p.rotation) + p.at).collect()
+}
+
+/// Turns paste-only apertures into paste windows of the copper pad they lie on (rectangles of
+/// one size, aligned with the pad); the others become paste drawings of the footprint.
+fn attach_paste(
+    pads: &mut [Pad],
+    has_paste: &[bool],
+    apertures: Vec<Pad>,
+    subject: &ObjectRef,
+    notes: &mut Notes,
+) -> Vec<Graphic> {
+    let mut per_pad: BTreeMap<usize, Vec<(Aperture, Pad)>> = BTreeMap::new();
+    let mut drawn: Vec<Pad> = Vec::new();
+    for ap in apertures {
+        let PadShape::Rect { w, h } = ap.shape else {
+            drawn.push(ap);
+            continue;
+        };
+        let win = (ap.at, ap.rotation, (w, h));
         // The SMD pad without its own paste whose box (in its frame) holds the aperture center.
         let host = pads.iter().enumerate().position(|(i, p)| {
-            if !matches!(p.kind, PadKind::Smd) || has_paste[i] {
+            if !matches!(p.kind, PadKind::Smd) || p.back || has_paste[i] {
                 return false;
             }
-            let d = (w.0 - p.at).rotated(-p.rotation);
+            let d = (win.0 - p.at).rotated(-p.rotation);
             let (pw, ph) = p.shape.size();
             d.x.0.abs() <= pw.0 / 2 && d.y.0.abs() <= ph.0 / 2
         });
         match host {
-            Some(i) => per_pad.entry(i).or_default().push(w),
-            None => lost += 1,
+            Some(i) => per_pad.entry(i).or_default().push((win, ap)),
+            None => drawn.push(ap),
         }
     }
     for (i, ws) in per_pad {
@@ -1003,29 +1153,34 @@ fn attach_paste(pads: &mut [Pad], has_paste: &[bool], windows: Vec<Aperture>, su
         // Window sizes in the pad's frame.
         let sizes: Vec<(Nm, Nm)> = ws
             .iter()
-            .map(|(_, r, (w, h))| match (*r - pad.rotation).normalized().quarter_turns() {
+            .map(|((_, r, (w, h)), _)| match (*r - pad.rotation).normalized().quarter_turns() {
                 Some(1 | 3) => (*h, *w),
                 _ => (*w, *h),
             })
             .collect();
-        let aligned = ws.iter().all(|(_, r, _)| (*r - pad.rotation).normalized().quarter_turns().is_some());
+        let aligned = ws.iter().all(|((_, r, _), _)| (*r - pad.rotation).normalized().quarter_turns().is_some());
         if !aligned || sizes.iter().any(|s| *s != sizes[0]) {
-            lost += ws.len();
+            drawn.extend(ws.into_iter().map(|(_, ap)| ap));
             continue;
         }
-        let at = ws.iter().map(|(c, _, _)| (*c - pad.at).rotated(-pad.rotation)).collect();
+        let at = ws.iter().map(|((c, _, _), _)| (*c - pad.at).rotated(-pad.rotation)).collect();
         pad.paste = Some(Paste::Windows { size: sizes[0], at });
     }
-    if lost > 0 {
-        notes.not_imported(
-            Diagnostic::warning(
-                "import.paste_aperture",
-                format!("{lost} paste aperture(s) of {subject} are not on a pad or not a grid of equal windows; not imported"),
+    if !drawn.is_empty() {
+        notes.agg(
+            "import.paste_drawing",
+            "paste",
+            Diagnostic::info(
+                "import.paste_drawing",
+                "paste-only apertures that are not a grid of equal rectangular windows on one pad become paste drawings of their footprint (paste margins do not apply to drawings)",
             )
-            .with_subject(subject.clone())
-            .with_hint("the pads they belong to get no paste: check the stencil, or regenerate the footprint (`footprint.generate`)"),
+            .with_subject(subject.clone()),
         );
     }
+    drawn
+        .iter()
+        .map(|ap| Graphic::new(GraphicLayer::Paste, Nm::ZERO, GraphicGeometry::Polygon { points: pad_outline(ap) }))
+        .collect()
 }
 
 /// Whether two footprints are the same land pattern, allowing the few nanometers of rounding a
@@ -1072,9 +1227,14 @@ pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {
             && close(x.at, y.at)
             && ang(x.rotation, y.rotation)
             && (matches!(x.kind, PadKind::Npth { .. }) || paste_eq(&x.paste, &y.paste))
+            && x.back == y.back
+            && x.mask == y.mask
+            && x.slot == y.slot
+            && x.overrides == y.overrides
     };
     let graphic_eq = |x: &Graphic, y: &Graphic| {
         x.layer == y.layer
+            && x.back == y.back
             && x.width == y.width
             && match (&x.geometry, &y.geometry) {
                 (GraphicGeometry::Path { points: p }, GraphicGeometry::Path { points: q }) => {
@@ -1099,6 +1259,7 @@ pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {
                         layer: g.layer,
                         width: g.width,
                         geometry: GraphicGeometry::Path { points: w.to_vec() },
+                        back: g.back,
                     })
                     .collect(),
                 _ => vec![g.clone()],
@@ -1106,6 +1267,8 @@ pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {
             .collect()
     };
     a.mount == b.mount
+        && a.overrides == b.overrides
+        && a.net_ties == b.net_ties
         && close_pts(&a.courtyard, &b.courtyard)
         && matched(&a.pads, &b.pads, pad_eq)
         && matched(&split(&a.graphics), &split(&b.graphics), graphic_eq)

@@ -17,7 +17,18 @@ pub fn hole_pad(h: &Hole) -> Pad {
         Some(d) => ("1".to_string(), PadKind::Tht { drill: h.drill }, d),
         None => (String::new(), PadKind::Npth { drill: h.drill }, h.drill),
     };
-    Pad { number, at: Point::ORIGIN, rotation: Default::default(), shape: PadShape::Circle { d }, kind, paste: None }
+    Pad {
+        number,
+        at: Point::ORIGIN,
+        rotation: Default::default(),
+        shape: PadShape::Circle { d },
+        kind,
+        paste: None,
+        back: false,
+        mask: Default::default(),
+        slot: None,
+        overrides: Default::default(),
+    }
 }
 
 /// Every board hole as a placed pad, in board order.
@@ -41,6 +52,10 @@ pub fn hole_pads(p: &Project) -> Vec<PlacedPad> {
                 hole: Some((h.drill, h.pad.is_some())),
                 pad,
                 side: BoardSide::Top,
+                pad_side: BoardSide::Top,
+                overrides: Default::default(),
+                slot: None,
+                tie: None,
             }
         })
         .collect()

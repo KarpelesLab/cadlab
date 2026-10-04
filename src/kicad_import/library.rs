@@ -2,10 +2,12 @@
 //!
 //! - **Footprints** (`.kicad_mod`, one per file; a `.pretty` directory holds many) go through the
 //!   same conversion as the footprints embedded in boards (`board.import_kicad`): pads of every
-//!   shape (custom pads as polygon pads; trapezoids, chamfers and slots approximated and
-//!   reported), drills, silkscreen, fab and courtyard drawings. What a cadlab footprint cannot
-//!   hold (texts, drawings on other layers, board edges, 3D model paths, local margins) is
-//!   reported with a diagnostic.
+//!   shape (custom pads as polygon pads; trapezoids and chamfers approximated and
+//!   reported; slotted holes, DECISIONS D40), drills, silkscreen, fab and courtyard drawings, copper,
+//!   mask and paste drawings, and local settings (mask and paste margins, clearances, zone
+//!   connections, net ties, back-side pads, per-side mask openings, paste-in-hole). What a cadlab
+//!   footprint cannot hold (texts, inner-layer copper, drawings on other layers, board edges, 3D
+//!   model paths) is reported with a diagnostic.
 //! - **Symbols** (`.kicad_sym`, many per file) become parts: pins (number, name, electrical type,
 //!   the side of the body they are on, unit, alternate functions), the category from the
 //!   reference prefix, and the fields (Value, Footprint, Datasheet, Description, MPN and

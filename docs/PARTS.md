@@ -159,13 +159,15 @@ cadlab lib import-kicad MyLib.kicad_sym --footprints MyLib.pretty [--library tea
 
 - **Footprints** (`.kicad_mod`, or every `.kicad_mod` of a `.pretty` directory) are converted like the
   footprints of an imported board (D32): named after the file, pads of every shape (custom pads as polygon
-  pads; trapezoids as their bounding box, chamfers as rounded corners, oval slots as round holes, each with an
-  `import.pad_approximated` warning), drills, paste (paste-only apertures become paste windows), silkscreen,
-  fab and courtyard drawings of the footprint's side (arcs as polylines; a courtyard made of lines, a
+  pads; trapezoids as their bounding box, chamfers as rounded corners, each with an
+  `import.pad_approximated` warning; oval holes as slots), drills, paste (paste-only apertures become paste
+  windows or paste drawings), local settings (mask and paste margins, clearances, zone connections, net ties,
+  pads on the back, per-side mask openings, paste-in-hole; D40), copper, mask and paste drawings of either
+  side, silkscreen, fab and courtyard drawings of the footprint's side (arcs as polylines; a courtyard made of lines, a
   rectangle or a circle becomes the courtyard polygon; without one, a box 0.25 mm around the pads). Not kept,
-  each reported: texts (`import.footprint_text`), drawings on other layers, copper drawings and board edges
+  each reported: texts (`import.footprint_text`), drawings on other layers, inner-layer copper and board edges
   (`import.footprint_layer`), 3D model paths (`import.footprint_model`: attach a model with
-  `footprint.model_set`), local mask/paste margins and clearances (`import.local_setting`). An `at` in a
+  `footprint.model_set`). An `at` in a
   library file is ignored, as KiCad does.
 - **Symbols** (`.kicad_sym`, all or `--symbol` ones) become parts named after the symbol. Pins keep number,
   name (`~` = none), electrical type (`free` reads as passive), the side of the body they are on (from the

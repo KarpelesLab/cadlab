@@ -127,7 +127,7 @@ pub fn netlist(p: &Project, o: &Options) -> OutFile {
     for pp in board::placed_pads(p) {
         let rot = pad_rotation(&pp, super::fp_rotation(p, &pp.refdes));
         let (op, access) = match pp.pad.kind {
-            PadKind::Smd => ("327", if pp.side == BoardSide::Top { 1 } else { n }),
+            PadKind::Smd => ("327", if pp.pad_side == BoardSide::Top { 1 } else { n }),
             PadKind::Tht { .. } => ("317", 0),
             PadKind::Npth { .. } => ("367", 0),
         };

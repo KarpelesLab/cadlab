@@ -20,6 +20,7 @@ fn pad(net: &str, cx: i64, cy: i64, hw: i64, hh: i64) -> CopperItem {
         layers: vec!["F.Cu".into()],
         shape: vec![rect(cx - hw, cy - hh, cx + hw, cy + hh)],
         anchor: Point::new(Nm(cx), Nm(cy)),
+        local: Default::default(),
     }
 }
 
@@ -40,6 +41,7 @@ fn track(net: &str, a: (i64, i64), b: (i64, i64), w: i64) -> CopperItem {
         layers: vec!["F.Cu".into()],
         shape: crate::board::track_shape(&t),
         anchor: t.start,
+        local: Default::default(),
     }
 }
 
@@ -60,6 +62,7 @@ fn via(net: &str, x: i64, y: i64) -> CopperItem {
         layers: vec!["F.Cu".into()],
         shape: vec![crate::board::via_shape(&v)],
         anchor: v.at,
+        local: Default::default(),
     }
 }
 

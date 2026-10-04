@@ -166,6 +166,43 @@ fn add_culling_cases(p: &mut cadlab::model::Project) {
             net: None,
         });
     }
+    // D40 inputs the fill depends on: local clearances and zone connections of footprints and
+    // pads, a custom rule, a tht_thermal zone and copper text.
+    use cadlab::model::board::{BoardGraphic, CustomRule, GraphicKind, ItemKind, RuleScope};
+    let names: Vec<String> = p.library().footprints.keys().cloned().collect();
+    for (i, n) in names.iter().enumerate() {
+        let f = p.library_mut().footprints.get_mut(n).unwrap();
+        match i % 3 {
+            0 => f.overrides.clearance = Some(Nm::from_um(450)),
+            1 => f.overrides.zone_connection = Some(PadConnection::Solid),
+            _ => {
+                if let Some(pad) = f.pads.first_mut() {
+                    pad.overrides.zone_connection = Some(PadConnection::None);
+                    pad.overrides.clearance = Some(Nm::from_um(120));
+                }
+            }
+        }
+    }
+    p.board_mut().custom_rules.push(CustomRule {
+        name: "vias".into(),
+        scope: RuleScope { kinds: vec![ItemKind::Via], ..Default::default() },
+        clearance: Some(Nm::from_um(350)),
+        track_width: None,
+    });
+    if let Some(z) = p.board_mut().zones.iter_mut().find(|z| z.name == "small1") {
+        z.pads = PadConnection::ThtThermal;
+    }
+    let id = p.alloc_id();
+    p.board_mut().graphics.push(BoardGraphic {
+        id,
+        layer: "In1.Cu".into(),
+        kind: GraphicKind::Text {
+            text: "D40".into(),
+            at: at(30, 50),
+            size: Nm::from_mm(2),
+            rotation: Default::default(),
+        },
+    });
 }
 
 #[test]

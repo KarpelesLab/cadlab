@@ -641,6 +641,8 @@ mod tests {
             generator: None,
             model: None,
             provenance: None,
+            overrides: Default::default(),
+            net_ties: Vec::new(),
         }
     }
 

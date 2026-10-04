@@ -182,6 +182,7 @@ fn zones_text(o: &Zones) -> String {
                     PadConnection::Thermal => "thermal",
                     PadConnection::Solid => "solid",
                     PadConnection::None => "none",
+                    PadConnection::ThtThermal => "tht_thermal",
                 },
                 z.clearance.map(|c| format!(", clearance {c}")).unwrap_or_default()
             )
@@ -559,13 +560,18 @@ fn keepouts_text(o: &Keepouts) -> String {
                 }
             }
             let layers = if k.layers.is_empty() { "all layers".to_string() } else { k.layers.join(" ") };
-            format!("keepout:{} on {layers}: no {}", k.name, what.join(", "))
+            if what.is_empty() {
+                format!("keepout:{} on {layers}: rule area (forbids nothing)", k.name)
+            } else {
+                format!("keepout:{} on {layers}: no {}", k.name, what.join(", "))
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Add a keep-out area. With no `no_*` flag given, everything is forbidden.
+/// Add a keep-out area. With no `no_*` flag given, everything is forbidden; with `rule_area`,
+/// nothing (a named area for custom rules).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KeepoutAdd {
@@ -588,6 +594,10 @@ pub struct KeepoutAdd {
     /// Forbid footprints (courtyards).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_footprints: Option<bool>,
+    /// A named rule area that forbids nothing, for the `in_area` scope of custom rules
+    /// (`board.custom_rule`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rule_area: bool,
 }
 
 impl Command for KeepoutAdd {
@@ -603,9 +613,15 @@ impl Command for KeepoutAdd {
         let layers = resolve_layers(p, &self.layers, "keepout.invalid_layer")?;
         let outline = resolve_outline(p, &self.outline, "keepout")?;
         let flags = [self.no_tracks, self.no_vias, self.no_pours, self.no_footprints];
-        let all = flags.iter().all(Option::is_none);
+        if self.rule_area && flags.contains(&Some(true)) {
+            return Err(CommandError::invalid_args(
+                "keepout.rule_area",
+                "a rule area forbids nothing: drop `rule_area` or the `no_*` flags",
+            ));
+        }
+        let all = flags.iter().all(Option::is_none) && !self.rule_area;
         let f = |v: Option<bool>| v.unwrap_or(all);
-        if !all && !flags.contains(&Some(true)) {
+        if !all && !self.rule_area && !flags.contains(&Some(true)) {
             return Err(CommandError::invalid_args("keepout.nothing_forbidden", "the keep-out forbids nothing")
                 .with_hint("set at least one of no_tracks, no_vias, no_pours, no_footprints to true"));
         }

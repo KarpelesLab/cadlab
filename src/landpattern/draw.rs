@@ -87,6 +87,7 @@ pub(super) fn finish(
         layer: GraphicLayer::Fab,
         width: opts.fab_width,
         geometry: GraphicGeometry::Polygon { points: fab },
+        back: false,
     });
 
     // Silkscreen: the body outline (inner stroke edge on the body edge), minus keep-outs around pads.
@@ -125,6 +126,7 @@ pub(super) fn finish(
             layer: GraphicLayer::Silk,
             width: opts.silk_width,
             geometry: GraphicGeometry::Path { points: pts },
+            back: false,
         });
     }
 
@@ -142,6 +144,7 @@ pub(super) fn finish(
             layer: GraphicLayer::Silk,
             width: Nm::ZERO,
             geometry: GraphicGeometry::Circle { center, radius: r, filled: true },
+            back: false,
         });
     }
 
@@ -162,5 +165,7 @@ pub(super) fn finish(
         generator: None,
         model: None,
         provenance: None,
+        overrides: Default::default(),
+        net_ties: Vec::new(),
     })
 }

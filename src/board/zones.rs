@@ -143,6 +143,16 @@ fn spokes(item: &CopperItem, gap: i64, w: i64) -> Vec<Polygon> {
     ]
 }
 
+/// How a same-net pad joins a zone: its own override, else the zone's style; `tht_thermal`
+/// resolves to thermal reliefs for plated through-hole pads and solid for the rest.
+pub fn connection(it: &CopperItem, zone: PadConnection) -> PadConnection {
+    match it.local.connection.unwrap_or(zone) {
+        PadConnection::ThtThermal if it.local.through => PadConnection::Thermal,
+        PadConnection::ThtThermal => PadConnection::Solid,
+        c => c,
+    }
+}
+
 fn same_net(a: Option<&str>, b: Option<&str>) -> bool {
     a.is_some() && a == b
 }
@@ -211,8 +221,8 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
             same.push(it);
             if let ItemRef::Pad(..) = it.item {
                 let Some(b) = it.shape.bbox() else { continue };
-                let d = match prm.pads {
-                    PadConnection::Solid => continue,
+                let d = match connection(it, prm.pads) {
+                    PadConnection::Solid | PadConnection::ThtThermal => continue,
                     PadConnection::Thermal => {
                         // A spoke stays inside its pad's window; outside the area it is never kept.
                         if b.expand(gap + w + 1).intersects(&abox) {
@@ -327,12 +337,15 @@ struct MemoEntry {
     netclasses: BTreeMap<String, NetClass>,
     net_classes: Vec<(String, Option<String>)>,
     base: Vec<CopperItem>,
-    npth: Vec<(poly::Point, i64)>,
+    npth: Vec<NpthHole>,
+    /// The clearance each base item keeps (custom rules, local and class clearances: they
+    /// depend on library footprints too, which the board does not hold).
+    item_c: Vec<Nm>,
     fills: Vec<ZoneFill>,
 }
 
 impl MemoEntry {
-    fn matches(&self, p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> bool {
+    fn matches(&self, p: &Project, base: &[CopperItem], npth: &[NpthHole], item_c: &[Nm]) -> bool {
         let c = p.circuit();
         (Arc::ptr_eq(&self.board, p.board_arc()) || *self.board == *p.board())
             && self.netclasses == c.netclasses
@@ -340,6 +353,7 @@ impl MemoEntry {
             && self.net_classes.iter().zip(&c.nets).all(|((n, k), (name, net))| n == name && *k == net.class)
             && self.base == base
             && self.npth == npth
+            && self.item_c == item_c
     }
 }
 
@@ -356,14 +370,15 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
         return vec![];
     }
     let npth = npth_holes(p);
+    let item_c = item_clearances(p, base);
     if let Ok(m) = MEMO.lock()
-        && let Some(e) = m.iter().find(|e| e.matches(p, base, &npth))
+        && let Some(e) = m.iter().find(|e| e.matches(p, base, &npth, &item_c))
     {
         return e.fills.clone();
     }
-    let fills = fill_with(p, base, &npth);
+    let fills = fill_with(p, base, &npth, &item_c);
     if let Ok(mut m) = MEMO.lock() {
-        m.retain(|e| !e.matches(p, base, &npth));
+        m.retain(|e| !e.matches(p, base, &npth, &item_c));
         let c = p.circuit();
         m.insert(
             0,
@@ -373,6 +388,7 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
                 net_classes: c.nets.iter().map(|(n, net)| (n.clone(), net.class.clone())).collect(),
                 base: base.to_vec(),
                 npth: npth.clone(),
+                item_c,
                 fills: fills.clone(),
             },
         );
@@ -390,35 +406,41 @@ pub fn clear_fill_cache() {
 
 /// [`fill_zones`] without the in-process reuse.
 pub fn fill_zones_uncached(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
-    fill_with(p, base, &npth_holes(p))
+    fill_with(p, base, &npth_holes(p), &item_clearances(p, base))
 }
 
-fn npth_holes(p: &Project) -> Vec<(poly::Point, i64)> {
+/// The clearance the DRC requires around each base item: its custom rule's, else its local
+/// clearance, else its net's (class, else the rules'), never below `min_clearance`. A zone
+/// with a smaller clearance of its own still keeps this much, so a fill never violates the DRC.
+fn item_clearances(p: &Project, base: &[CopperItem]) -> Vec<Nm> {
+    let resolved = super::clearance::Clearances::new(p, base, true);
+    (0..base.len()).map(|i| resolved.item(i)).collect()
+}
+
+/// A non-plated hole: the ends of its slot (equal for a round hole) and its radius.
+type NpthHole = (poly::Point, poly::Point, i64);
+
+fn npth_holes(p: &Project) -> Vec<NpthHole> {
     placed_pads(p)
         .into_iter()
         .filter_map(|pp| match pp.hole {
-            Some((d, false)) => Some((pp.center.into(), d.0 / 2)),
+            Some((d, false)) => {
+                let (a, b) = pp.slot.unwrap_or((pp.center, pp.center));
+                Some((a.into(), b.into(), d.0 / 2))
+            }
             _ => None,
         })
         .collect()
 }
 
-fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> Vec<ZoneFill> {
+fn fill_with(p: &Project, base: &[CopperItem], npth: &[NpthHole], item_c: &[Nm]) -> Vec<ZoneFill> {
     let board = p.board();
     if board.zones.is_empty() {
         return vec![];
     }
     let rules = &board.rules;
     let area = board_area(p, rules.copper_to_edge);
-    // Per item: the clearance DRC requires around its net (its class's, else the rules'),
-    // resolved once. A zone with a smaller clearance of its own still keeps this much, so a
-    // fill never violates the DRC.
     let net_c = |n: Option<&str>| class_clearance(p, n).unwrap_or(rules.clearance);
-    let mut class_c: BTreeMap<Option<&str>, Nm> = BTreeMap::new();
-    for it in base {
-        let n = it.net.as_deref();
-        class_c.entry(n).or_insert_with(|| net_c(n));
-    }
     // Zones interact only within a layer (priorities), so layers fill independently, in
     // parallel; within a layer, higher priority first (ties: board order).
     let mut by_layer: BTreeMap<&str, Vec<(usize, usize)>> = BTreeMap::new();
@@ -433,8 +455,9 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
     let fill_one_layer = |layer: &str, jobs: &[(usize, usize)]| -> Vec<(usize, usize, ZoneFill)> {
         let items_on: Vec<(&CopperItem, Nm)> = base
             .iter()
-            .filter(|it| it.layers.iter().any(|l| l == layer))
-            .map(|it| (it, class_c[&it.net.as_deref()]))
+            .zip(item_c)
+            .filter(|(it, _)| it.layers.iter().any(|l| l == layer))
+            .map(|(it, c)| (it, *c))
             .collect();
         let index = RTree::new(items_on.iter().map(|(it, _)| it.shape.bbox()));
         let max_c = items_on.iter().map(|(_, c)| c.0).max().unwrap_or(0);
@@ -468,13 +491,18 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[(poly::Point, i64)]) -> V
                     Err(e) => return Err(e.clone()),
                 };
                 let mut keepaway: Vec<Polygon> = Vec::new();
-                for &(c, r) in npth {
+                for &(a, b, r) in npth {
                     let r = r + prm.clearance.0 + SAFETY;
-                    if !near(&poly::Rect::new(c, c), r) {
+                    if !near(&poly::Rect::new(a, a).union(&poly::Rect::new(b, b)), r) {
                         continue;
                     }
-                    let ring = Circle::new(c, r).to_ring(OBSTACLE_TOL)?;
-                    keepaway.push(Polygon::new(ring, vec![]));
+                    if a == b {
+                        let ring = Circle::new(a, r).to_ring(OBSTACLE_TOL)?;
+                        keepaway.push(Polygon::new(ring, vec![]));
+                    } else {
+                        let path = vec![poly::Path(vec![a, b])];
+                        keepaway.extend(poly::offset_paths(&path, r, Join::Round, poly::EndCap::Round, OBSTACLE_TOL)?);
+                    }
                 }
                 for (k, (_, _, f)) in done.iter().enumerate() {
                     if !same_net(f.net.as_deref(), z.net.as_deref()) && !f.fill.is_empty() {
@@ -557,6 +585,7 @@ pub fn zone_items(p: &Project, base: &[CopperItem]) -> Vec<CopperItem> {
                 layers: vec![f.layer.clone()],
                 shape: vec![poly],
                 anchor,
+                local: Default::default(),
             });
         }
     }

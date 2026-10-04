@@ -136,6 +136,7 @@ fn random_items(seed: u64, n: usize) -> Vec<CopperItem> {
                     layers,
                     shape: vec![Polygon::new(moved, vec![])],
                     anchor: c,
+                    local: Default::default(),
                 });
             }
             4..=6 => {
@@ -157,6 +158,7 @@ fn random_items(seed: u64, n: usize) -> Vec<CopperItem> {
                     layers: vec![t.layer.clone()],
                     shape: track_shape(&t),
                     anchor: t.start,
+                    local: Default::default(),
                 });
             }
             7 | 8 => {
@@ -176,6 +178,7 @@ fn random_items(seed: u64, n: usize) -> Vec<CopperItem> {
                     layers: LAYERS.iter().map(|l| l.to_string()).collect(),
                     shape: vec![via_shape(&v)],
                     anchor: v.at,
+                    local: Default::default(),
                 });
             }
             _ => {
@@ -217,6 +220,7 @@ fn random_items(seed: u64, n: usize) -> Vec<CopperItem> {
                         layers: vec![layer.clone()],
                         shape: vec![poly],
                         anchor,
+                        local: Default::default(),
                     });
                 }
             }

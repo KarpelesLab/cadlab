@@ -36,7 +36,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     let items = geo::copper_items(p);
     let pads = geo::placed_pads(p);
     copper_pairs(&ctx, &items, &mut out);
-    track_widths(&ctx, &mut out);
+    track_widths(&ctx, &rule_widths(p, &items), &mut out);
     via_sizes(&ctx, &mut out);
     pad_holes(&ctx, &pads, &mut out);
     hole_to_hole(&ctx, &pads, &mut out);
@@ -75,7 +75,7 @@ pub fn check_limits(p: &Project, rules: &Rules) -> Vec<Diagnostic> {
     let items = geo::copper_items(p);
     let pads = geo::placed_pads(p);
     copper_pairs(&ctx, &items, &mut out);
-    track_widths(&ctx, &mut out);
+    track_widths(&ctx, &BTreeMap::new(), &mut out);
     if rules.hole_to_hole > Nm::ZERO {
         hole_to_hole(&ctx, &pads, &mut out);
     }
@@ -112,11 +112,6 @@ impl<'a> Ctx<'a> {
         }
         let c = self.p.circuit();
         net.and_then(|n| c.nets.get(n)).and_then(|n| n.class.as_ref()).and_then(|k| c.netclasses.get(k))
-    }
-
-    /// Clearance of a net: its class's, else the rules'.
-    fn clearance(&self, net: Option<&str>) -> Nm {
-        self.class(net).and_then(|c| c.clearance).unwrap_or(self.rules.clearance)
     }
 
     /// Bit mask of copper layers.
@@ -261,8 +256,9 @@ fn unplaced(ctx: &Ctx, out: &mut Vec<Diagnostic>) {
 fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
     let boxes: Vec<Option<Rect>> = items.iter().map(|it| it.shape.bbox()).collect();
     let masks: Vec<u64> = items.iter().map(|it| ctx.mask(&it.layers)).collect();
-    let clear: Vec<i64> = items.iter().map(|it| ctx.clearance(it.net.as_deref()).0).collect();
-    let max_clear = clear.iter().copied().max().unwrap_or(0);
+    // Clearances in effect: custom rules, local pad and footprint clearances, net classes.
+    let clear = geo::clearance::Clearances::new(ctx.p, items, ctx.classes);
+    let max_clear = clear.max().0;
     let labels: Vec<String> = items.iter().map(|it| it.item.to_string()).collect();
     // Large shapes (zone fills) are indexed once; queries against them give the same answers.
     let prep: Vec<Option<Prepared>> = items
@@ -284,10 +280,10 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
     for (i, j) in near_pairs(&boxes, max_clear) {
         let (a, b) = (&items[i], &items[j]);
         let shared = masks[i] & masks[j];
-        if shared == 0 || a.net == b.net {
+        if shared == 0 || a.net == b.net || geo::tied(a, b) {
             continue;
         }
-        let mut required = clear[i].max(clear[j]);
+        let mut required = clear.pair(i, j).0;
         // The two nets of a differential pair may run at the pair's gap.
         if ctx.classes
             && let (Some(na), Some(nb)) = (&a.net, &b.net)
@@ -319,8 +315,9 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
                 "remove or reroute the copper joining the nets (track.remove / via.remove), or give it the right net",
             )
         } else {
-            // Pads of one footprint are spaced by the footprint itself, not by the layout.
-            if let (geo::ItemRef::Pad(ra, _), geo::ItemRef::Pad(rb, _)) = (&a.item, &b.item)
+            // Pads and copper drawings of one footprint are spaced by the footprint itself, not
+            // by the layout.
+            if let (Some(ra), Some(rb)) = (a.item.footprint(), b.item.footprint())
                 && ra == rb
             {
                 continue;
@@ -340,6 +337,11 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
             .with_hint("move or reroute one of them, or lower the net class / rules clearance if the fab allows it")
         };
         d = d.with_subject(item_ref(la)).with_subject(item_ref(lb));
+        for it in [a, b] {
+            if let geo::ItemRef::FpGraphic(r, _) = &it.item {
+                d = d.with_subject(ObjectRef::Name(r.clone()));
+            }
+        }
         for n in [&a.net, &b.net].into_iter().flatten() {
             d = d.with_subject(ObjectRef::Net(n.clone()));
         }
@@ -347,7 +349,23 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
     }
 }
 
-fn track_widths(ctx: &Ctx, out: &mut Vec<Diagnostic>) {
+/// Track widths custom rules ask for, by track.
+fn rule_widths(p: &Project, items: &[CopperItem]) -> BTreeMap<crate::id::ObjectId, (Nm, String)> {
+    let rules = &p.board().custom_rules;
+    if rules.is_empty() {
+        return BTreeMap::new();
+    }
+    geo::clearance::rule_matches(p, items, |r| r.track_width)
+        .into_iter()
+        .zip(items)
+        .filter_map(|(m, it)| match (m, &it.item) {
+            (Some((k, w)), geo::ItemRef::Track(id)) => Some((*id, (w, rules[k].name.clone()))),
+            _ => None,
+        })
+        .collect()
+}
+
+fn track_widths(ctx: &Ctx, rule_width: &BTreeMap<crate::id::ObjectId, (Nm, String)>, out: &mut Vec<Diagnostic>) {
     for t in &ctx.p.board().tracks {
         let mid = from_f((t.start.x.0 as f64 + t.end.x.0 as f64) / 2.0, (t.start.y.0 as f64 + t.end.y.0 as f64) / 2.0);
         let at = t.mid.unwrap_or(mid);
@@ -371,6 +389,19 @@ fn track_widths(ctx: &Ctx, out: &mut Vec<Diagnostic>) {
                     "remove it and add it again wider (track.add with width), or lower board.rules min_track_width",
                 ),
             ));
+        } else if let Some((w, name)) = rule_width.get(&t.id) {
+            if t.width < *w {
+                out.push(with_net(
+                    Diagnostic::error(
+                        "drc.track_width",
+                        format!("track#{} is {} wide, custom rule `{name}` asks for {w}", t.id.0, t.width),
+                    )
+                    .with_subject(subject)
+                    .with_subject(ObjectRef::Named { kind: "rule".into(), name: name.clone() })
+                    .at(at)
+                    .with_hint("remove it and add it again wider (track.add with width), or change the custom rule (board.custom_rule)"),
+                ));
+            }
         } else if let Some(w) = class_width
             && t.width < w
         {
@@ -522,8 +553,10 @@ fn pad_holes(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
             out.push(d);
         }
         if matches!(pp.pad.kind, PadKind::Tht { .. }) {
+            // Per pad axis: a slot leaves less copper along its length.
             let (w, h) = pp.pad.shape.size();
-            let ring = Nm((w.0.min(h.0) - drill.0) / 2);
+            let (sx, sy) = pp.pad.hole_size().unwrap_or((drill, drill));
+            let ring = Nm(((w.0 - sx.0) / 2).min((h.0 - sy.0) / 2));
             if ring < ctx.rules.min_annular_ring {
                 let mut d = Diagnostic::error(
                     "drc.pad_annular_ring",
@@ -546,6 +579,10 @@ fn pad_holes(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
 fn hole_to_hole(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     struct Hole {
         at: Point,
+        /// The other end of a slot (`at` for a round hole).
+        end: Point,
+        /// Footprint and pad number of a pad hole.
+        pin: Option<(String, String)>,
         r: i64,
         label: String,
         subjects: Vec<ObjectRef>,
@@ -554,6 +591,8 @@ fn hole_to_hole(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     for v in &ctx.p.board().vias {
         holes.push(Hole {
             at: v.at,
+            end: v.at,
+            pin: None,
             r: v.drill.0 / 2,
             label: format!("via#{}", v.id.0),
             subjects: vec![ObjectRef::Item { kind: "via".into(), index: v.id.0 }],
@@ -561,19 +600,28 @@ fn hole_to_hole(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     }
     for pp in pads {
         if let Some((d, _)) = pp.hole {
-            holes.push(Hole { at: pp.center, r: d.0 / 2, label: pad_label(pp), subjects: pad_subjects(pp) });
+            let (at, end) = pp.slot.unwrap_or((pp.center, pp.center));
+            let pin = (!pp.number.is_empty()).then(|| (pp.refdes.clone(), pp.number.clone()));
+            holes.push(Hole { at, end, pin, r: d.0 / 2, label: pad_label(pp), subjects: pad_subjects(pp) });
         }
     }
     let min = ctx.rules.hole_to_hole.0;
-    let boxes: Vec<Option<Rect>> = holes.iter().map(|h| Some(Rect::new(pt(h.at), pt(h.at)).expand(h.r))).collect();
+    let boxes: Vec<Option<Rect>> = holes
+        .iter()
+        .map(|h| Some(Rect::new(pt(h.at), pt(h.at)).union(&Rect::new(pt(h.end), pt(h.end))).expand(h.r)))
+        .collect();
     for (i, j) in near_pairs(&boxes, min) {
         let (a, b) = (&holes[i], &holes[j]);
-        let (dx, dy) = ((a.at.x.0 - b.at.x.0) as f64, (a.at.y.0 - b.at.y.0) as f64);
-        let edge = (dx * dx + dy * dy).sqrt() - (a.r + b.r) as f64;
+        // Holes of one pad (pads of a footprint sharing a number) are one pin's holes.
+        if a.pin.is_some() && a.pin == b.pin {
+            continue;
+        }
+        let (dist, pa, pb) = segment_distance((a.at, a.end), (b.at, b.end));
+        let edge = dist - (a.r + b.r) as f64;
         if edge >= min as f64 - 0.5 {
             continue;
         }
-        let at = from_f((a.at.x.0 + b.at.x.0) as f64 / 2.0, (a.at.y.0 + b.at.y.0) as f64 / 2.0);
+        let at = from_f((pa.0 + pb.0) / 2.0, (pa.1 + pb.1) / 2.0);
         let mut d = Diagnostic::error(
             "drc.hole_to_hole",
             format!(
@@ -590,6 +638,31 @@ fn hole_to_hole(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
         d.subjects.extend(b.subjects.iter().cloned());
         out.push(d);
     }
+}
+
+/// Distance between two segments (a point when both ends are equal) and the closest points.
+fn segment_distance(a: (Point, Point), b: (Point, Point)) -> (f64, (f64, f64), (f64, f64)) {
+    let f = |p: Point| (p.x.0 as f64, p.y.0 as f64);
+    let (p0, p1, q0, q1) = (f(a.0), f(a.1), f(b.0), f(b.1));
+    // Closest point on segment s0-s1 to p.
+    let proj = |p: (f64, f64), s0: (f64, f64), s1: (f64, f64)| {
+        let (dx, dy) = (s1.0 - s0.0, s1.1 - s0.1);
+        let l = dx * dx + dy * dy;
+        let t = if l == 0.0 { 0.0 } else { (((p.0 - s0.0) * dx + (p.1 - s0.1) * dy) / l).clamp(0.0, 1.0) };
+        (s0.0 + t * dx, s0.1 + t * dy)
+    };
+    let d = |u: (f64, f64), v: (f64, f64)| (u.0 - v.0).hypot(u.1 - v.1);
+    // Segments that cross are at distance 0.
+    let cross = |o: (f64, f64), u: (f64, f64), v: (f64, f64)| (u.0 - o.0) * (v.1 - o.1) - (u.1 - o.1) * (v.0 - o.0);
+    let (d1, d2, d3, d4) = (cross(q0, q1, p0), cross(q0, q1, p1), cross(p0, p1, q0), cross(p0, p1, q1));
+    if p0 != p1 && q0 != q1 && d1 * d2 < 0.0 && d3 * d4 < 0.0 {
+        let t = d1 / (d1 - d2);
+        let x = (p0.0 + t * (p1.0 - p0.0), p0.1 + t * (p1.1 - p0.1));
+        return (0.0, x, x);
+    }
+    let cands = [(p0, proj(p0, q0, q1)), (p1, proj(p1, q0, q1)), (proj(q0, p0, p1), q0), (proj(q1, p0, p1), q1)];
+    let (u, v) = cands.into_iter().min_by(|x, y| d(x.0, x.1).total_cmp(&d(y.0, y.1))).expect("candidates");
+    (d(u, v), u, v)
 }
 
 /// The board outline as polygon rings.
@@ -877,11 +950,13 @@ fn silk_shapes(p: &Project) -> Vec<(String, BoardSide, PolygonSet)> {
             "B.SilkS" => BoardSide::Bottom,
             _ => continue,
         };
-        if let GraphicKind::Line { points, width } = &g.kind {
-            let set = stroke(points.iter().map(|q| pt(*q)).collect(), *width);
-            if !set.is_empty() {
-                out.push((format!("graphic#{}", g.id.0), side, set));
-            }
+        let set = match &g.kind {
+            GraphicKind::Line { points, width } => stroke(points.iter().map(|q| pt(*q)).collect(), *width),
+            GraphicKind::Polygon { points, width } => geo::polygon_area(points, *width),
+            GraphicKind::Text { .. } => continue,
+        };
+        if !set.is_empty() {
+            out.push((format!("graphic#{}", g.id.0), side, set));
         }
     }
     out
@@ -901,18 +976,19 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
             continue;
         }
         let ((owner, side, shape), pp) = (&silk[i], &pads[j - ns]);
+        let opening = &pp.shape;
         let layer = if *side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
         // A minimum within the tolerance only forbids overlaps, which must then be wider than the
         // tolerance (silk touching a pad overlaps it by the outward arc approximation).
         let close = if min > TOLERANCE {
-            polyclip::distance_less_than(shape, &pp.shape, limit)
+            polyclip::distance_less_than(shape, opening, limit)
         } else {
-            overlap(shape, &pp.shape).is_some()
+            overlap(shape, opening).is_some()
         };
-        if !pp.layers.iter().any(|l| l == layer) || !close {
+        if !pp.mask_on(*side) || !pp.layers.iter().any(|l| l == layer) || !close {
             continue;
         }
-        let (dist, at) = gap(shape, &pp.shape).unwrap_or((0.0, pp.center));
+        let (dist, at) = gap(shape, opening).unwrap_or((0.0, pp.center));
         let what = if dist == 0.0 { "overlaps".to_string() } else { format!("is {} from", nm_f(dist)) };
         let mut d = Diagnostic::warning(
             "drc.silk_over_pad",

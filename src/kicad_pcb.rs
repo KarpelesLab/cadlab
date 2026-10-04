@@ -22,6 +22,11 @@
 //!   minimum width, thermal gap and spoke with defaults resolved), and each footprint's
 //!   Reference field sits where cadlab's legend prints the designator ([`crate::fabout::refdes_text`]).
 //!   The rules set no minimum via diameter: cadlab checks via drill and annular ring only.
+//! - Local settings (DECISIONS D40) are written in KiCad's terms: pad and footprint margins,
+//!   clearances and zone connections, `net_tie_pad_groups`, back-side pads, per-side mask layers,
+//!   oval drills, paste-in-hole, filled copper/mask/paste drawings, the board's mask and paste
+//!   settings in the setup, and custom rules as `.kicad_dru` rules after the net class ones (KiCad
+//!   gives later rules priority, as cadlab does). `min_clearance` is the smallest clearance in use.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -30,7 +35,9 @@ use crate::board::{self as geo, side_layer};
 use crate::geom::{BBox, Point};
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind, PadConnection, PlacedFootprint, Segment};
-use crate::model::footprint::{Footprint, GraphicGeometry, GraphicLayer, Mount, Pad, PadKind, PadShape, Paste};
+use crate::model::footprint::{
+    Footprint, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Pad, PadKind, PadShape, Paste,
+};
 use crate::model::part::PinKind;
 use crate::netlist::{LIB, kicad_pin_type};
 use crate::units::{Angle, Nm};
@@ -322,7 +329,17 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
     }
     w.line(1, ")");
     w.line(1, "(setup");
-    w.line(2, "(pad_to_mask_clearance 0)");
+    let r = &board.rules;
+    w.line(2, &format!("(pad_to_mask_clearance {})", mm(r.mask_expansion)));
+    if r.mask_min_web.0 > 0 {
+        w.line(2, &format!("(solder_mask_min_width {})", mm(r.mask_min_web)));
+    }
+    if r.paste_margin.0 != 0 {
+        w.line(2, &format!("(pad_to_paste_clearance {})", mm(r.paste_margin)));
+    }
+    if r.paste_ratio.0 != 0 {
+        w.line(2, &format!("(pad_to_paste_clearance_ratio {})", r.paste_ratio));
+    }
     w.line(2, "(allow_soldermask_bridges_in_footprints no)");
     let o = w.xy(Point::new(Nm::ZERO, Nm::ZERO));
     w.line(2, &format!("(aux_axis_origin {o})"));
@@ -459,16 +476,23 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
         attr.extend(["exclude_from_pos_files", "exclude_from_bom", "dnp"]);
     }
     w.line(2, &format!("(attr {})", attr.join(" ")));
+    write_overrides(w, &fp.overrides, false);
+    if !fp.net_ties.is_empty() {
+        let groups: Vec<String> = fp.net_ties.iter().map(|g| q(&g.join(","))).collect();
+        w.line(2, &format!("(net_tie_pad_groups {})", groups.join(" ")));
+    }
 
     // Graphics.
     for (gi, g) in fp.graphics.iter().enumerate() {
-        let layer = q(&f.layer(match g.layer {
-            GraphicLayer::Silk => "F.SilkS",
-            GraphicLayer::Fab => "F.Fab",
-            GraphicLayer::Courtyard => "F.CrtYd",
-        }));
+        let layer = q(&side_layer(geo::pad_side(pf.side, g.back), g.layer.front_name()));
         let stroke = format!("(stroke (width {}) (type solid))", mm(g.width));
         let gk = format!("{key}/g{gi}");
+        // Copper, mask and paste polygons are areas.
+        let fill = if matches!(g.layer, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste) {
+            "solid"
+        } else {
+            "none"
+        };
         match &g.geometry {
             GraphicGeometry::Path { points } => {
                 for (si, s) in points.windows(2).enumerate() {
@@ -488,7 +512,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
                 w.line(
                     2,
                     &format!(
-                        "(fp_poly (pts {}) {stroke} (fill none) (layer {layer}) (uuid {}))",
+                        "(fp_poly (pts {}) {stroke} (fill {fill}) (layer {layer}) (uuid {}))",
                         pts.join(" "),
                         w.id(&gk, refdes)
                     ),
@@ -585,16 +609,34 @@ fn write_pad(
     pins: &BTreeMap<String, (String, PinKind)>,
 ) {
     let angle = deg(f.angle(pad.rotation));
+    // Windows are written as paste-only pads below.
+    let paste = pad.has_paste() && !matches!(pad.paste, Some(Paste::Windows { .. }));
     let (kind, layers): (&str, Vec<String>) = match pad.kind {
         PadKind::Smd => {
-            let mut l = vec![f.layer("F.Cu"), f.layer("F.Mask")];
-            if pad.paste.is_none() {
-                l.push(f.layer("F.Paste"));
+            let s = geo::pad_side(f.pf.side, pad.back);
+            let mut l = vec![side_layer(s, "F.Cu")];
+            if pad.mask != MaskOpening::None {
+                l.push(side_layer(s, "F.Mask"));
+            }
+            if paste {
+                l.push(side_layer(s, "F.Paste"));
             }
             ("smd", l)
         }
-        PadKind::Tht { .. } => ("thru_hole", vec!["*.Cu".into(), "*.Mask".into()]),
-        PadKind::Npth { .. } => ("np_thru_hole", vec!["*.Cu".into(), "*.Mask".into()]),
+        PadKind::Tht { .. } | PadKind::Npth { .. } => {
+            let mut l = vec!["*.Cu".to_string()];
+            let other = geo::pad_side(f.pf.side, true);
+            match pad.mask {
+                MaskOpening::Pad => l.push("*.Mask".into()),
+                MaskOpening::Front => l.push(f.layer("F.Mask")),
+                MaskOpening::Back => l.push(side_layer(other, "F.Mask")),
+                MaskOpening::None => {}
+            }
+            if paste {
+                l.push(f.layer("F.Paste"));
+            }
+            (if matches!(pad.kind, PadKind::Tht { .. }) { "thru_hole" } else { "np_thru_hole" }, l)
+        }
     };
     // A polygon pad is a custom pad: a 1 µm circular anchor at the center plus the outline as a
     // filled polygon primitive, in KiCad's pad coordinates (Y down; mirrored on the bottom side).
@@ -631,11 +673,14 @@ fn write_pad(
         mm(size.0),
         mm(size.1)
     );
-    match pad.kind {
-        PadKind::Tht { drill } | PadKind::Npth { drill } => {
+    match (pad.kind, pad.slot) {
+        (PadKind::Tht { .. } | PadKind::Npth { .. }, Some((sx, sy))) => {
+            let _ = write!(s, "(drill oval {} {}) ", mm(sx), mm(sy));
+        }
+        (PadKind::Tht { drill } | PadKind::Npth { drill }, None) => {
             let _ = write!(s, "(drill {}) ", mm(drill));
         }
-        PadKind::Smd => {}
+        (PadKind::Smd, _) => {}
     }
     let _ = write!(s, "(layers {})", layers.join(" "));
     if let Some(pts) = &custom {
@@ -658,6 +703,7 @@ fn write_pad(
             let _ = write!(s, " (pintype {})", q(kicad_pin_type(*kind)));
         }
     }
+    s.push_str(&overrides_text(&pad.overrides, true));
     let label = if pad.number.is_empty() { refdes.to_string() } else { format!("{refdes}.{}", pad.number) };
     let _ = write!(s, " (uuid {}))", w.id(key, label.clone()));
     w.line(2, &s);
@@ -678,6 +724,46 @@ fn write_pad(
                 ),
             );
         }
+    }
+}
+
+/// KiCad's zone connection number: 0 none, 1 thermal, 2 solid, 3 thermal for through-hole pads.
+fn zone_connect(c: PadConnection) -> u8 {
+    match c {
+        PadConnection::None => 0,
+        PadConnection::Thermal => 1,
+        PadConnection::Solid => 2,
+        PadConnection::ThtThermal => 3,
+    }
+}
+
+/// Local settings as KiCad tokens, each with a leading space. Pads name the paste ratio
+/// `solder_paste_margin_ratio`, footprints `solder_paste_ratio`.
+fn overrides_text(o: &crate::model::footprint::Overrides, pad: bool) -> String {
+    let mut s = String::new();
+    if let Some(m) = o.mask_margin {
+        let _ = write!(s, " (solder_mask_margin {})", mm(m));
+    }
+    if let Some(m) = o.paste_margin {
+        let _ = write!(s, " (solder_paste_margin {})", mm(m));
+    }
+    if let Some(r) = o.paste_ratio {
+        let key = if pad { "solder_paste_margin_ratio" } else { "solder_paste_ratio" };
+        let _ = write!(s, " ({key} {r})");
+    }
+    if let Some(c) = o.clearance {
+        let _ = write!(s, " (clearance {})", mm(c));
+    }
+    if let Some(c) = o.zone_connection {
+        let _ = write!(s, " (zone_connect {})", zone_connect(c));
+    }
+    s
+}
+
+fn write_overrides(w: &mut Writer<'_>, o: &crate::model::footprint::Overrides, pad: bool) {
+    let s = overrides_text(o, pad);
+    if !s.is_empty() {
+        w.line(2, s.trim_start());
     }
 }
 
@@ -743,6 +829,16 @@ fn write_graphics(w: &mut Writer<'_>) {
                     );
                     w.line(1, &t);
                 }
+            }
+            GraphicKind::Polygon { points, width } => {
+                let pts: Vec<String> = points.iter().map(|x| format!("(xy {})", w.xy(*x))).collect();
+                let t = format!(
+                    "(gr_poly (pts {}) (stroke (width {}) (type solid)) (fill solid) (layer {layer}) (uuid {}))",
+                    pts.join(" "),
+                    mm(*width),
+                    w.id(&key, format!("graphic#{}", g.id.0))
+                );
+                w.line(1, &t);
             }
             GraphicKind::Text { text, at, size, rotation } => {
                 let t = format!(
@@ -831,6 +927,7 @@ fn write_copper(w: &mut Writer<'_>) {
             PadConnection::Thermal => String::new(),
             PadConnection::Solid => "yes ".into(),
             PadConnection::None => "no ".into(),
+            PadConnection::ThtThermal => "thru_hole_only ".into(),
         };
         w.line(2, &format!("(connect_pads {connect}(clearance {clearance}))"));
         w.line(2, &format!("(min_thickness {}) (filled_areas_thickness no)", mm(prm.min_width)));
@@ -933,9 +1030,10 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
                 },
                 "meta": {"version": 2},
                 "rules": {
-                    // KiCad floors every clearance at the board minimum; cadlab lets a class go
-                    // below the rules clearance, so the minimum is the smallest of them.
-                    "min_clearance": mmf(circuit.netclasses.values().filter_map(|c| c.clearance).fold(r.clearance, Nm::min)),
+                    // KiCad floors every clearance at the board minimum; cadlab lets a class, a
+                    // local clearance or a custom rule go below the rules clearance (down to its
+                    // own `min_clearance`), so the minimum is the smallest of them.
+                    "min_clearance": mmf(min_clearance(p)),
                     "min_connection": 0.0,
                     "min_copper_edge_clearance": mmf(r.copper_to_edge),
                     "min_hole_clearance": mmf(r.clearance),
@@ -973,11 +1071,83 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
     s
 }
 
+/// The smallest clearance in use: rules, net classes, local pad and footprint clearances and
+/// custom rules, floored at the rules' `min_clearance`.
+fn min_clearance(p: &Project) -> Nm {
+    let r = &p.board().rules;
+    let mut m = p.circuit().netclasses.values().filter_map(|c| c.clearance).fold(r.clearance, Nm::min);
+    for fp in p.library().footprints.values() {
+        for o in std::iter::once(&fp.overrides).chain(fp.pads.iter().map(|pad| &pad.overrides)) {
+            if let Some(c) = o.clearance {
+                m = m.min(c);
+            }
+        }
+    }
+    for c in p.board().custom_rules.iter().filter_map(|c| c.clearance) {
+        m = m.min(c);
+    }
+    m.max(r.min_clearance)
+}
+
+/// A custom rule's scope as a KiCad rule condition (`A.Type == 'Pad' && A.Layer == 'F.Cu'
+/// && A.memberOfFootprint('cadlab:QFN*')`). Footprint patterns match cadlab's footprint names
+/// (the export's `cadlab:` library) or designators.
+fn scope_condition(s: &crate::model::board::RuleScope) -> String {
+    use crate::model::board::ItemKind;
+    let mut terms: Vec<String> = Vec::new();
+    let kind = |k: ItemKind| match k {
+        ItemKind::Pad => "Pad",
+        ItemKind::Track => "Track",
+        ItemKind::Via => "Via",
+        ItemKind::Zone => "Zone",
+        ItemKind::Graphic => "Graphic",
+    };
+    if !s.kinds.is_empty() {
+        let any: Vec<String> = s.kinds.iter().map(|k| format!("A.Type == '{}'", kind(*k))).collect();
+        terms.push(if any.len() == 1 { any[0].clone() } else { format!("({})", any.join(" || ")) });
+    }
+    if let Some(l) = &s.layer {
+        terms.push(format!("A.Layer == '{l}'"));
+    }
+    let fp = |f: &str, pat: &str| format!("(A.{f}('{LIB}:{pat}') || A.{f}('{pat}'))");
+    if let Some(pat) = &s.footprint {
+        terms.push(fp("memberOfFootprint", pat));
+    }
+    if let Some(pat) = &s.in_courtyard {
+        terms.push(fp("intersectsCourtyard", pat));
+    }
+    if let Some(a) = &s.in_area {
+        terms.push(format!("A.enclosedByArea('{a}')"));
+    }
+    terms.join(" && ")
+}
+
 /// Custom rules (`.kicad_dru`): KiCad does not check net class track widths by itself, so each
-/// class with a width gets a minimum track width rule.
+/// class with a width gets a minimum track width rule; then cadlab's custom rules, in order
+/// (KiCad gives later rules priority, as cadlab does).
 fn dru(p: &Project) -> (String, Vec<String>) {
     let mut s = String::from("(version 1)\n");
     let mut warnings = Vec::new();
+    let custom = |s: &mut String, warnings: &mut Vec<String>| {
+        for r in &p.board().custom_rules {
+            let cond = scope_condition(&r.scope);
+            if cond.contains('"') || r.name.contains('"') {
+                warnings.push(format!("custom rule `{}`: quotes in its name or scope; not written", r.name));
+                continue;
+            }
+            let _ = write!(s, "\n(rule {}", q(&r.name));
+            if !cond.is_empty() {
+                let _ = write!(s, "\n  (condition \"{cond}\")");
+            }
+            if let Some(c) = r.clearance {
+                let _ = write!(s, "\n  (constraint clearance (min {}mm))", mm(c));
+            }
+            if let Some(w) = r.track_width {
+                let _ = write!(s, "\n  (constraint track_width (min {}mm))", mm(w));
+            }
+            s.push_str(")\n");
+        }
+    };
     for (name, c) in &p.circuit().netclasses {
         let Some(width) = c.track_width else { continue };
         if name.contains('\'') || name.contains('"') {
@@ -991,6 +1161,7 @@ fn dru(p: &Project) -> (String, Vec<String>) {
             mm(width)
         );
     }
+    custom(&mut s, &mut warnings);
     (s, warnings)
 }
 

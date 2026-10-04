@@ -889,6 +889,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                     layer: GraphicLayer::Fab,
                     width: opts.fab_width,
                     geometry: GraphicGeometry::Polygon { points },
+                    back: false,
                 });
             }
             Ok(fp)
@@ -944,6 +945,10 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                         shape,
                         kind: PadKind::Tht { drill: *drill },
                         paste: Some(Paste::None),
+                        back: false,
+                        mask: Default::default(),
+                        slot: None,
+                        overrides: Default::default(),
                     }
                 })
                 .collect();
@@ -968,6 +973,10 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                     shape: PadShape::Circle { d: land },
                     kind: PadKind::Smd,
                     paste: None,
+                    back: false,
+                    mask: Default::default(),
+                    slot: None,
+                    overrides: Default::default(),
                 })
                 .collect();
             let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
@@ -996,6 +1005,10 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                         shape,
                         kind: PadKind::Tht { drill: *drill },
                         paste: Some(Paste::None),
+                        back: false,
+                        mask: Default::default(),
+                        slot: None,
+                        overrides: Default::default(),
                     });
                 }
             }
@@ -1069,7 +1082,18 @@ fn smd_pad(number: &str, at: Point, len: Nm, width: Nm, opts: &GenOptions) -> Pa
     } else {
         PadShape::RoundRect { w: len, h: width, r: corner(len, width, opts) }
     };
-    Pad { number: number.to_string(), at, rotation: Default::default(), shape, kind: PadKind::Smd, paste: None }
+    Pad {
+        number: number.to_string(),
+        at,
+        rotation: Default::default(),
+        shape,
+        kind: PadKind::Smd,
+        paste: None,
+        back: false,
+        mask: Default::default(),
+        slot: None,
+        overrides: Default::default(),
+    }
 }
 
 /// Two-terminal pads: 1 (cathode) on the left, 2 on the right.

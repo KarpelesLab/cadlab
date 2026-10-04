@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geom::Point;
 use crate::id::ObjectId;
-use crate::units::{Angle, Nm};
+use crate::units::{Angle, Nm, Scale};
 use crate::value::Quantity;
 
 /// Board side of a footprint.
@@ -190,6 +190,35 @@ pub struct Rules {
     pub zone_min_width: Nm,
     /// IPC-6012 class (2 or 3).
     pub ipc_class: u8,
+    /// Absolute minimum copper clearance: local pad and footprint clearances and custom rules
+    /// may go below `clearance` and net class values, never below this (0: no floor).
+    #[serde(skip_serializing_if = "is_zero_nm")]
+    pub min_clearance: Nm,
+    /// Solder mask opening growth beyond pads on every side (negative shrinks), unless a pad or
+    /// footprint sets its own margin. A design choice; `export.gerber --mask-expansion`
+    /// overrides it for one export.
+    #[serde(skip_serializing_if = "is_zero_nm")]
+    pub mask_expansion: Nm,
+    /// Solder mask minimum web: mask openings closer than this are merged (the sliver of mask
+    /// between them could not be made). 0: never merged.
+    #[serde(skip_serializing_if = "is_zero_nm")]
+    pub mask_min_web: Nm,
+    /// Solder paste opening growth beyond SMD pads on every side (usually negative), unless a
+    /// pad or footprint sets its own.
+    #[serde(skip_serializing_if = "is_zero_nm")]
+    pub paste_margin: Nm,
+    /// Solder paste growth as a fraction of each pad side (`-0.05`: 5 % smaller at each end),
+    /// added to the paste margin, unless a pad or footprint sets its own.
+    #[serde(skip_serializing_if = "is_zero_scale")]
+    pub paste_ratio: Scale,
+}
+
+fn is_zero_nm(n: &Nm) -> bool {
+    n.0 == 0
+}
+
+fn is_zero_scale(s: &Scale) -> bool {
+    s.0 == 0
 }
 
 impl Default for Rules {
@@ -208,6 +237,11 @@ impl Default for Rules {
             min_silk_width: Nm::from_um(150),
             zone_min_width: Nm::from_um(200),
             ipc_class: 2,
+            min_clearance: Nm::ZERO,
+            mask_expansion: Nm::ZERO,
+            mask_min_web: Nm::ZERO,
+            paste_margin: Nm::ZERO,
+            paste_ratio: Scale(0),
         }
     }
 }
@@ -282,6 +316,66 @@ impl Rules {
             },
         }
     }
+}
+
+/// Kinds of copper item a custom rule can select.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    /// Footprint pads and board holes.
+    Pad,
+    /// Tracks.
+    Track,
+    /// Vias.
+    Via,
+    /// Zone fills.
+    Zone,
+    /// Copper drawings and texts (board or footprint).
+    Graphic,
+}
+
+/// The copper items a custom rule applies to: every condition given must hold.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuleScope {
+    /// Item kinds (empty: any kind).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<ItemKind>,
+    /// Copper layer the item is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+    /// Pads and copper drawings of footprints whose designator or footprint name matches this
+    /// pattern (`*` and `?` wildcards).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footprint: Option<String>,
+    /// Items touching the courtyard of a footprint whose designator or footprint name matches
+    /// this pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_courtyard: Option<String>,
+    /// Items entirely inside the keep-out (or rule area) of this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_area: Option<String>,
+}
+
+/// A design rule for part of the board (neck-downs under fine-pitch parts, breakout areas):
+/// values that replace the net class, local and board values for the items in its scope. When
+/// several rules match, the last one in board order wins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomRule {
+    /// Name, unique on the board.
+    pub name: String,
+    /// Items it applies to.
+    #[serde(default)]
+    pub scope: RuleScope,
+    /// Clearance between an item in scope and copper of another net (when either item is in
+    /// scope), never below `board.rules` `min_clearance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance: Option<Nm>,
+    /// Width tracks in scope need, instead of their net class width (the board's
+    /// `min_track_width` still applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_width: Option<Nm>,
 }
 
 /// Built-in design rule presets: engineering intent, not a fab's limits (sources in
@@ -375,6 +469,9 @@ pub enum PadConnection {
     Solid,
     /// Not connected.
     None,
+    /// Thermal relief spokes for through-hole pads, solid for SMD pads.
+    #[serde(rename = "tht_thermal")]
+    ThtThermal,
 }
 
 /// A copper pour.
@@ -412,7 +509,8 @@ pub struct Zone {
     pub thermal_spoke: Option<Nm>,
 }
 
-/// An area where some items are forbidden.
+/// An area where some items are forbidden. One that forbids nothing is a named rule area, for
+/// the `in_area` scope of custom rules.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Keepout {
@@ -466,7 +564,8 @@ impl Hole {
     }
 }
 
-/// A drawing on a non-copper layer.
+/// A board drawing or text. On a copper layer it is copper without a net (logos, layer marks):
+/// the DRC checks it against every net, zone fills avoid it and the Gerber copper layer has it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BoardGraphic {
     /// ID.
@@ -487,6 +586,14 @@ pub enum GraphicKind {
         /// Vertices.
         points: Vec<Point>,
         /// Stroke width.
+        width: Nm,
+    },
+    /// Filled polygon (logos, copper areas), with its outline stroked by `width`.
+    Polygon {
+        /// Vertices (not repeating the first).
+        points: Vec<Point>,
+        /// Outline stroke width (0: the area alone).
+        #[serde(default, skip_serializing_if = "is_zero_nm")]
         width: Nm,
     },
     /// Text.
@@ -537,6 +644,9 @@ pub struct Board {
     /// Graphics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graphics: Vec<BoardGraphic>,
+    /// Design rules for parts of the board (`board.custom_rule`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_rules: Vec<CustomRule>,
 }
 
 impl Board {

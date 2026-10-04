@@ -1,7 +1,8 @@
 //! Zone fill as it was computed before obstacles were culled per zone (DECISIONS D42): every
 //! item of the layer, every NPTH hole, every keep-out and the whole of every earlier fill go
 //! into each zone's booleans. `tests/perf.rs` checks that `fill_zones_uncached` gives exactly
-//! the same polygons.
+//! the same polygons. It follows the fill semantics otherwise (D40): per-item clearances (custom
+//! rules, local clearances, net classes), per-pad zone connections and slotted NPTH holes.
 
 use std::collections::BTreeMap;
 
@@ -64,8 +65,8 @@ fn fill_layer(
         if same_net(it.net.as_deref(), net) {
             same.push(it);
             if let ItemRef::Pad(..) = it.item {
-                let d = match prm.pads {
-                    PadConnection::Solid => continue,
+                let d = match zones::connection(it, prm.pads) {
+                    PadConnection::Solid | PadConnection::ThtThermal => continue,
                     PadConnection::Thermal => {
                         thermal.push(it);
                         prm.thermal_gap.0
@@ -146,15 +147,20 @@ fn fill_layer(
 pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     let board = p.board();
     let rules = &board.rules;
-    let npth: Vec<(poly::Point, i64)> = placed_pads(p)
+    let npth: Vec<(poly::Point, poly::Point, i64)> = placed_pads(p)
         .into_iter()
         .filter_map(|pp| match pp.hole {
-            Some((d, false)) => Some((pp.center.into(), d.0 / 2)),
+            Some((d, false)) => {
+                let (a, b) = pp.slot.unwrap_or((pp.center, pp.center));
+                Some((a.into(), b.into(), d.0 / 2))
+            }
             _ => None,
         })
         .collect();
     let area = zones::board_area(p, rules.copper_to_edge);
     let net_c = |n: Option<&str>| zones::class_clearance(p, n).unwrap_or(rules.clearance);
+    // Per item: custom rule, local clearance, else the net's (D40).
+    let resolved = cadlab::board::clearance::Clearances::new(p, base, true);
     let mut by_layer: BTreeMap<&str, Vec<(usize, usize)>> = BTreeMap::new();
     for (zi, z) in board.zones.iter().enumerate() {
         for (li, layer) in z.layers.iter().enumerate() {
@@ -166,8 +172,9 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
         jobs.sort_by_key(|&(zi, _)| (std::cmp::Reverse(board.zones[zi].priority), zi));
         let items_on: Vec<(&CopperItem, Nm)> = base
             .iter()
-            .filter(|it| it.layers.iter().any(|l| l == layer))
-            .map(|it| (it, net_c(it.net.as_deref())))
+            .enumerate()
+            .filter(|(_, it)| it.layers.iter().any(|l| l == layer))
+            .map(|(i, it)| (it, resolved.item(i)))
             .collect();
         let mut done: Vec<(usize, usize, ZoneFill)> = Vec::new();
         for (zi, li) in jobs {
@@ -180,9 +187,15 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
                     Err(e) => return Err(e.clone()),
                 };
                 let mut keepaway: Vec<Polygon> = Vec::new();
-                for &(c, r) in &npth {
-                    let ring = Circle::new(c, r + prm.clearance.0 + SAFETY).to_ring(OBSTACLE_TOL)?;
-                    keepaway.push(Polygon::new(ring, vec![]));
+                for &(a, b, r) in &npth {
+                    let r = r + prm.clearance.0 + SAFETY;
+                    if a == b {
+                        let ring = Circle::new(a, r).to_ring(OBSTACLE_TOL)?;
+                        keepaway.push(Polygon::new(ring, vec![]));
+                    } else {
+                        let path = vec![poly::Path(vec![a, b])];
+                        keepaway.extend(poly::offset_paths(&path, r, Join::Round, poly::EndCap::Round, OBSTACLE_TOL)?);
+                    }
                 }
                 for (_, _, f) in &done {
                     if !same_net(f.net.as_deref(), z.net.as_deref()) && !f.fill.is_empty() {

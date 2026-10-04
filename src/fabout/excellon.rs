@@ -1,6 +1,8 @@
 //! Excellon drill files in the XNC profile (Ucamco "XNC Format Specification", revision
-//! 2021.11): metric, decimal-point coordinates, a tool table in the header, drill mode only, one
-//! file per plating and layer span. X2 attributes are carried in standard comments
+//! 2021.11): metric, decimal-point coordinates, a tool table in the header, one file per plating
+//! and layer span. Holes are drill hits; slots (oval holes) are routed with the slot's width as
+//! the tool (`G00` to one end, `M15` tool down, `G01` to the other end, `M16` tool up, `G05`
+//! back to drill mode). X2 attributes are carried in standard comments
 //! (`; #@! TF.FileFunction,...`, `; #@! TA.AperFunction,...`, spec section 4).
 
 use std::fmt::Write as _;
@@ -44,8 +46,18 @@ pub fn drills(p: &Project, o: &Options) -> Vec<OutFile> {
         s.push_str("%\nG05\n");
         for (i, (kind, d)) in tools.iter().enumerate() {
             let _ = writeln!(s, "T{:02}", i + 1);
-            for h in hs.iter().filter(|h| h.kind == *kind && h.diameter == *d) {
+            let of_tool = || hs.iter().filter(|h| h.kind == *kind && h.diameter == *d);
+            for h in of_tool().filter(|h| h.slot.is_none()) {
                 let _ = writeln!(s, "X{}Y{}", xnc_num(h.at.x.0), xnc_num(h.at.y.0));
+            }
+            // Slots in route mode: move to one end, tool down, route to the other, tool up,
+            // back to drill mode.
+            for h in of_tool() {
+                let Some((a, b)) = h.slot else { continue };
+                let _ = writeln!(s, "G00X{}Y{}", xnc_num(a.x.0), xnc_num(a.y.0));
+                s.push_str("M15\n");
+                let _ = writeln!(s, "G01X{}Y{}", xnc_num(b.x.0), xnc_num(b.y.0));
+                s.push_str("M16\nG05\n");
             }
         }
         s.push_str("M30\n");

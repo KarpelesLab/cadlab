@@ -148,6 +148,7 @@ fn imports_a_hand_written_board() {
         other => panic!("{other:?}"),
     }
     assert_eq!(fu.pads[3].kind, PadKind::Tht { drill: Nm(600_000) });
+    assert_eq!(fu.pads[3].slot, Some((Nm(600_000), Nm(1_200_000))), "the oval hole is a slot");
     assert_eq!(fu.mount, Mount::Tht, "no attribute: from the pads");
     assert_eq!(fu.courtyard.len(), 4);
     assert!(fu.graphics.iter().any(|g| matches!(g.geometry, GraphicGeometry::Circle { filled: true, .. })));
@@ -156,6 +157,9 @@ fn imports_a_hand_written_board() {
     let u1p1 = pads.iter().find(|x| x.refdes == "U1" && x.number == "1").unwrap();
     assert_eq!(u1p1.center, pt(21.0, 10.0));
     assert_eq!(u1p1.layers, ["B.Cu"]);
+    let slot = pads.iter().find(|x| x.refdes == "U1" && x.number == "4").unwrap().slot.unwrap();
+    assert_eq!(slot.0.x, slot.1.x, "a vertical slot");
+    assert_eq!((slot.0.y - slot.1.y).abs(), Nm(600_000));
     let r1p1 = pads.iter().find(|x| x.refdes == "R1" && x.number == "1").unwrap();
     assert_eq!(r1p1.center, pt(10.0, 9.5), "KiCad (110, 60.5)");
     // The mounting hole.
@@ -216,8 +220,6 @@ fn imports_a_hand_written_board() {
     for want in [
         "import.invalid_refdes",
         "import.footprint_layer",
-        "import.pad_approximated",
-        "import.copper_drawing",
         "import.unsupported_item",
         "import.track_layer",
         "import.zone_fills",
@@ -228,8 +230,10 @@ fn imports_a_hand_written_board() {
         assert!(c.contains(&want), "{want} missing from {c:?}");
     }
     // invalid designator, F.SilkS line on a bottom footprint, Cmts.User circle of the hole,
-    // copper drawing, dimension, track on silkscreen.
-    assert_eq!(r.not_imported, 6, "{d:#?}");
+    // dimension, track on silkscreen.
+    assert_eq!(r.not_imported, 5, "{d:#?}");
+    // The copper drawing is board copper.
+    assert!(b.graphics.iter().any(|g| g.layer == "F.Cu" && matches!(g.kind, GraphicKind::Line { .. })));
 }
 
 #[test]
@@ -374,22 +378,18 @@ fn corpus_features() {
     assert_eq!(r.holes, 2);
     // Text variables replaced.
     assert!(b.graphics.iter().any(|g| matches!(&g.kind, GraphicKind::Text { text, .. } if text == "rev 1.2")));
-    for want in [
-        "import.local_setting",
-        "import.net_tie",
-        "import.footprint_as_via",
-        "import.footprint_as_holes",
-        "import.zone_outlines",
-        "import.text_variable",
-    ] {
+    for want in ["import.footprint_as_via", "import.footprint_as_holes", "import.zone_outlines", "import.text_variable"]
+    {
         assert!(c.contains(&want), "{want} missing from {c:?}");
     }
-    // Aggregated notes name every subject.
-    let local: Vec<String> = d
-        .iter()
-        .filter(|x| x.code == "import.local_setting")
-        .flat_map(|x| x.subjects.iter().map(|s| s.to_string()))
-        .collect();
-    assert!(local.iter().any(|s| s.contains("H5")), "{local:?}");
-    assert!(local.iter().any(|s| s == "setup"), "{local:?}");
+    // Local settings: the board's mask expansion, the ring pad's mask margin, clearance and
+    // zone connection.
+    assert_eq!(b.rules.mask_expansion, Nm(50_000));
+    let pad = &h5.pads.iter().find(|x| x.number == "1").unwrap().overrides;
+    assert_eq!(pad.mask_margin, Some(Nm(100_000)));
+    assert_eq!(pad.clearance, Some(Nm(200_000)));
+    assert_eq!(pad.zone_connection, Some(PadConnection::None));
+    // The net tie: its pads touch nothing else, but their nets are one group.
+    let nt = crate::board::footprint_for(&p, "NT1").unwrap();
+    assert_eq!(nt.net_ties, vec![vec!["1".to_string(), "2".to_string()]]);
 }

@@ -23,6 +23,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<List>()
         .register::<Show>()
         .register::<Remove>()
+        .register::<FootprintSet>()
         .register::<ModelSet>()
         .register::<ModelClear>()
         .register::<ModelList>();
@@ -288,6 +289,339 @@ impl Command for Remove {
 
     fn summarize(o: &Removed) -> String {
         format!("removed footprint {}", o.name)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Local settings: mask and paste margins, clearance, zone connection, net ties, pads on the
+// back, slots, paste on through-hole pads (DECISIONS D40).
+
+/// A pad's paste setting for `footprint.set`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteChoice {
+    /// The default: an opening equal to the pad for SMD pads, none for through-hole pads.
+    Default,
+    /// No paste.
+    None,
+    /// An opening equal to the pad, also on through-hole pads (paste-in-hole reflow).
+    Pad,
+}
+
+/// Change a footprint's local settings, for the whole footprint (defaults of its pads) or for
+/// some pads: solder mask and paste margins, clearance, zone connection; and per pad the side
+/// (`back`), a slotted hole and paste-in-hole; and the footprint's net ties. Only given values
+/// change; `unset` resets values to "inherited". Every placement using the footprint follows.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FootprintSet {
+    /// Footprint name.
+    pub name: String,
+    /// Pad numbers to change (default: the footprint's own settings, which its pads inherit).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pads: Vec<String>,
+    /// Solder mask opening growth beyond the copper per side (negative shrinks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_margin: Option<Nm>,
+    /// Solder paste opening growth per side (usually negative).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_margin: Option<Nm>,
+    /// Solder paste growth as a fraction of each pad side (`-0.05`), added to the margin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_ratio: Option<Scale>,
+    /// Copper clearance to other nets, instead of the net class clearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance: Option<Nm>,
+    /// Zone connection: thermal, solid, none or tht_thermal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_connection: Option<crate::model::board::PadConnection>,
+    /// Settings to reset to inherited: mask_margin, paste_margin, paste_ratio, clearance,
+    /// zone_connection; for pads also slot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unset: Vec<String>,
+    /// Pads only: SMD pads on the other side of the footprint (true) or on its side (false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<bool>,
+    /// Pads only: solder mask openings: pad (default: where its copper is outside), front or
+    /// back (holes: one side only), none (covered by mask).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<crate::model::footprint::MaskOpening>,
+    /// Pads only: a slotted hole, its size along the pad's X and Y axes; the drill becomes the
+    /// smaller of the two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<(Nm, Nm)>,
+    /// Pads only: solder paste (default, none, or pad for paste-in-hole).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste: Option<PasteChoice>,
+    /// Footprint only: net-tie groups of pad numbers (`[["1", "2"]]`), replacing the current
+    /// ones; `[]` removes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_ties: Option<Vec<Vec<String>>>,
+}
+
+/// A pad with settings of its own.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PadSettings {
+    /// Pad number.
+    pub number: String,
+    /// Its own settings.
+    #[serde(flatten)]
+    pub overrides: crate::model::footprint::Overrides,
+    /// On the other side of the footprint.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub back: bool,
+    /// Solder mask openings, when not the default.
+    #[serde(default, skip_serializing_if = "crate::model::footprint::MaskOpening::is_default")]
+    pub mask: crate::model::footprint::MaskOpening,
+    /// Slotted hole size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<(Nm, Nm)>,
+    /// Paste setting, when not the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste: Option<crate::model::footprint::Paste>,
+}
+
+/// A footprint's local settings after `footprint.set`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FootprintSettings {
+    /// Footprint name.
+    pub name: String,
+    /// Footprint-level settings (defaults of its pads).
+    #[serde(flatten)]
+    pub overrides: crate::model::footprint::Overrides,
+    /// Net-tie groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub net_ties: Vec<Vec<String>>,
+    /// Pads with settings of their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pads: Vec<PadSettings>,
+}
+
+impl FootprintSettings {
+    fn of(f: &Footprint) -> Self {
+        use crate::model::footprint::{PadKind, Paste};
+        let pads = f
+            .pads
+            .iter()
+            .filter(|p| {
+                let default_paste = match p.kind {
+                    PadKind::Smd => p.paste.is_none(),
+                    _ => p.paste.is_none() || p.paste == Some(Paste::None),
+                };
+                !p.overrides.is_empty() || p.back || !p.mask.is_default() || p.slot.is_some() || !default_paste
+            })
+            .map(|p| PadSettings {
+                number: p.number.clone(),
+                overrides: p.overrides.clone(),
+                back: p.back,
+                mask: p.mask,
+                slot: p.slot,
+                paste: p.paste.clone().filter(|x| !matches!(x, Paste::None) || matches!(p.kind, PadKind::Smd)),
+            })
+            .collect();
+        FootprintSettings { name: f.name.clone(), overrides: f.overrides.clone(), net_ties: f.net_ties.clone(), pads }
+    }
+}
+
+fn overrides_text(o: &crate::model::footprint::Overrides) -> Vec<String> {
+    let mut v = Vec::new();
+    if let Some(x) = o.mask_margin {
+        v.push(format!("mask margin {x}"));
+    }
+    if let Some(x) = o.paste_margin {
+        v.push(format!("paste margin {x}"));
+    }
+    if let Some(x) = o.paste_ratio {
+        v.push(format!("paste ratio {x}"));
+    }
+    if let Some(x) = o.clearance {
+        v.push(format!("clearance {x}"));
+    }
+    if let Some(x) = o.zone_connection {
+        v.push(format!(
+            "zone connection {}",
+            serde_json::to_value(x).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
+        ));
+    }
+    v
+}
+
+impl Command for FootprintSet {
+    const NAME: &'static str = "footprint.set";
+    const SUMMARY: &'static str = "Set a footprint's or its pads' mask/paste margins, clearance, zone connection, net ties, back-side pads, slots, paste-in-hole";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = FootprintSettings;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<FootprintSettings, CommandError> {
+        use crate::model::footprint::{PadKind, Paste};
+        let p = ctx.project()?;
+        let name = util::footprint(p, &self.name)?.name.clone();
+        let bad = |code: &'static str, msg: String| CommandError::invalid_args(code, msg);
+        for (field, v) in [("clearance", self.clearance)] {
+            if v.is_some_and(|v| v < Nm::ZERO) {
+                return Err(bad("footprint.invalid_setting", format!("`{field}` cannot be negative")));
+            }
+        }
+        if self.paste_ratio.is_some_and(|r| r.0 <= -500_000 || r.0 >= 1_000_000) {
+            return Err(bad(
+                "footprint.invalid_setting",
+                "`paste_ratio` is a fraction of the pad side, between -0.5 and 1".into(),
+            )
+            .with_hint("e.g. -0.05 for 5 % smaller openings"));
+        }
+        const FIELDS: [&str; 6] =
+            ["mask_margin", "paste_margin", "paste_ratio", "clearance", "zone_connection", "slot"];
+        for u in &self.unset {
+            if !FIELDS.contains(&u.as_str()) || (u == "slot" && self.pads.is_empty()) {
+                return Err(bad("footprint.invalid_setting", format!("`{u}` cannot be unset here"))
+                    .with_hint(format!("give one of {}", FIELDS.join(", "))));
+            }
+        }
+        let pad_only = self.back.is_some() || self.mask.is_some() || self.slot.is_some() || self.paste.is_some();
+        if self.pads.is_empty() && pad_only {
+            return Err(bad("footprint.pads_required", "`back`, `mask`, `slot` and `paste` apply to pads".into())
+                .with_hint("name the pads with `pads`"));
+        }
+        if !self.pads.is_empty() && self.net_ties.is_some() {
+            return Err(bad("footprint.invalid_setting", "`net_ties` belongs to the footprint, not to pads".into())
+                .with_hint("leave out `pads`"));
+        }
+        let lib = ctx.project_mut()?.library_mut();
+        let f = lib.footprints.get_mut(&name).expect("footprint exists");
+        let apply = |o: &mut crate::model::footprint::Overrides| {
+            if self.mask_margin.is_some() {
+                o.mask_margin = self.mask_margin;
+            }
+            if self.paste_margin.is_some() {
+                o.paste_margin = self.paste_margin;
+            }
+            if self.paste_ratio.is_some() {
+                o.paste_ratio = self.paste_ratio;
+            }
+            if self.clearance.is_some() {
+                o.clearance = self.clearance;
+            }
+            if self.zone_connection.is_some() {
+                o.zone_connection = self.zone_connection;
+            }
+            for u in &self.unset {
+                match u.as_str() {
+                    "mask_margin" => o.mask_margin = None,
+                    "paste_margin" => o.paste_margin = None,
+                    "paste_ratio" => o.paste_ratio = None,
+                    "clearance" => o.clearance = None,
+                    "zone_connection" => o.zone_connection = None,
+                    _ => {}
+                }
+            }
+        };
+        if self.pads.is_empty() {
+            apply(&mut f.overrides);
+            if let Some(groups) = &self.net_ties {
+                for g in groups {
+                    if g.len() < 2 {
+                        return Err(bad("footprint.net_tie", "a net-tie group joins at least two pads".into()));
+                    }
+                    if let Some(n) = g.iter().find(|n| !f.pads.iter().any(|p| &p.number == *n)) {
+                        return Err(CommandError::not_found(
+                            "footprint.pad_not_found",
+                            format!("footprint `{name}` has no pad `{n}`"),
+                        ));
+                    }
+                }
+                f.net_ties = groups.clone();
+            }
+        } else {
+            for n in &self.pads {
+                if !f.pads.iter().any(|p| &p.number == n) {
+                    let numbers: Vec<&str> = f.pads.iter().map(|p| p.number.as_str()).collect();
+                    let s = did_you_mean(n, numbers, 3);
+                    return Err(CommandError::not_found(
+                        "footprint.pad_not_found",
+                        format!("footprint `{name}` has no pad `{n}`"),
+                    )
+                    .with_suggestions(&s));
+                }
+            }
+            for pad in f.pads.iter_mut().filter(|p| self.pads.contains(&p.number)) {
+                apply(&mut pad.overrides);
+                if let Some(b) = self.back {
+                    if b && !matches!(pad.kind, PadKind::Smd) {
+                        return Err(bad(
+                            "footprint.invalid_setting",
+                            format!("pad {} has a hole: only SMD pads go on the back", pad.number),
+                        ));
+                    }
+                    pad.back = b;
+                }
+                if let Some(m) = self.mask {
+                    pad.mask = m;
+                }
+                if self.unset.iter().any(|u| u == "slot") {
+                    pad.slot = None;
+                }
+                if let Some((sx, sy)) = self.slot {
+                    let (PadKind::Tht { drill } | PadKind::Npth { drill }) = &mut pad.kind else {
+                        return Err(bad(
+                            "footprint.invalid_setting",
+                            format!("pad {} has no hole to slot", pad.number),
+                        ));
+                    };
+                    if sx <= Nm::ZERO || sy <= Nm::ZERO {
+                        return Err(bad("footprint.invalid_setting", "slot sizes must be positive".into()));
+                    }
+                    *drill = sx.min(sy);
+                    pad.slot = (sx != sy).then_some((sx, sy));
+                }
+                if let Some(c) = self.paste {
+                    pad.paste = match (c, pad.kind) {
+                        (_, PadKind::Npth { .. }) => {
+                            return Err(bad(
+                                "footprint.invalid_setting",
+                                format!("pad {} is a non-plated hole", pad.number),
+                            ));
+                        }
+                        (PasteChoice::Default, PadKind::Smd) => None,
+                        (PasteChoice::Default | PasteChoice::None, _) => Some(Paste::None),
+                        (PasteChoice::Pad, PadKind::Smd) => None,
+                        (PasteChoice::Pad, _) => Some(Paste::Pad),
+                    };
+                }
+            }
+        }
+        Ok(FootprintSettings::of(f))
+    }
+
+    fn summarize(o: &FootprintSettings) -> String {
+        let mut s = format!("footprint {}", o.name);
+        let own = overrides_text(&o.overrides);
+        if !own.is_empty() {
+            s += &format!(": {}", own.join(", "));
+        }
+        for g in &o.net_ties {
+            s += &format!("\n  net tie {}", g.join(", "));
+        }
+        for pad in &o.pads {
+            let mut v = overrides_text(&pad.overrides);
+            if pad.back {
+                v.push("on the back".into());
+            }
+            if !pad.mask.is_default() {
+                v.push(format!(
+                    "mask {}",
+                    serde_json::to_value(pad.mask).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
+                ));
+            }
+            if let Some((x, y)) = pad.slot {
+                v.push(format!("slot {x} x {y}"));
+            }
+            if let Some(pp) = &pad.paste {
+                v.push(format!("paste {}", serde_json::to_value(pp).ok().map(|v| v.to_string()).unwrap_or_default()));
+            }
+            s += &format!("\n  pad {}: {}", pad.number, v.join(", "));
+        }
+        s
     }
 }
 

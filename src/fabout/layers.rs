@@ -13,7 +13,7 @@
 use polyclip::{Circle, EndCap, FillRule, Join, Op, Path, Polygon, PolygonSet};
 
 use super::gerber::{Gerber, Polarity, Seg, Xy, arc_segs, circle_segs, field, mm};
-use super::{FileKind, Hole, Options, OutFile, file_name, grow, holes, is_heatsink, pad_rotation, populated};
+use super::{FileKind, Hole, Options, OutFile, file_name, holes, is_heatsink, pad_rotation, populated};
 use crate::board::{
     self, COPPER_TOL, CopperItem, ItemRef, PlacedPad, footprint_for, side_layer, transform, via_layers,
 };
@@ -164,14 +164,42 @@ impl Ctx<'_> {
         Gerber::new(&self.o.version, function, pol)
     }
 
-    /// Pads with a solder mask opening on `side` (SMD pads on that side, all hole pads).
+    /// Pads with a solder mask opening on `side` (SMD pads facing it, all hole pads).
     fn mask_pads(&self, side: BoardSide) -> impl Iterator<Item = &PlacedPad> {
-        let cu = side_layer(side, "F.Cu");
-        self.pads.iter().filter(move |pp| match pp.pad.kind {
-            PadKind::Smd => pp.layers.contains(&cu),
-            PadKind::Tht { .. } | PadKind::Npth { .. } => true,
-        })
+        super::mask_pads(&self.pads, side)
     }
+
+    /// Every solder mask opening on `side` as regions in board coordinates: pads grown by their
+    /// margins, footprint mask drawings, and the slivers the minimum web merges.
+    fn mask_regions(&self, side: BoardSide) -> PolygonSet {
+        let mut set: PolygonSet = Vec::new();
+        for pp in self.mask_pads(side) {
+            let m = super::mask_margin(self.p, self.o, pp);
+            if m == 0 {
+                set.push(pp.shape.clone());
+            } else {
+                let tol =
+                    polyclip::ArcTol::new(1_000, if m > 0 { polyclip::Side::Outside } else { polyclip::Side::Inside });
+                set.extend(polyclip::offset(&pp.shape, m, Join::Round, tol).unwrap_or_default());
+            }
+        }
+        set.extend(super::footprint_openings(self.p, GraphicLayer::Mask, side));
+        polyclip::union_all(&set, FillRule::NonZero).unwrap_or(set)
+    }
+}
+
+/// The openings with the mask between them narrower than `web` (which a fab cannot make) opened
+/// too: their closing (grown by half the web, then shrunk back, round joins).
+fn web_closing(openings: &PolygonSet, web: i64) -> PolygonSet {
+    if web <= 0 || openings.is_empty() {
+        return Vec::new();
+    }
+    let half = web / 2;
+    let tol = polyclip::ArcTol::new(1_000, polyclip::Side::Inside);
+    let closed = polyclip::offset(openings, half, Join::Round, polyclip::ArcTol::new(1_000, polyclip::Side::Outside))
+        .and_then(|g| polyclip::offset(&g, -half, Join::Round, tol))
+        .unwrap_or_default();
+    polyclip::union_all(&[closed, openings.clone()].concat(), FillRule::NonZero).unwrap_or_default()
 }
 
 /// Every Gerber layer: copper (top to bottom), masks, pastes, legends, profile and the X3
@@ -275,7 +303,7 @@ fn copper(ctx: &Ctx<'_>, i: usize, items: &[CopperItem]) -> OutFile {
         g.region(&fractured(&it.shape), Some("Conductor"));
     }
 
-    graphics(ctx, &mut g, layer, "NonConductor", &[]);
+    // Board and footprint copper drawings are copper items, drawn above as regions.
     ctx.out(FileKind::Copper(layer.clone()), &function, g)
 }
 
@@ -289,13 +317,29 @@ fn mask(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
     let function = format!("Soldermask,{}", side_name(side));
     let mut g = ctx.gerber(&function, Polarity::Negative);
     g.comment("Solder mask openings (negative image); vias are tented");
-    let e = ctx.o.mask_expansion.0;
+    let web = ctx.p.board().rules.mask_min_web.0;
+    if web > 0 {
+        // Openings closer than the minimum web merge: the closing of all openings, as regions.
+        let merged = web_closing(&ctx.mask_regions(side), web);
+        if !merged.is_empty() {
+            g.comment("Openings merged across mask narrower than the minimum web");
+            g.region(&fractured(&merged), Some("Material"));
+        }
+        graphics(ctx, &mut g, &side_layer(side, "F.Mask"), "Material", &[]);
+        return ctx.out(FileKind::Mask(side), &function, g);
+    }
     for pp in ctx.mask_pads(side) {
-        let (shape, a) = ctx.oriented(pp);
-        let ap = pad_aperture(&mut g, grow(shape, e), a);
+        let (shape, a) = super::mask_opening(ctx.p, ctx.o, pp);
+        let ap = pad_aperture(&mut g, shape, a);
         let d = g.aperture(&ap, Some("Material"));
         g.attrs(&[(".C", field(&pp.refdes))]);
         g.flash(d, xy(pp.center));
+    }
+    let drawn = super::footprint_openings(ctx.p, GraphicLayer::Mask, side);
+    if !drawn.is_empty() {
+        g.attrs(&[]);
+        g.comment("Footprint mask openings");
+        g.region(&fractured(&drawn), Some("Material"));
     }
     graphics(ctx, &mut g, &side_layer(side, "F.Mask"), "Material", &[]);
     ctx.out(FileKind::Mask(side), &function, g)
@@ -304,20 +348,19 @@ fn mask(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
 fn paste(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
     let function = format!("Paste,{}", side_name(side));
     let mut g = ctx.gerber(&function, Polarity::Positive);
-    let cu = side_layer(side, "F.Cu");
-    for pp in ctx.pads.iter().filter(|pp| pp.pad.kind == PadKind::Smd && pp.layers.contains(&cu)) {
+    for pp in super::paste_pads(&ctx.pads, side) {
         let a = ctx.rotation(pp);
         g.attrs(&[(".C", field(&pp.refdes))]);
         match &pp.pad.paste {
-            None => {
-                let (shape, a) = ctx.oriented(pp);
+            None | Some(Paste::Pad) => {
+                let (shape, a) = super::paste_opening(ctx.p, pp);
                 let ap = pad_aperture(&mut g, shape, a);
                 let d = g.aperture(&ap, Some("Material"));
                 g.flash(d, xy(pp.center));
             }
             Some(Paste::None) => {}
             Some(Paste::Windows { size, at }) => {
-                let ap = pad_aperture(&mut g, PadShape::Rect { w: size.0, h: size.1 }, a);
+                let ap = pad_aperture(&mut g, super::paste_window(ctx.p, pp, *size), a);
                 let d = g.aperture(&ap, Some("Material"));
                 let pf = &ctx.p.board().footprints[&pp.refdes];
                 let tf = transform(pf);
@@ -327,6 +370,12 @@ fn paste(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
                 }
             }
         }
+    }
+    let drawn = super::footprint_openings(ctx.p, GraphicLayer::Paste, side);
+    if !drawn.is_empty() {
+        g.attrs(&[]);
+        g.comment("Footprint paste openings");
+        g.region(&fractured(&drawn), Some("Material"));
     }
     graphics(ctx, &mut g, &side_layer(side, "F.Paste"), "Material", &[]);
     ctx.out(FileKind::Paste(side), &function, g)
@@ -445,36 +494,42 @@ fn graphics(ctx: &Ctx<'_>, g: &mut Gerber, layer: &str, function: &str, openings
     let mirror = layer.starts_with("B.");
     let min_w = ctx.p.board().rules.min_silk_width.0;
     let mut strokes = Vec::new();
+    let mut areas: PolygonSet = Vec::new();
     for gr in ctx.p.board().graphics.iter().filter(|gr| gr.layer == layer) {
         match &gr.kind {
             GraphicKind::Line { points, width } => {
                 strokes.push(Stroke::Line { pts: points.iter().map(|&p| xy(p)).collect(), width: width.0 })
             }
+            GraphicKind::Polygon { points, width } => areas.extend(board::polygon_area(points, *width)),
             GraphicKind::Text { text, at, size, rotation } => {
                 strokes.extend(text_strokes(text, *at, *size, *rotation, mirror, (size.0 / 8).max(min_w)))
             }
         }
     }
-    if strokes.is_empty() {
+    if strokes.is_empty() && areas.is_empty() {
         return;
     }
     g.attrs(&[]);
     g.comment(&format!("Board graphics on {layer}"));
     emit_clipped(g, &strokes, openings, function);
+    if !areas.is_empty() {
+        let holes: Vec<Polygon> = openings.iter().map(|(p, _)| p.clone()).collect();
+        let rest = if holes.is_empty() {
+            areas
+        } else {
+            polyclip::boolean(Op::Difference, &areas, &holes, FillRule::NonZero).unwrap_or(areas)
+        };
+        g.region(&fractured(&rest), Some(function));
+    }
 }
 
 fn legend(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
     let function = format!("Legend,{}", side_name(side));
     let mut g = ctx.gerber(&function, Polarity::Positive);
-    let e = ctx.o.mask_expansion.0;
     let openings: Vec<(Polygon, (Xy, Xy))> = ctx
-        .mask_pads(side)
-        .filter_map(|pp| {
-            let poly = if e == 0 {
-                pp.shape.clone()
-            } else {
-                polyclip::offset(&pp.shape, e, Join::Round, COPPER_TOL).ok()?.into_iter().next()?
-            };
+        .mask_regions(side)
+        .into_iter()
+        .filter_map(|poly| {
             let bb = poly.bbox()?;
             Some((poly, ((bb.min.x, bb.min.y), (bb.max.x, bb.max.y))))
         })
@@ -669,7 +724,11 @@ pub fn drill_gerbers(p: &Project, o: &Options) -> Vec<OutFile> {
                 if plated {
                     g.attrs(&[net_attr(&h.net)]);
                 }
-                g.flash(ap, xy(h.at));
+                match h.slot {
+                    // A slot is a draw of the drill aperture between its end centers.
+                    Some((a, b)) => g.polyline(ap, &[xy(a), xy(b)]),
+                    None => g.flash(ap, xy(h.at)),
+                }
             }
         }
         out.push(OutFile {

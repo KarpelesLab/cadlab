@@ -440,6 +440,7 @@ impl Ctx<'_> {
                         out.push(d);
                     }
                 }
+                GraphicKind::Polygon { .. } => {}
                 GraphicKind::Text { text, at, size, .. } => {
                     if let Some(m) = q.min_silk_height
                         && *size < m

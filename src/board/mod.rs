@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+pub mod clearance;
 pub mod holes;
 pub mod place;
 pub mod prepared;
@@ -13,8 +14,8 @@ use polyclip::{ArcTol, Circle, Curve, EndCap, Join, Path, Polygon, PolygonSet, S
 use crate::geom::Point;
 use crate::id::ObjectId;
 use crate::model::Project;
-use crate::model::board::{BoardSide, Contour, PlacedFootprint, Segment, Track, Via};
-use crate::model::footprint::{Footprint, Pad, PadKind, PadShape};
+use crate::model::board::{BoardSide, Contour, GraphicKind, PadConnection, PlacedFootprint, Segment, Track, Via};
+use crate::model::footprint::{Footprint, Overrides, Pad, PadKind, PadShape};
 use crate::units::{Angle, Nm};
 
 /// Arc approximation tolerance for copper shapes (1 µm, outward: never smaller than true copper).
@@ -72,6 +73,74 @@ pub struct PlacedPad {
     pub pad: Pad,
     /// Side of the footprint.
     pub side: BoardSide,
+    /// Side of the board the pad's copper faces: the footprint's, or the other one for an SMD
+    /// pad on the back of its footprint ([`Pad::back`]). Through-hole pads: the footprint's.
+    pub pad_side: BoardSide,
+    /// Local settings in effect (the pad's, else its footprint's).
+    pub overrides: Overrides,
+    /// A slotted hole: the centers of its two end circles on the board (the hole diameter is
+    /// the slot width).
+    pub slot: Option<(Point, Point)>,
+    /// The footprint's net-tie group holding this pad.
+    pub tie: Option<usize>,
+}
+
+impl PlacedPad {
+    /// The drilled hole's outline (a circle, or a stadium for a slot), if the pad has a hole.
+    pub fn hole_shape(&self) -> Option<Polygon> {
+        let (d, _) = self.hole?;
+        let path = match self.slot {
+            Some((a, b)) => vec![pt(a), pt(b)],
+            None => vec![pt(self.center)],
+        };
+        if path.len() == 1 {
+            let ring = Circle { center: path[0], radius: d.0 / 2 }.to_ring(COPPER_TOL).ok()?;
+            return Some(Polygon::new(ring, vec![]));
+        }
+        polyclip::offset_paths(&vec![Path(path)], d.0 / 2, Join::Round, EndCap::Round, COPPER_TOL)
+            .ok()?
+            .into_iter()
+            .next()
+    }
+
+    /// Whether the pad has a solder mask opening on `side` ([`Pad::mask`]).
+    pub fn mask_on(&self, side: BoardSide) -> bool {
+        use crate::model::footprint::MaskOpening;
+        match (self.pad.kind, self.pad.mask) {
+            (_, MaskOpening::None) => false,
+            (PadKind::Smd, _) => self.pad_side == side,
+            (_, MaskOpening::Pad) => true,
+            (_, MaskOpening::Front) => self.side == side,
+            (_, MaskOpening::Back) => self.side != side,
+        }
+    }
+
+    /// Whether the pad has a plated hole.
+    pub fn plated(&self) -> bool {
+        matches!(self.hole, Some((_, true)))
+    }
+}
+
+/// The side an SMD pad's copper is on: its footprint's, or the other one for a pad on the
+/// back of its footprint.
+pub fn pad_side(footprint: BoardSide, back: bool) -> BoardSide {
+    match (footprint, back) {
+        (s, false) => s,
+        (BoardSide::Top, true) => BoardSide::Bottom,
+        (BoardSide::Bottom, true) => BoardSide::Top,
+    }
+}
+
+/// The slot of a footprint pad as the centers of its end circles, in footprint coordinates.
+pub fn slot_ends(pad: &Pad) -> Option<(Point, Point)> {
+    let (sx, sy) = pad.slot?;
+    let half = Nm((sx.0 - sy.0).abs() / 2);
+    if half.0 == 0 {
+        return None;
+    }
+    let d = if sx > sy { Point::new(half, Nm::ZERO) } else { Point::new(Nm::ZERO, half) };
+    let d = d.rotated(pad.rotation);
+    Some((pad.at - d, pad.at + d))
 }
 
 fn pt(p: Point) -> polyclip::Point {
@@ -182,11 +251,16 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
                 shape.outer.reverse_orientation();
                 shape.holes.iter_mut().for_each(|h| h.reverse_orientation());
             }
+            let ps = match pad.kind {
+                PadKind::Smd => pad_side(pf.side, pad.back),
+                _ => pf.side,
+            };
             let (layers, hole) = match pad.kind {
-                PadKind::Smd => (vec![side_layer(pf.side, "F.Cu")], None),
+                PadKind::Smd => (vec![side_layer(ps, "F.Cu")], None),
                 PadKind::Tht { drill } => (copper.clone(), Some((drill, true))),
                 PadKind::Npth { drill } => (vec![], Some((drill, false))),
             };
+            let slot = if hole.is_some() { slot_ends(pad).map(|(a, b)| (tf(a), tf(b))) } else { None };
             out.push(PlacedPad {
                 refdes: refdes.clone(),
                 number: pad.number.clone(),
@@ -197,6 +271,10 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
                 hole,
                 pad: pad.clone(),
                 side: pf.side,
+                pad_side: ps,
+                overrides: fp.pad_overrides(pad),
+                slot,
+                tie: fp.tie_group(&pad.number),
             });
         }
     }
@@ -285,6 +363,10 @@ pub enum ItemRef {
     Via(ObjectId),
     /// One island of a zone fill: (zone, copper layer, island index in the fill).
     Zone(ObjectId, String, usize),
+    /// A board drawing or text on a copper layer.
+    Graphic(ObjectId),
+    /// A copper drawing of a footprint: (designator, index in the footprint's graphics).
+    FpGraphic(String, usize),
 }
 
 impl std::fmt::Display for ItemRef {
@@ -294,8 +376,44 @@ impl std::fmt::Display for ItemRef {
             ItemRef::Track(id) => write!(f, "track#{}", id.0),
             ItemRef::Via(id) => write!(f, "via#{}", id.0),
             ItemRef::Zone(id, layer, i) => write!(f, "zone#{}@{layer}/{i}", id.0),
+            ItemRef::Graphic(id) => write!(f, "graphic#{}", id.0),
+            ItemRef::FpGraphic(r, i) => write!(f, "copper:{r}/{i}"),
         }
     }
+}
+
+impl ItemRef {
+    /// The footprint (designator) the item belongs to: pads and footprint copper drawings.
+    pub fn footprint(&self) -> Option<&str> {
+        match self {
+            ItemRef::Pad(r, _) | ItemRef::FpGraphic(r, _) => Some(r),
+            _ => None,
+        }
+    }
+}
+
+/// Settings a copper item carries besides its shape: local overrides of pads and how a
+/// footprint ties nets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemLocal {
+    /// Local clearance (a pad's, else its footprint's).
+    pub clearance: Option<Nm>,
+    /// Zone connection override (pads).
+    pub connection: Option<PadConnection>,
+    /// A plated through-hole pad.
+    pub through: bool,
+    /// The net-tie group of its footprint it belongs to: (designator, group).
+    pub tie: Option<(String, usize)>,
+    /// For a copper drawing of a net-tie footprint: the nets of its group, which it may touch
+    /// anywhere (it is the bridge between them).
+    pub tie_nets: Vec<String>,
+}
+
+/// Whether two copper items of different nets may touch: both belong to one net-tie group of
+/// the same footprint.
+pub fn tied(a: &CopperItem, b: &CopperItem) -> bool {
+    let bridges = |x: &CopperItem, y: &CopperItem| y.net.as_ref().is_some_and(|n| x.local.tie_nets.contains(n));
+    a.net != b.net && ((a.local.tie.is_some() && a.local.tie == b.local.tie) || bridges(a, b) || bridges(b, a))
 }
 
 /// A piece of copper.
@@ -311,6 +429,8 @@ pub struct CopperItem {
     pub shape: PolygonSet,
     /// A representative point (pad center, via center, track start).
     pub anchor: Point,
+    /// Local settings and net ties.
+    pub local: ItemLocal,
 }
 
 /// All copper items: pads, tracks, vias and zone fills (one item per fill island, computed
@@ -322,7 +442,8 @@ pub fn copper_items(p: &Project) -> Vec<CopperItem> {
     out
 }
 
-/// Copper items other than zone fills: pads, tracks, vias.
+/// Copper items other than zone fills: pads, tracks, vias, then copper drawings (footprint and
+/// board).
 pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
     let mut out: Vec<CopperItem> = placed_pads(p)
         .into_iter()
@@ -333,6 +454,13 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
             layers: pp.layers.clone(),
             shape: vec![pp.shape.clone()],
             anchor: pp.center,
+            local: ItemLocal {
+                clearance: pp.overrides.clearance,
+                connection: pp.overrides.zone_connection,
+                through: pp.plated(),
+                tie: pp.tie.map(|g| (pp.refdes.clone(), g)),
+                tie_nets: Vec::new(),
+            },
         })
         .collect();
     for t in &p.board().tracks {
@@ -342,6 +470,7 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
             layers: vec![t.layer.clone()],
             shape: track_shape(t),
             anchor: t.start,
+            local: ItemLocal::default(),
         });
     }
     for v in &p.board().vias {
@@ -351,6 +480,172 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
             layers: via_layers(p, v),
             shape: vec![via_shape(v)],
             anchor: v.at,
+            local: ItemLocal::default(),
+        });
+    }
+    let graphics = graphic_items(p, &out);
+    out.extend(graphics);
+    out
+}
+
+/// Stroke width of board texts: an eighth of the height, at least the minimum silkscreen
+/// width (texts carry no stroke width of their own).
+pub fn text_stroke_width(p: &Project, size: Nm) -> Nm {
+    Nm((size.0 / 8).max(p.board().rules.min_silk_width.0))
+}
+
+/// Text strokes as polylines: centered on `at`, cap height `size`, rotated, mirrored (bottom
+/// side) — the Hershey font every output uses.
+pub fn text_paths(text: &str, at: Point, size: Nm, rotation: Angle, mirror: bool) -> Vec<Vec<Point>> {
+    use crate::render::font::{self, HAlign, VAlign};
+    let (s, c) = rotation.to_rad_f64().sin_cos();
+    font::layout(text, (0.0, 0.0), size.0 as f64, HAlign::Center, VAlign::Middle, 0)
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            l.into_iter()
+                .map(|(x, y)| {
+                    let x = if mirror { -x } else { x };
+                    let (rx, ry) = (x * c - y * s, x * s + y * c);
+                    Point::new(Nm(rx.round() as i64) + at.x, Nm(ry.round() as i64) + at.y)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A filled polygon with its outline stroked by `width` (0: the area alone), as one region set.
+pub fn polygon_area(points: &[Point], width: Nm) -> PolygonSet {
+    let ring: Vec<polyclip::Point> = points.iter().map(|&q| pt(q)).collect();
+    let mut s = polyclip::union_all(&ring, polyclip::FillRule::NonZero).unwrap_or_default();
+    if width.0 > 0 && !points.is_empty() {
+        let mut closed = points.to_vec();
+        closed.push(points[0]);
+        s.extend(stroke_set(vec![closed], width));
+        s = polyclip::union_all(&s, polyclip::FillRule::NonZero).unwrap_or(s);
+    }
+    s
+}
+
+fn stroke_set(paths: Vec<Vec<Point>>, width: Nm) -> PolygonSet {
+    let paths: Vec<Path> =
+        paths.into_iter().filter(|p| !p.is_empty()).map(|p| Path(p.into_iter().map(pt).collect())).collect();
+    if paths.is_empty() {
+        return PolygonSet::new();
+    }
+    polyclip::offset_paths(&paths, (width.0 / 2).max(1), Join::Round, EndCap::Round, COPPER_TOL).unwrap_or_default()
+}
+
+/// A footprint drawing as a region in board coordinates: polylines stroked, polygons filled
+/// (and stroked), circles filled or as rings.
+pub fn fp_graphic_shape(pf: &PlacedFootprint, g: &crate::model::footprint::Graphic) -> PolygonSet {
+    use crate::model::footprint::GraphicGeometry;
+    let tf = transform(pf);
+    let mut set = match &g.geometry {
+        GraphicGeometry::Path { points } => stroke_set(vec![points.iter().map(|q| tf(*q)).collect()], g.width),
+        GraphicGeometry::Polygon { points } => {
+            let ring: Vec<polyclip::Point> = points.iter().map(|q| pt(tf(*q))).collect();
+            let mut s = polyclip::union_all(&ring, polyclip::FillRule::NonZero).unwrap_or_default();
+            if g.width.0 > 0 {
+                let mut closed: Vec<Point> = points.iter().map(|q| tf(*q)).collect();
+                if let Some(&f) = closed.first() {
+                    closed.push(f);
+                }
+                s.extend(stroke_set(vec![closed], g.width));
+            }
+            s
+        }
+        GraphicGeometry::Circle { center, radius, filled } => {
+            let c = pt(tf(*center));
+            let outer = Circle { center: c, radius: radius.0 + g.width.0 / 2 }.to_ring(COPPER_TOL).unwrap_or_default();
+            let inner = radius.0 - g.width.0 / 2;
+            if *filled || inner <= 0 {
+                vec![Polygon::new(outer, vec![])]
+            } else {
+                let mut hole =
+                    Circle { center: c, radius: inner }.to_ring(ArcTol::new(1_000, Side::Inside)).unwrap_or_default();
+                hole.reverse_orientation();
+                vec![Polygon::new(outer, vec![hole])]
+            }
+        }
+    };
+    if set.len() > 1 {
+        set = polyclip::union_all(&set, polyclip::FillRule::NonZero).unwrap_or(set);
+    }
+    set
+}
+
+/// Copper drawings as copper items: footprint copper drawings (on the net of the first pad of
+/// their footprint they touch, in its net-tie group) and board drawings and texts on copper
+/// layers (no net). `pads` are the footprint pads' items, used for the nets.
+fn graphic_items(p: &Project, items: &[CopperItem]) -> Vec<CopperItem> {
+    use crate::model::footprint::GraphicLayer;
+    let board = p.board();
+    let copper = board.stackup.copper_names();
+    let mut out = Vec::new();
+    for (refdes, pf) in &board.footprints {
+        let Some(fp) = footprint_for(p, refdes) else { continue };
+        for (i, g) in fp.graphics.iter().enumerate() {
+            if g.layer != GraphicLayer::Copper {
+                continue;
+            }
+            let layer = side_layer(pad_side(pf.side, g.back), "F.Cu");
+            if !copper.contains(&layer) {
+                continue;
+            }
+            let shape = fp_graphic_shape(pf, g);
+            if shape.is_empty() {
+                continue;
+            }
+            let pad = items.iter().find(|it| {
+                matches!(&it.item, ItemRef::Pad(r, _) if r == refdes)
+                    && it.layers.contains(&layer)
+                    && polyclip::intersects(&it.shape, &shape)
+            });
+            let anchor = shape[0].outer.0.first().copied().map(Into::into).unwrap_or(pf.at);
+            let tie = pad.and_then(|it| it.local.tie.clone());
+            let mut tie_nets: Vec<String> = items
+                .iter()
+                .filter(|it| tie.is_some() && it.local.tie == tie)
+                .filter_map(|it| it.net.clone())
+                .collect();
+            tie_nets.sort();
+            tie_nets.dedup();
+            out.push(CopperItem {
+                item: ItemRef::FpGraphic(refdes.clone(), i),
+                net: pad.and_then(|it| it.net.clone()),
+                layers: vec![layer],
+                shape,
+                anchor,
+                local: ItemLocal { tie: tie.clone(), tie_nets, ..Default::default() },
+            });
+        }
+    }
+    for g in &board.graphics {
+        if !copper.contains(&g.layer) {
+            continue;
+        }
+        let (shape, anchor) = match &g.kind {
+            GraphicKind::Line { points, width } => (stroke_set(vec![points.clone()], *width), points.first().copied()),
+            GraphicKind::Polygon { points, width } => (polygon_area(points, *width), points.first().copied()),
+            GraphicKind::Text { text, at, size, rotation } => {
+                let mirror = g.layer == "B.Cu";
+                let paths = text_paths(text, *at, *size, *rotation, mirror);
+                let set = stroke_set(paths, text_stroke_width(p, *size));
+                let set = polyclip::union_all(&set, polyclip::FillRule::NonZero).unwrap_or(set);
+                (set, Some(*at))
+            }
+        };
+        if shape.is_empty() {
+            continue;
+        }
+        out.push(CopperItem {
+            item: ItemRef::Graphic(g.id),
+            net: None,
+            layers: vec![g.layer.clone()],
+            shape,
+            anchor: anchor.unwrap_or_default(),
+            local: ItemLocal::default(),
         });
     }
     out
@@ -432,7 +727,7 @@ pub fn islands(items: &[CopperItem]) -> Vec<usize> {
                 continue;
             }
             let (a, b) = (sets.find(*i), sets.find(*j));
-            if a != b && polyclip::intersects(&items[*i].shape, &items[*j].shape) {
+            if a != b && !tied(&items[*i], &items[*j]) && polyclip::intersects(&items[*i].shape, &items[*j].shape) {
                 sets.join_roots(a, b);
             }
         }
@@ -446,7 +741,7 @@ pub fn islands(items: &[CopperItem]) -> Vec<usize> {
                 continue;
             }
             let (x, y) = (sets.find(b), sets.find(j));
-            if x != y && prep.intersects(&items[j].shape) {
+            if x != y && !tied(&items[b], &items[j]) && prep.intersects(&items[j].shape) {
                 sets.join_roots(x, y);
             }
         }
@@ -499,7 +794,7 @@ pub fn ratsnest_from(items: &[CopperItem], isl: &[usize]) -> Vec<RatLine> {
     let mut by_net: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
         if let Some(n) = &it.net
-            && !matches!(it.item, ItemRef::Track(_) | ItemRef::Zone(..))
+            && !matches!(it.item, ItemRef::Track(_) | ItemRef::Zone(..) | ItemRef::Graphic(_) | ItemRef::FpGraphic(..))
         {
             by_net.entry(n.as_str()).or_default().push(i);
         }

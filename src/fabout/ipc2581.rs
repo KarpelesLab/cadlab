@@ -32,7 +32,7 @@ use polyclip::Ring;
 
 use super::gerber::mm;
 use super::layers::{Stroke, text_strokes};
-use super::{FileKind, Hole, HoleKind, Options, OutFile, deg, file_name, fp_rotation, grow, holes, pad_rotation};
+use super::{FileKind, Hole, HoleKind, Options, OutFile, deg, file_name, fp_rotation, holes, pad_rotation};
 use crate::board::{self, PlacedPad, footprint_for, side_layer, transform, via_layers};
 use crate::geom::Point;
 use crate::mcad::{Edge, Loop, arc_edge, board_profile};
@@ -519,35 +519,22 @@ fn copper_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, layer: &str, items: &[
 }
 
 fn mask_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
-    let cu = side_layer(side, "F.Cu");
-    let pads: Vec<&PlacedPad> = c
-        .pads
-        .iter()
-        .filter(|pp| match pp.pad.kind {
-            PadKind::Smd => pp.layers.contains(&cu),
-            PadKind::Tht { .. } | PadKind::Npth { .. } => true,
-        })
-        .collect();
+    let pads: Vec<&PlacedPad> = super::mask_pads(&c.pads, side).collect();
     if pads.is_empty() {
         return;
     }
     x.open("LayerFeature", &[a("layerRef", side_layer(side, "F.Mask"))]);
     x.open("Set", &[]);
     for pp in pads {
-        let (s, r) = c.oriented(pp);
-        pad(x, d, pp.center, grow(s, c.o.mask_expansion.0), r, c.pin(pp));
+        let (s, r) = super::mask_opening(c.p, c.o, pp);
+        pad(x, d, pp.center, s, r, c.pin(pp));
     }
     x.close("Set");
     x.close("LayerFeature");
 }
 
 fn paste_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
-    let cu = side_layer(side, "F.Cu");
-    let pads: Vec<&PlacedPad> = c
-        .pads
-        .iter()
-        .filter(|pp| pp.pad.kind == PadKind::Smd && pp.layers.contains(&cu) && pp.pad.paste != Some(Paste::None))
-        .collect();
+    let pads: Vec<&PlacedPad> = super::paste_pads(&c.pads, side).collect();
     if pads.is_empty() {
         return;
     }
@@ -561,11 +548,11 @@ fn paste_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
                 let tf = transform(pf);
                 for w in at {
                     let local = w.rotated(pp.pad.rotation) + pp.pad.at;
-                    pad(x, d, tf(local), PadShape::Rect { w: size.0, h: size.1 }, r, c.pin(pp));
+                    pad(x, d, tf(local), super::paste_window(c.p, pp, *size), r, c.pin(pp));
                 }
             }
             _ => {
-                let (s, r) = c.oriented(pp);
+                let (s, r) = super::paste_opening(c.p, pp);
                 pad(x, d, pp.center, s, r, c.pin(pp))
             }
         }
@@ -616,6 +603,19 @@ fn legend_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
             GraphicKind::Line { points, width } => {
                 let pts = points.iter().map(|q| (q.x.0, q.y.0)).collect();
                 stroke_set(&mut body, d, &[a("geometryUsage", "GRAPHIC")], &[Stroke::Line { pts, width: width.0 }]);
+            }
+            GraphicKind::Polygon { points, width } => {
+                // The outline (IPC-2581 legend features are strokes).
+                let mut pts: Vec<(i64, i64)> = points.iter().map(|q| (q.x.0, q.y.0)).collect();
+                if let Some(&f) = pts.first() {
+                    pts.push(f);
+                }
+                stroke_set(
+                    &mut body,
+                    d,
+                    &[a("geometryUsage", "GRAPHIC")],
+                    &[Stroke::Line { pts, width: width.0.max(min_w) }],
+                );
             }
             GraphicKind::Text { text, at, size, rotation } => {
                 let w = (size.0 / 8).max(min_w);
