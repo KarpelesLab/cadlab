@@ -421,6 +421,97 @@ impl Neg for Angle {
     }
 }
 
+/// A dimensionless scale factor in millionths (parts per million): `Scale(1_000_000)` is 1.
+/// Exact decimal text in files (`"2.54"`, `"0.3937"`); finer than 1 ppm is rounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Scale(pub i64);
+
+impl Scale {
+    /// 1 (no scaling).
+    pub const ONE: Scale = Scale(1_000_000);
+
+    /// Parses a plain decimal number (`"1"`, `"2.54"`, `"0.001"`), optionally followed by `x`.
+    pub fn parse(s: &str) -> Result<Scale, UnitError> {
+        let (num, rest) = parse_decimal(s)?;
+        if !matches!(rest.trim(), "" | "x" | "X") {
+            return Err(UnitError::UnknownUnit {
+                input: s.trim().to_string(),
+                unit: rest.trim().to_string(),
+                known: "a plain number (scale factor)",
+            });
+        }
+        let v = num.scale_rounded(1_000_000).ok_or_else(|| UnitError::OutOfRange(s.trim().into()))?;
+        i64::try_from(v).map(Scale).map_err(|_| UnitError::OutOfRange(s.trim().into()))
+    }
+
+    /// Value as a float.
+    pub fn to_f64(self) -> f64 {
+        self.0 as f64 / 1e6
+    }
+
+    /// Whether this is exactly 1.
+    pub fn is_one(&self) -> bool {
+        *self == Scale::ONE
+    }
+}
+
+impl Default for Scale {
+    fn default() -> Self {
+        Scale::ONE
+    }
+}
+
+impl fmt::Display for Scale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_fixed(self.0 as i128, 6))
+    }
+}
+
+impl FromStr for Scale {
+    type Err = UnitError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Scale::parse(s)
+    }
+}
+
+impl Serialize for Scale {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Scale {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw<'a> {
+            Str(Cow<'a, str>),
+            Num(f64),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Str(s) => Scale::parse(&s).map_err(serde::de::Error::custom),
+            Raw::Num(n) => Scale::parse(&n.to_string()).map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+impl JsonSchema for Scale {
+    fn schema_name() -> Cow<'static, str> {
+        "Scale".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": ["string", "number"],
+            "description": "Scale factor, exact to 1 ppm. Examples: 1, \"2.54\", \"0.3937\"."
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// A parsed decimal: `mantissa / 10^frac_digits`.
 struct Decimal {
     mantissa: i128,
@@ -510,6 +601,18 @@ fn format_fixed(q: i128, frac_digits: u32) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn scale_factors() {
+        assert_eq!(Scale::parse("2.54").unwrap(), Scale(2_540_000));
+        assert_eq!(Scale::parse("1x").unwrap(), Scale::ONE);
+        assert_eq!(Scale::parse("0.0000004").unwrap(), Scale(0));
+        assert!(Scale::parse("2mm").is_err());
+        assert_eq!(Scale(393_700).to_string(), "0.3937");
+        let v: Scale = serde_json::from_value(serde_json::json!(0.5)).unwrap();
+        assert_eq!(v, Scale(500_000));
+        assert_eq!(serde_json::to_value(Scale::ONE).unwrap(), serde_json::json!("1"));
+    }
 
     #[test]
     fn parses_units() {

@@ -8,6 +8,7 @@ pub mod footprint;
 pub mod format;
 mod manifest;
 pub mod migrate;
+pub mod model3d;
 pub mod part;
 mod project;
 mod raw;

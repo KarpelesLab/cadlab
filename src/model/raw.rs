@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::model::ModelError;
+use crate::model::model3d::{ModelData, base64_decode, base64_encode};
 
 /// Project content as untyped JSON values: the manifest, one value per section (`bom`,
 /// `circuit`, `schematic`, `board`; section `x` lives in `x.json`), and library items
@@ -19,6 +20,8 @@ pub struct RawProject {
     pub parts: BTreeMap<String, Value>,
     /// Library footprints by name.
     pub footprints: BTreeMap<String, Value>,
+    /// Library model files by file name (`library/models/<name>`), as bytes.
+    pub models: BTreeMap<String, ModelData>,
 }
 
 impl RawProject {
@@ -41,19 +44,22 @@ impl RawProject {
     }
 
     /// Single-document form: `{"manifest": ..., "<section>": ..., "library": {"parts": ...,
-    /// "footprints": ...}}`.
+    /// "footprints": ..., "models": {"<name>": "<base64>"}}}` (`models` only when there are some).
     pub fn to_packed(&self) -> Value {
         let mut m = serde_json::Map::new();
         m.insert("manifest".into(), self.manifest.clone());
         for (k, v) in &self.sections {
             m.insert(k.clone(), v.clone());
         }
-        if !self.parts.is_empty() || !self.footprints.is_empty() {
+        if !self.parts.is_empty() || !self.footprints.is_empty() || !self.models.is_empty() {
             let obj = |items: &BTreeMap<String, Value>| Value::Object(items.clone().into_iter().collect());
-            m.insert(
-                "library".into(),
-                serde_json::json!({"parts": obj(&self.parts), "footprints": obj(&self.footprints)}),
-            );
+            let mut lib = serde_json::json!({"parts": obj(&self.parts), "footprints": obj(&self.footprints)});
+            if !self.models.is_empty() {
+                lib["models"] = Value::Object(
+                    self.models.iter().map(|(k, v)| (k.clone(), Value::String(base64_encode(v.bytes())))).collect(),
+                );
+            }
+            m.insert("library".into(), lib);
         }
         Value::Object(m)
     }
@@ -75,6 +81,14 @@ impl RawProject {
             };
             raw.parts = take("parts")?;
             raw.footprints = take("footprints")?;
+            for (k, v) in take("models")? {
+                let bytes = v
+                    .as_str()
+                    .ok_or_else(|| "expected a base64 string".to_string())
+                    .and_then(base64_decode)
+                    .map_err(|e| ModelError::invalid("<packed>", format!("`library.models.{k}`: {e}")))?;
+                raw.models.insert(k, ModelData::new(bytes));
+            }
         }
         raw.sections = m.into_iter().collect();
         Ok(raw)

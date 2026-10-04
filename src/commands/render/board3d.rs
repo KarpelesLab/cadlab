@@ -11,7 +11,8 @@ use crate::command::{Command, CommandError, CommandKind, Context};
 use crate::suggest::did_you_mean;
 
 /// Render the assembled board in 3D: board with thickness, holes and cutouts, mask, copper
-/// finish and silkscreen on its faces, and component bodies generated from package dimensions.
+/// finish and silkscreen on its faces, and component bodies: the footprint's 3D model when one
+/// is attached (`footprint.model_set`), else generated from the package dimensions.
 /// Orthographic projection, isometric by default.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -109,6 +110,9 @@ impl Command for Board3d {
                 CommandError::invalid_args("render.empty_board", e)
                     .with_hint("define an outline (`board outline`) and place components; lower `size` for huge images")
             })?;
+            for (refdes, e) in &img.model_errors {
+                ctx.report(e.warning(refdes));
+            }
             let bytes = img.to_png().map_err(|e| CommandError::invalid_args("render.failed", e))?;
             let io = |e| CommandError::from(crate::model::ModelError::Io { path: path.clone(), source: e });
             if let Some(dir) = path.parent() {

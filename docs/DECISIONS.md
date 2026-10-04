@@ -362,6 +362,30 @@ search; PCBWay sources by MPN.
 that is both permitted and reproducible. Header recognition plus explicit mapping survives export format
 changes without guessing, and reading values only for passives keeps parametric matching (D26) honest.
 
+### D36. 3D models come from oxideav-mesh3d (2026-10-04)
+cadlab reads 3D model files only through the **oxideav-mesh3d** crate family (MIT): the typed `Scene3D` model with
+its `Mesh3DDecoder` trait and `Mesh3DRegistry`, and the format crates `oxideav-stl`, `oxideav-obj`,
+`oxideav-gltf` and `oxideav-usdz`, behind the default cargo feature `models3d`. cadlab writes no mesh types or
+3D parsers of its own: `cadlab::models3d` builds the registry (`build_registry`, the single place a format crate
+is registered), decodes by file extension, and walks the decoded scene (`world_node_transforms` /
+`world_mesh_with`, `triangle_indices`, material base colors) into placed triangles for the renderer and the
+exporters. STEP and VRML decoders are being added to the family; they plug in with one dependency line and one
+`register` call, nothing else changes. Until then `.step`/`.wrl` give `model.unsupported_format` with the
+formats available now.
+Models attach to footprints, or to a part's footprint reference (an override for that part). The stored
+reference is exact (offset in `Nm`, rotations in millidegrees about X, Y, Z, per-axis scale in ppm, optional
+unit and up-axis overrides); the model file is project data, copied as-is into `library/models/` (D19: projects
+never resolve files outside themselves), carried base64 in packed projects, undo snapshots and block files, and
+copied by `lib.publish` / `lib.import` as library items of kind `model`. Unused files go away with their last
+reference. Renders draw model triangles double-sided; STEP export writes them as faceted B-rep (closed,
+outward-oriented `FACETED_BREP` pieces, or a surface model when a mesh is open); IDF takes the model's bounding
+box. A model that cannot be read never fails a render or an export: the generated body is used, with a warning.
+*Why:* the oxideav crates are the user's own MIT 3D layer with a typed scene model and pluggable decoders, so
+cadlab gets STL/OBJ/glTF/USDZ now and STEP/VRML later without carrying parsers (or KiCad's GPL-adjacent tooling)
+itself. Storing the file in the project keeps projects self-contained and undo/dry-run exact; exact placement
+values keep files deterministic and diffable. Meshes are what every format decodes to, so one path serves all
+of them; faceted B-rep is the standard AP214 way to carry a mesh as a solid.
+
 ## Open questions
 
 None currently.

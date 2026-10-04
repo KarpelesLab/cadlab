@@ -124,7 +124,9 @@ A project is a directory, designed for git:
 myboard/
 ├── cadlab.toml            # manifest (TOML: hand-editable)
 ├── library/
-│   └── <part-id>.json     # one file per part
+│   ├── parts/<id>.json    # one file per part
+│   ├── footprints/<name>.json
+│   └── models/<file>      # 3D model files (STL, glTF, ...), stored as-is
 ├── bom.json
 ├── circuit.json
 ├── schematic.json         # optional
@@ -149,6 +151,12 @@ Rules for the JSON files:
   JSON Schema per file lets editors and agents validate files.
 - **Units in files:** stored as strings with explicit units (`"12.7mm"`), parsed exactly to `Nm`. Readable,
   unambiguous, and lossless as long as values are on the nm grid.
+- **Binary files:** 3D model files are the only non-JSON project data. They are stored as-is under
+  `library/models/` and referenced by name from footprints (`"model": {"file": "sot23-5.stl", "offset":
+  ["0mm", "0mm", "0.1mm"], "rotation": ["0deg", "0deg", "90deg"], "scale": ["2.54", "2.54", "2.54"], "unit": "in",
+  "up": "z"}`, defaults left out) and from a part's footprint references. The placement is exact like all
+  stored data: lengths in `Nm`, angles in millidegrees, scale factors in ppm (`Scale`), never floats. The packed
+  single-file form and undo snapshots carry the files base64-encoded under `library.models`.
 - **Derived data is not stored** (ratsnest, connectivity graph, DRC results), except zone fills, which are
   expensive and cached in `.cadlab/`.
 

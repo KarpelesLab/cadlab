@@ -14,7 +14,7 @@ Part
 ├── symbol             pins: number, name, electrical type (in/out/bidir/power_in/power_out/passive/nc/...),
 │                      graphical units for multi-unit parts; drawing optional (auto-generated from pins)
 ├── footprints         one or more candidates; pin → pad mapping per footprint
-├── model3d            optional: generated body dims, or STEP/VRML reference
+├── model3d            optional, per footprint: a 3D model file (FootprintRef.model; see "3D models")
 ├── datasheet          URL (+ cached local copy path)
 ├── sourcing           supplier offers: supplier, SKU, stock, price breaks, MOQ, lifecycle, fetched_at
 └── provenance         where it came from (generated, supplier, user import, hand-written) + license
@@ -62,7 +62,8 @@ Layout: the same as a project's `library/`, plus blocks. Files use the canonical
 ├── library.toml              schema_version = 1
 ├── parts/<id>.json           same format as a project part
 ├── footprints/<name>.json    same format as a project footprint
-└── blocks/<name>.json        {"name", "block", "parts", "footprints"}
+├── models/<file>             3D model files (`sot23-5.stl`), as-is
+└── blocks/<name>.json        {"name", "block", "parts", "footprints", "models"}
 ```
 
 A block file is **self-contained**: it carries copies of every part its components use and of their footprints,
@@ -70,7 +71,7 @@ so importing it into an empty project always works, whatever happens later to th
 
 | Command | Purpose |
 |---|---|
-| `lib.list [query] [--kind part\|footprint\|block] [--library L]` | items across libraries, with the library each comes from; no project needed |
+| `lib.list [query] [--kind part\|footprint\|block\|model] [--library L]` | items across libraries, with the library each comes from; no project needed |
 | `lib.show <name>` | one item in full |
 | `lib.publish --part ID \| --footprint NAME \| --block NAME [--library L] [--replace]` | copy from the project into a library: a part brings its footprints, a block its parts and footprints |
 | `lib.import <name> [--kind K] [--library L] [--replace]` | copy into the project (part + footprints; block + parts + footprints), reporting what was added |
@@ -132,6 +133,7 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `part.create` | concrete or custom part from a pin list + package name or dimensions |
 | `part.list / show / set / remove` | inspect and edit the library (removal refused while in use) |
 | `footprint.generate / list / show / remove` | land patterns |
+| `footprint.model_set / model_clear / model_list` | 3D models of footprints and parts (below) |
 | `circuit.add <part or spec>` | add components (`--count`), auto-numbered by category (R1, C3, U2) |
 | `circuit.remove / list` | components |
 | `bom.list` | one line per part: quantity, designators, DNP, order MPN, unsourced lines |
@@ -140,6 +142,46 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `bom.note <part> <text>` | purchasing/assembly note |
 | `bom.replace <from> <to>` | switch components to another part, warning about missing pins |
 | `bom.export <path> --format generic|jlcpcb|pcbway` | CSV; fab layouts omit DNP and warn about lines without MPN |
+
+### 3D models
+
+A footprint can carry a 3D model used by `render.board3d`, `export.step` and `export.idf` instead of the body
+generated from its package dimensions; a part can carry its own model for one of its footprints (an LED and a
+resistor on the same `0603` land pattern), which wins over the footprint's. Models are files decoded by the
+**oxideav-mesh3d** crate family (DECISIONS D36): STL, Wavefront OBJ, glTF 2.0 (`.gltf` with embedded buffers,
+`.glb`) and USDZ today; STEP and VRML once the oxideav STEP/VRML decoders are published. cadlab has no mesh
+parser of its own.
+
+```sh
+cadlab footprint model-set SOT95P280X145-5N models/sot23-5.stl
+cadlab footprint model-set LEDC1608X80N led.glb --part LED_red_0603 --rotation 0,0,90
+cadlab footprint model-set CONN_USB_C usb-c.obj --unit mm --up z --offset 0mm,-1.2mm,0mm --scale 1
+cadlab footprint model-list                  # files, users, triangles, extents, readable formats
+cadlab footprint model-clear SOT95P280X145-5N
+```
+
+- `footprint.model_set` copies the file into the project library, `library/models/<name>` (stored as-is; the
+  name keeps the extension, which selects the decoder), decodes it to validate it, and stores the reference on
+  the footprint (or on the part's footprint reference with `part`). `file` is a path (relative to the project) or
+  the name of a model already in the library. A different file under an existing name is a `model.exists`
+  conflict unless `replace: true`. `--dry-run` decodes and reports without changing anything; undo reverts the
+  file and the reference together.
+- The reference is exact: `offset` (X, Y, Z in `Nm`, Z up from the board), `rotation` (about X, then Y, then Z,
+  millidegree `Angle`s), `scale` (one or three factors, exact to 1 ppm), `unit` (`mm`, `cm`, `m`, `in`, `mil`,
+  `ft`) and `up` (`y` or `z`) when the file's own are wrong (STL is read as mm with Z up, glTF and OBJ as m with
+  Y up). Model coordinates are converted to mm, turned so `up` is +Z (Y up: the model's front, +Z, faces the
+  board's front edge), scaled, rotated, then offset: the result is in footprint coordinates (IPC zero
+  orientation). A model whose extent is more than 10 times off the package body gets `model.size_mismatch`.
+- Errors: `model.unsupported_format` (with the formats available now; `.step`/`.wrl` say the decoders are pending
+  upstream), `model.invalid`, `model.empty`, `model.file_not_found`, `model.too_large` (64 MiB), `model.bad_scale`,
+  `model.part_footprint`, `model.not_set`. Renders and exports never fail on a model: they fall back to the
+  generated body with a warning.
+- Model files nothing references are removed with the last reference (`model_clear`, `footprint.remove`,
+  `part.remove`); regenerating a footprint keeps its model.
+- Shared libraries carry models: `lib.publish` of a part or footprint also writes its model files to
+  `<library>/models/`, `lib.import` copies them back, a block file embeds them (base64), and `lib.remove` keeps a
+  model a library footprint or part still uses. Model files are library items of kind `model`.
+- Without the default `models3d` cargo feature, references and files are kept and copied, but nothing is decoded.
 
 Fab column layouts move to fab profiles in M4 (they follow the fabs' current templates; verify before
 ordering). Research commands are below.

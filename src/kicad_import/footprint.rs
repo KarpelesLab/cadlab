@@ -391,6 +391,7 @@ pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Convert
         graphics,
         body: None,
         generator: None,
+        model: None,
     };
     Some(Converted {
         refdes,

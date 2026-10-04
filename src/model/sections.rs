@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::model::footprint::Footprint;
+use crate::model::model3d::ModelData;
 use crate::model::part::Part;
 
 pub use crate::model::board::Board;
@@ -19,6 +20,9 @@ pub struct Library {
     pub parts: BTreeMap<String, Part>,
     /// Footprints by name.
     pub footprints: BTreeMap<String, Footprint>,
+    /// 3D model files by file name (`library/models/<name>`), referenced by footprints and
+    /// part footprint references.
+    pub models: BTreeMap<String, ModelData>,
 }
 
 impl Library {
@@ -30,6 +34,38 @@ impl Library {
     /// Finds a footprint name case-insensitively.
     pub fn find_footprint_ci(&self, name: &str) -> Option<&str> {
         self.footprints.keys().find(|k| k.eq_ignore_ascii_case(name)).map(String::as_str)
+    }
+
+    /// Finds a model file name case-insensitively.
+    pub fn find_model_ci(&self, name: &str) -> Option<&str> {
+        self.models.keys().find(|k| k.eq_ignore_ascii_case(name)).map(String::as_str)
+    }
+
+    /// Who references model file `name`: `footprint X` and `part P on X`, in order.
+    pub fn model_users(&self, name: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .footprints
+            .values()
+            .filter(|f| f.model.as_ref().is_some_and(|m| m.file == name))
+            .map(|f| format!("footprint {}", f.name))
+            .collect();
+        for p in self.parts.values() {
+            for fr in &p.footprints {
+                if fr.model.as_ref().is_some_and(|m| m.file == name) {
+                    out.push(format!("part {} on {}", p.id, fr.footprint));
+                }
+            }
+        }
+        out
+    }
+
+    /// Removes model files nothing references; returns their names.
+    pub fn prune_models(&mut self) -> Vec<String> {
+        let unused: Vec<String> = self.models.keys().filter(|k| self.model_users(k).is_empty()).cloned().collect();
+        for k in &unused {
+            self.models.remove(k);
+        }
+        unused
     }
 }
 

@@ -16,7 +16,7 @@ use crate::command::{Command, CommandError, CommandKind, Context, ErrorKind, Reg
 use crate::model::Project;
 use crate::model::format::to_canonical_string;
 use crate::suggest::did_you_mean;
-use crate::userlib::{Existing, Item, ItemKind, LibBlock, LibError, Libraries, UserLibrary};
+use crate::userlib::{Existing, Item, ItemKind, LibBlock, LibError, Libraries, UserLibrary, models_used};
 use crate::{Diagnostic, ObjectRef};
 
 pub(crate) fn register(r: &mut Registry) {
@@ -376,6 +376,10 @@ fn publish_items(ctx: &mut Context<'_>, cmd: &Publish) -> Result<Vec<Item>, Comm
                 .with_hint("add the part back, or recreate the block with `block.create`"));
             }
             for m in &missing {
+                if let Some(file) = m.strip_prefix("model ") {
+                    warnings.push(missing_model(file));
+                    continue;
+                }
                 warnings.push(
                     Diagnostic::warning("lib.footprint_missing", format!("block `{name}`: {m} is not in the project"))
                         .with_hint("generate it with `footprint.generate` and publish again"),
@@ -390,10 +394,39 @@ fn publish_items(ctx: &mut Context<'_>, cmd: &Publish) -> Result<Vec<Item>, Comm
             ));
         }
     };
+    // 3D model files of the parts and footprints sent (blocks embed theirs).
+    let parts = items.iter().filter_map(|i| if let Item::Part(p) = i { Some(p) } else { None });
+    let fps = items.iter().filter_map(|i| if let Item::Footprint(f) = i { Some(f) } else { None });
+    let mut models = Vec::new();
+    for m in models_used(parts, fps) {
+        match p.library().models.get(&m) {
+            Some(d) => models.push(Item::Model(m, d.clone())),
+            None => warnings.push(missing_model(&m)),
+        }
+    }
+    let mut items = items;
+    items.extend(models);
     for w in warnings {
         ctx.report(w);
     }
     Ok(items)
+}
+
+fn missing_model(file: &str) -> Diagnostic {
+    Diagnostic::warning("lib.model_missing", format!("3D model `{file}` is referenced but missing"))
+        .with_hint("attach the model again with `footprint.model_set`")
+}
+
+/// Finds model `file` in `first`, then the other libraries in search order.
+fn find_model(libs: &Libraries, first: &UserLibrary, file: &str) -> Result<Option<Item>, CommandError> {
+    for l in std::iter::once(first).chain(libs.list.iter().filter(|l| *l != first)) {
+        if let Some(n) = l.resolve(ItemKind::Model, file)?
+            && n == file
+        {
+            return Ok(l.read(ItemKind::Model, &n)?);
+        }
+    }
+    Ok(None)
 }
 
 fn missing_footprint(part: &str, fp: &str) -> Diagnostic {
@@ -489,6 +522,11 @@ fn compare_in_project(p: &Project, it: &Item) -> Existing {
             Some(_) => Existing::Different,
             None => lib.find_footprint_ci(&f.name).map_or(Existing::Absent, |k| Existing::CaseVariant(k.into())),
         },
+        Item::Model(n, d) => match lib.models.get(n) {
+            Some(old) if old == d => Existing::Same,
+            Some(_) => Existing::Different,
+            None => lib.find_model_ci(n).map_or(Existing::Absent, |k| Existing::CaseVariant(k.into())),
+        },
         Item::Block(b) => match p.circuit().blocks.get(&b.name) {
             Some(old) if *old == b.block => Existing::Same,
             Some(_) => Existing::Different,
@@ -539,13 +577,27 @@ impl Command for Import {
                     }
                 }
             }
-            Item::Footprint(_) => {}
+            Item::Footprint(_) | Item::Model(..) => {}
             Item::Block(b) => {
                 items.extend(b.parts.values().cloned().map(Item::Part));
                 items.extend(b.footprints.values().cloned().map(Item::Footprint));
+                items.extend(b.models.iter().map(|(n, d)| Item::Model(n.clone(), d.clone())));
             }
         }
         items.insert(0, item);
+        // 3D model files of the parts and footprints (blocks bring theirs).
+        if !matches!(items[0], Item::Block(_)) {
+            let parts = items.iter().filter_map(|i| if let Item::Part(p) = i { Some(p) } else { None });
+            let fps = items.iter().filter_map(|i| if let Item::Footprint(f) = i { Some(f) } else { None });
+            let wanted = models_used(parts, fps);
+            for m in wanted {
+                match find_model(&libs, &lib, &m)? {
+                    Some(it) => items.push(it),
+                    None if ctx.project()?.library().models.contains_key(&m) => {}
+                    None => warnings.push(missing_model(&m)),
+                }
+            }
+        }
 
         let p = ctx.project()?;
         let mut plan = Vec::new();
@@ -606,6 +658,9 @@ impl Command for Import {
                 Item::Block(b) => {
                     p.circuit_mut().blocks.insert(b.name, b.block);
                 }
+                Item::Model(n, d) => {
+                    p.library_mut().models.insert(n, d);
+                }
             }
         }
         for w in warnings {
@@ -664,6 +719,30 @@ impl Command for Remove {
                     ),
                 )
                 .with_hint("remove those parts first"));
+            }
+        }
+        if let Item::Model(name, _) = &item {
+            let parts: Vec<_> = lib.items(ItemKind::Part)?;
+            let fps: Vec<_> = lib.items(ItemKind::Footprint)?;
+            let mut users: Vec<String> = fps
+                .iter()
+                .filter_map(|it| match it {
+                    Item::Footprint(f) if f.model.as_ref().is_some_and(|m| &m.file == name) => Some(f.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            users.extend(parts.iter().filter_map(|it| match it {
+                Item::Part(p) if p.footprints.iter().any(|r| r.model.as_ref().is_some_and(|m| &m.file == name)) => {
+                    Some(p.id.clone())
+                }
+                _ => None,
+            }));
+            if !users.is_empty() {
+                return Err(CommandError::conflict(
+                    "lib.in_use",
+                    format!("model `{name}` is used by {} in library `{}`", users.join(", "), target.name),
+                )
+                .with_hint("remove those footprints and parts first"));
             }
         }
         let dry_run = ctx.is_dry_run();

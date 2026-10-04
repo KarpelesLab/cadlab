@@ -339,12 +339,21 @@ fn no_outline() -> CommandError {
 fn report_no_body(ctx: &mut Context<'_>, refdes: Vec<String>) {
     for r in refdes {
         ctx.report(
-            Diagnostic::warning("export.no_body", format!("`{r}` has no package body dimensions and is left out"))
-                .with_subject(ObjectRef::Name(r))
-                .with_hint(
-                    "use a footprint generated from a package (`footprint.generate`), which records the body size and height",
-                ),
+            Diagnostic::warning(
+                "export.no_body",
+                format!("`{r}` has neither a 3D model nor package body dimensions and is left out"),
+            )
+            .with_subject(ObjectRef::Name(r))
+            .with_hint(
+                "attach a 3D model (`footprint.model_set`), or use a footprint generated from a package (`footprint.generate`), which records the body size and height",
+            ),
         );
+    }
+}
+
+fn report_model_errors(ctx: &mut Context<'_>, errors: &[(String, crate::models3d::ModelError3d)]) {
+    for (refdes, e) in errors {
+        ctx.report(e.warning(refdes));
     }
 }
 
@@ -360,8 +369,8 @@ fn with_ext(path: PathBuf, ext: &str) -> PathBuf {
 }
 
 /// Write the board as a STEP (AP214) assembly for MCAD: the board solid (outline extruded to
-/// the stackup thickness, minus cutouts and drilled holes) and component bodies as boxes from
-/// the package dimensions.
+/// the stackup thickness, minus cutouts and drilled holes) and component bodies: attached 3D
+/// models as faceted B-rep, other parts as boxes from the package dimensions.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -384,6 +393,9 @@ pub struct StepExported {
     pub path: String,
     /// Component bodies written.
     pub bodies: usize,
+    /// Of those, bodies from attached 3D models (faceted).
+    #[serde(default)]
+    pub model_bodies: usize,
     /// Holes cut in the board.
     pub holes: usize,
     /// Holes left out (crossing the edge, a cutout or another hole).
@@ -420,9 +432,20 @@ impl Command for Step {
             );
         }
         report_no_body(ctx, out.no_body);
+        report_model_errors(ctx, &out.model_errors);
+        for m in &out.open_models {
+            ctx.report(
+                Diagnostic::info(
+                    "export.step_open_model",
+                    format!("model `{m}` is not a closed, consistently oriented mesh: written as surfaces, not a solid"),
+                )
+                .with_hint("MCAD tools show it but cannot compute its volume; repair the mesh (close holes, fix normals) for a solid"),
+            );
+        }
         Ok(StepExported {
             path: written.files[0].path.clone(),
             bodies: out.bodies,
+            model_bodies: out.model_bodies,
             holes: out.holes,
             skipped_holes: out.skipped_holes.len(),
         })
@@ -483,6 +506,7 @@ impl Command for Idf {
         let dir = resolve(ctx, self.dir.as_deref(), mcad_dir());
         let written = write(files.into_iter().map(|f| (dir.join(&f.name), f)).collect())?;
         report_no_body(ctx, out.no_body);
+        report_model_errors(ctx, &out.model_errors);
         Ok(IdfExported { files: written.files, components: out.placed, holes: out.holes })
     }
 

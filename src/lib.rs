@@ -51,6 +51,7 @@ pub mod landpattern;
 pub mod lint;
 pub mod mcad;
 pub mod model;
+pub mod models3d;
 pub mod netlist;
 pub mod partspec;
 pub mod refs;

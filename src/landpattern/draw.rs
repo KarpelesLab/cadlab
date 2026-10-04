@@ -160,5 +160,6 @@ pub(super) fn finish(
         graphics,
         body: Some(body),
         generator: None,
+        model: None,
     })
 }

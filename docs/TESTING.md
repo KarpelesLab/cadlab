@@ -171,6 +171,12 @@ boxes; `CADLAB_IPC2581_XSD` (a local copy of IPC's `IPC-2581C.xsd`, not shipped)
 `xmllint --schema`. Example:
 `CADLAB_ORACLES=1 CADLAB_ORACLE_FREECAD=/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd cargo test --test exchange`.
 
+3D models (`tests/models3d.rs`, D36) use small boxes the tests write themselves as STL, OBJ and glTF (no
+third-party models). The 3D view is checked with pixel probes where the model stands (above and under the board)
+and identical bytes for identical input; the STEP faceted B-rep is parsed back (closed `POLY_LOOP` shells,
+welded corners at the expected coordinates), and the same FreeCAD oracle must read the model body as a valid
+closed solid of the box's volume (`--test models3d`).
+
 ### Oracle availability
 
 - Oracle tests are behind an env flag (`CADLAB_ORACLES=1`). Without it they skip with a message; with it, a

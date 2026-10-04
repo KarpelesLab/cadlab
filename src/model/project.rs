@@ -11,6 +11,7 @@ use crate::model::footprint::Footprint;
 use crate::model::format::to_canonical_string;
 use crate::model::manifest::Manifest;
 use crate::model::migrate::migrate;
+use crate::model::model3d::{ModelData, valid_model_name};
 use crate::model::part::Part;
 use crate::model::raw::RawProject;
 use crate::model::sections::{Board, Bom, Circuit, Library, Schematic};
@@ -24,6 +25,8 @@ const SECTION_FILES: &[&str] = &["bom", "circuit", "schematic", "board"];
 /// Library subdirectories: parts and footprints, one JSON file per item.
 const PARTS_DIR: &str = "library/parts";
 const FOOTPRINTS_DIR: &str = "library/footprints";
+/// 3D model files, stored as-is (binary), one file each.
+const MODELS_DIR: &str = "library/models";
 
 /// A cadlab project, in memory.
 ///
@@ -142,6 +145,7 @@ impl Project {
         raw.sections.insert("board".into(), to_value(&*self.board));
         raw.parts = self.library.parts.iter().map(|(k, v)| (k.clone(), to_value(v))).collect();
         raw.footprints = self.library.footprints.iter().map(|(k, v)| (k.clone(), to_value(v))).collect();
+        raw.models = self.library.models.clone();
         raw
     }
 
@@ -176,6 +180,15 @@ impl Project {
                 ));
             }
             library.footprints.insert(name, f);
+        }
+        for (name, data) in raw.models {
+            if !valid_model_name(&name) {
+                return Err(ModelError::invalid(
+                    format!("{MODELS_DIR}/{name}"),
+                    "invalid model file name (letters, digits, `. _ + -`, with an extension)",
+                ));
+            }
+            library.models.insert(name, data);
         }
         Ok(Project {
             manifest: Arc::new(manifest),
@@ -242,6 +255,7 @@ impl Project {
         }
         raw.parts = read_items(&dir.join(PARTS_DIR))?;
         raw.footprints = read_items(&dir.join(FOOTPRINTS_DIR))?;
+        raw.models = read_models(&dir.join(MODELS_DIR))?;
         Project::from_raw(raw)
     }
 
@@ -269,6 +283,28 @@ impl Project {
                 if path.exists() {
                     fs::remove_file(&path).map_err(|e| ModelError::io(&path, e))?;
                     report.removed.push(path);
+                }
+            }
+        }
+        // Model files (binary).
+        let models = &self.library.models;
+        for (name, data) in models {
+            let path = dir.join(MODELS_DIR).join(name);
+            if fs::read(&path).is_ok_and(|old| old == data.bytes()) {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|e| ModelError::io(parent, e))?;
+            }
+            write_atomic_bytes(&path, data.bytes())?;
+            report.written.push(path);
+        }
+        if let Ok(rd) = fs::read_dir(dir.join(MODELS_DIR)) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if valid_model_name(&name) && !models.contains_key(&name) && e.path().is_file() {
+                    fs::remove_file(e.path()).map_err(|err| ModelError::io(e.path(), err))?;
+                    report.removed.push(e.path());
                 }
             }
         }
@@ -315,6 +351,27 @@ fn read_items(dir: &Path) -> Result<std::collections::BTreeMap<String, Value>, M
     Ok(out)
 }
 
+/// Reads every model file in `dir` (missing directory = empty). Files whose names are not valid
+/// model names (hidden files, temporary files) are ignored.
+fn read_models(dir: &Path) -> Result<std::collections::BTreeMap<String, ModelData>, ModelError> {
+    let mut out = std::collections::BTreeMap::new();
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(ModelError::io(dir, e)),
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let path = e.path();
+        if !valid_model_name(&name) || name.ends_with(".tmp") || !path.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|err| ModelError::io(&path, err))?;
+        out.insert(name, ModelData::new(bytes));
+    }
+    Ok(out)
+}
+
 fn manifest_toml(m: &Manifest) -> String {
     // Serializing a plain struct of strings, numbers and maps to TOML cannot fail.
     toml::to_string(m).expect("manifest serializes to TOML")
@@ -333,6 +390,12 @@ fn section<T: DeserializeOwned>(
     name: &str,
 ) -> Result<Option<T>, ModelError> {
     take(name).map(|v| from_value(&format!("{name}.json"), v)).transpose()
+}
+
+fn write_atomic_bytes(path: &Path, content: &[u8]) -> Result<(), ModelError> {
+    let tmp = path.with_extension(format!("{}.tmp", path.extension().and_then(|e| e.to_str()).unwrap_or("")));
+    fs::write(&tmp, content).map_err(|e| ModelError::io(&tmp, e))?;
+    fs::rename(&tmp, path).map_err(|e| ModelError::io(path, e))
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), ModelError> {
