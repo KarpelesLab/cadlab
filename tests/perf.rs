@@ -1,7 +1,9 @@
-//! Large-board performance (roadmap "Performance"): equivalence of the indexed connectivity and
-//! ratsnest with the straightforward versions on generated boards, and `#[ignore]`d timings on
-//! the 500-component synthetic board (`cargo test --release --test perf -- --ignored --nocapture`,
-//! or `cargo run --release --example bigboard`).
+//! Large-board performance (roadmap "Performance"): equivalence of the indexed connectivity,
+//! ratsnest and zone fill with the straightforward versions on generated boards, and
+//! `#[ignore]`d timings on the 500-component synthetic board and, when `CADLAB_CORPUS_DIR` is
+//! set, the corpus boards (`cargo test --release --test perf -- --ignored --nocapture`, or
+//! `cargo run --release --example bigboard [corpus]`). The timing test only fails on
+//! pathological times (a minute per step), so it cannot flap.
 
 use std::collections::BTreeMap;
 
@@ -209,4 +211,9 @@ fn big_board_timings() {
     let get = |name: &str| rows.iter().find(|t| t.name == name).unwrap();
     assert!(get("islands").note.ends_with("islands"));
     assert!(rows.iter().all(|t| t.time.as_secs() < 60), "something is pathologically slow");
+    // Corpus boards, when fetched (`CADLAB_CORPUS_DIR`, scripts/fetch-corpus.sh).
+    for (name, rows) in bigboard::corpus_timings(&[], 1) {
+        println!("{}", bigboard::report(&format!("{name}: {}", rows[0].note), &rows));
+        assert!(rows.iter().all(|t| t.time.as_secs() < 60), "{name}: something is pathologically slow");
+    }
 }
