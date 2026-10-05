@@ -174,7 +174,24 @@ let gerber_regions: Vec<Ring> = fill.polygons().map(fracture).collect();
 if distance_less_than(&track_a, &pad_b, rules.clearance) { /* DRC violation */ }
 ```
 
-## 8. Wishlist from cadlab (measured, D42)
+## 8. Wishlist from cadlab (measured, D42; done in 0.0.5–0.0.6)
+
+**Status:** `polyclip` 0.0.5 and 0.0.6 implemented items 1–4 below. Same reproduction, same machine:
+
+| Call | 0.0.4 | 0.0.6 |
+|---|---|---|
+| `offset(set, -100 µm)` | 212 ms | 12 ms |
+| `offset(shrunk, +100 µm)` | 465 ms | 47 ms |
+| `opening(set, 100 µm)` | 673 ms | 58 ms |
+| union with 40 small rectangles (thermal spokes) | 94 ms | 4.5 ms |
+
+The synthetic board's cold zone fill went from 1.0 s to ~150 ms with cadlab's outputs byte-identical (BOARD.md,
+"Performance"). One consequence for callers: the "looks canonical" test is linear and cannot see overlaps, so
+a set of overlapping rings in canonical order is offset without being merged first (valid output, but it can
+round a few nanometers differently from offsetting the merged region). cadlab unions its obstacle groups
+before growing them so its fills do not depend on that. Item 5 (incremental `ZoneFill`) remains open.
+
+The original measurements and requests follow.
 
 After D42, the cold zone fill of the synthetic large board (`tests/common/bigboard.rs`, 1.0 s) is almost all
 inside `polyclip` 0.0.4. Reproduction: `cargo run --release --example polyclip_opening [out.json]` builds the

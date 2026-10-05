@@ -594,9 +594,9 @@ dependencies = [
 
 [[package]]
 name = "polyclip"
-version = "0.0.4"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10359ca1225bb96584c0489df97ce328c411287204d484d1275a7c7d1ec4aaaa"
+checksum = "ec124e3c6f2ae3d261d3017c988554f89d1df05fcf7cf24a31a0a51cf12ddac3"
 dependencies = [
  "libm",
  "rayon",

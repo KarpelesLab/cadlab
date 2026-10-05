@@ -86,12 +86,14 @@ fn fill_layer(
         return Ok(vec![]);
     }
     let mut hard: Vec<Polygon> = keepaway;
+    // Groups are merged before growing, as in the fill (overlapping outlines).
+    let merged = |s: &Vec<Polygon>| Boolean::new().subject(s, FillRule::NonZero).op(Op::Union).execute();
     for (c, shapes) in hard_groups {
-        hard.extend(poly::offset(&shapes, c + SAFETY, Join::Round, OBSTACLE_TOL)?);
+        hard.extend(poly::offset(&merged(&shapes)?, c + SAFETY, Join::Round, OBSTACLE_TOL)?);
     }
     let mut soft: Vec<Polygon> = Vec::new();
     for (d, shapes) in soft_groups {
-        soft.extend(poly::offset(&shapes, d, Join::Round, OBSTACLE_TOL)?);
+        soft.extend(poly::offset(&merged(&shapes)?, d, Join::Round, OBSTACLE_TOL)?);
     }
     let avail =
         Boolean::new().subject(&area, FillRule::NonZero).clip(&hard, FillRule::NonZero).op(Op::Difference).execute()?;

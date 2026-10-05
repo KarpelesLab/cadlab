@@ -248,11 +248,16 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
         return Ok(vec![]);
     }
     let mut hard: Vec<Polygon> = input.keepaway.clone();
+    // Item outlines may overlap (a teardrop over its pad): merge each group first so `offset` gets
+    // canonical input; its linear "looks canonical" check cannot see overlaps, and growing
+    // overlapping rings unmerged rounds differently (docs/POLYGON_LIB.md §8).
     for (c, shapes) in hard_groups {
+        let shapes = Boolean::new().subject(&shapes, FillRule::NonZero).op(Op::Union).execute()?;
         hard.extend(poly::offset(&shapes, c + SAFETY, Join::Round, OBSTACLE_TOL)?);
     }
     let mut soft: Vec<Polygon> = Vec::new();
     for (d, shapes) in soft_groups {
+        let shapes = Boolean::new().subject(&shapes, FillRule::NonZero).op(Op::Union).execute()?;
         soft.extend(poly::offset(&shapes, d, Join::Round, OBSTACLE_TOL)?);
     }
 

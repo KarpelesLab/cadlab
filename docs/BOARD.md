@@ -391,22 +391,23 @@ nets, 2674 pads, 3040 tracks, 2434 vias, GND pour on In1.Cu and 3V3/1V8/5V pours
 DRC has violations to report). `cargo run --release --example bigboard` times every heavy step (best of 3,
 zone fill cache cleared before each run, i.e. what a fresh CLI process sees); `tests/perf.rs` has the same as an
 `#[ignore]`d test plus equivalence checks against the previous algorithms. Apple Silicon laptop, release
-(the D42 column was measured on a loaded machine, so small differences are noise):
+(the D42 column was measured on a loaded machine, so small differences are noise; the last column is
+`polyclip` 0.0.6, outputs byte-identical):
 
-| Step | Before D23 | After D23 | After D42 |
-|---|---|---|---|
-| `project.save` / `Project::load` | 16 / 7 ms | 17 / 7 ms | 17 / 7 ms |
-| `placed_pads` | 46 ms | 4 ms | 4 ms |
-| zone fill, 4 inner pours (`fill_zones_uncached`) | 2212 ms | 1371 ms | 1000 ms |
-| `islands` | 3309 ms | 39 ms | 42 ms |
-| ratsnest from copper items (islands + MST) | 3484 ms | 40 ms | 43 ms |
-| `ratsnest` (with fill) | 5612 ms | 1453 ms | 1059 ms |
-| `drc::check` (with fill) / fills cached | 8797 / ~6600 ms | 1587 / 206 ms | 1170 / 199 ms |
-| `render.board` PNG (with fill) / fills cached | 6331 / ~4100 ms | 1854 / 431 ms | 1363 / 429 ms |
-| `export.gerber` (with fill) / fills cached | 2505 / ~300 ms | 1569 / 167 ms | 1131 / 159 ms |
-| `board.export_kicad` | 62 ms | 27 ms | 30 ms |
-| `render.schematic` (layout + PNG) | 1492 ms | 1538 ms | (unchanged code) |
-| `place.auto` (all 528 parts, `replace`) | | 182 s | 39 s |
+| Step | Before D23 | After D23 | After D42 | polyclip 0.0.6 |
+|---|---|---|---|---|
+| `project.save` / `Project::load` | 16 / 7 ms | 17 / 7 ms | 17 / 7 ms | 16 / 7 ms |
+| `placed_pads` | 46 ms | 4 ms | 4 ms | 4 ms |
+| zone fill, 4 inner pours (`fill_zones_uncached`) | 2212 ms | 1371 ms | 1000 ms | 147 ms |
+| `islands` | 3309 ms | 39 ms | 42 ms | 41 ms |
+| ratsnest from copper items (islands + MST) | 3484 ms | 40 ms | 43 ms | 42 ms |
+| `ratsnest` (with fill) | 5612 ms | 1453 ms | 1059 ms | 203 ms |
+| `drc::check` (with fill) / fills cached | 8797 / ~6600 ms | 1587 / 206 ms | 1170 / 199 ms | 317 / 175 ms |
+| `render.board` PNG (with fill) / fills cached | 6331 / ~4100 ms | 1854 / 431 ms | 1363 / 429 ms | 392 / 251 ms |
+| `export.gerber` (with fill) / fills cached | 2505 / ~300 ms | 1569 / 167 ms | 1131 / 159 ms | 308 / 146 ms |
+| `board.export_kicad` | 62 ms | 27 ms | 30 ms | 31 ms |
+| `render.schematic` (layout + PNG) | 1492 ms | 1538 ms | (unchanged code) | |
+| `place.auto` (all 528 parts, `replace`) | | 182 s | 39 s | |
 
 What changed in D23 (outputs are byte-identical, D20): `placed_pads` builds one pin → net index instead of
 scanning all nets per pin; `islands` skips pairs already connected and tests zone fills through
@@ -426,26 +427,29 @@ net's MST in one pass per step and reuses net costs across swap candidates (it s
 (an R-tree packed once does not fit) and queries are under 10 % of `route.all` on the small boards.
 
 `cargo run --release --example bigboard corpus` times the open-source corpus boards (`CADLAB_CORPUS_DIR`,
-docs/TESTING.md), cold (fill cache cleared), before → after D42:
+docs/TESTING.md), cold (fill cache cleared), before → after D42 → with `polyclip` 0.0.6:
 
 | Board | Zones | Zone fill | `drc::check` | `render.board` | `export.gerber` |
 |---|---|---|---|---|---|
-| corne-cherry | 925 (teardrops) | 4238 → 613 ms | 4724 → 758 ms | 4362 → 726 ms | 4225 → 663 ms |
-| cynthion | 57 | 568 → 429 ms | 1232 → 653 ms | 964 → 737 ms | 714 → 556 ms |
-| glasgow-revD1 | 7 | 685 → 711 ms | 1048 → 1053 ms | 1099 → 1087 ms | 976 → 945 ms |
-| lumenpnp-mobo | 82 | 599 → 578 ms | 848 → 816 ms | 874 → 842 ms | 703 → 667 ms |
-| sweep-v2.2 | 2 | 144 → 146 ms | 260 → 204 ms | 212 → 213 ms | 161 → 163 ms |
-| buspirate5-rev10 | 15 | 237 → 252 ms | 334 → 351 ms | 413 → 432 ms | 315 → 333 ms |
-| glasgow-revC3 | 31 | 196 → 199 ms | 428 → 422 ms | 410 → 403 ms | 308 → 296 ms |
-| tinytapeout-demo | 3 | 281 → 262 ms | 436 → 413 ms | 507 → 488 ms | 356 → 337 ms |
+| corne-cherry | 925 (teardrops) | 4238 → 613 → 295 ms | 4724 → 758 → 420 ms | 4362 → 726 → 379 ms | 4225 → 663 → 380 ms |
+| cynthion | 57 | 568 → 429 → 227 ms | 1232 → 653 → 416 ms | 964 → 737 → 488 ms | 714 → 556 → 368 ms |
+| glasgow-revD1 | 7 | 685 → 711 → 349 ms | 1048 → 1053 → 620 ms | 1099 → 1087 → 662 ms | 976 → 945 → 587 ms |
+| lumenpnp-mobo | 82 | 599 → 578 → 309 ms | 848 → 816 → 533 ms | 874 → 842 → 510 ms | 703 → 667 → 404 ms |
+| sweep-v2.2 | 2 | 144 → 146 → 76 ms | 260 → 204 → 138 ms | 212 → 213 → 159 ms | 161 → 163 → 112 ms |
+| buspirate5-rev10 | 15 | 237 → 252 → 138 ms | 334 → 351 → 215 ms | 413 → 432 → 269 ms | 315 → 333 → 241 ms |
+| glasgow-revC3 | 31 | 196 → 199 → 44 ms | 428 → 422 → 194 ms | 410 → 403 → 196 ms | 308 → 296 → 122 ms |
+| tinytapeout-demo | 3 | 281 → 262 → 159 ms | 436 → 413 → 284 ms | 507 → 488 → 330 ms | 356 → 337 → 225 ms |
 
-Remaining: the zone fill of the synthetic board (1.0 s) is now almost all inside `polyclip`, on one thread
-per layer: on the GND layer, ~650 ms of the ~950 ms go to `opening` (two offsets of a 240 k-vertex, 2150-hole
-set), ~180 ms to the two differences, ~85 ms to merging the spokes. What `polyclip` would need is listed in
-[POLYGON_LIB.md](POLYGON_LIB.md), "Wishlist from cadlab", with a reproduction
-(`cargo run --release --example polyclip_opening`). Everything that needs the fill (cold ratsnest, DRC,
-render, Gerber) inherits it; within one session the fill cache removes it. Schematic rendering is dominated by
-PNG encoding of the large sheet.
+`polyclip` 0.0.5–0.0.6 implemented the wishlist in [POLYGON_LIB.md](POLYGON_LIB.md) (canonical input is no longer re-normalized, fused
+opening, booleans cluster by cluster, parallel noding and sweep within a cluster): the synthetic fill went from
+1.0 s to ~150 ms and the corpus boards' cold DRC, render and Gerber 2–3× faster, outputs byte-identical. One
+cadlab change came with it: obstacle shapes are concatenations of item outlines that may overlap (a teardrop
+over its pad), and an overlapping set can pass `polyclip`'s cheap "looks canonical" test, in which case
+`offset` grows the rings without merging them first, valid output that rounds a few nanometers differently
+(5 of corne-cherry's 925 teardrop fills changed). The fill now unions each obstacle group before growing it,
+so `offset` always gets canonical input and fills do not depend on that heuristic. Everything that needs the
+fill (cold ratsnest, DRC, render, Gerber) inherits its cost; within one session the fill cache removes it.
+Schematic rendering is dominated by PNG encoding of the large sheet.
 
 ## Workstreams after the model lands
 
