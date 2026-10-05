@@ -406,7 +406,7 @@ zone fill cache cleared before each run, i.e. what a fresh CLI process sees); `t
 | `render.board` PNG (with fill) / fills cached | 6331 / ~4100 ms | 1854 / 431 ms | 1363 / 429 ms | 392 / 251 ms |
 | `export.gerber` (with fill) / fills cached | 2505 / ~300 ms | 1569 / 167 ms | 1131 / 159 ms | 308 / 146 ms |
 | `board.export_kicad` | 62 ms | 27 ms | 30 ms | 31 ms |
-| `render.schematic` (layout + PNG) | 1492 ms | 1538 ms | (unchanged code) | |
+| `render.schematic` (layout + PNG, 5 sheets) | 1492 ms | 1538 ms | (unchanged code) | 866 ms |
 | `place.auto` (all 528 parts, `replace`) | | 182 s | 39 s | |
 
 What changed in D23 (outputs are byte-identical, D20): `placed_pads` builds one pin → net index instead of
@@ -449,7 +449,7 @@ over its pad), and an overlapping set can pass `polyclip`'s cheap "looks canonic
 (5 of corne-cherry's 925 teardrop fills changed). The fill now unions each obstacle group before growing it,
 so `offset` always gets canonical input and fills do not depend on that heuristic. Everything that needs the
 fill (cold ratsnest, DRC, render, Gerber) inherits its cost; within one session the fill cache removes it.
-Schematic rendering is dominated by PNG encoding of the large sheet.
+Schematic layout had grown to 7.3 s on this board with the multi-sheet layout (D24): attaching crystals rescanned the whole pool of passives for every pair of nearby pins; two lookups built once per anchor bring it to 0.3 s with identical sheets, and PNG encoding of the sheets is again the larger part.
 
 ## Workstreams after the model lands
 

@@ -751,6 +751,25 @@ fn anchor_variant(ctx: &Ctx, a: &str, pool: &mut Pool, decaps: &[String], varian
     }
 
     // Crystals between two pins of one side.
+    // Lookups over the pool, built once in pool order (the pool only shrinks in this loop, so the
+    // first entry still in the pool is what a scan of the pool would find): parts whose pins are
+    // on exactly two nets, by net pair, and per net the parts with a pin on it whose other pin is
+    // on a power net (with that pin).
+    let mut by_pair: BTreeMap<(&str, &str), Vec<String>> = BTreeMap::new();
+    let mut caps_on: BTreeMap<&str, Vec<(String, String)>> = BTreeMap::new();
+    for r in pool.iter() {
+        let pins = &ctx.comps[r].sym.pins;
+        let nets: BTreeSet<Option<&str>> = pins.iter().map(|q| ctx.net_of(r, &q.number)).collect();
+        if let [Some(n1), Some(n2)] = nets.iter().copied().collect::<Vec<_>>()[..] {
+            by_pair.entry((n1, n2)).or_default().push(r.clone());
+        }
+        for net in nets.iter().flatten() {
+            let Some(near) = pins.iter().find(|q| ctx.net_of(r, &q.number) == Some(net)) else { continue };
+            if ctx.net_of(r, &ctx.other_pin(r, &near.number)).and_then(|far| ctx.power(far)).is_some() {
+                caps_on.entry(net).or_default().push((r.clone(), near.number.clone()));
+            }
+        }
+    }
     let mut done: BTreeSet<usize> = BTreeSet::new();
     for i in 0..signals.len() {
         for j in 0..signals.len() {
@@ -762,19 +781,11 @@ fn anchor_variant(ctx: &Ctx, a: &str, pool: &mut Pool, decaps: &[String], varian
             if dist > 4 * G {
                 continue;
             }
-            let x = pool.iter().find(|r| {
-                let pins = &ctx.comps[*r].sym.pins;
-                let nets: BTreeSet<Option<&str>> = pins.iter().map(|q| ctx.net_of(r, &q.number)).collect();
-                nets.contains(&Some(si.4)) && nets.contains(&Some(sj.4)) && nets.len() == 2
-            });
+            let pair = if si.4 < sj.4 { (si.4, sj.4) } else { (sj.4, si.4) };
+            let x = by_pair.get(&pair).and_then(|rs| rs.iter().find(|r| pool.contains(*r)));
             let Some(x) = x.cloned() else { continue };
             let cap_for = |net: &str| -> Option<(String, String)> {
-                pool.iter().filter(|r| **r != x).find_map(|r| {
-                    let pins = &ctx.comps[r].sym.pins;
-                    let near = pins.iter().find(|q| ctx.net_of(r, &q.number) == Some(net))?;
-                    let far = ctx.net_of(r, &ctx.other_pin(r, &near.number))?;
-                    ctx.power(far).map(|_| (r.clone(), near.number.clone()))
-                })
+                caps_on.get(net)?.iter().find(|(r, _)| *r != x && pool.contains(r)).cloned()
             };
             let caps = [cap_for(si.4), cap_for(sj.4)];
             let pa = PinAt { owner: si.0, refdes: a, num: &si.1, end: si.2, dir: si.3, net: si.4 };
