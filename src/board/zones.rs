@@ -237,6 +237,44 @@ fn slanted_spoke(item: &CopperItem, b: &poly::Rect, a: Angle, gap: i64, w: i64) 
     Polygon::new(vec![at(-h, o0), at(len, o0), at(len, o1), at(-h, o1)], vec![])
 }
 
+/// A spoke trimmed where it would cross another item's clearance (a pad squeezed between
+/// other-net items, where no whole spoke fits): `spoke` ∩ `avail`, kept only within the pad's
+/// thermal gap and the pour, in pieces joining the pad to the pour over at least half the spoke
+/// width. Otherwise nothing.
+fn trimmed_spoke(
+    it: &CopperItem,
+    r: &Relief,
+    spoke: &Polygon,
+    avail: &PolygonSet,
+    fill: &PolygonSet,
+) -> Result<PolygonSet, poly::Error> {
+    if !poly::intersects(fill, spoke) {
+        return Ok(vec![]);
+    }
+    let gap = poly::offset(&it.shape, r.gap, Join::Round, OBSTACLE_TOL)?;
+    let room = Boolean::new().subject(fill, FillRule::NonZero).subject(&gap, FillRule::NonZero).execute()?;
+    let inside = Boolean::new()
+        .subject(avail, FillRule::NonZero)
+        .clip(&room, FillRule::NonZero)
+        .op(Op::Intersection)
+        .execute()?;
+    let mut piece = Boolean::new()
+        .subject(std::slice::from_ref(spoke), FillRule::NonZero)
+        .clip(&inside, FillRule::NonZero)
+        .op(Op::Intersection)
+        .execute()?;
+    piece.retain(|q| poly::intersects(q, &it.shape) && poly::intersects(q, fill));
+    let joint = Boolean::new()
+        .subject(&piece, FillRule::NonZero)
+        .clip(fill, FillRule::NonZero)
+        .op(Op::Intersection)
+        .execute()?;
+    if joint.is_empty() || poly::offset(&joint, -(r.w / 4), Join::Round, FILL_TOL)?.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(piece)
+}
+
 /// How a same-net pad joins a zone: its own override, else the zone's style; `tht_thermal`
 /// resolves to thermal reliefs for plated through-hole pads and solid for the rest.
 pub fn connection(it: &CopperItem, zone: PadConnection) -> PadConnection {
@@ -390,11 +428,19 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
         let near = |set: &PolygonSet, r: &poly::Rect| -> PolygonSet {
             set.iter().filter(|q| q.bbox().is_some_and(|b| b.intersects(r))).cloned().collect()
         };
+        let fits = |s: &Polygon| {
+            let b = s.bbox().expect("spoke");
+            poly::contains(&near(&local_avail, &b), s) && poly::intersects(&near(&local_fill, &b), s)
+        };
         for (it, r) in &thermal {
+            // A spoke whose end would cross another item's clearance is trimmed instead of
+            // dropped when the rest still joins the pour (`trimmed_spoke`).
             for s in spokes(it, r) {
-                let r = s.bbox().expect("spoke");
-                if poly::contains(&near(&local_avail, &r), &s) && poly::intersects(&near(&local_fill, &r), &s) {
+                if fits(&s) {
                     kept.push(s);
+                } else {
+                    let b = s.bbox().expect("spoke");
+                    kept.extend(trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?);
                 }
             }
         }
