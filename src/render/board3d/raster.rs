@@ -6,7 +6,7 @@
 //! in input order and a sample is replaced only by a strictly closer one, so the result does
 //! not depend on the thread count.
 
-use super::bodies::Rgb;
+use crate::body3d::Rgb;
 
 /// Samples per pixel along each axis.
 pub(crate) const SS: usize = 3;
@@ -74,7 +74,7 @@ pub(crate) struct PTri {
 /// Background color of an output row (vertical gradient).
 pub(crate) fn background(row: f64, height: f64) -> Rgb {
     let t = (row / height.max(1.0)) as f32;
-    let (a, b) = (super::bodies::rgb(0x3d424a), super::bodies::rgb(0x1c1e22));
+    let (a, b) = (crate::body3d::rgb(0x3d424a), crate::body3d::rgb(0x1c1e22));
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 }
 

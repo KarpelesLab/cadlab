@@ -1,0 +1,380 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<foundation:EDMDDataSet xmlns:foundation="http://www.prostep.org/ecad-mcad/edmd/4.0/foundation" xmlns:pdm="http://www.prostep.org/ecad-mcad/edmd/4.0/pdm" xmlns:d2="http://www.prostep.org/ecad-mcad/edmd/4.0/geometry.d2" xmlns:property="http://www.prostep.org/ecad-mcad/edmd/4.0/property" xmlns:computational="http://www.prostep.org/ecad-mcad/edmd/4.0/computational" xmlns:administration="http://www.prostep.org/ecad-mcad/edmd/4.0/administration" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <foundation:Header xsi:type="foundation:EDMDHeader">
+    <foundation:Description>tiny</foundation:Description>
+    <foundation:CreatorName></foundation:CreatorName>
+    <foundation:CreatorCompany></foundation:CreatorCompany>
+    <foundation:CreatorSystem>cadlab</foundation:CreatorSystem>
+    <foundation:PostProcessor>cadlab</foundation:PostProcessor>
+    <foundation:PostProcessorVersion>VERSION</foundation:PostProcessorVersion>
+    <foundation:System>CADLAB</foundation:System>
+    <foundation:CreationDateTime>1970-01-01T00:00:00Z</foundation:CreationDateTime>
+    <foundation:ModifiedDateTime>1970-01-01T00:00:00Z</foundation:ModifiedDateTime>
+    <foundation:GlobalUnitLength>UNIT_MM</foundation:GlobalUnitLength>
+  </foundation:Header>
+  <foundation:Body xsi:type="foundation:EDMDDataSetBody">
+    <foundation:System xsi:type="foundation:EDMDSystem" id="CADLAB">
+      <foundation:SystemType>ECAD</foundation:SystemType>
+      <foundation:GlobalName>cadlab</foundation:GlobalName>
+      <foundation:Revision>VERSION</foundation:Revision>
+    </foundation:System>
+    <foundation:UnitLength xsi:type="property:EDMDUnitLength" id="UNIT_MM">
+      <property:Fundamental>mm</property:Fundamental>
+    </foundation:UnitLength>
+    <foundation:Person xsi:type="administration:EDMDPerson" id="ACTOR">
+      <administration:SurName>Ada</administration:SurName>
+    </foundation:Person>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT1">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>-0.5</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>-0.25</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT2">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>0.5</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>-0.25</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT3">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>0.5</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>0.25</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT4">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>-0.5</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>0.25</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:PolyLine xsi:type="d2:EDMDPolyLine" id="PL1">
+      <d2:Point>PT1</d2:Point>
+      <d2:Point>PT2</d2:Point>
+      <d2:Point>PT3</d2:Point>
+      <d2:Point>PT4</d2:Point>
+      <d2:Point>PT1</d2:Point>
+    </foundation:PolyLine>
+    <foundation:CurveSet2d xsi:type="d2:EDMDCurveSet2d" id="CS1">
+      <pdm:ShapeDescriptionType>GeometricModel</pdm:ShapeDescriptionType>
+      <d2:LowerBound xsi:type="property:EDMDLengthProperty">
+        <property:Value>0</property:Value>
+      </d2:LowerBound>
+      <d2:UpperBound xsi:type="property:EDMDLengthProperty">
+        <property:Value>0.55</property:Value>
+      </d2:UpperBound>
+      <d2:DetailedGeometricModelElement>PL1</d2:DetailedGeometricModelElement>
+    </foundation:CurveSet2d>
+    <foundation:ShapeElement xsi:type="pdm:EDMDShapeElement" id="SE1">
+      <pdm:ShapeElementType>FeatureShapeElement</pdm:ShapeElementType>
+      <pdm:Inverted>false</pdm:Inverted>
+      <pdm:DefiningShape>CS1</pdm:DefiningShape>
+    </foundation:ShapeElement>
+    <foundation:AssemblyComponent xsi:type="pdm:EDMDAssemblyComponent" id="AC1">
+      <pdm:ShapeElement>SE1</pdm:ShapeElement>
+      <pdm:AssemblyComponentType>Physical</pdm:AssemblyComponentType>
+    </foundation:AssemblyComponent>
+    <foundation:Item xsi:type="pdm:EDMDItem" id="ITEM1">
+      <foundation:Name>CAPC1005X55N</foundation:Name>
+      <foundation:Description>component body</foundation:Description>
+      <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+        <property:Key xsi:type="foundation:EDMDName">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:ObjectName>PARTNUM</foundation:ObjectName>
+        </property:Key>
+        <property:Value>C_1uF_16V_X5R_0402</property:Value>
+      </foundation:UserProperty>
+      <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+        <property:Key xsi:type="foundation:EDMDName">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:ObjectName>HEIGHT</foundation:ObjectName>
+        </property:Key>
+        <property:Value>0.55</property:Value>
+      </foundation:UserProperty>
+      <pdm:ItemType>single</pdm:ItemType>
+      <pdm:Identifier xsi:type="foundation:EDMDIdentifier">
+        <foundation:SystemScope>CADLAB</foundation:SystemScope>
+        <foundation:Number>PACKAGE:CAPC1005X55N:C_1uF_16V_X5R_0402</foundation:Number>
+        <foundation:Version>1</foundation:Version>
+        <foundation:Revision>0</foundation:Revision>
+        <foundation:Sequence>0</foundation:Sequence>
+      </pdm:Identifier>
+      <pdm:PackageName xsi:type="foundation:EDMDName">
+        <foundation:SystemScope>CADLAB</foundation:SystemScope>
+        <foundation:ObjectName>CAPC1005X55N</foundation:ObjectName>
+      </pdm:PackageName>
+      <pdm:Shape>AC1</pdm:Shape>
+    </foundation:Item>
+    <foundation:Item xsi:type="pdm:EDMDItem" id="ITEM2" GeometryType="COMPONENT">
+      <foundation:Name>C2</foundation:Name>
+      <foundation:Description>C_1uF_16V_X5R_0402</foundation:Description>
+      <pdm:ItemType>assembly</pdm:ItemType>
+      <pdm:Identifier xsi:type="foundation:EDMDIdentifier">
+        <foundation:SystemScope>CADLAB</foundation:SystemScope>
+        <foundation:Number>COMPONENT:C2</foundation:Number>
+        <foundation:Version>1</foundation:Version>
+        <foundation:Revision>0</foundation:Revision>
+        <foundation:Sequence>1</foundation:Sequence>
+      </pdm:Identifier>
+      <pdm:ItemInstance xsi:type="pdm:EDMDItemInstance">
+        <foundation:Name>C2</foundation:Name>
+        <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+          <property:Key xsi:type="foundation:EDMDName">
+            <foundation:SystemScope>CADLAB</foundation:SystemScope>
+            <foundation:ObjectName>REFDES</foundation:ObjectName>
+          </property:Key>
+          <property:Value>C2</property:Value>
+        </foundation:UserProperty>
+        <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+          <property:Key xsi:type="foundation:EDMDName">
+            <foundation:SystemScope>CADLAB</foundation:SystemScope>
+            <foundation:ObjectName>SIDE</foundation:ObjectName>
+          </property:Key>
+          <property:Value>TOP</property:Value>
+        </foundation:UserProperty>
+        <pdm:InstanceName xsi:type="foundation:EDMDName">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:ObjectName>C2</foundation:ObjectName>
+        </pdm:InstanceName>
+        <pdm:Transformation xsi:type="pdm:EDMDTransformation">
+          <pdm:TransformationType>d3</pdm:TransformationType>
+          <pdm:xx>0</pdm:xx>
+          <pdm:xy>-1</pdm:xy>
+          <pdm:xz>0</pdm:xz>
+          <pdm:yx>1</pdm:yx>
+          <pdm:yy>0</pdm:yy>
+          <pdm:yz>0</pdm:yz>
+          <pdm:zx>0</pdm:zx>
+          <pdm:zy>0</pdm:zy>
+          <pdm:zz>1</pdm:zz>
+          <pdm:tx xsi:type="property:EDMDLengthProperty">
+            <property:Value>18</property:Value>
+          </pdm:tx>
+          <pdm:ty xsi:type="property:EDMDLengthProperty">
+            <property:Value>9</property:Value>
+          </pdm:ty>
+          <pdm:tz xsi:type="property:EDMDLengthProperty">
+            <property:Value>1.6</property:Value>
+          </pdm:tz>
+        </pdm:Transformation>
+        <pdm:Item>ITEM1</pdm:Item>
+      </pdm:ItemInstance>
+    </foundation:Item>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT5">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>-0.8</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>-1.46</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT6">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>0.8</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>-1.46</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT7">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>0.8</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>1.46</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:CartesianPoint xsi:type="d2:EDMDCartesianPoint" id="PT8">
+      <d2:X xsi:type="property:EDMDLengthProperty">
+        <property:Value>-0.8</property:Value>
+      </d2:X>
+      <d2:Y xsi:type="property:EDMDLengthProperty">
+        <property:Value>1.46</property:Value>
+      </d2:Y>
+    </foundation:CartesianPoint>
+    <foundation:PolyLine xsi:type="d2:EDMDPolyLine" id="PL2">
+      <d2:Point>PT5</d2:Point>
+      <d2:Point>PT6</d2:Point>
+      <d2:Point>PT7</d2:Point>
+      <d2:Point>PT8</d2:Point>
+      <d2:Point>PT5</d2:Point>
+    </foundation:PolyLine>
+    <foundation:CurveSet2d xsi:type="d2:EDMDCurveSet2d" id="CS2">
+      <pdm:ShapeDescriptionType>GeometricModel</pdm:ShapeDescriptionType>
+      <d2:LowerBound xsi:type="property:EDMDLengthProperty">
+        <property:Value>0</property:Value>
+      </d2:LowerBound>
+      <d2:UpperBound xsi:type="property:EDMDLengthProperty">
+        <property:Value>1.45</property:Value>
+      </d2:UpperBound>
+      <d2:DetailedGeometricModelElement>PL2</d2:DetailedGeometricModelElement>
+    </foundation:CurveSet2d>
+    <foundation:ShapeElement xsi:type="pdm:EDMDShapeElement" id="SE2">
+      <pdm:ShapeElementType>FeatureShapeElement</pdm:ShapeElementType>
+      <pdm:Inverted>false</pdm:Inverted>
+      <pdm:DefiningShape>CS2</pdm:DefiningShape>
+    </foundation:ShapeElement>
+    <foundation:AssemblyComponent xsi:type="pdm:EDMDAssemblyComponent" id="AC2">
+      <pdm:ShapeElement>SE2</pdm:ShapeElement>
+      <pdm:AssemblyComponentType>Physical</pdm:AssemblyComponentType>
+    </foundation:AssemblyComponent>
+    <foundation:Item xsi:type="pdm:EDMDItem" id="ITEM3">
+      <foundation:Name>SOT95P280X145-5N</foundation:Name>
+      <foundation:Description>component body</foundation:Description>
+      <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+        <property:Key xsi:type="foundation:EDMDName">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:ObjectName>PARTNUM</foundation:ObjectName>
+        </property:Key>
+        <property:Value>AP2112K-3.3TRG1</property:Value>
+      </foundation:UserProperty>
+      <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+        <property:Key xsi:type="foundation:EDMDName">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:ObjectName>HEIGHT</foundation:ObjectName>
+        </property:Key>
+        <property:Value>1.45</property:Value>
+      </foundation:UserProperty>
+      <pdm:ItemType>single</pdm:ItemType>
+      <pdm:Identifier xsi:type="foundation:EDMDIdentifier">
+        <foundation:SystemScope>CADLAB</foundation:SystemScope>
+        <foundation:Number>PACKAGE:SOT95P280X145-5N:AP2112K-3.3TRG1</foundation:Number>
+        <foundation:Version>1</foundation:Version>
+        <foundation:Revision>0</foundation:Revision>
+        <foundation:Sequence>0</foundation:Sequence>
+      </pdm:Identifier>
+      <pdm:PackageName xsi:type="foundation:EDMDName">
+        <foundation:SystemScope>CADLAB</foundation:SystemScope>
+        <foundation:ObjectName>SOT95P280X145-5N</foundation:ObjectName>
+      </pdm:PackageName>
+      <pdm:Shape>AC2</pdm:Shape>
+    </foundation:Item>
+    <foundation:Item xsi:type="pdm:EDMDItem" id="ITEM4" GeometryType="COMPONENT">
+      <foundation:Name>U1</foundation:Name>
+      <foundation:Description>AP2112K-3.3TRG1</foundation:Description>
+      <pdm:ItemType>assembly</pdm:ItemType>
+      <pdm:Identifier xsi:type="foundation:EDMDIdentifier">
+        <foundation:SystemScope>CADLAB</foundation:SystemScope>
+        <foundation:Number>COMPONENT:U1</foundation:Number>
+        <foundation:Version>1</foundation:Version>
+        <foundation:Revision>0</foundation:Revision>
+        <foundation:Sequence>1</foundation:Sequence>
+      </pdm:Identifier>
+      <pdm:ItemInstance xsi:type="pdm:EDMDItemInstance">
+        <foundation:Name>U1</foundation:Name>
+        <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+          <property:Key xsi:type="foundation:EDMDName">
+            <foundation:SystemScope>CADLAB</foundation:SystemScope>
+            <foundation:ObjectName>REFDES</foundation:ObjectName>
+          </property:Key>
+          <property:Value>U1</property:Value>
+        </foundation:UserProperty>
+        <foundation:UserProperty xsi:type="property:EDMDUserSimpleProperty">
+          <property:Key xsi:type="foundation:EDMDName">
+            <foundation:SystemScope>CADLAB</foundation:SystemScope>
+            <foundation:ObjectName>SIDE</foundation:ObjectName>
+          </property:Key>
+          <property:Value>TOP</property:Value>
+        </foundation:UserProperty>
+        <pdm:InstanceName xsi:type="foundation:EDMDName">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:ObjectName>U1</foundation:ObjectName>
+        </pdm:InstanceName>
+        <pdm:Transformation xsi:type="pdm:EDMDTransformation">
+          <pdm:TransformationType>d3</pdm:TransformationType>
+          <pdm:xx>1</pdm:xx>
+          <pdm:xy>0</pdm:xy>
+          <pdm:xz>0</pdm:xz>
+          <pdm:yx>0</pdm:yx>
+          <pdm:yy>1</pdm:yy>
+          <pdm:yz>0</pdm:yz>
+          <pdm:zx>0</pdm:zx>
+          <pdm:zy>0</pdm:zy>
+          <pdm:zz>1</pdm:zz>
+          <pdm:tx xsi:type="property:EDMDLengthProperty">
+            <property:Value>13</property:Value>
+          </pdm:tx>
+          <pdm:ty xsi:type="property:EDMDLengthProperty">
+            <property:Value>8</property:Value>
+          </pdm:ty>
+          <pdm:tz xsi:type="property:EDMDLengthProperty">
+            <property:Value>1.6</property:Value>
+          </pdm:tz>
+        </pdm:Transformation>
+        <pdm:Item>ITEM3</pdm:Item>
+      </pdm:ItemInstance>
+    </foundation:Item>
+  </foundation:Body>
+  <foundation:ProcessInstruction xsi:type="computational:EDMDProcessInstructionSendChanges">
+    <computational:Actor>ACTOR</computational:Actor>
+    <computational:Changes xsi:type="computational:EDMDTransaction">
+      <foundation:Description>C2 moved</foundation:Description>
+      <computational:Change xsi:type="computational:EDMDChange">
+        <computational:NewItem xsi:type="foundation:EDMDIdentifier">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:Number>COMPONENT:C2</foundation:Number>
+          <foundation:Version>1</foundation:Version>
+          <foundation:Revision>0</foundation:Revision>
+          <foundation:Sequence>1</foundation:Sequence>
+        </computational:NewItem>
+        <computational:PredecessorItem xsi:type="foundation:EDMDIdentifier">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:Number>COMPONENT:C2</foundation:Number>
+          <foundation:Version>1</foundation:Version>
+          <foundation:Revision>0</foundation:Revision>
+          <foundation:Sequence>0</foundation:Sequence>
+        </computational:PredecessorItem>
+      </computational:Change>
+    </computational:Changes>
+    <computational:Changes xsi:type="computational:EDMDTransaction">
+      <foundation:Description>J1 removed</foundation:Description>
+      <computational:Change xsi:type="computational:EDMDChange">
+        <computational:NewItem xsi:type="foundation:EDMDIdentifier">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:Number>COMPONENT:J1</foundation:Number>
+          <foundation:Version>1</foundation:Version>
+          <foundation:Revision>0</foundation:Revision>
+          <foundation:Sequence>1</foundation:Sequence>
+        </computational:NewItem>
+        <computational:PredecessorItem xsi:type="foundation:EDMDIdentifier">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:Number>COMPONENT:J1</foundation:Number>
+          <foundation:Version>1</foundation:Version>
+          <foundation:Revision>0</foundation:Revision>
+          <foundation:Sequence>0</foundation:Sequence>
+        </computational:PredecessorItem>
+        <computational:DeletedInstanceName xsi:type="foundation:EDMDName">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:ObjectName>J1</foundation:ObjectName>
+        </computational:DeletedInstanceName>
+      </computational:Change>
+    </computational:Changes>
+    <computational:Changes xsi:type="computational:EDMDTransaction">
+      <foundation:Description>U1 moved</foundation:Description>
+      <computational:Change xsi:type="computational:EDMDChange">
+        <computational:NewItem xsi:type="foundation:EDMDIdentifier">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:Number>COMPONENT:U1</foundation:Number>
+          <foundation:Version>1</foundation:Version>
+          <foundation:Revision>0</foundation:Revision>
+          <foundation:Sequence>1</foundation:Sequence>
+        </computational:NewItem>
+        <computational:PredecessorItem xsi:type="foundation:EDMDIdentifier">
+          <foundation:SystemScope>CADLAB</foundation:SystemScope>
+          <foundation:Number>COMPONENT:U1</foundation:Number>
+          <foundation:Version>1</foundation:Version>
+          <foundation:Revision>0</foundation:Revision>
+          <foundation:Sequence>0</foundation:Sequence>
+        </computational:PredecessorItem>
+      </computational:Change>
+    </computational:Changes>
+  </foundation:ProcessInstruction>
+</foundation:EDMDDataSet>

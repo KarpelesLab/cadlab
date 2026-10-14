@@ -1,6 +1,6 @@
 //! `export.*`: generic manufacturing outputs (Gerber X2/X3, XNC drill, pick-and-place,
 //! IPC-D-356A, IPC-2581), mechanical CAD outputs (STEP, IDF, IDX) and the Specctra DSN design for
-//! external autorouters. Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
+//! external autorouters, and `place.import_idx` (answering IDX change messages). Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,8 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<Step>()
         .register::<Idf>()
         .register::<Idx>()
+        .register::<IdxChanges>()
+        .register::<PlaceImportIdx>()
         .register::<ExportDsn>()
         .register::<Spice>();
 }
@@ -371,7 +373,9 @@ fn with_ext(path: PathBuf, ext: &str) -> PathBuf {
 
 /// Write the board as a STEP (AP214) assembly for MCAD: the board solid (outline extruded to
 /// the stackup thickness, minus cutouts and drilled holes) and component bodies: attached 3D
-/// models as faceted B-rep, other parts as boxes from the package dimensions.
+/// models as faceted B-rep, other parts as exact solids generated from the package (body with
+/// chamfered top edges, leads, terminations, cylinders for MELF bodies and pins), as in the 3D
+/// view.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -397,6 +401,9 @@ pub struct StepExported {
     /// Of those, bodies from attached 3D models (faceted).
     #[serde(default)]
     pub model_bodies: usize,
+    /// Solids written for generated package bodies (body, leads, marks; once per footprint).
+    #[serde(default)]
+    pub generated_solids: usize,
     /// Holes cut in the board.
     pub holes: usize,
     /// Holes left out (crossing the edge, a cutout or another hole).
@@ -447,6 +454,7 @@ impl Command for Step {
             path: written.files[0].path.clone(),
             bodies: out.bodies,
             model_bodies: out.model_bodies,
+            generated_solids: out.generated_solids,
             holes: out.holes,
             skipped_holes: out.skipped_holes.len(),
         })
@@ -462,7 +470,9 @@ impl Command for Step {
 }
 
 /// Write IDF 3.0 board (`.emn`) and library (`.emp`) files for MCAD: outline, cutouts,
-/// drilled holes and component placements with body outlines and heights.
+/// routing and placement outlines (the board inside the copper-to-edge clearance), routing,
+/// via and placement keep-outs, drilled holes and component placements with body outlines and
+/// heights.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Idf {
@@ -486,6 +496,9 @@ pub struct IdfExported {
     pub components: usize,
     /// Drilled holes listed.
     pub holes: usize,
+    /// Keep-out sections written (routing, via and placement keep-outs).
+    #[serde(default)]
+    pub keepouts: usize,
 }
 
 impl Command for Idf {
@@ -508,11 +521,17 @@ impl Command for Idf {
         let written = write(files.into_iter().map(|f| (dir.join(&f.name), f)).collect())?;
         report_no_body(ctx, out.no_body);
         report_model_errors(ctx, &out.model_errors);
-        Ok(IdfExported { files: written.files, components: out.placed, holes: out.holes })
+        Ok(IdfExported { files: written.files, components: out.placed, holes: out.holes, keepouts: out.keepouts })
     }
 
     fn summarize(o: &IdfExported) -> String {
-        let mut s = format!("wrote {} file(s) ({} components, {} holes)", o.files.len(), o.components, o.holes);
+        let mut s = format!(
+            "wrote {} file(s) ({} components, {} holes, {} keep-outs)",
+            o.files.len(),
+            o.components,
+            o.holes,
+            o.keepouts
+        );
         for f in &o.files {
             s.push_str(&format!("\n  {} ({})", f.path, f.function));
         }
@@ -577,6 +596,255 @@ impl Command for Idx {
 
     fn summarize(o: &IdxExported) -> String {
         format!("wrote {} ({} components, {} holes, {} keep-outs)", o.path, o.components, o.holes, o.keepouts)
+    }
+}
+
+/// Reads an IDX file, mapping read and parse failures to errors with hints.
+fn read_idx(path: &Path) -> Result<String, CommandError> {
+    std::fs::read_to_string(path).map_err(|e| io(path, e))
+}
+
+fn idx_error(path: &Path, e: String) -> CommandError {
+    CommandError::invalid_args("idx.invalid", format!("{}: {e}", path.display()))
+        .with_hint("pass an IDX (ProSTEP EDMD) file: a baseline (`export.idx`), change or response message")
+}
+
+/// Write an IDX change message (`SendChanges`) with the component placements that changed
+/// since earlier messages: moved, rotated or flipped components, components placed with
+/// another package, added and removed ones, one transaction each so the MCAD side can accept
+/// or reject them separately. Board, holes and keep-outs are not compared.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IdxChanges {
+    /// The messages exchanged so far, oldest first: the baseline (`export.idx`), then change
+    /// and response messages (relative to the project). Rejected changes in a response are
+    /// undone.
+    pub since: Vec<PathBuf>,
+    /// Output file (default `out/mcad/<project>-changes.idx`, relative to the project; `.idx`
+    /// is appended if missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Name of the person sending the changes (the message's actor; default empty: projects
+    /// store no people).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// One component change of `export.idx_changes`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct IdxComponentChange {
+    /// Designator.
+    pub refdes: String,
+    /// `moved`, `changed` (another package), `added` or `removed`.
+    pub change: String,
+}
+
+/// Result of `export.idx_changes`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct IdxChangesExported {
+    /// File written.
+    pub path: String,
+    /// The changes, one transaction each.
+    pub changes: Vec<IdxComponentChange>,
+}
+
+impl Command for IdxChanges {
+    const NAME: &'static str = "export.idx_changes";
+    const SUMMARY: &'static str = "Write an IDX change message with the placements changed since earlier IDX messages";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["since"];
+    type Output = IdxChangesExported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<IdxChangesExported, CommandError> {
+        if self.since.is_empty() {
+            return Err(CommandError::invalid_args("idx.no_baseline", "no earlier IDX message given").with_hint(
+                "pass the baseline written by `export.idx` (and later change/response messages) as `since`",
+            ));
+        }
+        check_placed(ctx)?;
+        let mut history = mcad::idx::History::default();
+        for f in &self.since {
+            let path = resolve(ctx, Some(f), PathBuf::new());
+            history.read(&read_idx(&path)?).map_err(|e| idx_error(&path, e))?;
+        }
+        let p = ctx.project()?;
+        let stem = fabout::file_stem(&p.manifest().name);
+        let actor = self.actor.as_deref().unwrap_or("");
+        let out = mcad::idx::changes(p, &mcad_options(false, None), &history, actor).ok_or_else(no_outline)?;
+        let Some(content) = out.content else {
+            return Err(CommandError::conflict(
+                "idx.no_changes",
+                "no component placement changed since those messages",
+            )
+            .with_hint("move, add or remove components first, or check the `since` files"));
+        };
+        let path = resolve(ctx, self.path.as_deref(), mcad_dir().join(format!("{stem}-changes.idx")));
+        let path = with_ext(path, "idx");
+        let written = write(vec![(path, OutFile { name: String::new(), function: "IDX".into(), content })])?;
+        report_no_body(ctx, out.no_body);
+        let changes = out
+            .changes
+            .iter()
+            .map(|c| {
+                let change = match c {
+                    mcad::idx::ComponentChange::Moved(_) => "moved",
+                    mcad::idx::ComponentChange::Changed(_) => "changed",
+                    mcad::idx::ComponentChange::Added(_) => "added",
+                    mcad::idx::ComponentChange::Removed(_) => "removed",
+                };
+                IdxComponentChange { refdes: c.refdes().to_string(), change: change.into() }
+            })
+            .collect();
+        Ok(IdxChangesExported { path: written.files[0].path.clone(), changes })
+    }
+
+    fn summarize(o: &IdxChangesExported) -> String {
+        let list: Vec<String> = o.changes.iter().map(|c| format!("{} {}", c.refdes, c.change)).collect();
+        format!("wrote {} ({} change(s): {})", o.path, o.changes.len(), list.join(", "))
+    }
+}
+
+/// Answer an IDX change message from MCAD: apply the component moves it proposes (position,
+/// rotation, side of placed, unlocked components) and write the response message accepting
+/// them. Transactions with changes cadlab cannot apply (other items, added or deleted
+/// components, locked ones) or listed in `reject` are rejected.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlaceImportIdx {
+    /// The change message (relative to the project).
+    pub path: PathBuf,
+    /// Reject the transactions changing these designators or item numbers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reject: Vec<String>,
+    /// Comment written in every answered transaction (default: the reason of a rejection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Response file (default `out/mcad/<message name>-response.idx`, relative to the
+    /// project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<PathBuf>,
+}
+
+/// One answered transaction of `place.import_idx`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct IdxAnswer {
+    /// The transaction's description.
+    pub description: String,
+    /// Designators (or item numbers) it changes.
+    pub items: Vec<String>,
+    /// Accepted (and applied) or rejected.
+    pub accepted: bool,
+    /// Why it was rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Result of `place.import_idx`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct IdxImported {
+    /// Response file written.
+    pub response: String,
+    /// Transactions, in message order.
+    pub transactions: Vec<IdxAnswer>,
+    /// Designators moved.
+    pub moved: Vec<String>,
+}
+
+impl Command for PlaceImportIdx {
+    const NAME: &'static str = "place.import_idx";
+    const SUMMARY: &'static str = "Apply the component moves of an IDX change message and write the response";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["path"];
+    type Output = IdxImported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<IdxImported, CommandError> {
+        let path = resolve(ctx, Some(&self.path), PathBuf::new());
+        let text = read_idx(&path)?;
+        let transactions = mcad::idx::read_changes(&text).map_err(|e| idx_error(&path, e))?;
+        let mut answers = Vec::new();
+        let mut out = Vec::new();
+        let mut moves = Vec::new();
+        for t in &transactions {
+            let p = ctx.project()?;
+            let mut reason = None;
+            let mut items = Vec::new();
+            let mut planned = Vec::new();
+            for c in &t.changes {
+                let refdes = c.placement.as_ref().map(|pl| pl.refdes.clone());
+                items.push(refdes.clone().unwrap_or_else(|| c.number.clone()));
+                let why = match (&c.placement, c.deleted.is_empty()) {
+                    (_, false) => Some(format!("{}: deleting components is not applied by cadlab", c.number)),
+                    (None, _) => Some(format!("{}: only component placements are applied by cadlab", c.number)),
+                    (Some(pl), _) => match p.board().footprints.get(&pl.refdes) {
+                        None => Some(format!("{} is not placed on the board", pl.refdes)),
+                        Some(f) if f.locked => Some(format!("{} is locked", pl.refdes)),
+                        Some(_) => {
+                            planned.push(pl.clone());
+                            None
+                        }
+                    },
+                };
+                if reason.is_none() {
+                    reason = why;
+                }
+            }
+            if reason.is_none() && t.changes.is_empty() {
+                reason = Some("the transaction has no change".into());
+            }
+            if reason.is_none()
+                && let Some(r) = items.iter().find(|i| self.reject.iter().any(|x| x == *i))
+            {
+                reason = Some(format!("{r}: rejected"));
+            }
+            if reason.is_none()
+                && let Some(c) = t.changes.iter().find(|c| self.reject.contains(&c.number))
+            {
+                reason = Some(format!("{}: rejected", c.number));
+            }
+            let accepted = reason.is_none();
+            if accepted {
+                moves.extend(planned);
+            }
+            answers
+                .push(mcad::idx::Answer { accept: accepted, comment: self.comment.clone().or_else(|| reason.clone()) });
+            out.push(IdxAnswer { description: t.description.clone(), items, accepted, reason });
+        }
+        let mut moved = Vec::new();
+        let p = ctx.project_mut()?;
+        for pl in moves {
+            let (at, rotation, side) = pl.board_placement();
+            if let Some(f) = p.board_mut().footprints.get_mut(&pl.refdes) {
+                f.at = at;
+                f.rotation = rotation;
+                f.side = side;
+                moved.push(pl.refdes);
+            }
+        }
+        let response = mcad::idx::respond(&text, &answers).map_err(|e| idx_error(&path, e))?;
+        let stem = path.file_stem().map_or("changes".into(), |s| s.to_string_lossy().to_string());
+        let rpath = resolve(ctx, self.response.as_deref(), mcad_dir().join(format!("{stem}-response.idx")));
+        let rpath = with_ext(rpath, "idx");
+        let written = if ctx.is_dry_run() {
+            rpath.display().to_string()
+        } else {
+            let file = OutFile { name: String::new(), function: "IDX".into(), content: response };
+            write(vec![(rpath, file)])?.files[0].path.clone()
+        };
+        Ok(IdxImported { response: written, transactions: out, moved })
+    }
+
+    fn summarize(o: &IdxImported) -> String {
+        let accepted = o.transactions.iter().filter(|t| t.accepted).count();
+        let mut s = format!(
+            "{accepted} of {} change(s) accepted, moved: {}; wrote {}",
+            o.transactions.len(),
+            if o.moved.is_empty() { "none".to_string() } else { o.moved.join(", ") },
+            o.response
+        );
+        for t in o.transactions.iter().filter(|t| !t.accepted) {
+            s.push_str(&format!("\n  rejected {}: {}", t.items.join(", "), t.reason.as_deref().unwrap_or("")));
+        }
+        s
     }
 }
 

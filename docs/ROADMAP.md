@@ -221,6 +221,9 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
       STEP/VRML crates; they plug into the registry in `src/models3d.rs`)
 - [x] STEP export of the assembled board (`export.step`: AP214, exact B-rep board with cutouts and holes, box
       bodies from package dimensions as an assembly; FreeCAD oracle; D31)
+- [x] STEP bodies generated like the 3D view's (`cadlab::body3d`, shared with `render.board3d`): chamfered
+      molded bodies, leads and terminations, BGA, DIP and header pins as exact planar B-rep solids, MELF bodies and
+      pin-1 dots as true cylinders; attached models stay faceted B-rep (D47)
 - [x] IPC-2581 rev C output (`export.ipc2581`, also in `export.all`: BOM, stackup, profile, packages,
       components, logical nets, copper/mask/paste/legend/drill features; D31)
 - [x] ODB++ if spec terms allow: they do not (Siemens' specification may not be used to develop interfaces
@@ -228,9 +231,14 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
       (MANUFACTURING.md, D37)
 - [x] IDF 3.0 export for MCAD (`export.idf`: `.emn` board with outline, cutouts, holes and placement, `.emp`
       library of body outlines; D31)
+- [x] IDF 3.0 `.ROUTE_OUTLINE` / `.PLACE_OUTLINE` (board inside the copper-to-edge clearance) and
+      `.ROUTE_KEEPOUT` / `.VIA_KEEPOUT` / `.PLACE_KEEPOUT` from keep-outs (D47)
 - [x] IDX (ProSTEP EDMD) export (`export.idx`: V4.5 baseline with board outline and cutouts, holes, keep-outs
-      and component placements with body heights; validated against the published schema; D37). Change and
-      response messages later
+      and component placements with body heights; validated against the published schema; D37)
+- [x] IDX change and response messages for component placements: `export.idx_changes` (moved, re-packaged,
+      added and removed components since the baseline and later messages, one transaction each) and
+      `place.import_idx` (applies MCAD's accepted moves, writes the response with `Accept` and comments);
+      validated against the published schema (D47). Changes of the outline, holes and keep-outs: a new baseline
 
 ## Stretch goals (XL)
 

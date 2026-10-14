@@ -16,6 +16,7 @@
 pub mod idf;
 pub mod idx;
 pub mod step;
+pub mod xml;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -287,6 +288,62 @@ pub fn board_profile(p: &Project) -> Option<(Loop, Vec<Loop>)> {
     let mut it = loops.into_iter();
     let outer = it.next()?.oriented(true);
     Some((outer, it.map(|l| l.oriented(false)).collect()))
+}
+
+/// The closed loop of a polygon (repeated and closing vertices dropped), or `None` with fewer
+/// than three vertices.
+pub fn polygon_loop(pts: &[Point]) -> Option<Loop> {
+    let mut pts = pts.to_vec();
+    pts.dedup();
+    if pts.len() > 1 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    if pts.len() < 3 {
+        return None;
+    }
+    let mut edges: Vec<Edge> = pts[1..].iter().map(|&to| Edge::Line { to }).collect();
+    edges.push(Edge::Line { to: pts[0] });
+    Some(Loop { start: pts[0], edges })
+}
+
+/// The board's outer contour shrunk by `edge` (the copper-to-edge clearance: where copper may
+/// go and where the placer puts courtyards), as counter-clockwise loops: the exact outer loop
+/// when `edge` is zero, else polygons with arcs approximated inside to within 1 µm (a narrow
+/// neck can split the area in several pieces). Cutouts are not subtracted.
+pub fn inset_outer(p: &Project, outer: &Loop, edge: Nm) -> Vec<Loop> {
+    use crate::geom::poly::{self, ArcTol, Join, Ring, Side};
+    if edge.0 <= 0 {
+        return vec![outer.clone()];
+    }
+    let Some(c) = p.board().outline.contours.first() else { return Vec::new() };
+    let tol = ArcTol::new(1_000, Side::Inside);
+    let ring: Ring = board::contour_ring(c, tol).into();
+    let Ok(set) = poly::offset(&ring, -edge.0, Join::Round, tol) else { return Vec::new() };
+    set.iter()
+        .filter_map(|pg| {
+            let pts: Vec<Point> = pg.outer.0.iter().map(|q| Point::new(Nm(q.x), Nm(q.y))).collect();
+            polygon_loop(&pts).map(|l| l.oriented(true))
+        })
+        .collect()
+}
+
+/// The board sides a keep-out's copper layers touch (`layers` empty: all layers; only inner
+/// layers: both sides).
+pub fn keepout_sides(p: &Project, layers: &[String]) -> Vec<BoardSide> {
+    let copper = p.board().stackup.copper_names();
+    let (top, bottom) = (copper.first().cloned().unwrap_or_default(), copper.last().cloned().unwrap_or_default());
+    let on = |l: &str| layers.is_empty() || layers.iter().any(|x| x == l);
+    let mut sides = Vec::new();
+    if on(&top) {
+        sides.push(BoardSide::Top);
+    }
+    if copper.len() > 1 && on(&bottom) {
+        sides.push(BoardSide::Bottom);
+    }
+    if sides.is_empty() {
+        sides = vec![BoardSide::Top, BoardSide::Bottom];
+    }
+    sides
 }
 
 /// A drilled hole for MCAD outputs.

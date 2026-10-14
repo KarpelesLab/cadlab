@@ -89,7 +89,8 @@ encodes the PNG).
   3 mm below the board). Leads sit where the footprint's pads are, so missing pins follow the land pattern. Pin 1 is a
   light dot on ICs (on pad 1's side), polarized two-terminal parts get a cathode band at pad 1. Footprints without a
   spec get a box from their body size, or a 1 mm grey box over the courtyard. Bottom-side parts are mirrored under
-  the board.
+  the board. Molded bodies (SOIC/QFP/DIP/SOT-223/SOD/SMA, BGA mold cap) have chamfered top edges. The solids come
+  from `cadlab::body3d`, which `export.step` writes as exact B-rep (D47).
 - **3D models**: a component whose part or footprint has a model attached (`footprint.model_set`, see
   [PARTS.md](PARTS.md#3d-models)) is drawn with the model's triangles instead of the generated body. The file is
   decoded through oxideav-mesh3d (`cadlab::models3d`, D36): every node's mesh with its world transform, meshes no

@@ -148,6 +148,8 @@ expression: names
   "export.step",
   "export.idf",
   "export.idx",
+  "export.idx_changes",
+  "place.import_idx",
   "export.dsn",
   "export.spice",
   "fab.list",

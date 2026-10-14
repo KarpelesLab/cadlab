@@ -702,6 +702,38 @@ algorithm: the mask expansion KiCad's silkscreen check sees, the diagonal spokes
 axis spokes missed, and rules the import had to drop. Modeling them once in the shared geometry and
 rules keeps every consumer (DRC, fills, exports) consistent, and keeps them editable through commands.
 
+### D47. MCAD exchange completed: generated STEP bodies, IDF outlines and keep-outs, IDX change and response messages (2026-10-14)
+**STEP bodies.** The 3D view's package bodies moved to a shared module, `cadlab::body3d`, used by
+`render.board3d` and `export.step`. Its solids are now typed: convex polyhedra (`Shape::Faces`) or cylinders along
+X or Z (`Shape::Cylinder`), so the STEP writer emits them exactly (planar faces bounded by lines; a cylindrical
+face with a seam edge) while the 3D view still draws prisms of the same 20/16 sides (byte-identical where the
+shapes did not change). Molded bodies gained chamfered top edges (a ten-face convex solid, in both outputs). Each
+solid is its own `MANIFOLD_SOLID_BREP` in the body part, not fused with the others: a boolean union would need
+a 3D B-rep kernel for touching boxes, and MCAD tools take a part made of several solids. Polyhedra are checked
+before writing (faces on the nanometer grid, outward from the centroid, every edge used once each way); a
+solid that collapses is left out, and a part with none falls back to the package box. Attached 3D models were
+already faceted B-rep and stay so.
+**IDF.** `.ROUTE_OUTLINE`/`.PLACE_OUTLINE` describe the area copper and courtyards keep to (the outer contour
+shrunk by `copper_to_edge`, the margin the placer uses); keep-outs map one section per forbidden kind
+(`no_tracks`, `no_vias`, `no_footprints` with height 0). IDF 3.0 sections hold one loop with a direction label,
+so neither cutouts nor several pieces share a section; routing layers can only say `TOP`, `BOTTOM`, `BOTH`,
+`INNER`, `ALL`, so a keep-out on some inner layers says `INNER` (it may overstate, never understate). Pour
+keep-outs and rule areas have no section and are left out rather than approximated by a stricter one.
+**IDX.** Change messages cover component placements, the part of the collaboration that changes after the
+baseline (moves on either side); outline, hole and keep-out edits go in a new baseline. The sender's state is
+not stored in the project (provider- and tool-agnostic design data, D12): `export.idx_changes` takes the
+messages exchanged so far and rebuilds the item versions from them, so sequences follow the guidelines
+(predecessor named explicitly, sequence + 1) and a rejected change in a response falls back to its
+predecessor. `place.import_idx` accepts only what it applies (placements of known, unlocked components) and
+rejects the rest with the reason, so an `Accept` true always matches the board. Responses are written by
+inserting `Accept` and descriptions into the received text instead of re-serializing it, so items cadlab does
+not understand pass through unchanged. Reading needs XML: `mcad::xml` is a ~250-line reader (elements,
+attributes, text, offsets) rather than a new dependency; it matches local names, so any namespace prefixes
+work. The required `Actor` refers to an `EDMDPerson` whose surname is an argument (empty by default).
+*Why:* these were the "not yet" items of MANUFACTURING.md that depend only on cadlab; STEP/VRML model import
+stays with the oxideav decoders (D36).
+
+
 ## Open questions
 
 

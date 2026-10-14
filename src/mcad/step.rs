@@ -29,6 +29,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::{DrillHole, Edge, Loop, Options, board_profile, body_set, cuttable_holes, drill_holes, radius};
+use crate::board::footprint_for;
+use crate::body3d::{self, Axis, Cylinder, Shape, Solid};
 use crate::fabout::gerber::mm;
 use crate::geom::Point;
 use crate::model::Project;
@@ -53,6 +55,9 @@ pub struct StepOut {
     pub open_models: Vec<String>,
     /// Bodies written.
     pub bodies: usize,
+    /// Solids written for generated package bodies (body, leads, marks), per part (shared by
+    /// the components with the same footprint).
+    pub generated_solids: usize,
     /// Holes cut in the board solid.
     pub holes: usize,
 }
@@ -105,6 +110,9 @@ fn nmf(v: f64) -> String {
 struct W {
     out: String,
     n: usize,
+    /// Maps points and directions (u, v, w) to (w, u, v): a profile drawn in the (y, z) plane
+    /// and extruded along X (a right-handed cyclic permutation, so orientations hold).
+    yzx: bool,
 }
 
 impl W {
@@ -115,10 +123,12 @@ impl W {
     }
 
     fn point(&mut self, x: String, y: String, z: String) -> usize {
+        let (x, y, z) = if self.yzx { (z, x, y) } else { (x, y, z) };
         self.add(format!("CARTESIAN_POINT('',({x},{y},{z}))"))
     }
 
     fn dir(&mut self, x: String, y: String, z: String) -> usize {
+        let (x, y, z) = if self.yzx { (z, x, y) } else { (x, y, z) };
         self.add(format!("DIRECTION('',({x},{y},{z}))"))
     }
 
@@ -259,6 +269,155 @@ fn extrude(w: &mut W, name: &str, loops: &[Loop], z0: i64, z1: i64) -> usize {
     faces.extend(side_faces);
     let shell = w.add(format!("CLOSED_SHELL('',({}))", refs(&faces)));
     w.add(format!("MANIFOLD_SOLID_BREP({},#{shell})", s(name)))
+}
+
+/// A millimeter value on the nanometer grid.
+fn grid(v: f64) -> i64 {
+    (v * 1e6).round() as i64
+}
+
+/// Writes a convex polyhedron (planar convex faces in mm, any winding) as a closed shell of
+/// planar faces bounded by straight edges. Returns the `MANIFOLD_SOLID_BREP` id, or `None`
+/// when a face collapses on the nanometer grid or the faces do not close.
+fn polyhedron(w: &mut W, name: &str, faces: &[Vec<[f64; 3]>]) -> Option<usize> {
+    // Faces as vertex indices on the nanometer grid.
+    let mut index: BTreeMap<[i64; 3], usize> = BTreeMap::new();
+    let mut verts: Vec<[i64; 3]> = Vec::new();
+    let mut loops: Vec<Vec<usize>> = Vec::with_capacity(faces.len());
+    for f in faces {
+        let mut lp: Vec<usize> = Vec::with_capacity(f.len());
+        for v in f {
+            let k = v.map(grid);
+            let i = *index.entry(k).or_insert_with(|| {
+                verts.push(k);
+                verts.len() - 1
+            });
+            if lp.last() != Some(&i) {
+                lp.push(i);
+            }
+        }
+        while lp.len() > 1 && lp.first() == lp.last() {
+            lp.pop();
+        }
+        if lp.len() < 3 {
+            return None;
+        }
+        loops.push(lp);
+    }
+    let fv = |i: usize| verts[i].map(|x| x as f64);
+    // Newell normal of a loop.
+    let normal = |lp: &[usize]| {
+        let mut n = [0.0; 3];
+        for k in 0..lp.len() {
+            let (a, b) = (fv(lp[k]), fv(lp[(k + 1) % lp.len()]));
+            n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        n
+    };
+    // Outward: counter-clockwise seen from outside, away from the centroid (convex solid).
+    let k = verts.len() as f64;
+    let centroid =
+        verts.iter().fold([0.0; 3], |a, v| [a[0] + v[0] as f64 / k, a[1] + v[1] as f64 / k, a[2] + v[2] as f64 / k]);
+    for lp in &mut loops {
+        let n = normal(lp);
+        let m = lp.len() as f64;
+        let c = lp.iter().fold([0.0; 3], |a, &i| {
+            let v = fv(i);
+            [a[0] + v[0] / m, a[1] + v[1] / m, a[2] + v[2] / m]
+        });
+        let d = sub(c, centroid);
+        let dot = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+        if dot.abs() < 1e-9 * (n[0].abs() + n[1].abs() + n[2].abs()).max(1.0) {
+            return None;
+        }
+        if dot < 0.0 {
+            lp.reverse();
+        }
+    }
+    // Closed: every directed edge once, and its reverse once.
+    let mut directed: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for lp in &loops {
+        for k in 0..lp.len() {
+            *directed.entry((lp[k], lp[(k + 1) % lp.len()])).or_default() += 1;
+        }
+    }
+    if !directed.iter().all(|(&(a, b), &n)| n == 1 && directed.get(&(b, a)) == Some(&1)) {
+        return None;
+    }
+    let pts: Vec<usize> = verts.iter().map(|v| w.point(nm(v[0]), nm(v[1]), nm(v[2]))).collect();
+    let vps: Vec<usize> = pts.iter().map(|p| w.add(format!("VERTEX_POINT('',#{p})"))).collect();
+    // One edge curve per undirected edge, from the smaller vertex index.
+    let mut edges: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for lp in &loops {
+        for k in 0..lp.len() {
+            let (a, b) = (lp[k], lp[(k + 1) % lp.len()]);
+            let key = (a.min(b), a.max(b));
+            if edges.contains_key(&key) {
+                continue;
+            }
+            let d = sub(fv(key.1), fv(key.0));
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let dir = w.dir(real(d[0] / len), real(d[1] / len), real(d[2] / len));
+            let vec = w.add(format!("VECTOR('',#{dir},{})", nmf(len)));
+            let line = w.add(format!("LINE('',#{},#{vec})", pts[key.0]));
+            edges.insert(key, w.add(format!("EDGE_CURVE('',#{},#{},#{line},.T.)", vps[key.0], vps[key.1])));
+        }
+    }
+    let mut face_ids = Vec::with_capacity(loops.len());
+    for lp in &loops {
+        let oes: Vec<String> = (0..lp.len())
+            .map(|k| {
+                let (a, b) = (lp[k], lp[(k + 1) % lp.len()]);
+                let e = edges[&(a.min(b), a.max(b))];
+                let sense = if a < b { ".T." } else { ".F." };
+                format!("#{}", w.add(format!("ORIENTED_EDGE('',*,*,#{e},{sense})")))
+            })
+            .collect();
+        let el = w.add(format!("EDGE_LOOP('',({}))", oes.join(",")));
+        let bound = w.add(format!("FACE_OUTER_BOUND('',#{el},.T.)"));
+        let n = unit(normal(lp));
+        let r = unit(sub(fv(lp[1]), fv(lp[0])));
+        let nd = w.dir(real(n[0]), real(n[1]), real(n[2]));
+        let rd = w.dir(real(r[0]), real(r[1]), real(r[2]));
+        let ax = w.add(format!("AXIS2_PLACEMENT_3D('',#{},#{nd},#{rd})", pts[lp[0]]));
+        let plane = w.add(format!("PLANE('',#{ax})"));
+        face_ids.push(format!("#{}", w.add(format!("ADVANCED_FACE('',(#{bound}),#{plane},.T.)"))));
+    }
+    let shell = w.add(format!("CLOSED_SHELL('',({}))", face_ids.join(",")));
+    Some(w.add(format!("MANIFOLD_SOLID_BREP({},#{shell})", s(name))))
+}
+
+/// Writes a cylinder as an extruded circle (exact cylindrical side face). `None` when it is
+/// empty on the nanometer grid.
+fn cylinder(w: &mut W, name: &str, c: &Cylinder) -> Option<usize> {
+    let (a0, a1) = (grid(c.from.min(c.to)), grid(c.from.max(c.to)));
+    let r = grid(c.radius);
+    if a1 <= a0 || r <= 0 {
+        return None;
+    }
+    let center = Point::new(Nm(grid(c.center.0)), Nm(grid(c.center.1)));
+    let lp = Loop::circle(center, Nm(2 * r), true);
+    w.yzx = c.axis == Axis::X;
+    let brep = extrude(w, name, &[lp], a0, a1);
+    w.yzx = false;
+    Some(brep)
+}
+
+/// Writes generated package solids; returns the breps and their colors.
+fn generated(w: &mut W, name: &str, solids: &[Solid]) -> Vec<(usize, Rgb3)> {
+    let mut out = Vec::new();
+    for sol in solids {
+        let brep = match &sol.shape {
+            Shape::Faces(f) => polyhedron(w, name, f),
+            Shape::Cylinder(c) => cylinder(w, name, c),
+        };
+        if let Some(b) = brep {
+            out.push((b, color3(sol.color)));
+        }
+    }
+    out
 }
 
 /// Shared context entities.
@@ -541,7 +700,7 @@ pub fn export(p: &Project, o: &Options) -> Option<StepOut> {
     let set = if o.components { body_set(p) } else { Default::default() };
     let (bodies, no_body, model_errors) = (&set.bodies, set.no_body.clone(), set.model_errors.clone());
 
-    let mut w = W { out: String::new(), n: 0 };
+    let mut w = W { out: String::new(), n: 0, yzx: false };
     let app = w.add("APPLICATION_CONTEXT('core data for automotive mechanical design processes')");
     w.add(format!("APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#{app})"));
     let product_ctx = w.add(format!("PRODUCT_CONTEXT('',#{app},'mechanical')"));
@@ -572,6 +731,7 @@ pub fn export(p: &Project, o: &Options) -> Option<StepOut> {
     // Body parts, one per footprint and size.
     let mut parts: BTreeMap<BodyKey, PartIds> = BTreeMap::new();
     let mut open_models = Vec::new();
+    let mut generated_solids = 0;
     let key_of = |b: &super::BodyBox| (b.footprint.clone(), b.width.0, b.length.0, b.height.0, b.model.clone());
     for b in bodies {
         let key = key_of(b);
@@ -589,19 +749,29 @@ pub fn export(p: &Project, o: &Options) -> Option<StepOut> {
             parts.insert(key, pr);
             continue;
         }
-        let (hw, hl) = (b.width.0 / 2, b.length.0 / 2);
-        let pt = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
-        let rect = Loop {
-            start: pt(-hw, -hl),
-            edges: vec![
-                Edge::Line { to: pt(b.width.0 - hw, -hl) },
-                Edge::Line { to: pt(b.width.0 - hw, b.length.0 - hl) },
-                Edge::Line { to: pt(-hw, b.length.0 - hl) },
-                Edge::Line { to: pt(-hw, -hl) },
-            ],
+        // Generated package solids (as in the 3D view), else the package box.
+        let solids =
+            footprint_for(p, &b.refdes).map(|fp| body3d::solids(fp, thickness as f64 / 1e6)).unwrap_or_default();
+        let breps = generated(&mut w, &b.footprint, &solids);
+        let pr = if breps.is_empty() {
+            let (hw, hl) = (b.width.0 / 2, b.length.0 / 2);
+            let pt = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
+            let rect = Loop {
+                start: pt(-hw, -hl),
+                edges: vec![
+                    Edge::Line { to: pt(b.width.0 - hw, -hl) },
+                    Edge::Line { to: pt(b.width.0 - hw, b.length.0 - hl) },
+                    Edge::Line { to: pt(-hw, b.length.0 - hl) },
+                    Edge::Line { to: pt(-hw, -hl) },
+                ],
+            };
+            let brep = extrude(&mut w, &b.footprint, &[rect], 0, b.height.0);
+            part(&mut w, &c, &b.footprint, brep, BODY_COLOR)
+        } else {
+            generated_solids += breps.len();
+            let items: Vec<usize> = breps.iter().map(|&(i, _)| i).collect();
+            part_rep(&mut w, &c, &b.footprint, "ADVANCED_BREP_SHAPE_REPRESENTATION", &items, &breps)
         };
-        let brep = extrude(&mut w, &b.footprint, &[rect], 0, b.height.0);
-        let pr = part(&mut w, &c, &b.footprint, brep, BODY_COLOR);
         parts.insert(key, pr);
     }
 
@@ -661,6 +831,7 @@ pub fn export(p: &Project, o: &Options) -> Option<StepOut> {
         model_bodies,
         open_models,
         bodies: bodies.len(),
+        generated_solids,
         holes: holes.len(),
     })
 }
@@ -682,7 +853,7 @@ mod tests {
 
     #[test]
     fn box_topology() {
-        let mut w = W { out: String::new(), n: 0 };
+        let mut w = W { out: String::new(), n: 0, yzx: false };
         let pt = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
         let rect = Loop {
             start: pt(0, 0),

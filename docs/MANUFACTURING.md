@@ -17,7 +17,7 @@ published specifications.
 | Intelligent fab data | **IPC-2581** (rev C) | export | M9, done (`export.ipc2581`) |
 | Intelligent fab data | ODB++ | — | not implemented: Siemens' terms do not permit it (below, D37) |
 | Routing exchange | **Specctra DSN / SES** | DSN export, SES import (DSN reader as library) | M5, done (`export.dsn`, `route.import_ses`; [ROUTER.md](ROUTER.md)) |
-| Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | M9, done (`export.idf`, `export.idx` baseline) |
+| Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | M9, done (`export.idf`; `export.idx` baseline, `export.idx_changes` change messages, `place.import_idx` responses) |
 | 3D | **STEP** AP214/AP242 (export), 3D models (import) | both | M9: AP214 export done (`export.step`); models via oxideav-mesh3d (STL, OBJ, glTF/GLB, USDZ now; STEP/VRML decoders pending upstream, D36) |
 | Simulation | SPICE netlist (ngspice dialect) | export | M8 |
 | Documentation | SVG, PNG, PDF | export | M3/M4 |
@@ -77,11 +77,21 @@ and one body part per footprint, instanced per designator (`NEXT_ASSEMBLY_USAGE_
 name, placement through `ITEM_DEFINED_TRANSFORMATION`). Geometry is exact B-rep (`MANIFOLD_SOLID_BREP`): the board
 is the outline extruded from Z = 0 to the stackup thickness, with planar faces for straight edges, cylindrical
 faces for arcs, outline cutouts and drilled holes (pad and mounting holes; vias with `vias`). Holes crossing the
-edge, a cutout or a larger hole are not cut (`export.step_hole_skipped`, with location). Bodies are boxes from
-the footprint's package dimensions (`body`: width, length, height; generated footprints have them), centered on
-the footprint origin, on the top face, or turned over under the bottom face for bottom-side parts. Components
-without a body are reported (`export.no_body`); DNP parts are left out. Colors: green board, dark gray bodies.
-The header time stamp is fixed (`1970-01-01T00:00:00`).
+edge, a cutout or a larger hole are not cut (`export.step_hole_skipped`, with location). Bodies are the solids
+the 3D view draws (`cadlab::body3d`, generated from the footprint's package spec, leads where the pads are):
+molded bodies with chamfered top edges, gull-wing leads, chip and no-lead terminations, SOD/SMA and tab leads,
+BGA substrate and mold, DIP pins and pin headers through the board, pin-1 dots, cathode bands, and MELF bodies
+and end caps. Every solid is convex and written exactly: polyhedra as closed shells of `PLANE` faces bounded by
+`LINE` edges (vertices welded on the nanometer grid, faces turned outward), cylinders (MELF along X, pins dots
+and notches along Z) as an extruded circle with a `CYLINDRICAL_SURFACE` side and a seam edge. Each solid is its
+own `MANIFOLD_SOLID_BREP` with its color, all in the body part's `ADVANCED_BREP_SHAPE_REPRESENTATION` (solids of
+one part touch or overlap, as the leads enter the body; they are not fused). A footprint without a package spec
+gets the box of its package dimensions (`body`: width, length, height), and a box is also the fallback when no
+solid can be generated. Bodies sit on the top face, or are turned over under the bottom face for bottom-side
+parts. Components without a body are reported (`export.no_body`); DNP parts are left out. Colors: green board,
+the 3D view's body colors. The header time stamp is fixed (`1970-01-01T00:00:00`). OpenCascade (through
+`cadquery-ocp`) reads the files of the tests as valid solids, 297 solids for one part per package family
+(checked 2026-10-14; the FreeCAD oracle runs the same check).
 
 Components with an attached 3D model (`footprint.model_set`, see [PARTS.md](PARTS.md#3d-models)) get the model
 instead of the box. The model is a triangle mesh (decoded through oxideav-mesh3d, D36), written as a **faceted
@@ -106,6 +116,23 @@ coordinates and its top as the height). Bottom-side parts: the library outline m
 rotated counter-clockwise, as cadlab places them (for the centered body rectangles any mirror axis gives the
 same result). Header dates are fixed (`1970/01/01.00:00:00`).
 
+The board file also carries the outlines and keep-outs of the IDF 3.0 specification (sections 3.4 to 3.8),
+between the board outline and the drilled holes (the specification only fixes the header first, the outline
+second and the placement last). In these sections each section is one closed loop whose label gives the
+direction (0: counter-clockwise), and the owner is `ECAD`:
+
+| Section | From | Record 2 |
+|---|---|---|
+| `.ROUTE_OUTLINE` | the board's outer contour shrunk by `copper_to_edge` (the exact outline when it is 0; else a polygon, arcs within 1 µm inside; one section per piece) | `ALL` |
+| `.PLACE_OUTLINE` | the same area (where the placer keeps courtyards) | `BOTH`, no height: the specification makes it optional, "no height restriction" |
+| `.ROUTE_KEEPOUT` | a keep-out with `no_tracks` | routing layers: `ALL` for all layers, else `TOP`/`BOTTOM`/`BOTH` for the outer layers and `INNER` when it covers any inner layer (one section per keyword; IDF 3.0 cannot name single inner layers) |
+| `.VIA_KEEPOUT` | a keep-out with `no_vias` | none (the specification has no second record) |
+| `.PLACE_KEEPOUT` | a keep-out with `no_footprints` | the side its copper layers touch (`TOP`, `BOTTOM`, `BOTH`) and height `0`: "all components are to be excluded" |
+
+Pour keep-outs (`no_pours`) and rule areas (keep-outs that forbid nothing, named areas for scoped rules) have no
+IDF 3.0 section and are left out (IDX carries pour keep-outs as `Plane` keep-outs); cutout margins are not
+written either (the cutouts are in the board outline).
+
 **IDX** (`export.idx [path] [--vias] [--components false]`, default `out/mcad/<project>.idx`): the ProSTEP iViP
 PSI 5 "ECAD/MCAD Collaboration" format, written from the free V4.5 recommendation, implementation guidelines
 and schema (prostep ivip, `https://www.prostep.org/fileadmin/prod-download/PSI5_IDXv4.5_release.zip`, schema
@@ -113,7 +140,7 @@ namespaces `http://www.prostep.org/ecad-mcad/edmd/4.0/...`). The recommendation 
 use" and may be duplicated "for use in the context of creating software"; its schema is not shipped (it may only
 be redistributed unchanged with its notice; tests take it from `CADLAB_IDX_XSD`). One `EDMDDataSet` with a
 `SendInformation` process instruction: the **baseline** that starts (or resets) a collaboration. Change and
-response messages (`SendChanges`) are not written or read yet.
+response messages (`SendChanges`) carry component placements afterwards (below).
 
 | Item (`GeometryType`) | Shape | Placement |
 |---|---|---|
@@ -133,6 +160,42 @@ creation and modification time stamps fixed (`1970-01-01T00:00:00Z`). Bodies com
 model's bounding box when there is one (D36), else from the footprint's package body; components with neither
 are reported (`export.no_body`) and left out, DNP parts too. Model files are not referenced (`Model3D`). Checked by the published XSD with `xmllint` (oracle above).
 
+**IDX change messages** (`export.idx_changes <since...> [--path] [--actor]`, default
+`out/mcad/<project>-changes.idx`) send the component placements that changed since earlier messages. `since`
+lists the messages exchanged so far, oldest first (the baseline, then change and response messages, from either
+side): cadlab reads the component items in them (items numbered `COMPONENT:<designator>`, any prefixes and the
+header's length unit) into a history of versions by sequence; an item a response marks `Accept` false is
+dropped again, so its previous version applies. Each component that differs from its latest version (another
+transformation: moved, rotated, flipped; or another package item) becomes one `EDMDTransaction` with one
+`EDMDChange`, so the MCAD side accepts or rejects each separately (the guidelines, §5.2.1):
+
+- moved or changed: `NewItem` is the next version of the component's assembly item (same number, sequence one
+  above the highest seen), `PredecessorItem` the current one; the body holds the new version with its new
+  transformation, and the package item it places;
+- added (no current version): `NewItem` only, the item in the body;
+- removed (unplaced, DNP, without a body): `NewItem` is the next version, not defined in the body, with
+  `DeletedInstanceName` (the guidelines' Figure 22).
+
+The transaction's `Description` says what changed (`U1 moved`). Items carry no `BaseLine`. `Actor` (required)
+refers to an `EDMDPerson` in the body whose surname is `--actor` (empty by default: projects store no people).
+Board outline, holes and keep-outs are not compared (send a new baseline for those). Nothing changed:
+`idx.no_changes`.
+
+**IDX responses** (`place.import_idx <path> [--reject ...] [--comment] [--response]`, default
+`out/mcad/<message>-response.idx`) answer a change message from MCAD. A transaction is accepted when every one
+of its changes is a placement cadlab can apply: an assembly item in the body with one instance (its name the
+designator of a placed, unlocked component) and a transformation. Accepted placements are applied (footprint
+origin from the translation, rotation from the matrix to 0.001°, bottom side when `zz` is negative, the
+inverse of the export transform). Other changes (new or deleted components, other items, unknown or locked
+designators) and the designators or item numbers listed in `reject` reject their transaction, with the reason
+as comment. The response is the received message unchanged except for `pdm:Accept` (`true`/`false`) on every
+body item a change names as its new item, at its place in the item's element order, and the comment as the
+transaction's `Description` (the guidelines, §5.2.2: same header, body and `SendChanges` instruction, so the
+`ModifiedDateTime` that pairs it with the change is kept). Messages are read with a small XML reader in
+`mcad::xml` (local names, so any namespace prefixes); the response is written by inserting into the received
+text, never by re-serializing it. Change and response files validate against the V4.5 schema (oracle above;
+the tests write a change, apply it to a copy of the board and validate all three messages).
+
 **ODB++ is not implemented.** The ODB++ Design Format Specification (Siemens, release 8.1 update 4, August 2024,
 `https://odbplusplus.com/wp-content/uploads/sites/2/2024/08/odb_spec_user.pdf`) is free to download, but its
 notice reads: "This Documentation contains trade secrets or otherwise confidential information owned by Siemens
@@ -148,9 +211,10 @@ cannot pass to the users and forks of an MIT crate is not compatible with cadlab
 format from observed files (KiCad's exporter, for instance) would sidestep the same terms. IPC-2581 (an open
 IPC standard, `export.ipc2581`) covers the same intelligent-fab-data need. See DECISIONS D37.
 
-Not yet: generated package bodies other than boxes in STEP (pins, chamfers, cylinders; the 3D view has them),
-STEP/VRML model files (they arrive with the oxideav STEP/VRML decoders, D36), writing a STEP model's exact B-rep
-through (models are meshes), AP242, IDF `.PLACE_OUTLINE`/keep-outs, IDX change and response messages.
+Not yet: STEP/VRML model files (they arrive with the oxideav STEP/VRML decoders, D36), writing a STEP model's
+exact B-rep through (models are meshes), AP242, IDF height-limited placement keep-outs (cadlab keep-outs have
+no height), IDX changes beyond component placements (board outline, holes, keep-outs: a new baseline carries
+them), applying MCAD-proposed new or deleted components, IDX clearance messages and `RequestForInformation`.
 
 Design standards used as rule and geometry sources (from the standards themselves, never from another tool's
 implementation):

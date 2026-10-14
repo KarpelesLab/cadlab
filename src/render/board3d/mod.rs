@@ -5,14 +5,13 @@
 //!   ([`super::board::realistic_scene`]), and holes are see-through.
 //! - Components are their attached 3D model (decoded through oxideav-mesh3d, see
 //!   [`crate::models3d`]), else convex solids built from their package dimensions (see
-//!   `bodies`); bottom-side parts are mirrored under the board.
+//!   [`crate::body3d`]); bottom-side parts are mirrored under the board.
 //! - Hidden surfaces: a supersampled z-buffer (`raster`); flat shading with one directional
 //!   light fixed relative to the camera.
 //!
 //! Output is deterministic: no randomness, fixed draw order, results independent of the thread
 //! count. See `docs/RENDERING.md` ("3D view").
 
-mod bodies;
 mod raster;
 
 use tiny_skia::{FillRule, IntSize, Mask, PathBuilder, Pixmap, Transform};
@@ -25,7 +24,7 @@ use crate::models3d::{self, ModelError3d};
 use crate::units::{LengthUnit, Nm};
 
 use super::View;
-use bodies::{Rgb, Solid, rgb};
+use crate::body3d::{self as bodies, Rgb, rgb};
 use raster::{Fill, PTri, Texture};
 
 /// True isometric elevation: atan(1/√2), in degrees.
@@ -314,7 +313,7 @@ fn component_tris(p: &Project, t: f64, highlight: &[String]) -> (Vec<Tri>, Vec<(
             }
         }
         for solid in bodies::solids(fp, t) {
-            let Solid { faces, color } = solid;
+            let (faces, color) = (solid.faces(), solid.color);
             let color = if lit { mix(color, HIGHLIGHT, 0.65) } else { color };
             let faces: Vec<Vec<[f64; 3]>> = faces.iter().map(|f| f.iter().map(|&v| place(v)).collect()).collect();
             let all: Vec<[f64; 3]> = faces.iter().flatten().copied().collect();

@@ -430,7 +430,12 @@ fn step_writes_models_as_faceted_breps() {
     assert_eq!(of("FACETED_BREP").len(), 1);
     assert_eq!(of("FACETED_BREP_SHAPE_REPRESENTATION").len(), 1);
     assert_eq!(of("FACE_SURFACE").len(), 12);
-    assert_eq!(of("MANIFOLD_SOLID_BREP").len(), 1 + 2, "board, and the 0402 and 0603 boxes");
+    assert_eq!(
+        of("MANIFOLD_SOLID_BREP").len(),
+        1 + out.generated_solids,
+        "board, and the generated 0402 and 0603 bodies (body and two terminations each)"
+    );
+    assert_eq!(out.generated_solids, 2 * 3);
     // The shell is closed: every poly-loop edge is used once in each direction.
     let brep = of("FACETED_BREP")[0];
     let shell = refs(&ents[&brep])[0];

@@ -8,7 +8,23 @@
 //! circle is its center followed by a point on it with angle 360), `.DRILLED_HOLES` (diameter,
 //! X, Y, `PTH`/`NPTH`, associated part — the designator, or `BOARD` — and hole type `PIN`,
 //! `VIA` or `MTG`, owner `ECAD`) and `.PLACEMENT` (geometry name, part number, designator; X,
-//! Y, mounting offset 0, rotation, `TOP`/`BOTTOM`, `PLACED`).
+//! Y, mounting offset 0, rotation, `TOP`/`BOTTOM`, `PLACED`). Between the outline and the
+//! holes:
+//!
+//! - `.ROUTE_OUTLINE ECAD` (`ALL` layers) and `.PLACE_OUTLINE ECAD` (`BOTH` sides, no height
+//!   field: no height restriction): the board's outer contour shrunk by the copper-to-edge
+//!   clearance, the area copper and courtyards keep to (one section each per piece; the exact
+//!   outline when the clearance is zero).
+//! - Per keep-out (a cadlab keep-out can give several): `.ROUTE_KEEPOUT ECAD` for `no_tracks`
+//!   with the routing layers `ALL`, `TOP`, `BOTTOM`, `BOTH` and/or `INNER` (one section per
+//!   keyword: IDF 3.0 cannot name single inner layers, so any inner layer gives `INNER`);
+//!   `.VIA_KEEPOUT ECAD` for `no_vias`; `.PLACE_KEEPOUT ECAD` for `no_footprints`, on the side
+//!   its copper layers touch (`TOP`, `BOTTOM` or `BOTH`) with height 0 (every component
+//!   excluded). Pour keep-outs and rule areas (keep-outs that forbid nothing) have no IDF 3.0
+//!   counterpart and are left out (IDX carries pour keep-outs).
+//!
+//! In these sections the loop label is the direction (0: counter-clockwise), each section is
+//! one closed loop.
 //!
 //! Library file: one `.ELECTRICAL` section per (geometry, part number) with the body height and
 //! its outline, counter-clockwise: the package body rectangle centered on the footprint origin,
@@ -24,7 +40,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use super::{BodyBox, DrillHole, Edge, Loop, Options, board_profile, body_set, drill_holes, sweep_deg};
+use super::{
+    BodyBox, DrillHole, Edge, Loop, Options, board_profile, body_set, drill_holes, inset_outer, keepout_sides,
+    polygon_loop, sweep_deg,
+};
 use crate::fabout::HoleKind;
 use crate::fabout::gerber::mm;
 use crate::model::Project;
@@ -48,6 +67,8 @@ pub struct IdfOut {
     pub placed: usize,
     /// Drilled holes listed.
     pub holes: usize,
+    /// Keep-out sections written (`.ROUTE_KEEPOUT`, `.VIA_KEEPOUT`, `.PLACE_KEEPOUT`).
+    pub keepouts: usize,
 }
 
 fn q(s: &str) -> String {
@@ -80,6 +101,79 @@ fn write_loop(out: &mut String, label: usize, lp: &Loop) {
         };
         let _ = writeln!(out, "{label} {} {} {a}", mm(to.x.0), mm(to.y.0));
     }
+}
+
+/// IDF routing layer keywords covering a keep-out's copper layers (`layers` empty: all):
+/// `ALL`, else `TOP`, `BOTTOM` or `BOTH` for the outer layers and `INNER` when any inner layer
+/// is included (IDF 3.0 cannot name single inner layers).
+fn routing_layers(copper: &[String], layers: &[String]) -> Vec<&'static str> {
+    let on = |l: &String| layers.is_empty() || layers.contains(l);
+    let n = copper.len();
+    let (top, bottom) = (n > 0 && on(&copper[0]), n > 1 && on(&copper[n - 1]));
+    let inner: Vec<bool> = copper.iter().skip(1).take(n.saturating_sub(2)).map(on).collect();
+    let all_inner = inner.iter().all(|&b| b);
+    if layers.is_empty() || (n == 1 && top) || (top && bottom && all_inner) {
+        return vec!["ALL"];
+    }
+    let mut out = Vec::new();
+    match (top, bottom) {
+        (true, true) => out.push("BOTH"),
+        (true, false) => out.push("TOP"),
+        (false, true) => out.push("BOTTOM"),
+        (false, false) => {}
+    }
+    if inner.iter().any(|&b| b) {
+        out.push("INNER");
+    }
+    out
+}
+
+/// One keep-out or outline section: `.NAME ECAD`, an optional second record, one loop
+/// (label 0: counter-clockwise), `.END_NAME`.
+fn loop_section(out: &mut String, name: &str, record: Option<&str>, lp: &Loop) {
+    let _ = writeln!(out, ".{name} ECAD");
+    if let Some(r) = record {
+        let _ = writeln!(out, "{r}");
+    }
+    write_loop(out, 0, lp);
+    let _ = writeln!(out, ".END_{name}");
+}
+
+/// Routing and placement outlines and keep-outs; returns the number of keep-out sections.
+fn outlines_and_keepouts(out: &mut String, p: &Project, outer: &Loop) -> usize {
+    let b = p.board();
+    // Routing and placement confined to the board shrunk by the copper-to-edge clearance.
+    for lp in inset_outer(p, outer, b.rules.copper_to_edge) {
+        loop_section(out, "ROUTE_OUTLINE", Some("ALL"), &lp);
+        loop_section(out, "PLACE_OUTLINE", Some("BOTH"), &lp);
+    }
+    let copper = b.stackup.copper_names();
+    let mut n = 0;
+    for k in &b.keepouts {
+        let Some(lp) = polygon_loop(&k.outline) else { continue };
+        let lp = lp.oriented(true);
+        if k.no_tracks {
+            for layers in routing_layers(&copper, &k.layers) {
+                loop_section(out, "ROUTE_KEEPOUT", Some(layers), &lp);
+                n += 1;
+            }
+        }
+        if k.no_vias {
+            loop_section(out, "VIA_KEEPOUT", None, &lp);
+            n += 1;
+        }
+        if k.no_footprints {
+            let side = match keepout_sides(p, &k.layers).as_slice() {
+                [BoardSide::Top] => "TOP",
+                [BoardSide::Bottom] => "BOTTOM",
+                _ => "BOTH",
+            };
+            // Height 0: every component is excluded.
+            loop_section(out, "PLACE_KEEPOUT", Some(&format!("{side} 0")), &lp);
+            n += 1;
+        }
+    }
+    n
 }
 
 fn hole_record(h: &DrillHole) -> String {
@@ -130,6 +224,7 @@ pub fn export(p: &Project, o: &Options) -> Option<IdfOut> {
         write_loop(&mut b, i + 1, c);
     }
     let _ = writeln!(b, ".END_BOARD_OUTLINE");
+    let keepouts = outlines_and_keepouts(&mut b, p, &outer);
     if !holes.is_empty() {
         let _ = writeln!(b, ".DRILLED_HOLES");
         for h in &holes {
@@ -162,7 +257,7 @@ pub fn export(p: &Project, o: &Options) -> Option<IdfOut> {
     for c in seen.values() {
         library_entry(&mut l, c);
     }
-    Some(IdfOut { board: b, library: l, no_body, model_errors, placed: bodies.len(), holes: holes.len() })
+    Some(IdfOut { board: b, library: l, no_body, model_errors, placed: bodies.len(), holes: holes.len(), keepouts })
 }
 
 #[cfg(test)]
@@ -179,5 +274,21 @@ mod tests {
         assert_eq!(angle(-0.0000001), "0");
         assert_eq!(angle(90.0), "90");
         assert_eq!(angle(-89.5), "-89.5");
+    }
+
+    #[test]
+    fn routing_layer_keywords() {
+        let four: Vec<String> = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"].map(String::from).to_vec();
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(routing_layers(&four, &[]), ["ALL"]);
+        assert_eq!(routing_layers(&four, &l(&["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])), ["ALL"]);
+        assert_eq!(routing_layers(&four, &l(&["F.Cu", "B.Cu"])), ["BOTH"]);
+        assert_eq!(routing_layers(&four, &l(&["B.Cu"])), ["BOTTOM"]);
+        assert_eq!(routing_layers(&four, &l(&["F.Cu", "In2.Cu"])), ["TOP", "INNER"]);
+        assert_eq!(routing_layers(&four, &l(&["In1.Cu"])), ["INNER"]);
+        let two: Vec<String> = ["F.Cu", "B.Cu"].map(String::from).to_vec();
+        assert_eq!(routing_layers(&two, &l(&["F.Cu", "B.Cu"])), ["ALL"]);
+        assert_eq!(routing_layers(&two, &l(&["F.Cu"])), ["TOP"]);
+        assert_eq!(routing_layers(&["F.Cu".to_string()], &l(&["F.Cu"])), ["ALL"]);
     }
 }

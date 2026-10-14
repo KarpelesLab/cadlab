@@ -420,13 +420,27 @@ fn step_structure() {
     assert_eq!(bodies.iter().map(|b| b.refdes.as_str()).collect::<Vec<_>>(), ["C2", "J1", "U1"]);
     assert_eq!(out.bodies, 3);
     let footprints: BTreeSet<&str> = bodies.iter().map(|b| b.footprint.as_str()).collect();
-    assert_eq!(of("MANIFOLD_SOLID_BREP").len(), 1 + footprints.len());
+    // Generated bodies: one solid per package part (body, terminations, leads, pin-1 dot), as
+    // in the 3D view.
+    let expected: usize = footprints
+        .iter()
+        .map(|f| {
+            let refdes = &bodies.iter().find(|b| b.footprint == *f).unwrap().refdes;
+            cadlab::body3d::solids(cadlab::board::footprint_for(p, refdes).unwrap(), 1.6).len()
+        })
+        .sum();
+    assert_eq!(out.generated_solids, expected);
+    assert!(expected > footprints.len());
+    assert_eq!(of("MANIFOLD_SOLID_BREP").len(), 1 + expected);
     assert_eq!(of("NEXT_ASSEMBLY_USAGE_OCCURRENCE").len(), 1 + bodies.len());
     assert_eq!(of("PRODUCT").len(), 1 + 1 + footprints.len(), "assembly, board, bodies");
     // Holes: J1's two pad holes and the mounting hole (vias are not drilled by default).
     assert_eq!(out.holes, 3);
     assert!(out.skipped_holes.is_empty());
-    assert_eq!(of("CYLINDRICAL_SURFACE").len(), 3 + 4, "holes and outline corners");
+    assert_eq!(of("CYLINDRICAL_SURFACE").len(), 3 + 4 + 1, "holes, outline corners and U1's pin-1 dot");
+    // U1's molded body has chamfered top edges: 10 planar faces.
+    let shells: Vec<usize> = of("CLOSED_SHELL").iter().map(|sh| refs(&ents[sh]).len()).collect();
+    assert!(shells.contains(&10), "{shells:?}");
 
     // Every shell is closed: each edge is used exactly twice, once in each direction.
     for shell in of("CLOSED_SHELL") {
@@ -496,18 +510,104 @@ fn step_freecad_oracle() {
             l.rsplit(' ').next().unwrap().parse().unwrap()
         })
         .collect();
-    let (bodies, _) = mcad::bodies(p);
-    assert_eq!(solids.len(), 1 + bodies.len(), "{stdout}");
+    // The board, then the generated package solids (one set per footprint part).
+    assert_eq!(solids.len(), 1 + out.generated_solids, "{stdout}");
     let expected = board_volume(p, false);
     assert!((solids[0] - expected).abs() < 1e-3, "board volume {} vs {expected}", solids[0]);
-    let mut want: Vec<f64> =
-        bodies.iter().map(|b| b.width.0 as f64 * b.length.0 as f64 * b.height.0 as f64 / 1e18).collect();
-    let mut got = solids[1..].to_vec();
-    want.sort_by(f64::total_cmp);
-    got.sort_by(f64::total_cmp);
-    for (g, w) in got.iter().zip(&want) {
-        assert!((g - w).abs() < 1e-4, "body volume {g} vs {w}");
+    assert!(solids[1..].iter().all(|&v| v > 0.0), "{stdout}");
+}
+
+/// A board with one part per generated package family: MELF cylinders, chamfered molded
+/// bodies with gull-wing, flat and through-hole leads, no-lead terminals, a ball grid array.
+fn package_board() -> (tempfile::TempDir, Registry, Session) {
+    let (d, r, mut s) = board();
+    let packages = [
+        ("MELF", 2),
+        ("SOIC-8", 8),
+        ("LQFP-48", 48),
+        ("QFN-32 5x5mm P0.5mm EP3.1mm", 33),
+        ("DIP-8", 8),
+        ("BGA-64 8x8 P0.8mm 6x6mm", 64),
+        ("SOT-223", 4),
+        ("SOD-123", 2),
+        ("SMA", 2),
+        ("DPAK", 3),
+    ];
+    for (i, (pkg, n)) in packages.iter().enumerate() {
+        let number = |k: usize| {
+            if pkg.starts_with("BGA") {
+                format!("{}{}", (b'A' + ((k - 1) / 8) as u8) as char, (k - 1) % 8 + 1)
+            } else {
+                k.to_string()
+            }
+        };
+        let pins: Vec<serde_json::Value> =
+            (1..=*n).map(|k| json!({"number": number(k), "name": format!("P{k}"), "kind": "passive"})).collect();
+        let id = format!("PKG{i}");
+        exec(&r, &mut s, "part.create", json!({"id": id, "category": "ic", "package": pkg, "pins": pins}));
+        let refdes = format!("X{i}");
+        exec(&r, &mut s, "circuit.add", json!({"part": id, "refdes": refdes}));
+        let (x, y) = (30 + 15 * (i % 5), 8 + 15 * (i / 5));
+        let side = if i % 3 == 2 { "bottom" } else { "top" };
+        exec(
+            &r,
+            &mut s,
+            "place.set",
+            json!({"refdes": refdes, "at": [format!("{x}mm"), format!("{y}mm")], "rotation": 30 * i, "side": side}),
+        );
     }
+    exec(&r, &mut s, "board.outline", json!({"width": "110mm", "height": "40mm", "corner_radius": "1mm"}));
+    (d, r, s)
+}
+
+/// Every closed shell of a STEP file uses each edge once in each direction.
+fn assert_closed_shells(ents: &BTreeMap<u64, String>) {
+    for (shell, body) in ents.iter().filter(|(_, b)| kind(b) == "CLOSED_SHELL") {
+        let mut uses: BTreeMap<u64, (u32, u32)> = BTreeMap::new();
+        for face in refs(body) {
+            for bound in refs(&ents[&face]).into_iter().filter(|r| kind(&ents[r]).contains("BOUND")) {
+                for oe in refs(&ents[&refs(&ents[&bound])[0]]) {
+                    let u = uses.entry(refs(&ents[&oe])[0]).or_default();
+                    if ents[&oe].ends_with(".T.)") { u.0 += 1 } else { u.1 += 1 }
+                }
+            }
+        }
+        assert!(uses.values().all(|&u| u == (1, 1)), "shell #{shell}");
+    }
+}
+
+#[test]
+fn step_generated_bodies() {
+    let (_d, _r, s) = package_board();
+    let p = s.project.as_ref().unwrap();
+    let out = mcad::step::export(p, &mcad_options()).unwrap();
+    assert!(out.no_body.is_empty(), "{:?}", out.no_body);
+    let ents = parse_step(&out.content);
+    assert_closed_shells(&ents);
+    // Every generated solid is written (none collapses), one part per footprint.
+    let (bodies, _) = mcad::bodies(p);
+    let mut by_fp: BTreeMap<&str, usize> = BTreeMap::new();
+    for b in &bodies {
+        let fp = cadlab::board::footprint_for(p, &b.refdes).unwrap();
+        by_fp.insert(&b.footprint, cadlab::body3d::solids(fp, 1.6).len());
+    }
+    assert_eq!(out.generated_solids, by_fp.values().sum::<usize>());
+    let breps = ents.values().filter(|b| kind(b) == "MANIFOLD_SOLID_BREP").count();
+    assert_eq!(breps, 1 + out.generated_solids);
+    // MELF: true cylinders along the body axis (X) for the body and its two end caps.
+    let axis_x = ents
+        .values()
+        .filter(|b| kind(b) == "CYLINDRICAL_SURFACE")
+        .filter(|c| ents[&refs(&ents[&refs(c)[0]])[1]] == "DIRECTION('',(1.,0.,0.))")
+        .count();
+    assert!(axis_x >= 3, "{axis_x} X cylinders");
+    // `CADLAB_STEP_KEEP=<dir>` keeps the file for review in a STEP viewer.
+    if let Some(dir) = std::env::var_os("CADLAB_STEP_KEEP") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(Path::new(&dir).join("packages.step"), &out.content).unwrap();
+    }
+    let (_d2, _r2, s2) = package_board();
+    assert_eq!(out.content, mcad::step::export(s2.project.as_ref().unwrap(), &mcad_options()).unwrap().content);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -540,7 +640,20 @@ fn idf_structure() {
     let out = mcad::idf::export(p, &mcad_options()).unwrap();
     let board = idf_sections(&out.board);
     let names: Vec<&str> = board.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["HEADER", "BOARD_OUTLINE", "DRILLED_HOLES", "PLACEMENT"]);
+    assert_eq!(names, ["HEADER", "BOARD_OUTLINE", "ROUTE_OUTLINE", "PLACE_OUTLINE", "DRILLED_HOLES", "PLACEMENT"]);
+    // Routing and placement outlines: one closed counter-clockwise loop inside the board,
+    // copper-to-edge clearance away from the edge.
+    let edge = p.board().rules.copper_to_edge.0 as f64 / 1e6;
+    assert!(edge > 0.0);
+    for sec in [&board[2], &board[3]] {
+        assert_eq!(sec.1[0], if sec.0 == "ROUTE_OUTLINE" { "ALL" } else { "BOTH" });
+        let pts: Vec<Vec<f64>> =
+            sec.1[1..].iter().map(|l| l.split(' ').map(|v| v.parse::<f64>().unwrap()).collect()).collect();
+        assert!(pts.iter().all(|r| r[0] == 0.0 && r[3] == 0.0), "label 0, straight edges");
+        assert_eq!(pts.first().unwrap()[1..3], pts.last().unwrap()[1..3]);
+        let (x0, x1) = pts.iter().fold((f64::MAX, f64::MIN), |(a, b), r| (a.min(r[1]), b.max(r[1])));
+        assert!((x0 - edge).abs() < 1e-3 && (x1 - (25.0 - edge)).abs() < 1e-3, "{x0} {x1}");
+    }
     assert!(board[0].1[0].starts_with("BOARD_FILE 3.0 \"cadlab test\" "));
     assert_eq!(board[0].1[1], "\"tiny\" MM");
     let outline = &board[1].1;
@@ -553,12 +666,12 @@ fn idf_structure() {
     }
     assert_eq!(pts.iter().filter(|r| r[3] == "90").count(), 4);
     // Holes: J1's pins and the mounting hole.
-    let holes = &board[2].1;
+    let holes = &board[4].1;
     assert_eq!(holes.len(), 3);
     assert!(holes.iter().any(|h| h.ends_with("NPTH \"BOARD\" MTG ECAD")));
     assert_eq!(holes.iter().filter(|h| h.contains("PTH \"J1\" PIN")).count(), 2);
     // Placement: two records per populated, placed component with a body.
-    let place = &board[3].1;
+    let place = &board[5].1;
     assert_eq!(place.len(), 2 * 3);
     let c2 = place.iter().position(|l| l.ends_with("\"C2\"")).unwrap();
     assert_eq!(place[c2 + 1], "18 9 0 90 BOTTOM PLACED");
@@ -620,6 +733,47 @@ const IDX_REFS: &[&str] = &[
     "d2:Curve",
     "d2:DetailedGeometricModelElement",
 ];
+
+#[test]
+fn idf_keepouts() {
+    let (_d, _r, s) = idx_board();
+    let p = s.project.as_ref().unwrap();
+    let out = mcad::idf::export(p, &mcad_options()).unwrap();
+    common::golden::assert_golden(&golden("tiny-keepouts.emn"), &out.board);
+    let board = idf_sections(&out.board);
+    let names: Vec<&str> = board.iter().map(|(n, _)| n.as_str()).collect();
+    // "mech" forbids tracks, vias and components on all layers (its pour ban has no IDF
+    // section); "tall" components on the top side.
+    assert_eq!(
+        names,
+        [
+            "HEADER",
+            "BOARD_OUTLINE",
+            "ROUTE_OUTLINE",
+            "PLACE_OUTLINE",
+            "ROUTE_KEEPOUT",
+            "VIA_KEEPOUT",
+            "PLACE_KEEPOUT",
+            "PLACE_KEEPOUT",
+            "DRILLED_HOLES",
+            "PLACEMENT"
+        ]
+    );
+    assert_eq!(out.keepouts, 4);
+    let first = |n: &str| board.iter().find(|(m, _)| m == n).unwrap();
+    assert_eq!(first("ROUTE_KEEPOUT").1[0], "ALL");
+    assert_eq!(first("VIA_KEEPOUT").1[0], "0 20 10 0", "no second record: the loop starts");
+    let place: Vec<&Vec<String>> = board.iter().filter(|(n, _)| n == "PLACE_KEEPOUT").map(|(_, r)| r).collect();
+    assert_eq!((place[0][0].as_str(), place[1][0].as_str()), ("BOTH 0", "TOP 0"));
+    // Keep-out loops: closed, counter-clockwise (label 0), five points for a rectangle.
+    for (_, recs) in board.iter().filter(|(n, _)| n.ends_with("_KEEPOUT")) {
+        let pts: Vec<&String> = recs.iter().filter(|r| r.starts_with("0 ")).collect();
+        assert_eq!(pts.len(), 5);
+        assert_eq!(pts[0], pts[4]);
+    }
+    // Header first, outline second, placement last (IDF 3.0 section 3.0).
+    assert_eq!((names[0], names[1], *names.last().unwrap()), ("HEADER", "BOARD_OUTLINE", "PLACEMENT"));
+}
 
 #[test]
 fn idx_golden_and_deterministic() {
@@ -829,10 +983,7 @@ fn idx_schema_oracle() {
     };
     let Some(xmllint) = oracle::optional(Oracle::Xmllint) else { return };
     let dir = std::path::PathBuf::from(dir);
-    let (d, _r, s) = idx_board();
-    let out = mcad::idx::export(s.project.as_ref().unwrap(), &mcad_options()).unwrap();
-    let path = d.path().join("tiny.idx");
-    std::fs::write(&path, &out.content).unwrap();
+    let (d, messages) = idx_messages();
     // The process instruction types live in a schema `foundation.xsd` does not import: a
     // wrapper imports both.
     let ns = "http://www.prostep.org/ecad-mcad/edmd/4.0/";
@@ -850,7 +1001,162 @@ fn idx_schema_oracle() {
     wrapper.push_str("</xs:schema>\n");
     let xsd = d.path().join("idx-wrapper.xsd");
     std::fs::write(&xsd, wrapper).unwrap();
-    oracle::run(&xmllint, &["--noout", "--schema", &xsd.to_string_lossy(), &path.to_string_lossy()]);
+    for (name, text) in messages {
+        let path = d.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        oracle::run(&xmllint, &["--noout", "--schema", &xsd.to_string_lossy(), &path.to_string_lossy()]);
+    }
+}
+
+/// Moves U1, flips C2 to the top and makes J1 DNP.
+fn idx_edit(r: &Registry, s: &mut Session) {
+    exec(r, s, "place.move", json!({"refdes": ["U1"], "by": ["1mm", "0.5mm"]}));
+    exec(r, s, "place.set", json!({"refdes": "C2", "at": ["18mm", "9mm"], "side": "top"}));
+    exec(r, s, "bom.dnp", json!({"refdes": ["J1"]}));
+}
+
+/// The IDX collaboration of the tests: the baseline of `idx_board`, the change message after
+/// `idx_edit`, and the response of a second copy of the board that accepts U1's move, rejects
+/// C2's flip on request and cannot apply J1's removal. Returns the directory of the response
+/// and the three messages.
+fn idx_messages() -> (tempfile::TempDir, Vec<(&'static str, String)>) {
+    let (d, r, mut s) = idx_board();
+    let base = exec(&r, &mut s, "export.idx", json!({}));
+    let base_path = base["output"]["path"].as_str().unwrap().to_string();
+    idx_edit(&r, &mut s);
+    let o = exec(&r, &mut s, "export.idx_changes", json!({"since": [base_path], "actor": "Ada"}));
+    let change_path = o["output"]["path"].as_str().unwrap().to_string();
+    let (_d2, r2, mut s2) = idx_board();
+    let o = exec(
+        &r2,
+        &mut s2,
+        "place.import_idx",
+        json!({"path": change_path, "reject": ["C2"], "response": d.path().join("response.idx")}),
+    );
+    let read = |p: &str| std::fs::read_to_string(p).unwrap();
+    let response = read(o["output"]["response"].as_str().unwrap());
+    (d, vec![("baseline.idx", read(&base_path)), ("change.idx", read(&change_path)), ("response.idx", response)])
+}
+
+#[test]
+fn idx_change_and_response() {
+    let (d, r, mut s) = idx_board();
+    let base = exec(&r, &mut s, "export.idx", json!({}));
+    let base_path = base["output"]["path"].as_str().unwrap().to_string();
+    // Nothing changed yet.
+    let e = r.execute(&mut s, "export.idx_changes", json!({"since": [&base_path]}), RunOptions::default()).unwrap_err();
+    assert_eq!(e.error.diagnostic.code, "idx.no_changes");
+
+    idx_edit(&r, &mut s);
+    let o = exec(&r, &mut s, "export.idx_changes", json!({"since": [&base_path], "actor": "Ada"}));
+    assert_eq!(
+        o["output"]["changes"],
+        json!([{"refdes": "C2", "change": "moved"}, {"refdes": "J1", "change": "removed"}, {"refdes": "U1", "change": "moved"}])
+    );
+    let change_path = o["output"]["path"].as_str().unwrap().to_string();
+    assert!(change_path.ends_with("tiny-changes.idx"));
+    let change = std::fs::read_to_string(&change_path).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    common::golden::assert_golden(&golden("tiny-changes.idx"), &change.replace(version, "VERSION"));
+
+    // A SendChanges instruction with one transaction per component; moved items are the next
+    // version (sequence 1) of their assembly item, in the body with the new transformation;
+    // J1's removal names its instance and has no body item.
+    let root = parse_xml(&change);
+    let pi = root.kid("foundation:ProcessInstruction");
+    assert_eq!(pi.attr("xsi:type"), "computational:EDMDProcessInstructionSendChanges");
+    let actor = &pi.kid("computational:Actor").text;
+    let person = root.kid("foundation:Body").kids("foundation:Person").find(|p| p.attr("id") == actor).unwrap();
+    assert_eq!(person.kid("administration:SurName").text, "Ada");
+    let txs: Vec<&El> = pi.kids("computational:Changes").collect();
+    assert_eq!(txs.len(), 3);
+    let seq = |e: &El| (e.kid("foundation:Number").text.clone(), e.kid("foundation:Sequence").text.clone());
+    let items: Vec<&El> = root.kid("foundation:Body").kids("foundation:Item").collect();
+    for t in &txs {
+        assert_eq!(t.attr("xsi:type"), "computational:EDMDTransaction");
+        let c = t.kid("computational:Change");
+        let (number, s1) = seq(c.kid("computational:NewItem"));
+        assert_eq!((s1.as_str(), seq(c.kid("computational:PredecessorItem")).1.as_str()), ("1", "0"));
+        let in_body = items.iter().any(|i| seq(i.kid("pdm:Identifier")) == (number.clone(), "1".into()));
+        assert_eq!(in_body, number != "COMPONENT:J1", "{number}");
+        if number == "COMPONENT:J1" {
+            assert_eq!(c.kid("computational:DeletedInstanceName").kid("foundation:ObjectName").text, "J1");
+        }
+    }
+    assert!(items.iter().all(|i| i.kids("pdm:BaseLine").count() == 0), "no baseline marks in a change");
+    let u1 = items
+        .iter()
+        .find(|i| {
+            i.attrs.get("GeometryType").is_some_and(|g| g == "COMPONENT") && i.kid("foundation:Name").text == "U1"
+        })
+        .unwrap();
+    let t = u1.kid("pdm:ItemInstance").kid("pdm:Transformation");
+    let v = |k: &str| t.kid(k).kid("property:Value").text.clone();
+    assert_eq!((v("pdm:tx"), v("pdm:ty")), ("13".into(), "8".into()));
+
+    // Baseline + change: nothing left to send.
+    let e = r
+        .execute(&mut s, "export.idx_changes", json!({"since": [&base_path, &change_path]}), RunOptions::default())
+        .unwrap_err();
+    assert_eq!(e.error.diagnostic.code, "idx.no_changes");
+
+    // The other side (a copy of the board before the changes) answers: U1's move is applied
+    // and accepted, C2 rejected on request, J1's removal not applicable.
+    let (_d2, r2, mut s2) = idx_board();
+    let o = exec(
+        &r2,
+        &mut s2,
+        "place.import_idx",
+        json!({"path": &change_path, "reject": ["C2"], "response": d.path().join("response.idx")}),
+    );
+    assert_eq!(o["output"]["moved"], json!(["U1"]));
+    let answers: Vec<(bool, String)> = o["output"]["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["accepted"].as_bool().unwrap(), t["items"][0].as_str().unwrap().to_string()))
+        .collect();
+    assert_eq!(answers, [(false, "C2".into()), (false, "COMPONENT:J1".into()), (true, "U1".into())]);
+    let (p1, p2) = (s.project.as_ref().unwrap(), s2.project.as_ref().unwrap());
+    assert_eq!(p2.board().footprints["U1"].at, p1.board().footprints["U1"].at);
+    assert_eq!(p2.board().footprints["U1"].rotation, p1.board().footprints["U1"].rotation);
+    assert_eq!(p2.board().footprints["C2"].side, cadlab::model::board::BoardSide::Bottom);
+    let response = std::fs::read_to_string(d.path().join("response.idx")).unwrap();
+    common::golden::assert_golden(&golden("tiny-changes-response.idx"), &response.replace(version, "VERSION"));
+    // The response is the change message plus Accept on the new items and the reasons.
+    let rroot = parse_xml(&response);
+    let accepts: BTreeMap<String, String> = rroot
+        .kid("foundation:Body")
+        .kids("foundation:Item")
+        .filter_map(|i| {
+            let a = i.kids("pdm:Accept").next()?;
+            Some((i.kid("foundation:Name").text.clone(), a.kid("property:Value").text.clone()))
+        })
+        .collect();
+    assert_eq!(accepts, [("C2".to_string(), "false".to_string()), ("U1".into(), "true".into())].into());
+    let descriptions: Vec<String> = rroot
+        .kid("foundation:ProcessInstruction")
+        .kids("computational:Changes")
+        .map(|t| t.kid("foundation:Description").text.clone())
+        .collect();
+    assert_eq!(descriptions[0], "C2: rejected");
+    assert!(descriptions[1].contains("deleting components"), "{descriptions:?}");
+    assert_eq!(descriptions[2], "U1 moved");
+    let d = |text: &str| format!("<foundation:Description>{text}</foundation:Description>");
+    let mut stripped: String =
+        response.lines().filter(|l| !l.contains("<pdm:Accept>")).map(|l| format!("{l}\n")).collect();
+    stripped = stripped.replace(&d("C2: rejected"), &d("C2 moved")).replace(&d(&descriptions[1]), &d("J1 removed"));
+    assert_eq!(stripped, change, "only Accept and descriptions differ");
+
+    // The sender reads the response: C2's flip is undone in its history, U1's move agreed.
+    let mut h = mcad::idx::History::default();
+    for text in [std::fs::read_to_string(&base_path).unwrap(), change, response] {
+        h.read(&text).unwrap();
+    }
+    let (u1_seq, u1) = h.current("COMPONENT:U1").unwrap();
+    assert_eq!((u1_seq, u1.unwrap().matrix[5]), (1, 13.0));
+    let (c2_seq, c2) = h.current("COMPONENT:C2").unwrap();
+    assert_eq!((c2_seq, c2.unwrap().matrix[4]), (0, -1.0), "back on the bottom side");
 }
 
 #[test]

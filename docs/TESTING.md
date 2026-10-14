@@ -321,11 +321,12 @@ board), a Part 21 reader (every `#ref` defined, every B-rep shell closed: each e
 and an IDF section reader. Three optional oracles skip when the tool or schema is missing even with
 `CADLAB_ORACLES=1`:
 `CADLAB_ORACLE_FREECAD` (`freecadcmd`, e.g. `/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd`) must
-read the STEP file as valid closed solids whose volumes match the outline minus cutouts and holes, and the bodies'
-boxes; `CADLAB_IPC2581_XSD` (a local copy of IPC's `IPC-2581C.xsd`, not shipped) validates the XML with
+read the STEP file as valid closed solids, the board volume matching the outline minus cutouts and holes, and
+every generated body solid with a positive volume; `CADLAB_IPC2581_XSD` (a local copy of IPC's `IPC-2581C.xsd`, not shipped) validates the XML with
 `xmllint --schema`; `CADLAB_IDX_XSD` (the directory of the IDX schema files from prostep ivip's free
-`PSI5_IDXv4.5_release.zip`, not shipped) validates the IDX file the same way (verified with the V4.5 schema,
-2026-10-04). No ODB++ or IDX reader is available as an oracle: KiCad exports ODB++ but not IDX, and cadlab
+`PSI5_IDXv4.5_release.zip`, not shipped) validates the IDX baseline, change and response messages the same way (verified with the V4.5 schema,
+2026-10-04, change and response messages 2026-10-14). `CADLAB_STEP_KEEP=<dir>` keeps the STEP file of
+`step_generated_bodies` (one part per package family) for a viewer. No ODB++ or IDX reader is available as an oracle: KiCad exports ODB++ but not IDX, and cadlab
 writes no ODB++ (DECISIONS D37). Example:
 `CADLAB_ORACLES=1 CADLAB_ORACLE_FREECAD=/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd cargo test --test exchange`.
 

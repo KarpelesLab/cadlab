@@ -1,19 +1,26 @@
-//! Component bodies generated from package dimensions: convex solids (boxes, prisms,
-//! cylinders) in footprint coordinates (mm, IPC zero orientation, origin at the body center,
-//! z up from the board surface).
+//! Component bodies generated from package dimensions, shared by the 3D view
+//! (`render.board3d`) and the STEP export (`export.step`): boxes, chamfered molded bodies,
+//! prisms and cylinders in footprint coordinates (mm, IPC zero orientation, origin at the body
+//! center, z up from the board surface).
 //!
 //! The package comes from the footprint's generator spec ([`PackageSpec`]); leads are placed
 //! where the footprint's pads are, so missing pins and odd layouts follow the land pattern.
 //! Footprints without a spec get a plain box from their body size or courtyard.
+//!
+//! Every solid is convex and is either a polyhedron with planar convex faces (written exactly
+//! by both users) or a right circular cylinder along X or Z (a true cylinder in STEP, a prism
+//! of [`Cylinder::segments`] sides in the 3D view). Coordinates are computed values, never
+//! stored (`f64` millimeters).
 
 use crate::landpattern::{ChipKind, Dim, PackageSpec, SodLead};
 use crate::model::footprint::{Footprint, Pad};
 use crate::units::{LengthUnit, Nm};
 
-/// Linear RGB-ish color in 0..1 (sRGB values, shaded linearly).
-pub(crate) type Rgb = [f32; 3];
+/// RGB color in 0..1 (sRGB values).
+pub type Rgb = [f32; 3];
 
-pub(crate) const fn rgb(hex: u32) -> Rgb {
+/// A color from `0xRRGGBB`.
+pub const fn rgb(hex: u32) -> Rgb {
     [((hex >> 16) & 0xff) as f32 / 255.0, ((hex >> 8) & 0xff) as f32 / 255.0, (hex & 0xff) as f32 / 255.0]
 }
 
@@ -25,11 +32,74 @@ const BAND: Rgb = rgb(0xc8c8c8);
 const PLASTIC: Rgb = rgb(0x1f1f21);
 const UNKNOWN: Rgb = rgb(0x6e6e72);
 
-/// A convex solid: planar convex faces, any winding (oriented later from the centroid).
-#[derive(Clone, Debug)]
-pub(crate) struct Solid {
-    pub faces: Vec<Vec<[f64; 3]>>,
+/// Axis of a cylinder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// Along X: the circle is in the (y, z) plane.
+    X,
+    /// Along Z: the circle is in the (x, y) plane.
+    Z,
+}
+
+/// A right circular cylinder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cylinder {
+    /// Axis direction.
+    pub axis: Axis,
+    /// Center of the circle in the plane across the axis: (y, z) for [`Axis::X`], (x, y) for
+    /// [`Axis::Z`].
+    pub center: (f64, f64),
+    /// Radius.
+    pub radius: f64,
+    /// First end along the axis (either order).
+    pub from: f64,
+    /// Second end along the axis.
+    pub to: f64,
+    /// Sides of the prism that approximates it in the 3D view.
+    pub segments: usize,
+}
+
+/// The geometry of a solid.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Shape {
+    /// Convex polyhedron: planar convex faces, any winding.
+    Faces(Vec<Vec<[f64; 3]>>),
+    /// Cylinder.
+    Cylinder(Cylinder),
+}
+
+/// A convex solid and its color.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Solid {
+    /// Geometry.
+    pub shape: Shape,
+    /// Color.
     pub color: Rgb,
+}
+
+impl Solid {
+    /// Planar faces (cylinders as prisms of [`Cylinder::segments`] sides), any winding.
+    pub fn faces(&self) -> Vec<Vec<[f64; 3]>> {
+        match &self.shape {
+            Shape::Faces(f) => f.clone(),
+            Shape::Cylinder(c) => {
+                let ring = circle(c.center, c.radius, c.segments);
+                let at = |a: f64, (u, v): (f64, f64)| match c.axis {
+                    Axis::X => [a, u, v],
+                    Axis::Z => [u, v, a],
+                };
+                let mut faces = vec![
+                    ring.iter().map(|&p| at(c.from, p)).collect::<Vec<_>>(),
+                    ring.iter().map(|&p| at(c.to, p)).collect::<Vec<_>>(),
+                ];
+                for i in 0..ring.len() {
+                    let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                    faces.push(vec![at(c.from, a), at(c.from, b), at(c.to, b), at(c.to, a)]);
+                }
+                faces
+            }
+        }
+    }
 }
 
 fn mm(v: Nm) -> f64 {
@@ -41,7 +111,7 @@ fn nom(d: &Dim) -> f64 {
 }
 
 /// Axis-aligned box.
-pub(crate) fn cuboid(a: [f64; 3], b: [f64; 3], color: Rgb) -> Solid {
+pub fn cuboid(a: [f64; 3], b: [f64; 3], color: Rgb) -> Solid {
     let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
     let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
     let (z0, z1) = (a[2].min(b[2]), a[2].max(b[2]));
@@ -49,7 +119,7 @@ pub(crate) fn cuboid(a: [f64; 3], b: [f64; 3], color: Rgb) -> Solid {
 }
 
 /// Convex polygon extruded from `z0` to `z1`.
-pub(crate) fn prism(poly: &[(f64, f64)], z0: f64, z1: f64, color: Rgb) -> Solid {
+pub fn prism(poly: &[(f64, f64)], z0: f64, z1: f64, color: Rgb) -> Solid {
     let n = poly.len();
     let mut faces = vec![
         poly.iter().map(|&(x, y)| [x, y, z0]).collect::<Vec<_>>(),
@@ -59,11 +129,58 @@ pub(crate) fn prism(poly: &[(f64, f64)], z0: f64, z1: f64, color: Rgb) -> Solid 
         let (a, b) = (poly[i], poly[(i + 1) % n]);
         faces.push(vec![[a.0, a.1, z0], [b.0, b.1, z0], [b.0, b.1, z1], [a.0, a.1, z1]]);
     }
-    Solid { faces, color }
+    Solid { shape: Shape::Faces(faces), color }
+}
+
+/// Box whose top edges are chamfered by `c` (a molded package body).
+fn chamfered(a: [f64; 3], b: [f64; 3], c: f64, color: Rgb) -> Solid {
+    let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+    let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+    let (z0, z1) = (a[2].min(b[2]), a[2].max(b[2]));
+    let c = c.min((x1 - x0) / 4.0).min((y1 - y0) / 4.0).min((z1 - z0) / 2.0);
+    if c < 0.02 {
+        return cuboid(a, b, color);
+    }
+    let zc = z1 - c;
+    let low = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    let top = [(x0 + c, y0 + c), (x1 - c, y0 + c), (x1 - c, y1 - c), (x0 + c, y1 - c)];
+    let mut faces = vec![
+        low.iter().map(|&(x, y)| [x, y, z0]).collect::<Vec<_>>(),
+        top.iter().map(|&(x, y)| [x, y, z1]).collect::<Vec<_>>(),
+    ];
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        faces.push(vec![
+            [low[i].0, low[i].1, z0],
+            [low[j].0, low[j].1, z0],
+            [low[j].0, low[j].1, zc],
+            [low[i].0, low[i].1, zc],
+        ]);
+        faces.push(vec![
+            [low[i].0, low[i].1, zc],
+            [low[j].0, low[j].1, zc],
+            [top[j].0, top[j].1, z1],
+            [top[i].0, top[i].1, z1],
+        ]);
+    }
+    Solid { shape: Shape::Faces(faces), color }
+}
+
+/// Chamfer of a molded body of height `h` and half sizes `hx`, `hy`.
+fn mold_chamfer(hx: f64, hy: f64, h: f64) -> f64 {
+    (h * 0.12).min(0.2).min(hx.min(hy) * 0.2)
+}
+
+/// Disc (cylinder along Z) of radius `r` at `c`, from `z0` to `z1`.
+fn disc(c: (f64, f64), r: f64, z0: f64, z1: f64, color: Rgb) -> Solid {
+    Solid {
+        shape: Shape::Cylinder(Cylinder { axis: Axis::Z, center: c, radius: r, from: z0, to: z1, segments: 16 }),
+        color,
+    }
 }
 
 /// Regular polygon approximating a circle.
-pub(crate) fn circle(c: (f64, f64), r: f64, n: usize) -> Vec<(f64, f64)> {
+pub fn circle(c: (f64, f64), r: f64, n: usize) -> Vec<(f64, f64)> {
     (0..n)
         .map(|i| {
             let a = std::f64::consts::TAU * (i as f64 + 0.5) / n as f64;
@@ -72,18 +189,10 @@ pub(crate) fn circle(c: (f64, f64), r: f64, n: usize) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// Cylinder along X from `x0` to `x1`, axis at (y = 0, z = `r`) so it rests on the board.
+/// Cylinder along X from `x0` to `x1`, axis at (y = 0, z = `z_axis`).
 fn cylinder_x(x0: f64, x1: f64, r: f64, z_axis: f64, color: Rgb) -> Solid {
-    let ring = circle((0.0, z_axis), r, 20);
-    let mut faces = vec![
-        ring.iter().map(|&(y, z)| [x0, y, z]).collect::<Vec<_>>(),
-        ring.iter().map(|&(y, z)| [x1, y, z]).collect::<Vec<_>>(),
-    ];
-    for i in 0..ring.len() {
-        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-        faces.push(vec![[x0, a.0, a.1], [x0, b.0, b.1], [x1, b.0, b.1], [x1, a.0, a.1]]);
-    }
-    Solid { faces, color }
+    let c = Cylinder { axis: Axis::X, center: (0.0, z_axis), radius: r, from: x0, to: x1, segments: 20 };
+    Solid { shape: Shape::Cylinder(c), color }
 }
 
 /// Which edge of the body a lead leaves from: axis (0 = X, 1 = Y) and sign.
@@ -133,7 +242,7 @@ fn pin1_dot(out: &mut Vec<Solid>, fp: &Footprint, first: &str, hx: f64, hy: f64,
     let r = (hx.min(hy) * 0.12).clamp(0.1, 0.5);
     let m = (r * 2.2).min(hx.min(hy) * 0.5);
     let c = (mm(p.at.x).clamp(-hx + m, hx - m), mm(p.at.y).clamp(-hy + m, hy - m));
-    out.push(prism(&circle(c, r, 16), z, z + 0.02, DOT));
+    out.push(disc(c, r, z, z + 0.02, DOT));
 }
 
 /// Band across the top of a two-terminal body near −X (cathode or + mark), between `x0` and `x1`.
@@ -152,9 +261,9 @@ fn chip_color(kind: ChipKind) -> (Rgb, Option<Rgb>) {
     }
 }
 
-/// Solids for one footprint, in footprint coordinates. `thickness` is the board thickness
-/// (through-hole pins go through it).
-pub(crate) fn solids(fp: &Footprint, thickness: f64) -> Vec<Solid> {
+/// Solids for one footprint, in footprint coordinates. `thickness` is the board thickness in
+/// mm (through-hole pins go through it).
+pub fn solids(fp: &Footprint, thickness: f64) -> Vec<Solid> {
     let spec = fp.generator.as_ref().and_then(|v| serde_json::from_value::<PackageSpec>(v.clone()).ok());
     let mut out = Vec::new();
     match spec {
@@ -185,7 +294,7 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
         PackageSpec::GullWing { span, body_width, body_length, terminal, lead_width, height, .. } => {
             let (hx, hy, h) = (nom(body_width) / 2.0, nom(body_length) / 2.0, mm(*height));
             let stand = (h * 0.08).min(0.1);
-            out.push(cuboid([-hx, -hy, stand], [hx, hy, h], MOLD));
+            out.push(chamfered([-hx, -hy, stand], [hx, hy, h], mold_chamfer(hx, hy, h), MOLD));
             let z_exit = stand + (h - stand) * 0.4;
             for p in smd_pads(fp) {
                 if let Some((e, at)) = pad_edge(p, hx, hy) {
@@ -200,7 +309,7 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
         PackageSpec::Qfp { span_x, span_y, body_x, body_y, terminal, lead_width, height, .. } => {
             let (hx, hy, h) = (nom(body_x) / 2.0, nom(body_y) / 2.0, mm(*height));
             let stand = (h * 0.08).min(0.1);
-            out.push(cuboid([-hx, -hy, stand], [hx, hy, h], MOLD));
+            out.push(chamfered([-hx, -hy, stand], [hx, hy, h], mold_chamfer(hx, hy, h), MOLD));
             let z_exit = stand + (h - stand) * 0.4;
             for p in smd_pads(fp) {
                 if let Some((e, at)) = pad_edge(p, hx, hy) {
@@ -238,7 +347,7 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
         } => {
             let (hx, hy, h) = (nom(body_width) / 2.0, nom(body_length) / 2.0, mm(*height));
             let stand = (h * 0.05).min(0.1);
-            out.push(cuboid([-hx, -hy, stand], [hx, hy, h], MOLD));
+            out.push(chamfered([-hx, -hy, stand], [hx, hy, h], mold_chamfer(hx, hy, h), MOLD));
             let (left_toe, tab_end) = match tab_protrusion {
                 Some(p) => {
                     let end = hx + nom(p);
@@ -266,14 +375,14 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
             let w = nom(lead_width);
             match lead {
                 SodLead::GullWing => {
-                    out.push(cuboid([-hx, -hy, 0.08], [hx, hy, h], MOLD));
+                    out.push(chamfered([-hx, -hy, 0.08], [hx, hy, h], mold_chamfer(hx, hy, h), MOLD));
                     for s in [-1.0, 1.0] {
                         let e = Edge { axis: 0, sign: s };
                         gull_lead(out, e, 0.0, hx, toe, nom(terminal), w, h * 0.4);
                     }
                 }
                 SodLead::Flat => {
-                    out.push(cuboid([-hx, -hy, 0.0], [hx, hy, h], MOLD));
+                    out.push(chamfered([-hx, -hy, 0.0], [hx, hy, h], mold_chamfer(hx, hy, h), MOLD));
                     for s in [-1.0, 1.0] {
                         out.push(cuboid([s * (hx - 0.1), -w / 2.0, 0.0], [s * toe, w / 2.0, 0.12], TIN));
                     }
@@ -284,7 +393,7 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
         PackageSpec::Molded { kind, length, body_length, width, lead_width, height, .. } => {
             let (hx, hy, h) = (nom(body_length) / 2.0, nom(width) / 2.0, mm(*height));
             let end = (nom(length) / 2.0).max(hx + 0.12);
-            out.push(cuboid([-hx, -hy, 0.05], [hx, hy, h], MOLD));
+            out.push(chamfered([-hx, -hy, 0.05], [hx, hy, h], mold_chamfer(hx, hy, h), MOLD));
             let w = nom(lead_width).min(2.0 * hy);
             for s in [-1.0, 1.0] {
                 out.push(cuboid([s * (hx - 0.3), -w / 2.0, 0.0], [s * end, w / 2.0, h * 0.55], TIN));
@@ -311,7 +420,7 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
         PackageSpec::Dip { body_width, body_length, height, .. } => {
             let (hx, hy, h) = (nom(body_width) / 2.0, nom(body_length) / 2.0, mm(*height));
             let stand = 0.5_f64.min(h * 0.3);
-            out.push(cuboid([-hx, -hy, stand], [hx, hy, h], MOLD));
+            out.push(chamfered([-hx, -hy, stand], [hx, hy, h], mold_chamfer(hx, hy, h), MOLD));
             let z_exit = stand + (h - stand) * 0.45;
             for p in smd_pads(fp) {
                 let (x, y) = (mm(p.at.x), mm(p.at.y));
@@ -323,7 +432,7 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
             }
             pin1_dot(out, fp, "1", hx, hy, h);
             // Notch at the pin-1 end.
-            out.push(prism(&circle((0.0, hy - 0.01), (hx * 0.18).min(0.8), 16), h, h + 0.02, rgb(0x141416)));
+            out.push(disc((0.0, hy - 0.01), (hx * 0.18).min(0.8), h, h + 0.02, rgb(0x141416)));
         }
         PackageSpec::Bga { ball, body_x, body_y, height, .. } => {
             let (hx, hy, h) = (nom(body_x) / 2.0, nom(body_y) / 2.0, mm(*height));
@@ -331,7 +440,12 @@ fn package(out: &mut Vec<Solid>, fp: &Footprint, spec: &PackageSpec, t: f64) {
             let sub = (s + 0.35).min(h * 0.6);
             out.push(cuboid([-hx, -hy, s], [hx, hy, sub], rgb(0x4b5e34)));
             let m = (hx.min(hy) * 0.04).min(0.3);
-            out.push(cuboid([-hx + m, -hy + m, sub], [hx - m, hy - m, h], MOLD));
+            out.push(chamfered(
+                [-hx + m, -hy + m, sub],
+                [hx - m, hy - m, h],
+                mold_chamfer(hx - m, hy - m, h - sub),
+                MOLD,
+            ));
             pin1_dot(out, fp, "A1", hx - m, hy - m, h);
         }
         PackageSpec::PinHeader { pitch, height, .. } => {
@@ -404,7 +518,7 @@ mod tests {
 
     fn extent(s: &[Solid]) -> [f64; 6] {
         let mut e = [f64::MAX, f64::MAX, f64::MAX, f64::MIN, f64::MIN, f64::MIN];
-        for v in s.iter().flat_map(|s| s.faces.iter().flatten()) {
+        for v in s.iter().flat_map(|s| s.faces()).flatten() {
             for i in 0..3 {
                 e[i] = e[i].min(v[i]);
                 e[i + 3] = e[i + 3].max(v[i]);
