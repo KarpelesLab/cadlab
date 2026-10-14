@@ -414,8 +414,9 @@ pub struct SetRules {
     /// Solder paste growth as a fraction of each pad side (`-0.05`), added to the margin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paste_ratio: Option<Scale>,
-    /// What `silk_to_pad` measures silkscreen against: mask (the solder mask openings, pads
-    /// grown by their mask margin plus mask drawings; the default) or copper (exposed pads).
+    /// What silkscreen is checked against: mask (`silk_to_pad` from pad copper, and no overlap
+    /// with solder mask openings: pads grown by their mask margin plus mask drawings; the
+    /// default) or copper (`silk_to_pad` from exposed pad copper only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub silk_check: Option<crate::model::board::SilkCheck>,
 }

@@ -211,9 +211,9 @@ pub struct Rules {
     /// added to the paste margin, unless a pad or footprint sets its own.
     #[serde(skip_serializing_if = "is_zero_scale")]
     pub paste_ratio: Scale,
-    /// What the silkscreen-to-pad check measures silkscreen against: the solder mask openings
-    /// (pads grown by their mask margin, and mask drawings; the default, as fabs clip the
-    /// legend there) or the exposed pad copper.
+    /// What the silkscreen-to-pad check measures silkscreen against: pad copper (`silk_to_pad`)
+    /// and, by default, the solder mask openings (pads grown by their mask margin, and mask
+    /// drawings: no overlap, as fabs clip the legend there), or the exposed pad copper alone.
     #[serde(skip_serializing_if = "SilkCheck::is_default")]
     pub silk_check: SilkCheck,
 }
@@ -222,8 +222,9 @@ pub struct Rules {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SilkCheck {
-    /// Solder mask openings: pads with a mask opening, grown by their mask margin (pad, else
-    /// footprint, else `mask_expansion`), and mask drawings of footprints and the board.
+    /// Pad copper (`silk_to_pad`) and solder mask openings (no overlap): pads with a mask
+    /// opening, grown by their mask margin (pad, else footprint, else `mask_expansion`), and mask
+    /// drawings of footprints and the board.
     #[default]
     Mask,
     /// The copper of pads with a mask opening, without the mask margin.

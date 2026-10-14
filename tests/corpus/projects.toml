@@ -95,7 +95,7 @@ reason = "schematic and board disagree (J2/J4, see drc.short): copper the board 
 [[project.known]]
 side = "cadlab"
 rule = "drc.unrouted"
-max = 14
+max = 13
 reason = "schematic and board disagree (J2/J4, see drc.short): the circuit's nets are not the ones the board routes"
 
 [[project.known]]
@@ -141,15 +141,8 @@ reason = "LOGO1 is a schematic symbol whose board footprint has no pads: the imp
 [[project.known]]
 side = "cadlab"
 rule = "drc.unrouted"
-max = 15
-reason = "connectivity through pours: cadlab refills the zones with its own algorithm (no thermal spoke angle or count settings), so some GND pads KiCad's fill reaches stay unconnected"
-
-[[project.known]]
-side = "kicad"
-rule = "silk_over_copper"
-max = 20
-stage = "reexport"
-reason = "the LEDs' silkscreen outline runs over their pads' mask openings grown by the board's 0.05 mm mask expansion (now exported): KiCad's check is against mask openings, cadlab's drc.silk_over_pad against the copper; the original's project sets the rule to ignore"
+max = 4
+reason = "connectivity through pours: cadlab refills the zones with its own algorithm, and four GND pads KiCad's fill reaches stay unconnected"
 
 [[project.gerber_known]]
 layer = "Edge.Cuts"
@@ -166,12 +159,6 @@ license = "CERN-OHL-W-2.0"
 layers = 2
 kicad = 6
 notes = "LumenPnP camera ring light: round 2-layer board with a central cutout, LEDs on an arc"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.unrouted"
-max = 2
-reason = "connectivity through pours: KiCad's fill joins U1.1 and U1.3 (GND) through a neck between the pins that cadlab's fill does not keep"
 
 [[project.gerber_known]]
 layer = "F.Cu"
@@ -203,12 +190,6 @@ rule = "annular_width"
 max = 2
 reason = "J7 stacks a round pad 2 (1.2 mm hole) over a slotted pad 2 (1 x 3 mm slot); KiCad measures an annular width of 0 there, cadlab checks each pad's ring against its own hole"
 
-[[project.known]]
-side = "cadlab"
-rule = "drc.unrouted"
-max = 4
-reason = "connectivity through pours: cadlab refills the zones with its own algorithm (no thermal spoke angle or count settings)"
-
 [[project.gerber_known]]
 layer = "In1.Cu"
 reason = "the copper text opulo.io on In1.Cu is drawn in cadlab's stroke font, whose glyphs differ from KiCad's"
@@ -231,13 +212,6 @@ max = 31
 reason = "the reversible TRRS jacks J1/J2 have slotted pads and silkscreen KiCad clips at their mask openings; not analyzed further"
 
 [[project.known]]
-side = "cadlab"
-rule = "drc.silk_over_pad"
-max = 8
-stage = "original"
-reason = "the reversible TRRS jack J1's silkscreen over its own pads, which KiCad's DRC of the original reports per segment against other items; not analyzed further"
-
-[[project.known]]
 side = "kicad"
 rule = "unconnected_items"
 max = 3
@@ -246,7 +220,7 @@ reason = "connectivity through pours: KiCad's fill reaches three GND pads that c
 [[project.known]]
 side = "cadlab"
 rule = "drc.unrouted"
-max = 4
+max = 3
 reason = "the POWER SW switches have a designator cadlab cannot use (import.invalid_refdes) and are not imported, so the vcc net is split"
 
 [[project.known]]
@@ -255,6 +229,12 @@ rule = "drc.courtyard_overlap"
 max = 2
 stage = "reexport"
 reason = "mouse-bite holes imported as board holes sit in switch courtyards; KiCad checks no holes against courtyards"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_over_mask_opening"
+max = 4
+reason = "the ferris_broom logo footprint has no pads, so its drawings become board graphics (import.footprint_as_graphics): its silkscreen art lies over its own F.Mask polygons by design (the fab clips it there); KiCad does not report silkscreen over mask drawings of the same footprint"
 
 [[project.gerber_known]]
 layer = "F.Cu"
@@ -309,7 +289,14 @@ reason = "not analyzed yet: reversible LED and switch footprints (REXLED/REXSW) 
 side = "cadlab"
 rule = "drc.unrouted"
 max = 4
-reason = "connectivity through pours: cadlab refills the zones (teardrops included) with its own algorithm"
+reason = "connectivity through pours: cadlab refills the zones (teardrops included) with its own algorithm; e.g. REXSW1.S1's diagonal spokes reach KiCad's pour, which keeps 0.25 mm (the hole clearance) from the copper-less NPTH below the pad, where cadlab keeps the zone's 0.508 mm clearance"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_over_pad"
+max = 118
+stage = "reexport"
+reason = "the 0402/0603 silkscreen runs over the pads' mask openings grown by the board's 0.2 mm mask expansion (pad_to_mask_clearance), which the fab applies and KiCad plots; KiCad's silkscreen check does not grow pads by the board-level expansion (only by pad and footprint margins); the original's project sets the rule to ignore"
 
 [[project]]
 name = "glasgow-revC3"
@@ -329,20 +316,6 @@ rule = "courtyards_overlap"
 max = 6
 stage = "original"
 reason = "the fiducials FID1-FID8 are on the board but not in the schematic (import.component_not_in_circuit): not placed, so cadlab has no courtyard for them"
-
-[[project.known]]
-side = "kicad"
-rule = "silk_over_copper"
-max = 6
-stage = "original"
-reason = "the fiducials are not placed (see courtyards_overlap): KiCad's silkscreen-to-mask-opening check sees their 0.375 mm mask margins, which cadlab does not have"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.silk_over_pad"
-max = 2
-stage = "original"
-reason = "not analyzed yet: a board silkscreen drawing over C11.2 that KiCad's DRC of the original does not report"
 
 [[project.gerber_known]]
 layer = "F.Cu"
@@ -373,13 +346,6 @@ kicad = 10
 notes = "Glasgow revD1: 6-layer, BGA FPGA and RAM, KiCad 10 format (nets by name), ring-shaped custom pads, net ties"
 
 [[project.known]]
-side = "kicad"
-rule = "silk_over_copper"
-max = 2
-stage = "original"
-reason = "silkscreen over NPTH openings (J1, J6)"
-
-[[project.known]]
 side = "cadlab"
 rule = "drc.courtyard_overlap"
 max = 13
@@ -391,12 +357,6 @@ rule = "drc.unplaced"
 max = 1
 stage = "original"
 reason = "G1 is a schematic symbol whose board footprint has no pads (a logo, import.footprint_as_graphics), so the component stays unplaced"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.unrouted"
-max = 3
-reason = "connectivity through pours: cadlab refills the zones with its own algorithm"
 
 [[project]]
 name = "cynthion"
@@ -413,28 +373,21 @@ notes = "Cynthion USB analyzer: ECP5 BGA, USB PHYs, Kelvin current-sense resisto
 [[project.known]]
 side = "cadlab"
 rule = "drc.short"
-max = 8
-reason = "the Kelvin current-sense resistors R1, R2, R42, R59 are net ties whose sense tracks cross the power pad of the other net (a short in both tools); KiCad reports them unevenly (4 of the 8 crossings on the original, 7 on the re-export) and its items do not pair with cadlab's"
-
-[[project.known]]
-side = "kicad"
-rule = "shorting_items"
 max = 4
-stage = "original"
-reason = "see the cadlab drc.short entry: the same sense-track crossings, reported by KiCad with items that do not pair with cadlab's findings"
-
-[[project.known]]
-side = "kicad"
-rule = "copper_edge_clearance"
-max = 3
-stage = "original"
-reason = "the side-mount switches SW2/SW3 near the edge: KiCad and cadlab pair the edge findings with different pads of the two identical switches; not analyzed further"
+reason = "the Kelvin current-sense resistors R1, R2, R42, R59 are net ties whose sense tracks cross the power pad of the other net (a short in both tools); KiCad reports them unevenly, 4 of the 8 crossings on the original and 7 on the re-export, which pair with cadlab's"
 
 [[project.known]]
 side = "cadlab"
 rule = "drc.copper_to_edge"
-max = 9
-reason = "the SW2/SW3 switches (see the KiCad copper_edge_clearance entry), and the layer-number texts 1-6 next to the edge: in cadlab's stroke font their glyphs come 0.275 mm from the edge, KiCad's stay clear"
+max = 6
+reason = "the layer-number texts 1-6 next to the edge: in cadlab's stroke font their glyphs come 0.275 mm from the edge, KiCad's stay clear"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_over_pad"
+max = 2
+stage = "original"
+reason = "J5's silkscreen passes 0.04 mm from its own copper-less NPTH holes, inside their openings grown by the board's 0.05 mm mask expansion; KiCad's silkscreen check does not apply the board-level expansion (see corne-cherry)"
 
 [[project.gerber_known]]
 layer = "F.Cu"
@@ -512,12 +465,6 @@ rule = "track_width"
 max = 1
 stage = "reexport"
 reason = "not analyzed yet: KiCad does not apply the exported neck-down rule to one 0.16 mm GND track at the QFN-80 courtyard edge that cadlab's courtyard test includes, so the Power class width applies"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.unrouted"
-max = 2
-reason = "connectivity through pours: cadlab refills the zones with its own algorithm"
 
 [[project.gerber_known]]
 layer = "F.Paste"

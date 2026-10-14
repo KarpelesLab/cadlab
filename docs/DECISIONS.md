@@ -818,6 +818,37 @@ one real problem in a pre-route check; the footprint name an agent reads in the 
 next; and land patterns are datasheet tables of pads, which a command should take directly, rather than a
 detour through KiCad's file format.
 
+### D51. Oracle refresh for KiCad 10.0.7: silkscreen minimum to copper, trimmed thermal spokes, corpus re-measured (2026-10-14)
+The CI's KiCad PPA moved from 10.0.6 to 10.0.7, and D44–D48 had left the corpus manifest unmeasured.
+**KiCad 10.0.7** no longer reports a pad/track clearance on a track it already reports crossing a track of
+the pad's net (the cross-check `short` board: identical files, 10.0.6 reported the 0.156 mm gap to U1.5);
+the gap is a real violation, so cadlab keeps it and the cross-check allows it on that board for KiCad ≥ 10.0.7
+only (the test reads `kicad-cli version`), so the entry is used on either version.
+**Silkscreen** (`silk_check: mask`): `silk_to_pad` is measured to pad copper, and mask openings (pads grown
+by their margin, non-plated holes, mask drawings) only forbid overlaps. D46 added the minimum on top of the
+grown opening, counting the margin twice: the cross-check's `local_settings` board (silk 0.15 mm from copper,
+0.12 mm from a 0.03 mm-grown opening, `min_silk_clearance` 0.15 mm) became a cadlab-only warning. A new
+cross-check board (`silk_near_pad`, a line 0.08 mm from a pad) shows KiCad's `silk_over_copper` applies no
+clearance at all (overlaps only; its silk clearance is silkscreen to silkscreen): cadlab keeps its fab
+minimum to copper, allowed on that board with that reason. The corpus also shows KiCad's silkscreen check
+does not grow pads by the board-level `pad_to_mask_clearance` (corne-cherry 0.2 mm, cynthion 0.05 mm), while
+it does by pad and footprint margins (glasgow-revC3's fiducials); the fab grows them all, so cadlab does too
+and those boards record the difference.
+**Thermal spokes:** D46's diagonal spokes on round pads squeezed between other-net pads crossed a clearance
+somewhere along their `gap + width` overshoot and were all dropped, where KiCad trims them and the axis
+spokes used to fit (new unrouted pads on corne-cherry and glasgow-revD1). A spoke that does not fit whole is
+now trimmed to the allowed area, kept within the pad's gap and the pour, and only if it joins the pour over at
+least half its width (no slivers). This also connects pads the earlier fill missed (corpus `drc.unrouted`
+known entries shrank or went away).
+**Import UUID table:** drawings of pad-less footprints (imported as board graphics) map to their `graphic#`,
+and KiCad 6/7 `tstamp`s of pads and footprint drawings are read like `uuid`s, so KiCad findings on them pair
+with cadlab's (silkscreen over a logo's NPTH neighbour on glasgow-revC3); the cross-check matching names an
+unnumbered pad by its footprint, as both UUID tables do.
+*Why:* the oracle is only useful if each difference is either fixed or explained by a measured cause; the
+reports, not assumptions, decided which side to change (the silkscreen double margin and the dropped spokes
+were cadlab regressions; the clearance after a crossing and the board-level mask expansion are KiCad's
+behavior).
+
 ## Open questions
 
 

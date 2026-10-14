@@ -84,8 +84,10 @@ For each zone and each of its layers, in priority order (higher first, ties in b
    a board axis end `thermal_gap + thermal_spoke` beyond the pad's bounding box; slanted ones as far
    beyond the farthest crossing of the pad's outline.
 4. Opening by `min_width / 2` removes copper narrower than `min_width` (default: rules `zone_min_width`).
-5. Spokes are added only when they lie entirely in the allowed area of step 2 and reach the pour (a spoke that
-   would violate a clearance is dropped, never trimmed into a sliver).
+5. Spokes are added when they lie entirely in the allowed area of step 2 and reach the pour. A spoke that
+   would cross another item's clearance (a pad squeezed between other-net pads, a spoke running past the
+   zone outline) is trimmed to the allowed area, keeping only its part within the pad's gap and the pour, and
+   only when that part joins the pour over at least half the spoke width; otherwise it is dropped (D51).
 6. Islands not touching a pad, via or track of the zone's net are removed (netless zones keep all islands and
    treat every item as an obstacle).
 
@@ -171,12 +173,14 @@ decides (`drc.clearance` when it is the rule in effect for the pair, `drc.track_
 Zone fills keep each item's rule clearance too (for a rule between two scopes, the largest one that can
 apply between the item and a zone).
 
-**Silkscreen** (`board.rules` `silk_check`) is checked against the solder mask openings by default
-(`mask`): pads with an opening on that side grown by their mask margin (pad, footprint, else
-`mask_expansion`; non-plated holes included), and mask drawings of footprints (`drc.silk_over_pad`,
-`drc.silk_over_mask_opening`), as fabs clip the legend there and as KiCad checks it. `copper` checks the
-exposed pad copper instead (cadlab's behavior before, and what the minimum web merging of mask openings
-does not change).
+**Silkscreen** (`board.rules` `silk_check`) must keep `silk_to_pad` from exposed pad copper and, by default
+(`mask`), must not overlap a solder mask opening: pads with an opening on that side grown by their mask
+margin (pad, footprint, else `mask_expansion`; non-plated holes included), and mask drawings of footprints
+and the board (`drc.silk_over_pad`, `drc.silk_over_mask_opening`), as fabs clip the legend there. The
+minimum is measured to the copper, not added to the opening: a mask margin is already a clearance around
+the copper (KiCad's silkscreen check, too, reports overlaps of openings only; D51). `copper` checks the
+pad copper alone (cadlab's behavior before D46, and what the minimum web merging of mask openings does not
+change).
 
 ## Commands
 
@@ -411,8 +415,8 @@ courtyards) count an overlap only where it is wider than 2 µm.
 | `drc.copper_to_edge` | error | copper closer than `copper_to_edge` to any contour |
 | `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine), or a board hole is inside a courtyard (either side) |
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout |
-| `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's solder mask opening on that side (grown by its mask margin; with `silk_check: copper`, to the pad copper) |
-| `drc.silk_over_mask_opening` | warning | silkscreen closer than `silk_to_pad` to a mask opening drawn by a footprint or on the board (`silk_check: mask`) |
+| `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's exposed copper on that side, or (`silk_check: mask`) overlapping its solder mask opening (grown by its mask margin; non-plated holes included) |
+| `drc.silk_over_mask_opening` | warning | silkscreen overlapping a mask opening drawn by a footprint or on the board (`silk_check: mask`) |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
 | `drc.disallowed` | error (rule's severity) | a copper item of a kind a custom rule's `disallow` forbids in its scope |
 

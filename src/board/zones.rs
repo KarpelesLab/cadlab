@@ -241,7 +241,7 @@ fn slanted_spoke(item: &CopperItem, b: &poly::Rect, a: Angle, gap: i64, w: i64) 
 /// other-net items, where no whole spoke fits): `spoke` ∩ `avail`, kept only within the pad's
 /// thermal gap and the pour, in pieces joining the pad to the pour over at least half the spoke
 /// width. Otherwise nothing.
-fn trimmed_spoke(
+pub fn trimmed_spoke(
     it: &CopperItem,
     r: &Relief,
     spoke: &Polygon,

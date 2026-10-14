@@ -3,7 +3,7 @@
 //! into each zone's booleans. `tests/perf.rs` checks that `fill_zones_uncached` gives exactly
 //! the same polygons. It follows the fill semantics otherwise (D40): per-item clearances (custom
 //! rules, local clearances, net classes), per-pad zone connections and slotted NPTH holes, and
-//! takes the thermal spokes (pad and zone settings, directions, D46) from `zones::Relief`.
+//! takes the thermal spokes (pad and zone settings, directions, D46; trimmed spokes, D51) from `zones`.
 
 use std::collections::BTreeMap;
 
@@ -119,9 +119,11 @@ fn fill_layer(
         };
         for (it, r) in &thermal {
             for s in zones::spokes(it, r) {
-                let r = s.bbox().expect("spoke");
-                if poly::contains(&near(&local_avail, &r), &s) && poly::intersects(&near(&local_fill, &r), &s) {
+                let b = s.bbox().expect("spoke");
+                if poly::contains(&near(&local_avail, &b), &s) && poly::intersects(&near(&local_fill, &b), &s) {
                     kept.push(s);
+                } else {
+                    kept.extend(zones::trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?);
                 }
             }
         }
