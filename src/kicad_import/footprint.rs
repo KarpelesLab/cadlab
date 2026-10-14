@@ -441,7 +441,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
     let mut pad_has_paste: Vec<bool> = Vec::new();
     for c in e.all("pad") {
         let Some(conv) = convert_pad(c, &loc, ctx, &subject, notes) else { continue };
-        if let Some(u) = c.child_value("uuid") {
+        if let Some(u) = c.child_value("uuid").or(c.child_value("tstamp")) {
             uuids.push((u.to_string(), format!("pad:{}", conv.pad.number)));
         }
         match conv.role {
