@@ -409,6 +409,16 @@ pub struct Overrides {
     /// How zones of the pad's net connect to it, instead of the zone's own pad connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone_connection: Option<PadConnection>,
+    /// Thermal relief gap between the pad and the zone, instead of the zone's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_gap: Option<Nm>,
+    /// Thermal relief spoke width, instead of the zone's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_spoke: Option<Nm>,
+    /// Direction of the first thermal spoke relative to the pad's orientation, instead of the
+    /// zone's (default: 45° for round pads, 90° for others).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_angle: Option<Angle>,
 }
 
 impl Overrides {
@@ -425,6 +435,9 @@ impl Overrides {
             paste_ratio: self.paste_ratio.or(fallback.paste_ratio),
             clearance: self.clearance.or(fallback.clearance),
             zone_connection: self.zone_connection.or(fallback.zone_connection),
+            thermal_gap: self.thermal_gap.or(fallback.thermal_gap),
+            thermal_spoke: self.thermal_spoke.or(fallback.thermal_spoke),
+            thermal_angle: self.thermal_angle.or(fallback.thermal_angle),
         }
     }
 }

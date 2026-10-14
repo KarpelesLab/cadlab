@@ -321,9 +321,11 @@ const FEATURES: &str = r#"(kicad_pcb (version 20240108) (generator pcbnew)
       (primitives (gr_circle (center -2.425 0) (end 0 0) (width 1.15) (fill no)))))
   (footprint "Jumper:NetTie" (layer "F.Cu") (at 120 60)
     (property "Reference" "NT1") (property "Value" "NetTie")
-    (net_tie_pad_groups "1, 2")
-    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND"))
-    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "A")))
+    (net_tie_pad_groups "1, 2") (thermal_width 0.5) (thermal_gap 0.6)
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "GND")
+      (thermal_bridge_width 0.3) (thermal_gap 0.4) (thermal_bridge_angle 90))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "A")
+      (thermal_width 0.25) (thermal_bridge_angle 0)))
   (footprint "Stitch:Via" (layer "F.Cu") (at 105 55)
     (property "Reference" "STITCH01") (attr through_hole board_only)
     (pad "1" thru_hole circle (at 0 0) (size 0.6 0.6) (drill 0.3) (layers "*.Cu") (net 1 "GND")))
@@ -392,6 +394,12 @@ fn corpus_features() {
     // The net tie: its pads touch nothing else, but their nets are one group.
     let nt = crate::board::footprint_for(&p, "NT1").unwrap();
     assert_eq!(nt.net_ties, vec![vec!["1".to_string(), "2".to_string()]]);
+    // Thermal reliefs: footprint and pad gaps and widths (both width tokens), a spoke angle
+    // unless it is KiCad's default for the pad shape.
+    assert_eq!((nt.overrides.thermal_spoke, nt.overrides.thermal_gap), (Some(Nm(500_000)), Some(Nm(600_000))));
+    let (p1, p2) = (&nt.pads[0].overrides, &nt.pads[1].overrides);
+    assert_eq!((p1.thermal_spoke, p1.thermal_gap, p1.thermal_angle), (Some(Nm(300_000)), Some(Nm(400_000)), None));
+    assert_eq!((p2.thermal_spoke, p2.thermal_gap, p2.thermal_angle), (Some(Nm(250_000)), None, Some(Angle::ZERO)));
 }
 
 /// Trapezoid, chamfered and drill-offset pads on a top footprint (90°) and a bottom one, each

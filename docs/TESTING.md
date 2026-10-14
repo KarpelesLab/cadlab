@@ -284,14 +284,20 @@ known differences fell from 46 DRC entries (812 findings at most) and 48 Gerber 
   every layer, `import.pad_approximated`). Trapezoid and chamfered pads and drill offsets, earlier
   approximated, are modeled since D44; the corpus has not been re-run with them here (no `kicad-cli` in that
   environment), so the manifest's per-board counts still date from before and may now be lower;
-- custom DRC rules cadlab has no counterpart for (`hasComponentClass`, `disallow`, conditions on `B`) and
-  rule severities or exclusions (layer-marker texts outside the outline, overlapping PMOD headers);
+- custom DRC rules cadlab has no counterpart for (`hasComponentClass`, terms relating both items such as
+  `A.Net == B.Net`, disallowed `text`/`hole`/`footprint`, track widths conditioned on `B`) and DRC
+  exclusions stored in the project (layer-marker texts outside the outline, overlapping PMOD headers);
+  `disallow`, conditions on `B` (a second scope, clearances) and rule severities are modeled since D46,
+  not yet re-measured against the corpus (no `kicad-cli` where they were written);
 - texts on copper layers are drawn in cadlab's stroke font, whose glyphs differ from KiCad's (Gerber
   copper layers, copper-to-edge near the edge);
-- KiCad checks silkscreen against mask openings (with the mask expansion), cadlab against the copper;
+- silkscreen is checked against solder mask openings (mask margins and drawings) like KiCad's since D46
+  (`silk_check: mask`, the default); the corpus differences this caused are not yet re-measured;
 - net-tie shorts of sense tracks crossing a tied pad are reported by KiCad unevenly (not paired);
-- connectivity through pours differs where cadlab's refill (its own algorithm, no thermal spoke angle or count
-  settings) does not reach a pad KiCad's fill reaches;
+- connectivity through pours differs where cadlab's refill (its own algorithm) does not reach a pad KiCad's
+  fill reaches; spoke angles (45° default on round pads, per-pad `thermal_bridge_angle`), per-pad thermal
+  gaps and widths follow KiCad's since D46, not yet re-measured against the corpus;
+
 - not yet analyzed: a few residual differences on `corne-cherry`, `glasgow-revC3`, `sweep-v2.2` and
   `tinytapeout-demo` (marked so in the manifest).
 

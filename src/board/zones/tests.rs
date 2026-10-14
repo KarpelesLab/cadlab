@@ -73,6 +73,8 @@ fn params(pads: PadConnection) -> ZoneParams {
         pads,
         thermal_gap: Nm(300_000),
         thermal_spoke: Nm(250_000),
+        thermal_angle: None,
+        thermal_spokes: 4,
     }
 }
 
@@ -165,6 +167,54 @@ fn thermal_spokes_and_gap() {
 }
 
 #[test]
+fn spoke_angle_count_and_pad_overrides() {
+    use crate::board::PadThermal;
+    use crate::units::Angle;
+    let outline = square(0, 0, 10 * MM, 10 * MM);
+    let (c, h) = (5 * MM, 500_000);
+    let mid = h + 150_000; // inside the 0.3 mm gap
+    let with = |t: PadThermal| {
+        let mut it = pad("GND", c, c, h, h);
+        it.local.thermal = Some(t);
+        vec![(it, Nm::ZERO)]
+    };
+    // A round pad defaults to diagonal spokes (here a square pad marked round: the spoke
+    // direction is what is checked).
+    let round = with(PadThermal { round: true, ..Default::default() });
+    let fill = run(&outline, &round, params(PadConnection::Thermal));
+    assert!(inside(&fill, c + mid, c + mid), "45° spoke");
+    assert!(inside(&fill, c - mid, c - mid), "225° spoke");
+    assert!(!inside(&fill, c + mid, c), "no axis spoke");
+    assert!(poly::intersects(&fill, &round[0].0.shape), "connected");
+    // The pad's orientation turns the spokes: a pad at 45° with the default 90° is diagonal.
+    let turned = with(PadThermal { rotation: Angle(45_000), ..Default::default() });
+    let f2 = run(&outline, &turned, params(PadConnection::Thermal));
+    assert!(inside(&f2, c - mid, c + mid), "135° spoke");
+    // The zone's angle applies to pads without one; a pad's own angle wins.
+    let mut prm = params(PadConnection::Thermal);
+    prm.thermal_angle = Some(Angle(45_000));
+    let plain = with(PadThermal::default());
+    assert!(inside(&run(&outline, &plain, prm), c + mid, c + mid));
+    let own = with(PadThermal { angle: Some(Angle::ZERO), ..Default::default() });
+    let f3 = run(&outline, &own, prm);
+    assert!(inside(&f3, c + mid, c) && !inside(&f3, c + mid, c + mid));
+    // Two spokes: +y and -y only (first at the default 90°).
+    let mut two = params(PadConnection::Thermal);
+    two.thermal_spokes = 2;
+    let f4 = run(&outline, &plain, two);
+    assert!(inside(&f4, c, c + mid) && inside(&f4, c, c - mid));
+    assert!(!inside(&f4, c + mid, c) && !inside(&f4, c - mid, c));
+    let four = run(&outline, &plain, params(PadConnection::Thermal));
+    assert!(poly::area2(&f4) < poly::area2(&four));
+    // A pad's own gap and spoke width.
+    let wide = with(PadThermal { gap: Some(Nm(600_000)), spoke: Some(Nm(400_000)), ..Default::default() });
+    let f5 = run(&outline, &wide, params(PadConnection::Thermal));
+    assert!(!inside(&f5, c + h + 400_000, c + h + 400_000), "inside the 0.6 mm gap");
+    assert!(inside(&f5, c + h + 300_000, c + 150_000), "a 0.4 mm spoke");
+    assert!(inside(&four, c + h + 400_000, c + h + 400_000), "outside the zone's 0.3 mm gap");
+}
+
+#[test]
 fn spokes_blocked_by_obstacles_are_dropped() {
     let outline = square(0, 0, 10 * MM, 10 * MM);
     let c = 5 * MM;
@@ -234,6 +284,8 @@ fn zone(id: u64, name: &str, layers: &[&str], outline: Vec<Point>, priority: u32
         pads: PadConnection::Thermal,
         thermal_gap: None,
         thermal_spoke: None,
+        thermal_angle: None,
+        thermal_spokes: None,
     }
 }
 

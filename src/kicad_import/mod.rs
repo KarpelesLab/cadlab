@@ -1449,6 +1449,8 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> V
         pads,
         thermal_gap: fill.and_then(|f| f.child_value("thermal_gap")).and_then(mm),
         thermal_spoke: fill.and_then(|f| f.child_value("thermal_bridge_width")).and_then(mm),
+        thermal_angle: None,
+        thermal_spokes: None,
     };
     split(RawItem::Zone { z, net: ctx.raw_net(e), uuid })
 }

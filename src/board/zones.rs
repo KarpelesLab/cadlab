@@ -35,7 +35,7 @@ use crate::id::ObjectId;
 use crate::model::Project;
 use crate::model::board::{Board, PadConnection, Zone};
 use crate::model::circuit::NetClass;
-use crate::units::Nm;
+use crate::units::{Angle, Nm};
 
 /// Arc tolerance for fill boundaries: approximations stay inside the true region.
 pub const FILL_TOL: ArcTol = ArcTol::new(5_000, Side::Inside);
@@ -58,7 +58,17 @@ pub struct ZoneParams {
     pub thermal_gap: Nm,
     /// Thermal spoke width.
     pub thermal_spoke: Nm,
+    /// First spoke direction relative to each pad (`None`: per pad shape, see
+    /// [`PadThermal::first_spoke`](crate::board::PadThermal::first_spoke)).
+    pub thermal_angle: Option<Angle>,
+    /// Spokes per pad.
+    pub thermal_spokes: u8,
 }
+
+/// Default number of thermal spokes per pad.
+pub const DEFAULT_SPOKES: u8 = 4;
+/// Largest number of thermal spokes per pad.
+pub const MAX_SPOKES: u8 = 8;
 
 fn class_of<'a>(p: &'a Project, net: Option<&str>) -> Option<&'a crate::model::circuit::NetClass> {
     let c = p.circuit();
@@ -84,6 +94,8 @@ pub fn zone_params(p: &Project, z: &Zone) -> ZoneParams {
         pads: z.pads,
         thermal_gap: z.thermal_gap.unwrap_or(clearance),
         thermal_spoke: z.thermal_spoke.unwrap_or(track.max(Nm::from_um(250))),
+        thermal_angle: z.thermal_angle,
+        thermal_spokes: z.thermal_spokes.unwrap_or(DEFAULT_SPOKES).clamp(1, MAX_SPOKES),
     }
 }
 
@@ -128,19 +140,101 @@ fn rect(x0: i64, y0: i64, x1: i64, y1: i64) -> Polygon {
     Polygon::new(vec![p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)], vec![])
 }
 
-/// The four axis-aligned spokes of a thermal relief around a pad: from the pad center to
-/// `spoke` beyond the gap.
-fn spokes(item: &CopperItem, gap: i64, w: i64) -> Vec<Polygon> {
+/// A thermal relief of a pad: gap, spoke width and the board directions of its spokes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Relief {
+    /// Gap between the pad and the pour (nm).
+    pub gap: i64,
+    /// Spoke width (nm).
+    pub w: i64,
+    /// Board directions of the spokes.
+    pub dirs: Vec<Angle>,
+}
+
+impl Relief {
+    /// The relief of a pad in a zone: the pad's (or its footprint's) gap, width and angle,
+    /// else the zone's, with the zone's spoke count.
+    pub fn of(it: &CopperItem, prm: &ZoneParams) -> Relief {
+        let t = it.local.thermal.unwrap_or_default();
+        let gap = t.gap.unwrap_or(prm.thermal_gap).0;
+        let w = t.spoke.unwrap_or(prm.thermal_spoke).0;
+        let first = t.first_spoke(prm.thermal_angle);
+        let n = prm.thermal_spokes.clamp(1, MAX_SPOKES) as i64;
+        let dirs = (0..n).map(|k| (first + Angle(((k * 360_000) / n) as i32)).normalized()).collect();
+        Relief { gap, w, dirs }
+    }
+
+    /// Whether every spoke runs along an axis.
+    fn axis_aligned(&self) -> bool {
+        self.dirs.iter().all(|a| a.quarter_turns().is_some())
+    }
+
+    /// How far beyond the pad's bounding box the relief reaches.
+    pub fn reach(&self) -> i64 {
+        // A slanted spoke's end corner can stick out by up to its half width beyond its length.
+        self.gap + self.w + if self.axis_aligned() { 0 } else { self.w }
+    }
+}
+
+/// The spokes of a thermal relief around a pad, from the pad center along each direction.
+/// Axis directions end `gap + w` beyond the pad's bounding box; slanted ones `gap + w` beyond
+/// the farthest crossing of the pad's outline.
+pub fn spokes(item: &CopperItem, r: &Relief) -> Vec<Polygon> {
     let Some(b) = item.shape.bbox() else { return vec![] };
+    let (gap, w) = (r.gap, r.w);
     let (cx, cy) = (item.anchor.x.0, item.anchor.y.0);
     let h = w / 2;
     let reach = gap + w;
-    vec![
-        rect(cx - h, cy - h, b.max.x + reach, cy + (w - h)),
-        rect(cx - h, cy - h, cx + (w - h), b.max.y + reach),
-        rect(b.min.x - reach, cy - h, cx + (w - h), cy + (w - h)),
-        rect(cx - h, b.min.y - reach, cx + (w - h), cy + (w - h)),
-    ]
+    r.dirs
+        .iter()
+        .map(|&a| match a.quarter_turns() {
+            Some(0) => rect(cx - h, cy - h, b.max.x + reach, cy + (w - h)),
+            Some(1) => rect(cx - h, cy - h, cx + (w - h), b.max.y + reach),
+            Some(2) => rect(b.min.x - reach, cy - h, cx + (w - h), cy + (w - h)),
+            Some(_) => rect(cx - h, b.min.y - reach, cx + (w - h), cy + (w - h)),
+            None => slanted_spoke(item, &b, a, gap, w),
+        })
+        .collect()
+}
+
+/// A spoke along a direction that is not an axis (floating point only to place its corners,
+/// rounded to the nanometer).
+fn slanted_spoke(item: &CopperItem, b: &poly::Rect, a: Angle, gap: i64, w: i64) -> Polygon {
+    let rad = (a.0 as f64 / 1000.0).to_radians();
+    let (ux, uy) = (rad.cos(), rad.sin());
+    let (cx, cy) = (item.anchor.x.0 as f64, item.anchor.y.0 as f64);
+    // Farthest crossing of the ray with the pad's outlines; without one (an anchor outside the
+    // copper), the farthest corner of its box.
+    let mut t_max: Option<f64> = None;
+    for pg in &item.shape {
+        let pts = &pg.outer.0;
+        for k in 0..pts.len() {
+            let (p0, p1) = (pts[k], pts[(k + 1) % pts.len()]);
+            let (ex, ey) = ((p1.x - p0.x) as f64, (p1.y - p0.y) as f64);
+            let den = ux * ey - uy * ex;
+            if den.abs() < 1e-12 {
+                continue;
+            }
+            let (qx, qy) = (p0.x as f64 - cx, p0.y as f64 - cy);
+            let t = (qx * ey - qy * ex) / den;
+            let s = (qx * uy - qy * ux) / den;
+            if t >= 0.0 && (0.0..=1.0).contains(&s) {
+                t_max = Some(t_max.map_or(t, |m: f64| m.max(t)));
+            }
+        }
+    }
+    let t = t_max.unwrap_or_else(|| {
+        [(b.min.x, b.min.y), (b.max.x, b.min.y), (b.max.x, b.max.y), (b.min.x, b.max.y)]
+            .iter()
+            .map(|&(x, y)| (x as f64 - cx).hypot(y as f64 - cy))
+            .fold(0.0, f64::max)
+    });
+    let (h, len) = ((w / 2) as f64, t + (gap + w) as f64);
+    let (o0, o1) = (-h, (w - w / 2) as f64);
+    let (nx, ny) = (-uy, ux);
+    let at =
+        |s: f64, o: f64| poly::Point::new((cx + ux * s + nx * o).round() as i64, (cy + uy * s + ny * o).round() as i64);
+    Polygon::new(vec![at(-h, o0), at(len, o0), at(len, o1), at(-h, o1)], vec![])
 }
 
 /// How a same-net pad joins a zone: its own override, else the zone's style; `tht_thermal`
@@ -212,10 +306,9 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
     // pads (thermal gap, or clearance for `none`), which shape this zone only; spokes cross them.
     let mut hard_groups: BTreeMap<i64, Vec<Polygon>> = BTreeMap::new();
     let mut soft_groups: BTreeMap<i64, Vec<Polygon>> = BTreeMap::new();
-    let mut thermal: Vec<&CopperItem> = Vec::new();
+    let mut thermal: Vec<(&CopperItem, Relief)> = Vec::new();
     let mut same: Vec<&CopperItem> = Vec::new();
     // Shapes far from the area are left out: they cannot change it (see `reaches`).
-    let (gap, w) = (prm.thermal_gap.0, prm.thermal_spoke.0);
     for &(it, c) in &input.items {
         if same_net(it.net.as_deref(), input.net) {
             same.push(it);
@@ -225,8 +318,10 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
                     PadConnection::Solid | PadConnection::ThtThermal => continue,
                     PadConnection::Thermal => {
                         // A spoke stays inside its pad's window; outside the area it is never kept.
-                        if b.expand(gap + w + 1).intersects(&abox) {
-                            thermal.push(it);
+                        let r = Relief::of(it, prm);
+                        let gap = r.gap;
+                        if b.expand(r.reach() + 1).intersects(&abox) {
+                            thermal.push((it, r));
                         }
                         gap
                     }
@@ -280,7 +375,7 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
     let mut kept: Vec<Polygon> = Vec::new();
     if !thermal.is_empty() && !fill.is_empty() {
         let boxes: Vec<poly::Rect> =
-            thermal.iter().filter_map(|it| it.shape.bbox()).map(|b| b.expand(gap + w + 1)).collect();
+            thermal.iter().filter_map(|(it, r)| it.shape.bbox().map(|b| b.expand(r.reach() + 1))).collect();
         let windows: Vec<Polygon> = boxes.iter().map(|b| rect(b.min.x, b.min.y, b.max.x, b.max.y)).collect();
         let index = RTree::new(boxes.iter().map(|b| Some(*b)));
         // Rings meeting no window cannot change the clipped sets: they are left out first.
@@ -295,8 +390,8 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
         let near = |set: &PolygonSet, r: &poly::Rect| -> PolygonSet {
             set.iter().filter(|q| q.bbox().is_some_and(|b| b.intersects(r))).cloned().collect()
         };
-        for it in &thermal {
-            for s in spokes(it, gap, w) {
+        for (it, r) in &thermal {
+            for s in spokes(it, r) {
                 let r = s.bbox().expect("spoke");
                 if poly::contains(&near(&local_avail, &r), &s) && poly::intersects(&near(&local_fill, &r), &s) {
                     kept.push(s);
@@ -438,6 +533,17 @@ fn npth_holes(p: &Project) -> Vec<NpthHole> {
         .collect()
 }
 
+/// The farthest a thermal relief of any pad among `items` can reach beyond the pad's box (its
+/// own settings, else the zone's; see `Relief::reach`).
+fn max_relief(items: &[(&CopperItem, Nm)], prm: &ZoneParams) -> i64 {
+    let zone = prm.thermal_gap.0 + 2 * prm.thermal_spoke.0;
+    items
+        .iter()
+        .filter_map(|(it, _)| it.local.thermal)
+        .map(|t| t.gap.unwrap_or(prm.thermal_gap).0 + 2 * t.spoke.unwrap_or(prm.thermal_spoke).0)
+        .fold(zone, i64::max)
+}
+
 fn fill_with(p: &Project, base: &[CopperItem], npth: &[NpthHole], item_c: &[Nm]) -> Vec<ZoneFill> {
     let board = p.board();
     if board.zones.is_empty() {
@@ -548,7 +654,7 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[NpthHole], item_c: &[Nm])
                         Some(w) => {
                             // Every distance `fill_layer` grows an item by, plus the arc and
                             // rounding margins of `reaches`.
-                            let d = max_c.max(prm.clearance.0).max(prm.thermal_gap.0 + prm.thermal_spoke.0);
+                            let d = max_c.max(prm.clearance.0).max(max_relief(&items_on, &prm));
                             let q = w.expand(d + OBSTACLE_TOL.tolerance + SAFETY + 1);
                             index.query(&q).into_iter().map(|i| items_on[i as usize]).collect()
                         }

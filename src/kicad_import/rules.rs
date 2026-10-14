@@ -22,7 +22,9 @@
 //! | `netclass_patterns`, `netclass_assignments` | `net.class` of matching circuit nets |
 //! | `.kicad_dru` rules without condition (`clearance`, `track_width`, `hole_size`, `annular_width`, `hole_to_hole`, `edge_clearance`) | the board rule, when stricter |
 //! | `.kicad_dru` `A.NetClass == 'X'` rules (`track_width`, `clearance`) | the class value, when stricter |
-//! | `.kicad_dru` rules with geometric conditions ([`condition_scope`]: item type, layer, `memberOfFootprint`, `intersectsCourtyard`, `enclosedByArea`) with `clearance` / `track_width` minimums | custom rules (`board.custom_rules`), in file order |
+//! | `.kicad_dru` rules with geometric conditions ([`condition_scope`]: item type, layer, `memberOfFootprint`, `intersectsCourtyard`, `enclosedByArea`, `intersectsArea` / `insideArea`) with `clearance` / `track_width` minimums or `disallow` (`track`, `via`, `pad`, `zone`, `graphic`) | custom rules (`board.custom_rules`), in file order |
+//! | conditions on `B` (the other item of a pair, [`condition_scopes`]) | the custom rule's `with` scope (clearance only) |
+//! | rule `severity` (`error`, `warning`, `ignore`; `exclusion` as `ignore`) | the custom rule's `severity` (rules without a condition become custom rules to keep it) |
 //!
 //! A zero KiCad minimum means "no minimum": the cadlab value is kept. Everything else is reported
 //! (`import.rule_unsupported`), never dropped silently.
@@ -36,7 +38,8 @@ use serde_json::Value;
 use super::{ImportError, invalid};
 use crate::diag::Diagnostic;
 use crate::model::Project;
-use crate::model::board::{CustomRule, ItemKind, RuleScope, Rules};
+use crate::model::board::{CustomRule, ItemKind, RuleScope, RuleSeverity, Rules};
+
 use crate::model::circuit::NetClass;
 use crate::refs::ObjectRef;
 use crate::sexpr;
@@ -317,11 +320,56 @@ pub fn condition_scope(cond: &str) -> Result<RuleScope, String> {
             s.in_courtyard = Some(fp_pattern(v));
         } else if let Some(v) = call(term, "A.enclosedByArea") {
             s.in_area = Some(v);
+        } else if let Some(v) = call(term, "A.intersectsArea").or_else(|| call(term, "A.insideArea")) {
+            // `insideArea` is the older name of `intersectsArea` (KiCad's documentation).
+            s.touches_area = Some(v);
         } else {
             return Err(unsupported());
         }
     }
     Ok(s)
+}
+
+/// The scopes of a geometric condition: the terms on `A` (as [`condition_scope`]) and, when
+/// there are terms on `B` (the other item of a pair), those as a second scope. A term naming
+/// both items is an error.
+pub fn condition_scopes(cond: &str) -> Result<(RuleScope, Option<RuleScope>), String> {
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for term in cond.split("&&").map(str::trim) {
+        let (on_a, on_b) = (term.contains("A."), term.contains("B."));
+        match (on_a, on_b) {
+            (true, true) => return Err(format!("condition term `{term}` relates both items")),
+            (false, true) => b.push(term.replace("B.", "A.")),
+            _ => a.push(term.to_string()),
+        }
+    }
+    let sa = if a.is_empty() { RuleScope::default() } else { condition_scope(&a.join(" && "))? };
+    let sb = if b.is_empty() { None } else { Some(condition_scope(&b.join(" && "))?) };
+    Ok((sa, sb))
+}
+
+/// A `disallow` constraint's item types as cadlab item kinds; `None` names the first type
+/// without a counterpart.
+fn disallow_kinds(con: &sexpr::Sexpr) -> Result<Vec<ItemKind>, String> {
+    let mut kinds = Vec::new();
+    for t in con.items().iter().skip(2).filter_map(|x| x.atom()) {
+        let k = match t {
+            "track" => ItemKind::Track,
+            "via" => ItemKind::Via,
+            "pad" => ItemKind::Pad,
+            "zone" => ItemKind::Zone,
+            "graphic" => ItemKind::Graphic,
+            other => return Err(format!("disallowed type `{other}` has no cadlab counterpart")),
+        };
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+    }
+    if kinds.is_empty() {
+        return Err("`disallow` names no type".into());
+    }
+    kinds.sort();
+    Ok(kinds)
 }
 
 fn parse_dru(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Result<(), ImportError> {
@@ -345,19 +393,31 @@ fn parse_dru(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
                     ),
             );
         };
-        if let Some(sev) = rule.child_value("severity")
-            && matches!(sev, "ignore" | "exclusion")
-        {
-            unsupported(format!("severity `{sev}` (cadlab rules are not switched off per area)"), diags);
-            continue;
-        }
+        let severity = match rule.child_value("severity") {
+            None | Some("error") => RuleSeverity::Error,
+            Some("warning") => RuleSeverity::Warning,
+            Some("ignore" | "exclusion") => RuleSeverity::Ignore,
+            Some(sev) => {
+                unsupported(format!("severity `{sev}` is not one of error, warning, ignore"), diags);
+                continue;
+            }
+        };
         let cond = rule.child_value("condition");
         let layer = rule.child_value("layer");
-        // Geometric conditions (item kind, layer, footprint, courtyard, area) become a custom
-        // rule; net class conditions tighten the class.
-        let geometric = layer.is_some() || cond.is_some_and(|c| condition_class(c).is_none());
+        let class_cond = cond.and_then(condition_class);
+        let disallows = rule.all("constraint").any(|c| c.value() == Some("disallow"));
+        if class_cond.is_some() && (severity != RuleSeverity::Error || disallows) {
+            unsupported("a severity or `disallow` on a net class condition".into(), diags);
+            continue;
+        }
+        // Geometric conditions (item kind, layer, footprint, courtyard, area, the other item)
+        // become a custom rule, as do rules with a severity or a `disallow`; net class
+        // conditions tighten the class.
+        let geometric = layer.is_some()
+            || cond.is_some_and(|c| condition_class(c).is_none())
+            || (class_cond.is_none() && (severity != RuleSeverity::Error || disallows));
         if geometric {
-            let mut scope = match cond.map(condition_scope).transpose() {
+            let (mut scope, with) = match cond.map(condition_scopes).transpose() {
                 Ok(s) => s.unwrap_or_default(),
                 Err(why) => {
                     unsupported(why, diags);
@@ -371,15 +431,30 @@ fn parse_dru(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
                 }
                 scope.layer = Some(l.to_string());
             }
-            let mut cr = CustomRule { name: name.clone(), scope, clearance: None, track_width: None };
+            let mut cr = CustomRule::new(name.clone(), scope);
+            cr.severity = severity;
+            let paired = with.is_some();
+            cr.with = with;
             for con in rule.all("constraint") {
                 let kind = con.value().unwrap_or("");
                 let min = con.child_value("min").and_then(dru_len);
                 match (kind, min) {
                     ("clearance", Some(v)) => cr.clearance = Some(v),
-                    ("track_width", Some(v)) => cr.track_width = Some(v),
+                    ("track_width", Some(v)) if !paired => cr.track_width = Some(v),
+                    ("disallow", _) if !paired => match disallow_kinds(con) {
+                        Ok(k) => cr.disallow = k,
+                        Err(why) => {
+                            unsupported(why, diags);
+                            continue;
+                        }
+                    },
                     _ => {
-                        unsupported(format!("constraint `{con}` has no cadlab counterpart in a scoped rule"), diags);
+                        let why = if paired {
+                            format!("constraint `{con}` with a condition on B (only clearances relate two items)")
+                        } else {
+                            format!("constraint `{con}` has no cadlab counterpart in a scoped rule")
+                        };
+                        unsupported(why, diags);
                         continue;
                     }
                 }
@@ -395,12 +470,12 @@ fn parse_dru(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
                     );
                 }
             }
-            if cr.clearance.is_some() || cr.track_width.is_some() {
+            if cr.clearance.is_some() || cr.track_width.is_some() || !cr.disallow.is_empty() {
                 k.custom.push(cr);
             }
             continue;
         }
-        let class = cond.and_then(condition_class);
+        let class = class_cond;
         for con in rule.all("constraint") {
             let Some(kind) = con.value() else { continue };
             let min = con.child_value("min").and_then(dru_len);
@@ -570,6 +645,41 @@ mod tests {
     }
 
     #[test]
+    fn severities_disallow_and_conditions_on_b() {
+        let dru = r#"(version 1)
+(rule soft (severity warning) (condition "A.Type == 'Track' && B.Type == 'Pad' && B.Layer == 'F.Cu'") (constraint clearance (min 0.1mm)))
+(rule off (severity ignore) (constraint clearance (min 0.3mm)))
+(rule excl (severity exclusion) (condition "A.memberOfFootprint('J1')") (constraint clearance (min 0.2mm)))
+(rule novias (condition "A.insideArea('rf')") (constraint disallow via track))
+(rule both (condition "A.intersectsArea('x') && B.Type == 'Via'") (constraint track_width (min 0.3mm)))
+(rule texts (condition "A.intersectsArea('x')") (constraint disallow text))
+(rule cls (severity warning) (condition "A.NetClass == 'HV'") (constraint clearance (min 1mm)))
+(rule mixed (condition "A.Net == B.Net") (constraint clearance (min 1mm)))"#;
+        let (k, diags) = parse(None, Some(dru)).unwrap();
+        let names: Vec<&str> = k.custom.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["soft", "off", "excl", "novias"]);
+        let soft = &k.custom[0];
+        assert_eq!(soft.severity, RuleSeverity::Warning);
+        assert_eq!(soft.scope.kinds, [ItemKind::Track]);
+        let with = soft.with.as_ref().unwrap();
+        assert_eq!((with.kinds.as_slice(), with.layer.as_deref()), ([ItemKind::Pad].as_slice(), Some("F.Cu")));
+        assert_eq!(k.custom[1].severity, RuleSeverity::Ignore);
+        assert_eq!(k.custom[1].scope, RuleScope::default(), "no condition: everything");
+        assert!(!k.rules.contains_key("clearance"), "an ignored rule does not tighten the board");
+        assert_eq!(k.custom[2].severity, RuleSeverity::Ignore, "exclusions are not reported");
+        let nv = &k.custom[3];
+        assert_eq!(nv.disallow, [ItemKind::Track, ItemKind::Via]);
+        assert_eq!(nv.scope.touches_area.as_deref(), Some("rf"));
+        let unsupported: Vec<&str> = diags
+            .iter()
+            .filter(|d| d.code == "import.rule_unsupported")
+            .map(|d| d.message.split('`').nth(1).unwrap_or(""))
+            .collect();
+        assert_eq!(unsupported, ["both", "texts", "cls", "mixed"]);
+        assert!(k.classes.is_empty());
+    }
+
+    #[test]
     fn project_and_custom_rules() {
         let pro = r#"{"board": {"design_settings": {"defaults": {"silk_line_width": 0.12},
             "rules": {"min_clearance": 0.15, "min_track_width": 0.127, "min_via_annular_width": 0.1,
@@ -588,14 +698,17 @@ mod tests {
         assert_eq!(k.classes[0].1.track_width, Some(Nm::from_um(600)), "the larger of class and rule");
         assert_eq!(k.patterns[0], ("/VBAT".to_string(), "Power".to_string()));
         let codes: Vec<&str> = diags.iter().map(|d| d.code.as_ref()).collect();
-        assert_eq!(codes, ["import.rule_zero", "import.rule_unsupported"]);
-        assert!(diags[1].message.contains("`y`"), "{}", diags[1].message);
+        assert_eq!(codes, ["import.rule_zero"]);
         // The geometric rule is a custom rule on QFN pads.
-        assert_eq!(k.custom.len(), 1);
+        assert_eq!(k.custom.len(), 2);
         let x = &k.custom[0];
         assert_eq!((x.name.as_str(), x.clearance, x.track_width), ("x", Some(Nm::from_um(100)), None));
         assert_eq!(x.scope.kinds, [ItemKind::Pad]);
         assert_eq!(x.scope.footprint.as_deref(), Some("QFN*"), "library prefix dropped");
+        // A condition on B only: anything against vias.
+        let y = &k.custom[1];
+        assert_eq!(y.scope, RuleScope::default());
+        assert_eq!(y.with.as_ref().map(|w| w.kinds.clone()), Some(vec![ItemKind::Via]));
 
         let mut p = Project::new("t");
         let (rep, _) = apply(&mut p, &k);

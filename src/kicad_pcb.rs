@@ -550,6 +550,18 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
     let nets = geo::pad_nets(p, refdes);
     let pins = pad_pins(p, refdes);
     for (pi, pad) in fp.pads.iter().enumerate() {
+        // KiCad has no footprint-level spoke angle: each pad without its own gets the
+        // footprint's.
+        let with_angle;
+        let pad = match (pad.overrides.thermal_angle, fp.overrides.thermal_angle) {
+            (None, Some(a)) => {
+                let mut c = pad.clone();
+                c.overrides.thermal_angle = Some(a);
+                with_angle = c;
+                &with_angle
+            }
+            _ => pad,
+        };
         write_pad(w, &f, refdes, &format!("{key}/pad{pi}"), pad, &nets, &pins);
     }
     w.line(1, ")");
@@ -801,6 +813,16 @@ fn overrides_text(o: &crate::model::footprint::Overrides, pad: bool) -> String {
     }
     if let Some(c) = o.zone_connection {
         let _ = write!(s, " (zone_connect {})", zone_connect(c));
+    }
+    if let Some(v) = o.thermal_spoke {
+        let _ = write!(s, " (thermal_width {})", mm(v));
+    }
+    if let Some(v) = o.thermal_gap {
+        let _ = write!(s, " (thermal_gap {})", mm(v));
+    }
+    // Pads only (see `write_footprint`, which hands a footprint's angle down to its pads).
+    if let (true, Some(a)) = (pad, o.thermal_angle) {
+        let _ = write!(s, " (thermal_bridge_angle {})", deg(a));
     }
     s
 }
@@ -1137,7 +1159,7 @@ fn min_clearance(p: &Project) -> Nm {
 /// A custom rule's scope as a KiCad rule condition (`A.Type == 'Pad' && A.Layer == 'F.Cu'
 /// && A.memberOfFootprint('cadlab:QFN*')`). Footprint patterns match cadlab's footprint names
 /// (the export's `cadlab:` library) or designators.
-fn scope_condition(s: &crate::model::board::RuleScope) -> String {
+fn scope_condition(s: &crate::model::board::RuleScope, who: char) -> String {
     use crate::model::board::ItemKind;
     let mut terms: Vec<String> = Vec::new();
     let kind = |k: ItemKind| match k {
@@ -1148,13 +1170,13 @@ fn scope_condition(s: &crate::model::board::RuleScope) -> String {
         ItemKind::Graphic => "Graphic",
     };
     if !s.kinds.is_empty() {
-        let any: Vec<String> = s.kinds.iter().map(|k| format!("A.Type == '{}'", kind(*k))).collect();
+        let any: Vec<String> = s.kinds.iter().map(|k| format!("{who}.Type == '{}'", kind(*k))).collect();
         terms.push(if any.len() == 1 { any[0].clone() } else { format!("({})", any.join(" || ")) });
     }
     if let Some(l) = &s.layer {
-        terms.push(format!("A.Layer == '{l}'"));
+        terms.push(format!("{who}.Layer == '{l}'"));
     }
-    let fp = |f: &str, pat: &str| format!("(A.{f}('{LIB}:{pat}') || A.{f}('{pat}'))");
+    let fp = |f: &str, pat: &str| format!("({who}.{f}('{LIB}:{pat}') || {who}.{f}('{pat}'))");
     if let Some(pat) = &s.footprint {
         terms.push(fp("memberOfFootprint", pat));
     }
@@ -1162,7 +1184,10 @@ fn scope_condition(s: &crate::model::board::RuleScope) -> String {
         terms.push(fp("intersectsCourtyard", pat));
     }
     if let Some(a) = &s.in_area {
-        terms.push(format!("A.enclosedByArea('{a}')"));
+        terms.push(format!("{who}.enclosedByArea('{a}')"));
+    }
+    if let Some(a) = &s.touches_area {
+        terms.push(format!("{who}.intersectsArea('{a}')"));
     }
     terms.join(" && ")
 }
@@ -1171,11 +1196,19 @@ fn scope_condition(s: &crate::model::board::RuleScope) -> String {
 /// class with a width gets a minimum track width rule; then cadlab's custom rules, in order
 /// (KiCad gives later rules priority, as cadlab does).
 fn dru(p: &Project) -> (String, Vec<String>) {
+    use crate::model::board::{ItemKind, RuleSeverity};
+
     let mut s = String::from("(version 1)\n");
     let mut warnings = Vec::new();
     let custom = |s: &mut String, warnings: &mut Vec<String>| {
         for r in &p.board().custom_rules {
-            let cond = scope_condition(&r.scope);
+            let mut cond = scope_condition(&r.scope, 'A');
+            if let Some(with) = &r.with {
+                let b = scope_condition(with, 'B');
+                if !b.is_empty() {
+                    cond = if cond.is_empty() { b } else { format!("{cond} && {b}") };
+                }
+            }
             if cond.contains('"') || r.name.contains('"') {
                 warnings.push(format!("custom rule `{}`: quotes in its name or scope; not written", r.name));
                 continue;
@@ -1189,6 +1222,25 @@ fn dru(p: &Project) -> (String, Vec<String>) {
             }
             if let Some(w) = r.track_width {
                 let _ = write!(s, "\n  (constraint track_width (min {}mm))", mm(w));
+            }
+            if !r.disallow.is_empty() {
+                let kinds: Vec<&str> = r
+                    .disallow
+                    .iter()
+                    .map(|k| match k {
+                        ItemKind::Pad => "pad",
+                        ItemKind::Track => "track",
+                        ItemKind::Via => "via",
+                        ItemKind::Zone => "zone",
+                        ItemKind::Graphic => "graphic",
+                    })
+                    .collect();
+                let _ = write!(s, "\n  (constraint disallow {})", kinds.join(" "));
+            }
+            match r.severity {
+                RuleSeverity::Error => {}
+                RuleSeverity::Warning => s.push_str("\n  (severity warning)"),
+                RuleSeverity::Ignore => s.push_str("\n  (severity ignore)"),
             }
             s.push_str(")\n");
         }

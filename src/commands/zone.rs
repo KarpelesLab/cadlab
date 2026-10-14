@@ -11,7 +11,7 @@ use crate::model::Project;
 use crate::model::board::{Keepout, PadConnection, Zone};
 use crate::refs::ObjectRef;
 use crate::suggest::did_you_mean;
-use crate::units::Nm;
+use crate::units::{Angle, Nm};
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<ZoneAdd>()
@@ -146,6 +146,17 @@ fn check_name(p: &Project, name: &str, kind: &'static str, skip: Option<usize>) 
     Ok(())
 }
 
+fn check_spokes(n: Option<u8>) -> Result<(), CommandError> {
+    if n.is_some_and(|n| !(1..=zones::MAX_SPOKES).contains(&n)) {
+        return Err(CommandError::invalid_args(
+            "zone.invalid_value",
+            format!("thermal_spokes must be between 1 and {}", zones::MAX_SPOKES),
+        )
+        .with_hint("4 is the usual count; 2 for small pads"));
+    }
+    Ok(())
+}
+
 fn check_len(v: Option<Nm>, field: &str, positive: bool) -> Result<(), CommandError> {
     if let Some(v) = v
         && (v < Nm::ZERO || (positive && v == Nm::ZERO))
@@ -221,6 +232,13 @@ pub struct ZoneAdd {
     /// Thermal spoke width (default: max(track width, 0.25mm)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_spoke: Option<Nm>,
+    /// Direction of the first thermal spoke relative to each pad's orientation, e.g. `45deg`
+    /// (default: 45° for round pads, 90° for others; a pad or footprint setting wins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_angle: Option<Angle>,
+    /// Thermal spokes per pad, evenly spaced, 1 to 8 (default 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_spokes: Option<u8>,
 }
 
 impl Command for ZoneAdd {
@@ -245,6 +263,7 @@ impl Command for ZoneAdd {
         check_len(self.min_width, "min_width", false)?;
         check_len(self.thermal_gap, "thermal_gap", false)?;
         check_len(self.thermal_spoke, "thermal_spoke", true)?;
+        check_spokes(self.thermal_spokes)?;
         let p = ctx.project_mut()?;
         let id = p.alloc_id();
         let z = Zone {
@@ -259,6 +278,8 @@ impl Command for ZoneAdd {
             pads: self.pads.unwrap_or_default(),
             thermal_gap: self.thermal_gap,
             thermal_spoke: self.thermal_spoke,
+            thermal_angle: self.thermal_angle.map(Angle::normalized),
+            thermal_spokes: self.thermal_spokes,
         };
         p.board_mut().zones.push(z.clone());
         Ok(Zones { zones: vec![z] })
@@ -305,6 +326,12 @@ pub struct ZoneSet {
     /// Thermal spoke width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_spoke: Option<Nm>,
+    /// Direction of the first thermal spoke relative to each pad's orientation (`45deg`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_angle: Option<Angle>,
+    /// Thermal spokes per pad, evenly spaced, 1 to 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_spokes: Option<u8>,
 }
 
 impl Command for ZoneSet {
@@ -333,6 +360,7 @@ impl Command for ZoneSet {
         check_len(self.min_width, "min_width", false)?;
         check_len(self.thermal_gap, "thermal_gap", false)?;
         check_len(self.thermal_spoke, "thermal_spoke", true)?;
+        check_spokes(self.thermal_spokes)?;
         let z = &mut ctx.project_mut()?.board_mut().zones[i];
         if let Some(n) = self.rename {
             z.name = n;
@@ -363,6 +391,12 @@ impl Command for ZoneSet {
         }
         if self.thermal_spoke.is_some() {
             z.thermal_spoke = self.thermal_spoke;
+        }
+        if let Some(a) = self.thermal_angle {
+            z.thermal_angle = Some(a.normalized());
+        }
+        if self.thermal_spokes.is_some() {
+            z.thermal_spokes = self.thermal_spokes;
         }
         Ok(Zones { zones: vec![z.clone()] })
     }

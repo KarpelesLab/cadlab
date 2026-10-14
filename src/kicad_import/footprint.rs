@@ -95,9 +95,11 @@ fn fp_layer(layer: &str, side: BoardSide) -> Option<(GraphicLayer, bool)> {
     (!back || area).then_some((gl, back))
 }
 
-/// Local settings of a pad or footprint (`(solder_mask_margin ...)`, ...). Zero margins and
-/// clearances are KiCad's "not set" (the footprint's or board's value applies); a zone
-/// connection is kept whatever its value.
+/// Local settings of a pad or footprint (`(solder_mask_margin ...)`, ...). Zero margins,
+/// clearances and thermal sizes are KiCad's "not set" (the footprint's, zone's or board's value
+/// applies); a zone connection is kept whatever its value. Thermal settings: `thermal_gap`,
+/// `thermal_width` (the documented name) or `thermal_bridge_width`, and on pads
+/// `thermal_bridge_angle` (kept as read; [`convert_pad`] drops the default).
 fn read_overrides(e: &Sexpr) -> Overrides {
     let len = |h: &str| e.child_value(h).and_then(mm).filter(|v| v.0 != 0);
     let ratio = e
@@ -118,6 +120,9 @@ fn read_overrides(e: &Sexpr) -> Overrides {
         paste_ratio: ratio,
         clearance: len("clearance"),
         zone_connection,
+        thermal_gap: len("thermal_gap"),
+        thermal_spoke: len("thermal_bridge_width").or_else(|| len("thermal_width")),
+        thermal_angle: e.child_value("thermal_bridge_angle").and_then(super::deg).map(Angle::normalized),
     }
 }
 
@@ -1085,6 +1090,11 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         (_, false, true) => MaskOpening::Back,
         (_, false, false) => MaskOpening::None,
     };
+    // KiCad's default spoke angle (45° round pads, 90° others) is cadlab's: left unset.
+    let mut overrides = read_overrides(c);
+    let default_angle =
+        if matches!(pshape, PadShape::Circle { .. }) { crate::board::ROUND_PAD_SPOKE_ANGLE } else { Angle::DEG_90 };
+    overrides.thermal_angle = overrides.thermal_angle.filter(|a| *a != default_angle);
     let pad = Pad {
         number,
         at,
@@ -1096,7 +1106,7 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         mask,
         slot,
         drill_offset,
-        overrides: read_overrides(c),
+        overrides,
     };
     Some(PadConv { pad, role, net })
 }

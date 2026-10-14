@@ -181,6 +181,153 @@ fn local_clearances_and_custom_rules() {
 }
 
 #[test]
+fn custom_rule_pairs_severities_and_disallow() {
+    let (_d, r, mut s) = setup();
+    // The 3V3 track 0.15 mm right of C1.1 (VIN), as above.
+    let (lo, hi) = pad_box(&mut s, "C1", "1");
+    let x = hi.x.0 as f64 / 1e6 + 0.15 + 0.1;
+    let t = add_track(
+        &mut s,
+        "F.Cu",
+        mm(x, lo.y.0 as f64 / 1e6 - 1.0),
+        mm(x, hi.y.0 as f64 / 1e6 + 1.0),
+        Nm(200_000),
+        "3V3",
+    );
+    let track = format!("track#{t}");
+    let clearance = |s: &Session| drc(s).into_iter().filter(|d| d.code == "drc.clearance").collect::<Vec<_>>();
+    assert_eq!(clearance(&s)[0].severity, cadlab::Severity::Error);
+
+    // A clearance between tracks and pads only (KiCad's conditions on B).
+    exec(
+        &r,
+        &mut s,
+        "board.custom_rule",
+        json!({"name": "pair", "kinds": ["track"], "with_kinds": ["pad"], "clearance": "0.1mm"}),
+    );
+    assert!(of(&drc(&s), "drc.clearance", &track).is_empty(), "track to pad: 0.1 mm");
+    exec(
+        &r,
+        &mut s,
+        "board.custom_rule",
+        json!({"name": "pair", "kinds": ["track"], "with_kinds": ["via"], "clearance": "0.1mm"}),
+    );
+    assert_eq!(of(&drc(&s), "drc.clearance", &track).len(), 1, "a track-to-via rule leaves pads alone");
+    assert_eq!(
+        fails(
+            &r,
+            &mut s,
+            "board.custom_rule",
+            json!({"name": "bad", "with_kinds": ["via"], "track_width": "0.3mm", "clearance": "0.1mm"})
+        ),
+        "board.invalid_custom_rule"
+    );
+    exec(&r, &mut s, "board.custom_rule_remove", json!({"name": "pair"}));
+
+    // Severities: a warning, then nothing; the deciding rule is a subject.
+    exec(
+        &r,
+        &mut s,
+        "board.custom_rule",
+        json!({"name": "soft", "kinds": ["track"], "clearance": "0.3mm", "severity": "warning"}),
+    );
+    let c = clearance(&s);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].severity, cadlab::Severity::Warning);
+    assert!(c[0].subjects.contains(&ObjectRef::Named { kind: "rule".into(), name: "soft".into() }));
+    exec(
+        &r,
+        &mut s,
+        "board.custom_rule",
+        json!({"name": "soft", "kinds": ["track"], "clearance": "0.3mm", "severity": "ignore"}),
+    );
+    assert!(clearance(&s).is_empty());
+    exec(&r, &mut s, "board.custom_rule_remove", json!({"name": "soft"}));
+
+    // Disallowed tracks touching an area; vias are allowed there.
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "notracks", "outline": {"rect": {"from": [format!("{}mm", x - 0.5), "0mm"], "to": [format!("{}mm", x + 0.5), "1mm"]}}, "rule_area": true}),
+    );
+    exec(&r, &mut s, "board.custom_rule", json!({"name": "nt", "touches_area": "notracks", "disallow": ["via"]}));
+    assert!(drc(&s).iter().all(|d| d.code != "drc.disallowed"), "the track does not reach the area");
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "mid", "outline": {"rect": {"from": [format!("{}mm", x - 0.5), "7mm"], "to": [format!("{}mm", x + 0.5), "8mm"]}}, "rule_area": true}),
+    );
+    exec(&r, &mut s, "board.custom_rule", json!({"name": "nt", "touches_area": "mid", "disallow": ["track", "via"]}));
+    let d = drc(&s);
+    let dis = of(&d, "drc.disallowed", &track);
+    assert_eq!(dis.len(), 1, "{d:#?}");
+    assert_eq!(dis[0].severity, cadlab::Severity::Error);
+    assert!(dis[0].hint.as_deref().unwrap().contains("custom rule `nt`"));
+    exec(
+        &r,
+        &mut s,
+        "board.custom_rule",
+        json!({"name": "nt", "touches_area": "mid", "disallow": ["track"], "severity": "warning"}),
+    );
+    assert_eq!(of(&drc(&s), "drc.disallowed", &track)[0].severity, cadlab::Severity::Warning);
+}
+
+#[test]
+fn silkscreen_against_mask_openings() {
+    let (_d, r, mut s) = setup();
+    // A silk line 0.2 mm left of C1.1's copper (the outer side): clear of the 0.15 mm minimum.
+    let (lo, hi) = pad_box(&mut s, "C1", "1");
+    let x = lo.x.0 as f64 / 1e6 - 0.2 - 0.075;
+    let p = project(&mut s);
+    let id = p.alloc_id();
+    p.board_mut().graphics.push(BoardGraphic {
+        id,
+        layer: "F.SilkS".into(),
+        kind: GraphicKind::Line {
+            points: vec![mm(x, lo.y.0 as f64 / 1e6), mm(x, hi.y.0 as f64 / 1e6)],
+            width: Nm(150_000),
+        },
+    });
+    let silk = format!("graphic#{}", id.0);
+    let d0 = drc(&s);
+    assert!(of(&d0, "drc.silk_over_pad", &silk).is_empty(), "{:#?}", of(&d0, "drc.silk_over_pad", &silk));
+    // A 0.1 mm mask expansion brings the opening within 0.1 mm.
+    exec(&r, &mut s, "board.rules", json!({"mask_expansion": "0.1mm"}));
+    let d = drc(&s);
+    let w = of(&d, "drc.silk_over_pad", &silk);
+    assert_eq!(w.len(), 1, "{d:#?}");
+    assert!(w[0].message.contains("solder mask opening of pad C1.1"), "{}", w[0].message);
+    assert!(w[0].message.contains("is 0.1mm from"), "{}", w[0].message);
+    // ... unless the check is against copper.
+    exec(&r, &mut s, "board.rules", json!({"silk_check": "copper"}));
+    assert!(of(&drc(&s), "drc.silk_over_pad", &silk).is_empty());
+    exec(&r, &mut s, "board.rules", json!({"silk_check": "mask", "mask_expansion": "0mm"}));
+    // A pad's own (smaller) margin wins over the board's expansion.
+    exec(&r, &mut s, "board.rules", json!({"mask_expansion": "0.1mm"}));
+    let cap = footprint_name(&mut s, "C1");
+    exec(&r, &mut s, "footprint.set", json!({"name": cap, "pads": ["1"], "mask_margin": "0.01mm"}));
+    assert!(of(&drc(&s), "drc.silk_over_pad", &silk).is_empty());
+    // A mask opening drawn on the board under the silk.
+    let p = project(&mut s);
+    let id2 = p.alloc_id();
+    p.board_mut().graphics.push(BoardGraphic {
+        id: id2,
+        layer: "F.Mask".into(),
+        kind: GraphicKind::Polygon {
+            points: vec![mm(x - 0.3, 1.0), mm(x + 0.3, 1.0), mm(x + 0.3, 14.0), mm(x - 0.3, 14.0)],
+            width: Nm::ZERO,
+        },
+    });
+    let d = drc(&s);
+    let m = of(&d, "drc.silk_over_mask_opening", &silk);
+    assert_eq!(m.len(), 1, "{d:#?}");
+    assert!(m[0].subjects.contains(&ObjectRef::parse(&format!("graphic#{}", id2.0)).unwrap()));
+    assert!(m[0].hint.is_some());
+}
+
+#[test]
 fn zone_connections_and_local_clearances_in_fills() {
     let (_d, r, mut s) = setup();
     exec(
@@ -413,6 +560,21 @@ fn kicad_round_trip() {
         json!({"name": "b", "kinds": ["pad"], "footprint": cap, "layer": "F.Cu", "clearance": "0.12mm", "track_width": "0.2mm"}),
     );
     exec(&r, &mut s, "board.custom_rule", json!({"name": "c", "in_courtyard": "U1", "clearance": "0.11mm"}));
+    exec(
+        &r,
+        &mut s,
+        "board.custom_rule",
+        json!({"name": "d", "kinds": ["track"], "with_kinds": ["via"], "clearance": "0.13mm", "severity": "warning"}),
+    );
+    exec(
+        &r,
+        &mut s,
+        "board.custom_rule",
+        json!({"name": "e", "touches_area": "area", "disallow": ["via", "zone"], "severity": "ignore"}),
+    );
+    // Thermal reliefs: the footprint's gap and width, a pad's spoke angle.
+    exec(&r, &mut s, "footprint.set", json!({"name": cap, "thermal_gap": "0.3mm", "thermal_spoke": "0.35mm"}));
+    exec(&r, &mut s, "footprint.set", json!({"name": cap, "pads": ["2"], "thermal_angle": "45deg"}));
     let p = project(&mut s);
     let id = p.alloc_id();
     p.board_mut().graphics.push(BoardGraphic {
@@ -426,6 +588,10 @@ fn kicad_round_trip() {
     assert!(ex.pcb.contains("(drill oval 0.6 1)"));
     assert!(ex.pcb.contains("(solder_mask_min_width 0.1)"));
     assert!(ex.rules.contains("A.enclosedByArea('area')"), "{}", ex.rules);
+    assert!(ex.rules.contains("A.Type == 'Track' && B.Type == 'Via'"), "{}", ex.rules);
+    assert!(ex.rules.contains("(constraint disallow via zone)") && ex.rules.contains("(severity ignore)"));
+    assert!(ex.pcb.contains("(thermal_width 0.35) (thermal_gap 0.3)"), "{}", ex.pcb);
+    assert!(ex.pcb.contains("(thermal_bridge_angle 45)"));
 
     // Back into a copy with the board cleared: the same footprints, rules and settings.
     let mut q = before.clone();

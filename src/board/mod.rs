@@ -435,6 +435,43 @@ pub struct ItemLocal {
     /// For a copper drawing of a net-tie footprint: the nets of its group, which it may touch
     /// anywhere (it is the bridge between them).
     pub tie_nets: Vec<String>,
+    /// Pads: thermal relief settings and orientation.
+    pub thermal: Option<PadThermal>,
+}
+
+/// A pad's thermal relief settings (its own, else its footprint's) and what its spokes'
+/// directions depend on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PadThermal {
+    /// Gap to the zone, instead of the zone's.
+    pub gap: Option<Nm>,
+    /// Spoke width, instead of the zone's.
+    pub spoke: Option<Nm>,
+    /// First spoke direction relative to the pad, instead of the zone's.
+    pub angle: Option<Angle>,
+    /// The pad's orientation on the board (footprint and pad rotation).
+    pub rotation: Angle,
+    /// On a bottom-side footprint (mirrored): relative directions turn the other way.
+    pub mirrored: bool,
+    /// A round pad (default spoke direction 45°, else 90°).
+    pub round: bool,
+}
+
+/// Default direction of the first thermal spoke of round pads, relative to the pad.
+pub const ROUND_PAD_SPOKE_ANGLE: Angle = Angle(45_000);
+
+impl PadThermal {
+    /// The board direction of the first spoke, given the zone's relative angle (if any): the
+    /// pad's angle, else the zone's, else 45° for round pads and 90° for others, turned by the
+    /// pad's orientation (mirrored on the bottom side).
+    pub fn first_spoke(&self, zone: Option<Angle>) -> Angle {
+        let rel = self.angle.or(zone).unwrap_or(if self.round { ROUND_PAD_SPOKE_ANGLE } else { Angle::DEG_90 });
+        if self.mirrored {
+            (self.rotation + Angle::DEG_180 - rel).normalized()
+        } else {
+            (self.rotation + rel).normalized()
+        }
+    }
 }
 
 /// Whether two copper items of different nets may touch: both belong to one net-tie group of
@@ -488,6 +525,21 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
                 through: pp.plated(),
                 tie: pp.tie.map(|g| (pp.refdes.clone(), g)),
                 tie_nets: Vec::new(),
+                thermal: Some(PadThermal {
+                    gap: pp.overrides.thermal_gap,
+                    spoke: pp.overrides.thermal_spoke,
+                    angle: pp.overrides.thermal_angle,
+                    rotation: {
+                        let fr = p.board().footprints.get(&pp.refdes).map_or(Angle::ZERO, |f| f.rotation);
+                        match pp.side {
+                            BoardSide::Top => fr + pp.pad.rotation,
+                            BoardSide::Bottom => fr - pp.pad.rotation,
+                        }
+                        .normalized()
+                    },
+                    mirrored: pp.side == BoardSide::Bottom,
+                    round: matches!(pp.pad.shape, PadShape::Circle { .. }),
+                }),
             },
         })
         .collect();

@@ -414,6 +414,10 @@ pub struct SetRules {
     /// Solder paste growth as a fraction of each pad side (`-0.05`), added to the margin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paste_ratio: Option<Scale>,
+    /// What `silk_to_pad` measures silkscreen against: mask (the solder mask openings, pads
+    /// grown by their mask margin plus mask drawings; the default) or copper (exposed pads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silk_check: Option<crate::model::board::SilkCheck>,
 }
 
 /// A rule value that changed.
@@ -537,6 +541,8 @@ impl Command for SetRules {
         r.mask_min_web = self.mask_min_web.unwrap_or(r.mask_min_web);
         r.paste_margin = self.paste_margin.unwrap_or(r.paste_margin);
         r.paste_ratio = self.paste_ratio.unwrap_or(r.paste_ratio);
+        r.silk_check = self.silk_check.unwrap_or(r.silk_check);
+
         if r.via_drill >= r.via_diameter {
             return Err(CommandError::invalid_args("board.invalid_rule", "via diameter must exceed via drill"));
         }
@@ -590,7 +596,10 @@ impl Command for SetRules {
 
 /// Add or replace a custom design rule for part of the board: a clearance and/or a track width
 /// for the copper items in its scope (item kinds, layer, footprint, courtyard, area), instead of
-/// the net class, local and board values. When several rules match an item the last one wins.
+/// the net class, local and board values, and/or item kinds the scope disallows. A clearance can
+/// be limited to pairs with an item of a second scope (`with_*`). When several rules match an
+/// item the last one wins. `severity` makes the DRC report the rule's violations as warnings,
+/// or not at all.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CustomRuleSet {
@@ -612,6 +621,36 @@ pub struct CustomRuleSet {
     /// Items entirely inside this keep-out or rule area (`keepout.add --rule-area`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_area: Option<String>,
+    /// Items touching this keep-out or rule area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touches_area: Option<String>,
+    /// The other item of a pair, for the clearance: its kinds (pad, track, via, zone, graphic).
+    /// Any `with_*` value limits the clearance to pairs of an item in scope and one in this
+    /// second scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub with_kinds: Vec<crate::model::board::ItemKind>,
+    /// The other item of a pair: its copper layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_layer: Option<String>,
+    /// The other item of a pair: pads and drawings of footprints matching this pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_footprint: Option<String>,
+    /// The other item of a pair: touching the courtyard of footprints matching this pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_in_courtyard: Option<String>,
+    /// The other item of a pair: entirely inside this keep-out or rule area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_in_area: Option<String>,
+    /// The other item of a pair: touching this keep-out or rule area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_touches_area: Option<String>,
+    /// Item kinds not allowed in the scope (pad, track, via, zone, graphic): the DRC reports
+    /// each one (`drc.disallowed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallow: Vec<crate::model::board::ItemKind>,
+    /// How the DRC reports this rule's violations: error (default), warning or ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<crate::model::board::RuleSeverity>,
     /// Clearance between items in scope and other nets' copper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clearance: Option<Nm>,
@@ -658,6 +697,17 @@ fn custom_rules_text(o: &CustomRules) -> String {
             if let Some(a) = &s.in_area {
                 scope.push(format!("inside {a}"));
             }
+            if let Some(a) = &s.touches_area {
+                scope.push(format!("touching {a}"));
+            }
+            let kinds = |ks: &[crate::model::board::ItemKind]| -> String {
+                ks.iter()
+                    .map(|k| {
+                        serde_json::to_value(k).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/")
+            };
             let mut v = Vec::new();
             if let Some(c) = r.clearance {
                 v.push(format!("clearance {c}"));
@@ -665,8 +715,19 @@ fn custom_rules_text(o: &CustomRules) -> String {
             if let Some(w) = r.track_width {
                 v.push(format!("track width {w}"));
             }
-            let scope = if scope.is_empty() { "everything".to_string() } else { scope.join(" ") };
-            format!("rule {}: {} for {scope}", r.name, v.join(", "))
+            if !r.disallow.is_empty() {
+                v.push(format!("no {}", kinds(&r.disallow)));
+            }
+            let mut scope = if scope.is_empty() { "everything".to_string() } else { scope.join(" ") };
+            if r.with.is_some() {
+                scope += " (against a second scope)";
+            }
+            let sev = match r.severity {
+                crate::model::board::RuleSeverity::Error => "",
+                crate::model::board::RuleSeverity::Warning => " [warning]",
+                crate::model::board::RuleSeverity::Ignore => " [ignored]",
+            };
+            format!("rule {}: {} for {scope}{sev}", r.name, v.join(", "))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -686,27 +747,43 @@ impl Command for CustomRuleSet {
         if self.name.trim().is_empty() {
             return Err(bad("a custom rule needs a name".into()));
         }
-        if self.clearance.is_none() && self.track_width.is_none() {
-            return Err(bad("the rule sets nothing".into()).with_hint("give `clearance` and/or `track_width`"));
+        if self.clearance.is_none() && self.track_width.is_none() && self.disallow.is_empty() {
+            return Err(
+                bad("the rule sets nothing".into()).with_hint("give `clearance`, `track_width` and/or `disallow`")
+            );
+        }
+        let with = RuleScope {
+            kinds: self.with_kinds.clone(),
+            layer: self.with_layer.clone(),
+            footprint: self.with_footprint.clone(),
+            in_courtyard: self.with_in_courtyard.clone(),
+            in_area: self.with_in_area.clone(),
+            touches_area: self.with_touches_area.clone(),
+        };
+        let with = (with != RuleScope::default()).then_some(with);
+        if with.is_some() && (self.track_width.is_some() || !self.disallow.is_empty() || self.clearance.is_none()) {
+            return Err(bad("`with_*` scopes the other item of a clearance pair".into())
+                .with_hint("give `clearance` only, or make separate rules for track widths and disallowed items"));
         }
         if self.clearance.is_some_and(|c| c < Nm::ZERO) || self.track_width.is_some_and(|w| w <= Nm::ZERO) {
             return Err(bad("clearance cannot be negative, track width must be positive".into()));
         }
-        if let Some(l) = &self.layer
-            && !p.board().is_copper(l)
-        {
-            let names = p.board().stackup.copper_names();
-            let s = did_you_mean(l, names.iter().map(String::as_str), 3);
-            return Err(CommandError::not_found("board.invalid_layer", format!("`{l}` is not a copper layer"))
-                .with_suggestions(&s));
+        for l in [&self.layer, &self.with_layer].into_iter().flatten() {
+            if !p.board().is_copper(l) {
+                let names = p.board().stackup.copper_names();
+                let s = did_you_mean(l, names.iter().map(String::as_str), 3);
+                return Err(CommandError::not_found("board.invalid_layer", format!("`{l}` is not a copper layer"))
+                    .with_suggestions(&s));
+            }
         }
-        if let Some(a) = &self.in_area
-            && !p.board().keepouts.iter().any(|k| &k.name == a)
+        for a in [&self.in_area, &self.touches_area, &self.with_in_area, &self.with_touches_area].into_iter().flatten()
         {
-            let s = did_you_mean(a, p.board().keepouts.iter().map(|k| k.name.as_str()), 3);
-            return Err(CommandError::not_found("keepout.not_found", format!("no keep-out or rule area `{a}`"))
-                .with_suggestions(&s)
-                .with_hint_if_none("add one with `keepout.add --rule-area`"));
+            if !p.board().keepouts.iter().any(|k| &k.name == a) {
+                let s = did_you_mean(a, p.board().keepouts.iter().map(|k| k.name.as_str()), 3);
+                return Err(CommandError::not_found("keepout.not_found", format!("no keep-out or rule area `{a}`"))
+                    .with_suggestions(&s)
+                    .with_hint_if_none("add one with `keepout.add --rule-area`"));
+            }
         }
         let rule = CustomRule {
             name: self.name.clone(),
@@ -716,10 +793,15 @@ impl Command for CustomRuleSet {
                 footprint: self.footprint,
                 in_courtyard: self.in_courtyard,
                 in_area: self.in_area,
+                touches_area: self.touches_area,
             },
             clearance: self.clearance,
             track_width: self.track_width,
+            with,
+            disallow: self.disallow,
+            severity: self.severity.unwrap_or_default(),
         };
+
         let rules = &mut ctx.project_mut()?.board_mut().custom_rules;
         match rules.iter_mut().find(|r| r.name == self.name) {
             Some(r) => *r = rule,

@@ -2,7 +2,8 @@
 //! item of the layer, every NPTH hole, every keep-out and the whole of every earlier fill go
 //! into each zone's booleans. `tests/perf.rs` checks that `fill_zones_uncached` gives exactly
 //! the same polygons. It follows the fill semantics otherwise (D40): per-item clearances (custom
-//! rules, local clearances, net classes), per-pad zone connections and slotted NPTH holes.
+//! rules, local clearances, net classes), per-pad zone connections and slotted NPTH holes, and
+//! takes the thermal spokes (pad and zone settings, directions, D46) from `zones::Relief`.
 
 use std::collections::BTreeMap;
 
@@ -16,19 +17,6 @@ use cadlab::units::Nm;
 fn rect(x0: i64, y0: i64, x1: i64, y1: i64) -> Polygon {
     let p = poly::Point::new;
     Polygon::new(vec![p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)], vec![])
-}
-
-fn spokes(item: &CopperItem, gap: i64, w: i64) -> Vec<Polygon> {
-    let Some(b) = item.shape.bbox() else { return vec![] };
-    let (cx, cy) = (item.anchor.x.0, item.anchor.y.0);
-    let h = w / 2;
-    let reach = gap + w;
-    vec![
-        rect(cx - h, cy - h, b.max.x + reach, cy + (w - h)),
-        rect(cx - h, cy - h, cx + (w - h), b.max.y + reach),
-        rect(b.min.x - reach, cy - h, cx + (w - h), cy + (w - h)),
-        rect(cx - h, b.min.y - reach, cx + (w - h), cy + (w - h)),
-    ]
 }
 
 fn same_net(a: Option<&str>, b: Option<&str>) -> bool {
@@ -59,7 +47,7 @@ fn fill_layer(
     let abox = area.bbox().expect("non-empty");
     let mut hard_groups: BTreeMap<i64, Vec<Polygon>> = BTreeMap::new();
     let mut soft_groups: BTreeMap<i64, Vec<Polygon>> = BTreeMap::new();
-    let mut thermal: Vec<&CopperItem> = Vec::new();
+    let mut thermal: Vec<(&CopperItem, zones::Relief)> = Vec::new();
     let mut same: Vec<&CopperItem> = Vec::new();
     for &(it, c) in items {
         if same_net(it.net.as_deref(), net) {
@@ -68,8 +56,11 @@ fn fill_layer(
                 let d = match zones::connection(it, prm.pads) {
                     PadConnection::Solid | PadConnection::ThtThermal => continue,
                     PadConnection::Thermal => {
-                        thermal.push(it);
-                        prm.thermal_gap.0
+                        // Spoke geometry (pad and zone settings, directions) is the fill's.
+                        let r = zones::Relief::of(it, prm);
+                        let gap = r.gap;
+                        thermal.push((it, r));
+                        gap
                     }
                     PadConnection::None => prm.clearance.0,
                 };
@@ -107,12 +98,11 @@ fn fill_layer(
     }
     let mut kept: Vec<Polygon> = Vec::new();
     if !thermal.is_empty() && !fill.is_empty() {
-        let (gap, w) = (prm.thermal_gap.0, prm.thermal_spoke.0);
         let windows: Vec<Polygon> = thermal
             .iter()
-            .filter_map(|it| it.shape.bbox())
-            .map(|b| {
-                let b = b.expand(gap + w + 1);
+            .filter_map(|(it, r)| it.shape.bbox().map(|b| (b, r.reach())))
+            .map(|(b, reach)| {
+                let b = b.expand(reach + 1);
                 rect(b.min.x, b.min.y, b.max.x, b.max.y)
             })
             .collect();
@@ -127,8 +117,8 @@ fn fill_layer(
         let near = |set: &PolygonSet, r: &poly::Rect| -> PolygonSet {
             set.iter().filter(|q| q.bbox().is_some_and(|b| b.intersects(r))).cloned().collect()
         };
-        for it in &thermal {
-            for s in spokes(it, gap, w) {
+        for (it, r) in &thermal {
+            for s in zones::spokes(it, r) {
                 let r = s.bbox().expect("spoke");
                 if poly::contains(&near(&local_avail, &r), &s) && poly::intersects(&near(&local_fill, &r), &s) {
                     kept.push(s);

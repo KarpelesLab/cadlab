@@ -15,10 +15,10 @@ use polyclip::{Circle, EndCap, FillRule, Geometry, Join, Op, Path, Polygon, Poly
 
 use crate::board::prepared::{self, Prepared};
 use crate::board::{self as geo, COPPER_TOL, CopperItem};
-use crate::diag::Diagnostic;
+use crate::diag::{Diagnostic, Severity};
 use crate::geom::{Point, RTree};
 use crate::model::Project;
-use crate::model::board::{BoardSide, GraphicKind, Rules};
+use crate::model::board::{BoardSide, CustomRule, GraphicKind, RuleSeverity, Rules, SilkCheck};
 use crate::model::circuit::NetClass;
 use crate::model::footprint::{GraphicGeometry, GraphicLayer, PadKind};
 use crate::model::sections::natural_cmp;
@@ -53,6 +53,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     board_holes(p, &courtyards, outline.as_ref(), &mut out);
     silk_to_pads(&ctx, &pads, &mut out);
     keepouts(&ctx, &courtyards, &mut out);
+    disallowed(&ctx, &items, &mut out);
     unrouted(&items, &mut out);
     out.extend(netclass_conflicts(p));
     out.extend(crate::electrical::current_check(p));
@@ -284,6 +285,7 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
             continue;
         }
         let mut required = clear.pair(i, j).0;
+        let rule = clear.pair_rule(i, j).map(|k| &ctx.p.board().custom_rules[k]);
         // The two nets of a differential pair may run at the pair's gap.
         if ctx.classes
             && let (Some(na), Some(nb)) = (&a.net, &b.net)
@@ -322,11 +324,14 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
             {
                 continue;
             }
+            let Some(sev) = rule_severity(rule) else { continue };
             let (dist, at) = gap(&a.shape, &b.shape).unwrap_or((0.0, a.anchor));
-            Diagnostic::error(
+            let by = rule.map(|r| format!(" (custom rule `{}`)", r.name)).unwrap_or_default();
+            let mut d = Diagnostic::new(
+                sev,
                 "drc.clearance",
                 format!(
-                    "{la} ({}) and {lb} ({}) are {} apart on {layer}, clearance is {}",
+                    "{la} ({}) and {lb} ({}) are {} apart on {layer}, clearance is {}{by}",
                     net_label(a.net.as_deref()),
                     net_label(b.net.as_deref()),
                     nm_f(dist),
@@ -334,7 +339,11 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
                 ),
             )
             .at(at)
-            .with_hint("move or reroute one of them, or lower the net class / rules clearance if the fab allows it")
+            .with_hint("move or reroute one of them, or lower the net class / rules clearance if the fab allows it");
+            if let Some(r) = rule {
+                d = d.with_subject(ObjectRef::Named { kind: "rule".into(), name: r.name.clone() });
+            }
+            d
         };
         d = d.with_subject(item_ref(la)).with_subject(item_ref(lb));
         for it in [a, b] {
@@ -349,8 +358,20 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Track widths custom rules ask for, by track.
-fn rule_widths(p: &Project, items: &[CopperItem]) -> BTreeMap<crate::id::ObjectId, (Nm, String)> {
+/// The severity of a violation decided by a custom rule (none: an error); `None` when the rule
+/// ignores its violations.
+fn rule_severity(rule: Option<&CustomRule>) -> Option<Severity> {
+    match rule.map(|r| r.severity).unwrap_or_default() {
+        RuleSeverity::Error => Some(Severity::Error),
+        RuleSeverity::Warning => Some(Severity::Warning),
+        RuleSeverity::Ignore => None,
+    }
+}
+
+/// Track widths custom rules ask for, by track: (width, rule name, severity).
+type RuleWidths = BTreeMap<crate::id::ObjectId, (Nm, String, RuleSeverity)>;
+
+fn rule_widths(p: &Project, items: &[CopperItem]) -> RuleWidths {
     let rules = &p.board().custom_rules;
     if rules.is_empty() {
         return BTreeMap::new();
@@ -359,13 +380,13 @@ fn rule_widths(p: &Project, items: &[CopperItem]) -> BTreeMap<crate::id::ObjectI
         .into_iter()
         .zip(items)
         .filter_map(|(m, it)| match (m, &it.item) {
-            (Some((k, w)), geo::ItemRef::Track(id)) => Some((*id, (w, rules[k].name.clone()))),
+            (Some((k, w)), geo::ItemRef::Track(id)) => Some((*id, (w, rules[k].name.clone(), rules[k].severity))),
             _ => None,
         })
         .collect()
 }
 
-fn track_widths(ctx: &Ctx, rule_width: &BTreeMap<crate::id::ObjectId, (Nm, String)>, out: &mut Vec<Diagnostic>) {
+fn track_widths(ctx: &Ctx, rule_width: &RuleWidths, out: &mut Vec<Diagnostic>) {
     for t in &ctx.p.board().tracks {
         let mid = from_f((t.start.x.0 as f64 + t.end.x.0 as f64) / 2.0, (t.start.y.0 as f64 + t.end.y.0 as f64) / 2.0);
         let at = t.mid.unwrap_or(mid);
@@ -389,10 +410,18 @@ fn track_widths(ctx: &Ctx, rule_width: &BTreeMap<crate::id::ObjectId, (Nm, Strin
                     "remove it and add it again wider (track.add with width), or lower board.rules min_track_width",
                 ),
             ));
-        } else if let Some((w, name)) = rule_width.get(&t.id) {
-            if t.width < *w {
+        } else if let Some((w, name, sev)) = rule_width.get(&t.id) {
+            let sev = match sev {
+                RuleSeverity::Error => Some(Severity::Error),
+                RuleSeverity::Warning => Some(Severity::Warning),
+                RuleSeverity::Ignore => None,
+            };
+            if let Some(sev) = sev
+                && t.width < *w
+            {
                 out.push(with_net(
-                    Diagnostic::error(
+                    Diagnostic::new(
+                        sev,
                         "drc.track_width",
                         format!("track#{} is {} wide, custom rule `{name}` asks for {w}", t.id.0, t.width),
                     )
@@ -999,22 +1028,99 @@ fn silk_shapes(p: &Project) -> Vec<(String, BoardSide, PolygonSet)> {
     out
 }
 
-/// Silkscreen over or too close to pads (exposed copper).
+/// A solder mask opening the silkscreen is checked against.
+enum Opening<'a> {
+    /// A pad's opening (or its copper, with `silk_check: copper`).
+    Pad(&'a geo::PlacedPad),
+    /// A mask drawing: owner (designator or `graphic#id`).
+    Drawn(String),
+}
+
+/// Solder mask openings on each side, by owner, with their regions: pads with an opening on
+/// that side (grown by their mask margin with `silk_check: mask`, their copper with `copper`),
+/// then, with `mask`, footprint and board mask drawings.
+fn mask_openings<'a>(ctx: &Ctx, pads: &'a [geo::PlacedPad]) -> Vec<(Opening<'a>, BoardSide, PolygonSet)> {
+    let board = ctx.p.board();
+    let mask = board.rules.silk_check == SilkCheck::Mask;
+    let mut out = Vec::new();
+    for side in [BoardSide::Top, BoardSide::Bottom] {
+        let layer = if side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
+        for pp in pads.iter().filter(|pp| pp.mask_on(side)) {
+            if !mask {
+                if pp.layers.iter().any(|l| l == layer) {
+                    out.push((Opening::Pad(pp), side, vec![pp.shape.clone()]));
+                }
+                continue;
+            }
+            let m = pp.overrides.mask_margin.unwrap_or(board.rules.mask_expansion).0;
+            let shape = if m == 0 {
+                vec![pp.shape.clone()]
+            } else {
+                let tol =
+                    polyclip::ArcTol::new(1_000, if m > 0 { polyclip::Side::Outside } else { polyclip::Side::Inside });
+                polyclip::offset(&pp.shape, m, Join::Round, tol).unwrap_or_default()
+            };
+            if !shape.is_empty() {
+                out.push((Opening::Pad(pp), side, shape));
+            }
+        }
+    }
+    if !mask {
+        return out;
+    }
+    for (r, pf) in &board.footprints {
+        let Some(fp) = geo::footprint_for(ctx.p, r) else { continue };
+        for g in fp.graphics.iter().filter(|g| g.layer == GraphicLayer::Mask) {
+            let shape = geo::fp_graphic_shape(pf, g);
+            if !shape.is_empty() {
+                out.push((Opening::Drawn(r.clone()), geo::pad_side(pf.side, g.back), shape));
+            }
+        }
+    }
+    for g in &board.graphics {
+        let side = match g.layer.as_str() {
+            "F.Mask" => BoardSide::Top,
+            "B.Mask" => BoardSide::Bottom,
+            _ => continue,
+        };
+        let set = match &g.kind {
+            GraphicKind::Line { points, width } => stroke(points.iter().map(|q| pt(*q)).collect(), *width),
+            GraphicKind::Polygon { points, width } => geo::polygon_area(points, *width),
+            GraphicKind::Text { .. } => continue,
+        };
+        if !set.is_empty() {
+            out.push((Opening::Drawn(format!("graphic#{}", g.id.0)), side, set));
+        }
+    }
+    out
+}
+
+/// Silkscreen over or too close to solder mask openings (pads grown by their mask margin, and
+/// mask drawings), or with `silk_check: copper` to exposed pad copper.
 fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     let silk = silk_shapes(ctx.p);
+    if silk.is_empty() {
+        return;
+    }
+    let openings = mask_openings(ctx, pads);
     let min = ctx.rules.silk_to_pad;
     let limit = (min.0 - TOLERANCE.0).max(1);
-    // One index over silk owners then pads.
+    let against = match ctx.p.board().rules.silk_check {
+        SilkCheck::Mask => "the solder mask opening of",
+        SilkCheck::Copper => "",
+    };
+    // One index over silk owners then openings.
     let mut boxes: Vec<Option<Rect>> = silk.iter().map(|(_, _, s)| s.bbox()).collect();
-    boxes.extend(pads.iter().map(|pp| pp.shape.bbox()));
+    boxes.extend(openings.iter().map(|(_, _, s)| s.bbox()));
     let ns = silk.len();
     for (i, j) in near_pairs(&boxes, limit) {
         if i >= ns || j < ns {
             continue;
         }
-        let ((owner, side, shape), pp) = (&silk[i], &pads[j - ns]);
-        let opening = &pp.shape;
-        let layer = if *side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
+        let ((owner, side, shape), (what_is, oside, opening)) = (&silk[i], &openings[j - ns]);
+        if side != oside {
+            continue;
+        }
         // A minimum within the tolerance only forbids overlaps, which must then be wider than the
         // tolerance (silk touching a pad overlaps it by the outward arc approximation).
         let close = if min > TOLERANCE {
@@ -1022,28 +1128,46 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
         } else {
             overlap(shape, opening).is_some()
         };
-        if !pp.mask_on(*side) || !pp.layers.iter().any(|l| l == layer) || !close {
+        if !close {
             continue;
         }
-        let (dist, at) = gap(shape, opening).unwrap_or((0.0, pp.center));
+        let anchor = match what_is {
+            Opening::Pad(pp) => pp.center,
+            Opening::Drawn(_) => opening.bbox().map(|b| from_f(b.min.x as f64, b.min.y as f64)).unwrap_or_default(),
+        };
+        let (dist, at) = gap(shape, opening).unwrap_or((0.0, anchor));
         let what = if dist == 0.0 { "overlaps".to_string() } else { format!("is {} from", nm_f(dist)) };
-        let mut d = Diagnostic::warning(
-            "drc.silk_over_pad",
-            format!("silkscreen of {owner} {what} {}, minimum is {min}", pad_label(pp)),
-        )
-        .with_subject(item_ref(owner))
-        .at(at)
-        .with_hint(if *owner == pp.refdes {
-            // Moving the part cannot fix the footprint's own drawing.
-            format!(
-                "the footprint's own silkscreen is that close to its pads: if `board.rules` asks for more than the \
-                 fab's published limit, lower it (`board.rules --silk-to-pad`), or regenerate/re-import the \
-                 footprint with silk farther from the pads; fabs clip silkscreen over pads anyway (minimum {min})"
+        let mut d = match what_is {
+            Opening::Pad(pp) => {
+                let target = if against.is_empty() { pad_label(pp) } else { format!("{against} {}", pad_label(pp)) };
+                let mut d = Diagnostic::warning(
+                    "drc.silk_over_pad",
+                    format!("silkscreen of {owner} {what} {target}, minimum is {min}"),
+                )
+                .with_subject(item_ref(owner))
+                .with_hint(if *owner == pp.refdes {
+                    // Moving the part cannot fix the footprint's own drawing.
+                    format!(
+                        "the footprint's own silkscreen is that close to its pads: if `board.rules` asks for more \
+                         than the fab's published limit, lower it (`board.rules --silk-to-pad`), or \
+                         regenerate/re-import the footprint with silk farther from the pads; fabs clip silkscreen \
+                         at solder mask openings anyway (minimum {min})"
+                    )
+                } else {
+                    "move the silkscreen or the part; fabs clip silkscreen at solder mask openings".to_string()
+                });
+                d.subjects.extend(pad_subjects(pp));
+                d
+            }
+            Opening::Drawn(o) => Diagnostic::warning(
+                "drc.silk_over_mask_opening",
+                format!("silkscreen of {owner} {what} a solder mask opening drawn by {o}, minimum is {min}"),
             )
-        } else {
-            "move the silkscreen or the part; fabs clip silkscreen over pads".to_string()
-        });
-        d.subjects.extend(pad_subjects(pp));
+            .with_subject(item_ref(owner))
+            .with_subject(item_ref(o))
+            .with_hint("move the silkscreen or the mask drawing; fabs clip silkscreen at solder mask openings"),
+        };
+        d = d.at(at);
         out.push(d);
     }
 }
@@ -1106,6 +1230,29 @@ fn keepouts(ctx: &Ctx, cy: &BTreeMap<String, (Ring, BoardSide)>, out: &mut Vec<D
                 }
             }
         }
+    }
+}
+
+/// Items of kinds a custom rule disallows in its scope.
+fn disallowed(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
+    let rules = &ctx.p.board().custom_rules;
+    if rules.iter().all(|r| r.disallow.is_empty()) {
+        return;
+    }
+    for (k, i) in geo::clearance::disallowed(ctx.p, items) {
+        let (r, it) = (&rules[k], &items[i]);
+        let Some(sev) = rule_severity(Some(r)) else { continue };
+        let label = it.item.to_string();
+        let mut d =
+            Diagnostic::new(sev, "drc.disallowed", format!("{label} is not allowed here by custom rule `{}`", r.name))
+                .with_subject(item_ref(&label))
+                .with_subject(ObjectRef::Named { kind: "rule".into(), name: r.name.clone() })
+                .at(it.anchor)
+                .with_hint(format!("move or remove {label}, or change custom rule `{}` (board.custom_rule)", r.name));
+        if let Some(n) = &it.net {
+            d = d.with_subject(ObjectRef::Net(n.clone()));
+        }
+        out.push(d);
     }
 }
 

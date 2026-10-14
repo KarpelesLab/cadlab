@@ -117,6 +117,8 @@ fn route_all(r: &Registry, s: &mut Session) {
         pads: PadConnection::Thermal,
         thermal_gap: None,
         thermal_spoke: None,
+        thermal_angle: None,
+        thermal_spokes: None,
     });
 }
 
@@ -530,6 +532,8 @@ fn feature_board() -> (tempfile::TempDir, Registry, Session) {
             pads,
             thermal_gap: Some(n(0.4)),
             thermal_spoke: Some(n(0.35)),
+            thermal_angle: None,
+            thermal_spokes: None,
         });
     }
     let id = p.alloc_id();

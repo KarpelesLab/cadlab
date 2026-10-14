@@ -211,6 +211,30 @@ pub struct Rules {
     /// added to the paste margin, unless a pad or footprint sets its own.
     #[serde(skip_serializing_if = "is_zero_scale")]
     pub paste_ratio: Scale,
+    /// What the silkscreen-to-pad check measures silkscreen against: the solder mask openings
+    /// (pads grown by their mask margin, and mask drawings; the default, as fabs clip the
+    /// legend there) or the exposed pad copper.
+    #[serde(skip_serializing_if = "SilkCheck::is_default")]
+    pub silk_check: SilkCheck,
+}
+
+/// What silkscreen is checked against (`board.rules` `silk_check`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SilkCheck {
+    /// Solder mask openings: pads with a mask opening, grown by their mask margin (pad, else
+    /// footprint, else `mask_expansion`), and mask drawings of footprints and the board.
+    #[default]
+    Mask,
+    /// The copper of pads with a mask opening, without the mask margin.
+    Copper,
+}
+
+impl SilkCheck {
+    /// Whether this is the default (`mask`).
+    pub fn is_default(&self) -> bool {
+        *self == SilkCheck::Mask
+    }
 }
 
 fn is_zero_nm(n: &Nm) -> bool {
@@ -242,6 +266,7 @@ impl Default for Rules {
             mask_min_web: Nm::ZERO,
             paste_margin: Nm::ZERO,
             paste_ratio: Scale(0),
+            silk_check: SilkCheck::Mask,
         }
     }
 }
@@ -355,6 +380,29 @@ pub struct RuleScope {
     /// Items entirely inside the keep-out (or rule area) of this name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_area: Option<String>,
+    /// Items touching (overlapping) the keep-out (or rule area) of this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touches_area: Option<String>,
+}
+
+/// How the DRC reports violations of a custom rule.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleSeverity {
+    /// As errors.
+    #[default]
+    Error,
+    /// As warnings.
+    Warning,
+    /// Not at all (the rule's values still apply to zone fills and the router).
+    Ignore,
+}
+
+impl RuleSeverity {
+    /// Whether this is the default (`error`).
+    pub fn is_default(&self) -> bool {
+        *self == RuleSeverity::Error
+    }
 }
 
 /// A design rule for part of the board (neck-downs under fine-pitch parts, breakout areas):
@@ -376,6 +424,34 @@ pub struct CustomRule {
     /// `min_track_width` still applies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_width: Option<Nm>,
+    /// The other item of a pair, for the clearance: when set, the rule applies only between an
+    /// item in `scope` and one in `with` (either way round), not between an item in `scope`
+    /// and anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with: Option<RuleScope>,
+    /// Item kinds forbidden in the scope: the DRC reports each item of these kinds in it
+    /// (`drc.disallowed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallow: Vec<ItemKind>,
+    /// How the DRC reports violations of this rule (clearance, track width, disallowed items):
+    /// error (default), warning, or ignore. Shorts are always errors.
+    #[serde(default, skip_serializing_if = "RuleSeverity::is_default")]
+    pub severity: RuleSeverity,
+}
+
+impl CustomRule {
+    /// A rule with only a name and a scope.
+    pub fn new(name: impl Into<String>, scope: RuleScope) -> CustomRule {
+        CustomRule {
+            name: name.into(),
+            scope,
+            clearance: None,
+            track_width: None,
+            with: None,
+            disallow: Vec::new(),
+            severity: RuleSeverity::Error,
+        }
+    }
 }
 
 /// Built-in design rule presets: engineering intent, not a fab's limits (sources in
@@ -507,6 +583,13 @@ pub struct Zone {
     /// Thermal relief spoke width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_spoke: Option<Nm>,
+    /// Direction of the first thermal spoke relative to each pad's orientation (default: 45°
+    /// for round pads, 90° for others), unless the pad or its footprint sets its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_angle: Option<Angle>,
+    /// Number of thermal spokes per pad, evenly spaced from the first (1 to 8; default 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_spokes: Option<u8>,
 }
 
 /// An area where some items are forbidden. One that forbids nothing is a named rule area, for

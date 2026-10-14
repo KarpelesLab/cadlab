@@ -145,6 +145,8 @@ fn add_culling_cases(p: &mut cadlab::model::Project) {
             pads: if k % 4 == 0 { PadConnection::None } else { PadConnection::Thermal },
             thermal_gap: None,
             thermal_spoke: None,
+            thermal_angle: None,
+            thermal_spokes: None,
         });
     }
     let id = p.alloc_id();
@@ -187,10 +189,8 @@ fn add_culling_cases(p: &mut cadlab::model::Project) {
         }
     }
     p.board_mut().custom_rules.push(CustomRule {
-        name: "vias".into(),
-        scope: RuleScope { kinds: vec![ItemKind::Via], ..Default::default() },
         clearance: Some(Nm::from_um(350)),
-        track_width: None,
+        ..CustomRule::new("vias", RuleScope { kinds: vec![ItemKind::Via], ..Default::default() })
     });
     if let Some(z) = p.board_mut().zones.iter_mut().find(|z| z.name == "small1") {
         z.pads = PadConnection::ThtThermal;

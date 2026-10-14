@@ -337,8 +337,18 @@ pub struct FootprintSet {
     /// Zone connection: thermal, solid, none or tht_thermal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone_connection: Option<crate::model::board::PadConnection>,
+    /// Thermal relief gap to zones, instead of the zone's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_gap: Option<Nm>,
+    /// Thermal relief spoke width, instead of the zone's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_spoke: Option<Nm>,
+    /// Direction of the first thermal spoke relative to the pad's orientation (`45deg`),
+    /// instead of the zone's (default: 45° for round pads, 90° for others).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_angle: Option<crate::units::Angle>,
     /// Settings to reset to inherited: mask_margin, paste_margin, paste_ratio, clearance,
-    /// zone_connection; for pads also slot.
+    /// zone_connection, thermal_gap, thermal_spoke, thermal_angle; for pads also slot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unset: Vec<String>,
     /// Pads only: SMD pads on the other side of the footprint (true) or on its side (false).
@@ -445,6 +455,15 @@ fn overrides_text(o: &crate::model::footprint::Overrides) -> Vec<String> {
             serde_json::to_value(x).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
         ));
     }
+    if let Some(x) = o.thermal_gap {
+        v.push(format!("thermal gap {x}"));
+    }
+    if let Some(x) = o.thermal_spoke {
+        v.push(format!("thermal spoke {x}"));
+    }
+    if let Some(x) = o.thermal_angle {
+        v.push(format!("thermal angle {x}"));
+    }
     v
 }
 
@@ -460,8 +479,11 @@ impl Command for FootprintSet {
         let p = ctx.project()?;
         let name = util::footprint(p, &self.name)?.name.clone();
         let bad = |code: &'static str, msg: String| CommandError::invalid_args(code, msg);
-        if self.clearance.is_some_and(|v| v < Nm::ZERO) {
-            return Err(bad("footprint.invalid_setting", "`clearance` cannot be negative".into()));
+        if self.clearance.is_some_and(|v| v < Nm::ZERO) || self.thermal_gap.is_some_and(|v| v < Nm::ZERO) {
+            return Err(bad("footprint.invalid_setting", "`clearance` and `thermal_gap` cannot be negative".into()));
+        }
+        if self.thermal_spoke.is_some_and(|v| v <= Nm::ZERO) {
+            return Err(bad("footprint.invalid_setting", "`thermal_spoke` must be positive".into()));
         }
         if self.paste_ratio.is_some_and(|r| r.0 <= -500_000 || r.0 >= 1_000_000) {
             return Err(bad(
@@ -470,8 +492,17 @@ impl Command for FootprintSet {
             )
             .with_hint("e.g. -0.05 for 5 % smaller openings"));
         }
-        const FIELDS: [&str; 6] =
-            ["mask_margin", "paste_margin", "paste_ratio", "clearance", "zone_connection", "slot"];
+        const FIELDS: [&str; 9] = [
+            "mask_margin",
+            "paste_margin",
+            "paste_ratio",
+            "clearance",
+            "zone_connection",
+            "thermal_gap",
+            "thermal_spoke",
+            "thermal_angle",
+            "slot",
+        ];
         for u in &self.unset {
             if !FIELDS.contains(&u.as_str()) || (u == "slot" && self.pads.is_empty()) {
                 return Err(bad("footprint.invalid_setting", format!("`{u}` cannot be unset here"))
@@ -505,6 +536,15 @@ impl Command for FootprintSet {
             if self.zone_connection.is_some() {
                 o.zone_connection = self.zone_connection;
             }
+            if self.thermal_gap.is_some() {
+                o.thermal_gap = self.thermal_gap;
+            }
+            if self.thermal_spoke.is_some() {
+                o.thermal_spoke = self.thermal_spoke;
+            }
+            if let Some(a) = self.thermal_angle {
+                o.thermal_angle = Some(a.normalized());
+            }
             for u in &self.unset {
                 match u.as_str() {
                     "mask_margin" => o.mask_margin = None,
@@ -512,6 +552,9 @@ impl Command for FootprintSet {
                     "paste_ratio" => o.paste_ratio = None,
                     "clearance" => o.clearance = None,
                     "zone_connection" => o.zone_connection = None,
+                    "thermal_gap" => o.thermal_gap = None,
+                    "thermal_spoke" => o.thermal_spoke = None,
+                    "thermal_angle" => o.thermal_angle = None,
                     _ => {}
                 }
             }

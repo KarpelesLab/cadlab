@@ -74,9 +74,15 @@ For each zone and each of its layers, in priority order (higher first, ties in b
    the larger of both zones' clearances; keep-outs with `no_pours` on that layer.
 3. Same-net pads, by the pad's own zone connection (`footprint.set --zone-connection`, pad then
    footprint), else the zone's: `solid` merges them; `thermal` keeps a `thermal_gap` around the pad
-   (default: the clearance) and adds spokes of width `thermal_spoke` (default: max(net track width,
-   0.25 mm)) in the four axis directions; `none` keeps a clearance gap; `tht_thermal` is `thermal` for
-   plated through-hole pads and `solid` for the others. Same-net tracks and vias are always solid.
+   (default: the clearance) and adds `thermal_spokes` spokes (default 4, evenly spaced) of width
+   `thermal_spoke` (default: max(net track width, 0.25 mm)); `none` keeps a clearance gap;
+   `tht_thermal` is `thermal` for plated through-hole pads and `solid` for the others. Same-net tracks
+   and vias are always solid. Gap, spoke width and the first spoke's direction (`thermal_angle`) can be
+   set per pad or footprint (`footprint.set`; pad, then footprint, then zone). The angle is relative to
+   the pad's orientation (footprint and pad rotation, mirrored on the bottom side); by default 45° for
+   round pads (diagonal spokes) and 90° for others (along the pad's axes), as KiCad's pads. Spokes along
+   a board axis end `thermal_gap + thermal_spoke` beyond the pad's bounding box; slanted ones as far
+   beyond the farthest crossing of the pad's outline.
 4. Opening by `min_width / 2` removes copper narrower than `min_width` (default: rules `zone_min_width`).
 5. Spokes are added only when they lie entirely in the allowed area of step 2 and reach the pour (a spoke that
    would violate a clearance is dropped, never trimmed into a sliver).
@@ -124,6 +130,7 @@ footprint follows; nothing in them names a fab (D12).
 | board `mask_min_web` | board | openings closer than it merge: the mask layer is written as the closing of all openings (grown by half the web, shrunk back, round joins), as regions |
 | `clearance` | pad, footprint | see the clearance resolution below |
 | `zone_connection` | pad, footprint | how zones of the pad's net join it (zone fill, step 3) |
+| `thermal_gap`, `thermal_spoke`, `thermal_angle` | pad, footprint | thermal relief gap, spoke width and first spoke direction (relative to the pad) instead of the zone's (zone fill, step 3) |
 | `back` | SMD pad | the pad's copper, mask and paste are on the other side of its footprint (card-edge fingers, heat sinks soldered from the back) |
 | `mask` | pad | openings on the pad's outer copper (default), on the footprint's side only (`front`) or the other side only (`back`) for holes, or none (`none`: tented thermal vias, covered heat spreaders) |
 | `slot` | through-hole and non-plated pads | an oval hole (size along the pad's X and Y); the drill is its width |
@@ -151,19 +158,34 @@ clearance and/or a track width to the copper items in a scope: item `kinds` (pad
 graphic), a copper `layer`, the pads and drawings of footprints matching a `footprint` pattern
 (designator or footprint name, `*` `?`), items touching the courtyard of matching footprints
 (`in_courtyard`), items entirely inside a named keep-out or rule area (`in_area`, `keepout.add
---rule-area`). A rule's clearance applies when either item is in scope (later rules win); its track
+--rule-area`), items touching one (`touches_area`). A rule's clearance applies when either item is in
+scope (later rules win); with a second scope (`with_kinds`, `with_layer`, `with_footprint`,
+`with_in_courtyard`, `with_in_area`, `with_touches_area`, stored as `with`) it applies only between an
+item in scope and one in the second scope, either way round (KiCad's conditions on `B`). Its track
 width replaces the net class width (`drc.track_width` when a track in scope is narrower; the board
-minimum still applies). Zone fills keep each item's rule clearance too.
+minimum still applies). `disallow` lists item kinds the scope forbids (`drc.disallowed` for each such
+item). `severity` (`error`, default; `warning`; `ignore`) sets how the DRC reports violations the rule
+decides (`drc.clearance` when it is the rule in effect for the pair, `drc.track_width`,
+`drc.disallowed`); the rule's values still apply to fills and the router, and shorts are always errors.
+Zone fills keep each item's rule clearance too (for a rule between two scopes, the largest one that can
+apply between the item and a zone).
+
+**Silkscreen** (`board.rules` `silk_check`) is checked against the solder mask openings by default
+(`mask`): pads with an opening on that side grown by their mask margin (pad, footprint, else
+`mask_expansion`; non-plated holes included), and mask drawings of footprints (`drc.silk_over_pad`,
+`drc.silk_over_mask_opening`), as fabs clip the legend there and as KiCad checks it. `copper` checks the
+exposed pad copper instead (cadlab's behavior before, and what the minimum web merging of mask openings
+does not change).
 
 ## Commands
 
 | Group | Commands |
 |---|---|
-| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance and track width, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
+| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
 | `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
-| `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set`, `remove`, `list`, `fill` (report area/islands, warn empty or split) |
+| `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
 | `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given; `rule_area`: forbid nothing, a named area for custom rules), `remove`, `list` |
 | `drc` | `run` (plus `fab.check` warnings for the manifest `targets`) |
 | `board` (stackup) | `stackup` (copper, dielectrics, line model per layer), `dielectric` (thickness, εr, material per gap; [ELECTRICAL.md](ELECTRICAL.md)) |
@@ -269,6 +291,7 @@ the library stay).
 | `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
 | board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad (`import.footprint_as_via`, `import.footprint_as_holes`) |
 | `solder_mask_margin`, `solder_paste_margin`, `solder_paste_margin_ratio` / `solder_paste_ratio`, `clearance`, `zone_connect` (pad, footprint) | the pad's or footprint's settings (zero margins and clearances are KiCad's "not set" and stay unset; `zone_connect` 0 none, 1 thermal, 2 solid, 3 `tht_thermal`) |
+| `thermal_gap`, `thermal_width` / `thermal_bridge_width` (pad, footprint), `thermal_bridge_angle` (pad) | the pad's or footprint's thermal gap, spoke width and spoke angle (zero sizes stay unset; an angle equal to KiCad's default for the pad shape, 45° round, 90° others, which is cadlab's, stays unset). The export writes `thermal_width` and `thermal_gap` and hands a footprint's angle to its pads; a zone's `thermal_angle` and `thermal_spokes` have no KiCad counterpart (KiCad pads always have up to 4 spokes) and are not written |
 | setup `pad_to_mask_clearance`, `solder_mask_min_width`, `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | `board.rules` `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio` |
 | `net_tie_pad_groups` (`"1, 2"`) | the footprint's `net_ties` |
 | project text variables (`${NAME}` in board texts) | replaced by their `.kicad_pro` values |
@@ -296,13 +319,17 @@ assignments give nets their class, custom rules without condition tighten board 
 (`board.custom_rules`) when every term of the condition (joined by `&&`) is one of `A.Type == 'Pad'`
 (`Track`, `Via`, `Zone`, `Graphic`; `!=` too), `A.Layer == '<copper layer>'`, `A.memberOfFootprint('…')`,
 `A.intersectsCourtyard('…')` (the library prefix of a footprint pattern is dropped: cadlab footprint
-names have none) or `A.enclosedByArea('…')`, or a parenthesized `||` of one kind of term (as the export
-writes them); a rule `(layer ...)` naming one copper layer is the layer term; their `clearance` and
-`track_width` minimums are kept (a maximum is not checked: `import.rule_partial`). Not supported, each
-reported (`import.rule_unsupported`): conditions on `B`, other functions (`hasComponentClass`,
-`insideArea`, ...), net class terms mixed with geometric ones, other constraints in scoped rules
-(`disallow`, `courtyard_clearance`, `silk_clearance`, ...), and rules switched off
-(`severity ignore` or `exclusion`). Zero minimums keep cadlab's value (`import.rule_zero`), except `min_silk_clearance`, which
+names have none), `A.enclosedByArea('…')` or `A.intersectsArea('…')` (`insideArea`, its older name), or a
+parenthesized `||` of one kind of term (as the export writes them); the same terms on `B` form the rule's
+second scope (`with`, clearance rules only); a rule `(layer ...)` naming one copper layer is the layer term;
+their `clearance` and `track_width` minimums and `disallow` (`track`, `via`, `pad`, `zone`, `graphic`) are
+kept (a maximum is not checked: `import.rule_partial`). A rule's `severity` is kept (`exclusion` as
+`ignore`); a rule without condition that has a severity or a `disallow` becomes a custom rule over
+everything rather than a board minimum. Not supported, each reported (`import.rule_unsupported`): terms
+relating both items (`A.Net == B.Net`), other functions (`hasComponentClass`, ...), net class terms mixed
+with geometric ones or with a severity, other constraints in scoped rules (`courtyard_clearance`,
+`silk_clearance`, ...), track widths with conditions on `B`, and disallowed types without counterpart
+(`text`, `hole`, `footprint`, `micro_via`, ...). Zero minimums keep cadlab's value (`import.rule_zero`), except `min_silk_clearance`, which
 becomes `silk_to_pad` even at zero (silkscreen may then touch pads but not cover them, as KiCad checks
 it).
 
@@ -371,8 +398,11 @@ courtyards) count an overlap only where it is wider than 2 µm.
 | `drc.copper_to_edge` | error | copper closer than `copper_to_edge` to any contour |
 | `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine), or a board hole is inside a courtyard (either side) |
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout |
-| `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad with a mask opening on that side |
+| `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's solder mask opening on that side (grown by its mask margin; with `silk_check: copper`, to the pad copper) |
+| `drc.silk_over_mask_opening` | warning | silkscreen closer than `silk_to_pad` to a mask opening drawn by a footprint or on the board (`silk_check: mask`) |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
+| `drc.disallowed` | error (rule's severity) | a copper item of a kind a custom rule's `disallow` forbids in its scope |
+
 | `drc.unrouted` | error | a ratsnest connection, with both ends |
 | `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |
 | `drc.impedance` | warning | tracks of a net whose class has an `impedance` target more than 10 % off on their layer |

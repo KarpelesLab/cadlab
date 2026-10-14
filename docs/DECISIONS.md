@@ -669,6 +669,40 @@ since the fab clips silk at pads and a margin buys no yield, and with it cadlab'
 footprint's own silk); the aliases and argument forms make the documented examples true without adding
 operations outside the registry.
 
+### D46. DRC and pour parity with KiCad: silkscreen against mask openings, thermal spoke angles and counts, rule pairs, `disallow` and severities (2026-10-14)
+Three gaps the open-source corpus listed (TESTING.md, "Known issues") are modeled rather than tolerated.
+**Silkscreen** is checked against the solder mask openings by default (`board.rules` `silk_check: mask`):
+pads with an opening on that side grown by their mask margin (pad, footprint, `mask_expansion`; NPTH holes
+included) and mask drawings of footprints and the board, the latter as a new code
+`drc.silk_over_mask_opening`; `silk_check: copper` keeps the former check against pad copper. With no
+margin and no drawings both agree, so designs without mask settings report what they did.
+**Thermal reliefs** gain a spoke direction and count: pads and footprints may set `thermal_gap`,
+`thermal_spoke` and `thermal_angle` (`Overrides`, pad then footprint then zone), zones `thermal_angle` and
+`thermal_spokes` (1 to 8, default 4). The angle is relative to the pad's orientation (mirrored on the bottom
+side); unset, it is 45° for round pads and 90° for others, which is KiCad's user-visible default (taken from
+its documentation and observed behavior, not its code). This changes fills of round pads from axis to
+diagonal spokes and turns spokes with rotated pads; axis spokes keep their exact former geometry, slanted
+ones are rectangles placed in floating point and rounded to the nanometer, reaching `gap + width` beyond
+the farthest crossing of the pad outline. KiCad's file format exposes pad and footprint `thermal_gap`,
+`thermal_width` (pads also `thermal_bridge_width`) and pad `thermal_bridge_angle`: all are imported (an
+angle equal to the shape default stays unset) and exported (a footprint angle handed to its pads, KiCad
+having none at that level). The zone angle and spoke count have no KiCad counterpart and are not
+exported. **Custom rules** gain a second scope `with` (KiCad's conditions on `B`: a clearance applies
+between an item in `scope` and one in `with`, either way round; resolution keeps "last rule in board
+order wins" across single-scope and pair rules), `touches_area` (`intersectsArea`/`insideArea`), `disallow`
+(item kinds forbidden in the scope, `drc.disallowed`) and `severity` (error, warning, ignore; KiCad's
+`exclusion` read as ignore). A severity only changes how the DRC reports violations the rule decides: the
+values still drive fills and the router, and shorts stay errors. A paired rule makes zone fills keep the
+largest pair clearance that can involve a zone, so a fill never violates the DRC. Not modeled: terms
+relating both items (`A.Net == B.Net`), disallowed `text`, `hole`, `footprint` and via subtypes, track widths
+conditioned on `B`; each is reported on import. The corpus manifest is left unchanged: its known
+differences for silkscreen and pour connectivity need re-measuring with `kicad-cli`.
+*Why:* each gap made the KiCad oracle disagree on real boards for reasons that are design data, not
+algorithm: the mask expansion KiCad's silkscreen check sees, the diagonal spokes that reach pads cadlab's
+axis spokes missed, and rules the import had to drop. Modeling them once in the shared geometry and
+rules keeps every consumer (DRC, fills, exports) consistent, and keeps them editable through commands.
+
 ## Open questions
+
 
 None currently.

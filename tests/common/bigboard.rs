@@ -469,6 +469,8 @@ pub fn build(spec: Spec) -> (tempfile::TempDir, Registry, Session) {
             pads: PadConnection::Thermal,
             thermal_gap: None,
             thermal_spoke: None,
+            thermal_angle: None,
+            thermal_spokes: None,
         });
     }
     s.mark_dirty();

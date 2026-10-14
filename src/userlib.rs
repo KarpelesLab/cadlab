@@ -186,6 +186,9 @@ impl LibBlock {
 
 /// One library item.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Items are handled one or a few at a time (library reads and writes); boxing would only
+// change the public variants.
+#[allow(clippy::large_enum_variant)]
 pub enum Item {
     /// A part.
     Part(Part),
