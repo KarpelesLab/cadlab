@@ -6,7 +6,8 @@
 //! - string / number / integer / enum → `--name <VALUE>`
 //! - array → `--name a,b` or `--name a --name b`; `--name ""` gives an empty list
 //! - object (map) → `--name key=value` (repeatable; `key=` sets null, which removes)
-//! - anything else → `--name '<json>'`
+//! - fixed-size tuple of scalars (points) → `--name 12.7mm,8mm` (or JSON)
+//! - anything else → `--name '<json>'`, or `--name @file.json` to read the JSON from a file
 //!
 //! Names listed in the command's `POSITIONAL` become positional arguments.
 
@@ -20,9 +21,13 @@ enum ArgKind {
     Bool,
     Integer,
     Number,
-    String { choices: Vec<String> },
+    String {
+        choices: Vec<String>,
+    },
     Array(Box<ArgKind>),
     Map,
+    /// A fixed-size array of scalars (`[x, y]` points): `12.7mm,8mm` or JSON.
+    Tuple(usize),
     Json,
 }
 
@@ -57,6 +62,13 @@ impl ArgKind {
             ["integer"] => ArgKind::Integer,
             ["number"] => ArgKind::Number,
             ["string"] => ArgKind::String { choices: vec![] },
+            ["array"]
+                if schema.get("prefixItems").and_then(Value::as_array).is_some_and(|items| {
+                    items.iter().all(|i| ArgKind::of(i) == ArgKind::String { choices: vec![] })
+                }) =>
+            {
+                ArgKind::Tuple(schema["prefixItems"].as_array().map_or(0, Vec::len))
+            }
             ["array"] => {
                 let item = schema.get("items").map(ArgKind::of).unwrap_or(ArgKind::Json);
                 match item {
@@ -91,10 +103,32 @@ impl ArgKind {
                 .and_then(|f| serde_json::Number::from_f64(f).map(Value::Number))
                 .ok_or_else(|| format!("expected a number, got `{raw}`")),
             ArgKind::String { .. } => Ok(Value::from(raw)),
-            ArgKind::Json => serde_json::from_str(raw).map_err(|e| format!("expected JSON: {e}")),
+            ArgKind::Tuple(n) => {
+                if raw.trim_start().starts_with('[') {
+                    return ArgKind::Json.convert(raw);
+                }
+                let parts: Vec<Value> = raw.split(',').map(|p| Value::from(p.trim())).collect();
+                if parts.len() != *n {
+                    return Err(format!("expected {n} comma-separated values (`12.7mm,8mm`), got `{raw}`"));
+                }
+                Ok(Value::Array(parts))
+            }
+            ArgKind::Json => json_arg(raw),
             ArgKind::Array(_) | ArgKind::Map => unreachable!("handled by the caller"),
         }
     }
+}
+
+/// A JSON argument: inline JSON, or `@path` to read it from a file.
+pub fn json_arg(raw: &str) -> Result<Value, String> {
+    let text = match raw.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path}`: {e}"))?,
+        None => raw.to_string(),
+    };
+    serde_json::from_str(&text).map_err(|e| {
+        let what = raw.strip_prefix('@').map_or_else(|| "the value".to_string(), |path| format!("`{path}`"));
+        format!("expected JSON ({what}: {e}); pass inline JSON or @file.json")
+    })
 }
 
 fn kebab(s: &str) -> String {
@@ -132,7 +166,9 @@ fn entry_command(e: &Entry) -> ClapCommand {
             }
             ArgKind::Array(_) => arg.action(ArgAction::Append).value_delimiter(',').value_name("A,B,..."),
             ArgKind::Map => arg.action(ArgAction::Append).value_name("KEY=VALUE"),
-            ArgKind::Json => arg.value_name("JSON"),
+            ArgKind::Tuple(2) => arg.value_name("X,Y"),
+            ArgKind::Tuple(_) => arg.value_name("A,B,..."),
+            ArgKind::Json => arg.value_name("JSON|@FILE"),
             _ => arg,
         };
         cmd = cmd.arg(arg);
@@ -142,8 +178,10 @@ fn entry_command(e: &Entry) -> ClapCommand {
 
 /// Global options shared by every subcommand.
 pub fn global_args(cmd: ClapCommand) -> ClapCommand {
+    const HEADING: &str = "Global options";
     cmd.arg(
         Arg::new("project")
+            .help_heading(HEADING)
             .short('p')
             .long("project")
             .global(true)
@@ -152,6 +190,7 @@ pub fn global_args(cmd: ClapCommand) -> ClapCommand {
     )
     .arg(
         Arg::new("json")
+            .help_heading(HEADING)
             .long("json")
             .global(true)
             .action(ArgAction::SetTrue)
@@ -159,13 +198,25 @@ pub fn global_args(cmd: ClapCommand) -> ClapCommand {
     )
     .arg(
         Arg::new("dry_run")
+            .help_heading(HEADING)
             .long("dry-run")
             .global(true)
             .action(ArgAction::SetTrue)
             .help("Run, report the result, then roll back"),
     )
-    .arg(Arg::new("quiet").short('q').long("quiet").global(true).action(ArgAction::SetTrue).help("Only print errors"))
+    .arg(
+        Arg::new("quiet")
+            .help_heading(HEADING)
+            .short('q')
+            .long("quiet")
+            .global(true)
+            .action(ArgAction::SetTrue)
+            .help("Only print errors"),
+    )
 }
+
+/// Top-level shortcuts for the checks agents run most (`cadlab erc` was the first thing tried).
+pub const ALIASES: &[(&str, &str)] = &[("erc", "circuit.erc"), ("lint", "circuit.lint")];
 
 /// The full clap tree.
 pub fn build(registry: &Registry) -> ClapCommand {
@@ -176,10 +227,16 @@ pub fn build(registry: &Registry) -> ClapCommand {
         .arg_required_else_help(true);
     root = global_args(root);
     for (group, entries) in registry.groups() {
-        let mut g = ClapCommand::new(group.to_string()).about(format!("{group} commands"));
-        // `cadlab history` alone lists history.
-        if group == "history" {
-            g = g.about("Undo/redo history (alone: list steps)");
+        let about = cadlab::commands::group_summary(group).map_or_else(|| format!("{group} commands"), String::from);
+        let mut g = ClapCommand::new(group.to_string()).about(about);
+        // `cadlab history` alone lists history; `cadlab drc` alone runs the check.
+        if group == "history" || group == "drc" {
+            g = g.args_conflicts_with_subcommands(true);
+            if let Some(run) = entries.iter().find(|e| e.name == "drc.run") {
+                for a in entry_command(run).get_arguments() {
+                    g = g.arg(a.clone());
+                }
+            }
         } else {
             g = g.subcommand_required(true).arg_required_else_help(true);
         }
@@ -187,6 +244,12 @@ pub fn build(registry: &Registry) -> ClapCommand {
             g = g.subcommand(entry_command(e));
         }
         root = root.subcommand(g);
+    }
+    for (alias, target) in ALIASES {
+        if let Some(e) = registry.get(target) {
+            let action = target.replace('.', " ").replace('_', "-");
+            root = root.subcommand(entry_command(e).name(*alias).about(format!("{} (alias of `{action}`)", e.summary)));
+        }
     }
     root.subcommand(ClapCommand::new("undo").about("Undo the last change (alias of `history undo`)").arg(steps_arg()))
         .subcommand(ClapCommand::new("redo").about("Redo an undone change (alias of `history redo`)").arg(steps_arg()))

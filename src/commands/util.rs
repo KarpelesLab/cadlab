@@ -99,3 +99,13 @@ pub(crate) fn refdes_key(p: &Project, refdes: &str) -> Result<String, CommandErr
     let id = component(p, refdes)?.id;
     Ok(p.circuit().components.iter().find(|(_, c)| c.id == id).map(|(k, _)| k.clone()).expect("found above"))
 }
+
+/// The name a value has in command arguments and JSON (`power_out`, `led`), for text summaries:
+/// what an agent reads in a summary must be what it can type back.
+pub(crate) fn wire_name<T: serde::Serialize>(v: &T) -> String {
+    match serde_json::to_value(v) {
+        Ok(serde_json::Value::String(s)) => s,
+        Ok(other) => other.to_string(),
+        Err(_) => String::new(),
+    }
+}

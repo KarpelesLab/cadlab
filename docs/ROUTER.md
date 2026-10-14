@@ -235,7 +235,7 @@ iteration through a callback, cancellation polled every 4096 search expansions, 
 stops at 75%, legalization at 100%) that returns the best legal partial result. When the budget cuts a run short,
 results may differ between runs.
 
-**Commands.** `route.all {budget_ms?, layers?, effort?, seed?, fanout?, any_angle?, gridless?, arcs?,
+**Commands.** `route.all {budget? ("60s") or budget_ms?, layers?, effort?, seed?, fanout?, any_angle?, gridless?, arcs?,
 arc_radius?, router?, neck?}`, `route.nets {nets, ...}` (net or class names, `class:power`), `route.connection {from, to, shove?,
 ...}` (pins), `route.track {layer, points, net?, width?, mode?}` (push-and-shove placement, below),
 `route.fanout {refdes?, layers?}`, `route.rip {nets? | all}` (unlocked items only), `route.status` (connections,
@@ -295,7 +295,7 @@ and clearance are used (`diffpair.no_class_rules` note). Nets of a pair use the 
 router's profile, `track.add`'s default and the DRC's class width check), and the DRC allows the pair's gap
 between its two nets where it is smaller than the clearance.
 
-`route.diffpair {pairs?, layers?, budget_ms?, skew?}` (`router::route_diffpairs`):
+`route.diffpair {pairs?, layers?, budget?, skew?}` (`router::route_diffpairs`):
 
 1. **Plan.** Each pad of the positive net is matched with the nearest free pad of the negative net (greedy
    by distance, at most 10 mm apart): an *end*. Ends are joined by a minimum spanning tree over their
@@ -547,7 +547,7 @@ try again.
 ## Benchmarks
 
 **Suite** (`tests/common/routebench.rs`): deterministic generated boards, easiest first, each routed from
-scratch with `route.all {seed: 1, budget_ms: 120000}`:
+scratch with `route.all {seed: 1, budget: "120s"}`:
 
 | board | what |
 |---|---|

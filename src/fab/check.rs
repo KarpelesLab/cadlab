@@ -423,7 +423,10 @@ impl Ctx<'_> {
                     "fab.silk_width",
                     format!("footprint {name} has {w} silkscreen lines, {who}'s minimum is {m}"),
                 )
-                .with_hint("the fab may print thin lines faintly or drop them; widen the footprint's silk lines in the project library if they matter");
+                .with_hint(
+                    "the fab may print thin lines faintly or drop them; if they matter, re-import the footprint \
+                     (`footprint.import_kicad --replace`) with wider silk lines, or regenerate it",
+                );
                 d.subjects = refs.into_iter().map(ObjectRef::Name).collect();
                 out.push(d);
             }
@@ -595,7 +598,7 @@ pub fn parts(
                 "fab.no_suppliers",
                 "no part suppliers are configured; parts availability was not checked",
             )
-            .with_hint("add catalog files to ~/.config/cadlab/catalogs/ or configure DigiKey (docs/PARTS.md)"),
+            .with_hint(crate::supplier::NO_SUPPLIERS_HINT),
         );
     } else if !catalog.is_empty() && only.is_empty() {
         diags.push(

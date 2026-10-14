@@ -13,7 +13,7 @@
 //! | unconnected `power_in` pin | error; other unconnected pins: warning (unless marked no-connect) |
 //! | references to missing components, parts or pins | error |
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diag::Diagnostic;
 use crate::model::Project;
@@ -40,7 +40,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
     // Kind of every pin in nets; stale references reported.
-    let kind_of = |pin: &PinRef| -> Result<(PinKind, Category), Box<Diagnostic>> {
+    let kind_of = |pin: &PinRef| -> Result<(PinKind, Category, String), Box<Diagnostic>> {
         let comp = c.components.get(&pin.refdes).ok_or_else(|| {
             Box::new(
                 Diagnostic::error("erc.missing_component", format!("{pin} refers to a component that does not exist"))
@@ -64,15 +64,21 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
                     .with_hint("the part changed (e.g. `bom.replace`); reconnect the net to an existing pin"),
             )
         })?;
-        Ok((sp.kind, part.category))
+        Ok((sp.kind, part.category, sp.label().to_string()))
     };
 
     for (name, net) in &c.nets {
         let mut kinds: BTreeMap<PinKind, Vec<&PinRef>> = BTreeMap::new();
         let mut has_connector = false;
+        // Pins of one component with the same name are one node inside the part (a connector's
+        // two VBUS contacts, a regulator's split output): they count as one driver.
+        let mut drivers: BTreeSet<(&str, String)> = BTreeSet::new();
         for pin in &net.pins {
             match kind_of(pin) {
-                Ok((k, cat)) => {
+                Ok((k, cat, label)) => {
+                    if matches!(k, PinKind::Output | PinKind::PowerOut) {
+                        drivers.insert((pin.refdes.as_str(), label));
+                    }
                     kinds.entry(k).or_default().push(pin);
                     has_connector |= cat == Category::Connector;
                 }
@@ -81,7 +87,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
         }
         let get = |k: PinKind| kinds.get(&k).map(Vec::as_slice).unwrap_or(&[]);
         let outputs: Vec<&PinRef> = get(PinKind::Output).iter().chain(get(PinKind::PowerOut)).copied().collect();
-        if outputs.len() >= 2 {
+        if drivers.len() >= 2 {
             let mut d = Diagnostic::error(
                 "erc.output_conflict",
                 format!("net `{name}` has several outputs driving it: {}", list(&outputs)),

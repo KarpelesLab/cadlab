@@ -132,8 +132,10 @@ impl Command for Generate {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<GenerateResult, CommandError> {
         let spec = match (&self.package, self.spec) {
-            (Some(name), None) => landpattern::packages::parse(name, self.kind.unwrap_or_default())
-                .map_err(|e| CommandError::invalid_args("footprint.unknown_package", e))?,
+            (Some(name), None) => landpattern::packages::parse(name, self.kind.unwrap_or_default()).map_err(|e| {
+                CommandError::invalid_args("footprint.unknown_package", e)
+                    .with_hint(landpattern::packages::unknown_package_hint("spec"))
+            })?,
             (None, Some(spec)) => spec,
             _ => {
                 return Err(CommandError::invalid_args("footprint.missing_package", "give either `package` or `spec`"));
@@ -239,7 +241,7 @@ impl Command for Show {
     }
 
     fn summarize(f: &Footprint) -> String {
-        let mut s = format!("{} ({:?}): {}", f.name, f.mount, f.description);
+        let mut s = format!("{} ({}): {}", f.name, util::wire_name(&f.mount), f.description);
         for p in &f.pads {
             let (w, h) = p.shape.size();
             s += &format!("\n  pad {:>3} at ({}, {}) {} x {}", p.number, p.at.x, p.at.y, w, h);

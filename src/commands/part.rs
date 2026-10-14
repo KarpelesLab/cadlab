@@ -322,8 +322,10 @@ impl Command for Create {
         let opts = GenOptions { density: self.density.unwrap_or_default(), ..Default::default() };
         let generated = match (&self.package, &self.package_spec) {
             (Some(name), _) => {
-                let spec = landpattern::packages::parse(name, chip_kind(self.category))
-                    .map_err(|e| CommandError::invalid_args("footprint.unknown_package", e))?;
+                let spec = landpattern::packages::parse(name, chip_kind(self.category)).map_err(|e| {
+                    CommandError::invalid_args("footprint.unknown_package", e)
+                        .with_hint(landpattern::packages::unknown_package_hint("package_spec"))
+                })?;
                 if params.get("package").is_none() {
                     params.insert("package", ParamValue::Text(name.clone()));
                 }
@@ -427,6 +429,19 @@ impl Command for Create {
             }
         }
 
+        if footprint.is_none() {
+            ctx.report(
+                Diagnostic::warning(
+                    "part.no_footprint",
+                    format!("part `{id}` has no footprint: its components cannot be placed on the board"),
+                )
+                .with_subject(ObjectRef::Part { scheme: "local".into(), id: id.clone() })
+                .with_hint(format!(
+                    "give `package` (see `footprint.generate`) or `package_spec`; for land patterns no generator \
+                     covers, import one with `footprint.import_kicad` and attach it with `part.set {id} --footprint <name>`"
+                )),
+            );
+        }
         let symbol = symbolgen::generate(self.category, pins);
         let description = self.description.clone().unwrap_or_else(|| match (&self.manufacturer, &self.mpn) {
             (_, Some(m)) => format!("{} {m}", self.category.label()),
@@ -549,7 +564,7 @@ impl Command for Show {
 
     fn summarize(o: &PartDetail) -> String {
         let p = &o.part;
-        let mut s = format!("{} ({:?}): {}", p.id, p.category, p.description);
+        let mut s = format!("{} ({}): {}", p.id, util::wire_name(&p.category), p.description);
         if let Some(m) = &p.mpn {
             s += &format!("\n  mpn: {}{m}", p.manufacturer.as_ref().map(|x| format!("{x} ")).unwrap_or_default());
         }
@@ -559,9 +574,12 @@ impl Command for Show {
         for f in &p.footprints {
             s += &format!("\n  footprint: {}", f.footprint);
         }
+        if p.footprints.is_empty() {
+            s += "\n  footprint: none (cannot be placed; `part.set --footprint`)";
+        }
         s += "\n  pins:";
         for pin in &p.symbol.pins {
-            s += &format!("\n    {:>4} {:<12} {:?}", pin.number, pin.name, pin.kind);
+            s += &format!("\n    {:>4} {:<12} {}", pin.number, pin.name, util::wire_name(&pin.kind));
         }
         if !o.used_by.is_empty() {
             s += &format!("\n  used by: {}", o.used_by.join(", "));
@@ -764,10 +782,7 @@ pub(crate) fn require_suppliers(ctx: &Context<'_>) -> Result<(), CommandError> {
             "supplier.none",
             "no part suppliers or catalogs are configured",
         )
-        .with_hint(
-            "import a parts list with `catalog.import`, add catalog files to ~/.config/cadlab/catalogs/ or \
-             CADLAB_CATALOGS, or configure DigiKey, Mouser or Nexar with `cadlab config` (docs/PARTS.md)",
-        ));
+        .with_hint(crate::supplier::NO_SUPPLIERS_HINT));
     }
     Ok(())
 }

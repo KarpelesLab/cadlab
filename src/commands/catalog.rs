@@ -284,7 +284,7 @@ impl Command for List {
 
     fn summarize(o: &Providers) -> String {
         if o.providers.is_empty() {
-            "no part providers configured".into()
+            format!("no part providers configured\n  hint: {}", crate::supplier::NO_SUPPLIERS_HINT)
         } else {
             format!("providers: {}", o.providers.join(", "))
         }

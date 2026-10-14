@@ -53,27 +53,33 @@ GLOBAL OPTS
   -q / -v               verbosity
 ```
 
-Groups follow the registry namespaces. Today: `project`, `part`, `footprint`, `circuit` (components, ERC,
-netlist export, summary), `net`, `netclass`, `block`, `bom`, `history`. Planned: `schematic`, `board`, `place`,
-`track`, `zone`, `drc`, `route`, `render`, `fab`, `import`. Actions with underscores also accept dashes on the
-CLI (`net no-connect`).
+Groups follow the registry namespaces (`cadlab --help` lists them with a one-line summary each): `project`,
+`part`, `footprint`, `circuit` (components, ERC, lint, netlist), `net`, `netclass`, `diffpair`, `lengthgroup`,
+`block`, `bom`, `board`, `place`, `track`, `via`, `impedance`, `current`, `lib`, `catalog`, `drc`, `zone`,
+`keepout`, `route`, `render`, `schematic`, `export`, `fab`, `history`. Actions with underscores also accept dashes
+on the CLI (`net no-connect`). Shortcuts: `cadlab erc` and `cadlab lint` (aliases of `circuit erc` / `circuit
+lint`), `cadlab drc` alone runs `drc run`, `cadlab undo` / `redo`.
 
-Examples:
+Examples (the full session is `tests/agent_session.rs`):
 
 ```sh
-cadlab project new myboard --layers 2 --targets jlcpcb,pcbway
-cadlab part search "LDO 3.3V 500mA SOT-23-5" --in-stock --limit 5
-cadlab bom add mpn:AP2112K-3.3TRG1
-cadlab circuit add AP2112K-3.3TRG1            # -> U2
+cadlab project new myboard --targets jlcpcb,pcbway
+cadlab part search "LDO 3.3V 500mA SOT-23-5" --in-stock --limit 5   # needs a supplier or catalog
+cadlab part create --category ldo --mpn AP2112K-3.3TRG1 --package SOT-23-5 --pins @ldo-pins.json
+cadlab part generic "C 1uF 16V X7R 0402"
+cadlab circuit add AP2112K-3.3TRG1 --refdes U2
 cadlab net connect VBUS J1.VBUS U2.VIN C1.1
 cadlab erc
-cadlab board outline rect 50mm 30mm
-cadlab place U2 10mm 15mm --rot 90 --side top
-cadlab route --all --budget 60s
+cadlab board setup --layers 2
+cadlab board outline --width 50mm --height 30mm
+cadlab board rules --fab jlcpcb
+cadlab place set U2 --at 10mm,15mm --rotation 90 --side top
+cadlab place auto
+cadlab route all --budget 60s
 cadlab drc
-cadlab render board --layers F.Cu,F.SilkS -o top.png
-cadlab fab compare --fab jlcpcb,pcbway
-cadlab export fab --fab pcbway -o out/pcbway/
+cadlab render board out/top.png --layers F.Cu,F.SilkS
+cadlab fab compare jlcpcb,pcbway
+cadlab fab export pcbway out/pcbway/
 ```
 
 ### Generic entry points
@@ -91,7 +97,9 @@ cadlab config digikey | show | path | remove        # user settings: supplier cr
 - Human output on stdout, logs and progress on stderr. With `--json`, stdout carries exactly one JSON document.
 - Exit codes: `0` ok, `1` command error, `2` usage error, `3` completed but checks failed (ERC/DRC errors).
   CI can then run `cadlab drc` and rely on the exit status.
-- Every length argument requires a unit.
+- Every length argument requires a unit; so do durations (`--budget 60s`).
+- JSON-valued flags take inline JSON or `@file.json`; points take `x,y` (`--at 12.7mm,8mm`) or JSON.
+- Summaries print enum values as arguments spell them (`power_out`, not `PowerOut`), so they can be typed back.
 
 ## MCP server
 

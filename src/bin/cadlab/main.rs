@@ -59,7 +59,7 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
             let args = match sm.get_one::<String>("args").map(String::as_str) {
                 None => Ok(json!({})),
                 Some("-") => read_stdin().and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())),
-                Some(s) => serde_json::from_str(s).map_err(|e| e.to_string()),
+                Some(s) => cli::json_arg(s),
             };
             match args {
                 Ok(args) => run_one(registry, g, name, args),
@@ -82,9 +82,24 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
             let steps = sm.get_one::<u32>("steps").copied().unwrap_or(1);
             run_one(registry, g, &format!("history.{sub}"), json!({ "steps": steps }))
         }
+        alias if cli::ALIASES.iter().any(|(a, _)| *a == alias) => {
+            let target = cli::ALIASES.iter().find(|(a, _)| *a == alias).map(|(_, t)| *t).unwrap();
+            let entry = registry.get(target).expect("alias of a registered command");
+            match cli::to_args(entry, sm) {
+                Ok(args) => run_one(registry, g, target, args),
+                Err(e) => usage_error(g, &e),
+            }
+        }
         group => {
             let Some((action, am)) = sm.subcommand() else {
-                // Only `history` allows no action.
+                // `history` alone lists steps; `drc` alone runs the check.
+                if group == "drc" {
+                    let entry = registry.get("drc.run").expect("registered");
+                    return match cli::to_args(entry, sm) {
+                        Ok(args) => run_one(registry, g, "drc.run", args),
+                        Err(e) => usage_error(g, &e),
+                    };
+                }
                 return run_one(registry, g, "history.list", json!({}));
             };
             let name = format!("{group}.{action}");

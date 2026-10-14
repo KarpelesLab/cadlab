@@ -198,7 +198,8 @@ impl Command for Symbol {
     const NAME: &'static str = "render.symbol";
     const SUMMARY: &'static str = "Render a part's schematic symbol to PNG or SVG";
     const KIND: CommandKind = CommandKind::Query;
-    const POSITIONAL: &'static [&'static str] = &["part"];
+    // Output path second, like `render board [PATH]` and `render schematic [PATH]`.
+    const POSITIONAL: &'static [&'static str] = &["part", "path"];
     type Output = Rendered;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Rendered, CommandError> {
@@ -341,7 +342,7 @@ impl Command for Footprint {
     const NAME: &'static str = "render.footprint";
     const SUMMARY: &'static str = "Render a footprint: pads, paste, courtyard, silkscreen, fab outline";
     const KIND: CommandKind = CommandKind::Query;
-    const POSITIONAL: &'static [&'static str] = &["name"];
+    const POSITIONAL: &'static [&'static str] = &["name", "path"];
     type Output = Rendered;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Rendered, CommandError> {

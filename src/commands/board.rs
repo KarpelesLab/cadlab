@@ -353,8 +353,9 @@ pub struct SetRules {
     /// Process of the fab profile (default: the first offering the board's layer count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
-    /// With `fab`: `comfortable` (default; minimums 25 % above the fab's limits, default track
-    /// and via never below 0.25 mm and 0.3/0.6 mm) or `tightest` (everything at the fab's limits).
+    /// With `fab`: `comfortable` (default; copper and drill minimums 25 % above the fab's limits,
+    /// silkscreen limits as published, default track and via never below 0.25 mm and 0.3/0.6 mm)
+    /// or `tightest` (everything at the fab's limits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub margin: Option<Margin>,
     /// Copper clearance.
@@ -921,7 +922,7 @@ pub(super) fn unlocked<'a>(p: &'a mut Project, r: &str) -> Result<&'a mut Placed
 pub struct PlaceSet {
     /// Designator.
     pub refdes: String,
-    /// Position of the footprint origin: ["12.7mm", "8mm"].
+    /// Position of the footprint origin: ["12.7mm", "8mm"] (on the CLI: `--at 12.7mm,8mm`).
     pub at: Point,
     /// Rotation, degrees counter-clockwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]

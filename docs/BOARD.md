@@ -228,7 +228,8 @@ show is enough. Fab-specific limits always come from fab profiles, not from thes
 | Rule | Profile field | `tightest` | `comfortable` (default) |
 |---|---|---|---|
 | `min_track_width`, `clearance`, `min_drill`, `min_annular_ring` | `min_track`, `min_space`, `min_drill`, `min_via_ring` | the fab's limit | limit × 1.25, rounded up to 10 µm |
-| `hole_to_hole`, `copper_to_edge`, `silk_to_pad`, `min_silk_width` | same names | the fab's limit | limit × 1.25, rounded up to 10 µm |
+| `hole_to_hole`, `copper_to_edge` | same names | the fab's limit | limit × 1.25, rounded up to 10 µm |
+| `silk_to_pad`, `min_silk_width` | same names | the fab's limit | the fab's limit (silk is clipped at pads; D45) |
 | `track_width`, `zone_min_width` | `min_track` | = `min_track_width` | max(`min_track_width`, 0.25 / 0.20 mm) |
 | `via_drill` | `min_drill` | = `min_drill` | max(`min_drill`, 0.30 mm) |
 | `via_diameter` | `min_via_ring` | drill + 2 × ring | max(drill + 2 × ring, 0.60 mm) |

@@ -204,7 +204,7 @@ keep cadlab the judge of what is legal.
 ### D26. Rule presets and fab-derived rules store numbers; substitutes are per-fab lock entries (2026-10-04)
 `board.rules` builds the rule set from a preset (`ipc2` = the defaults, `ipc3` = class 3 annular ring and
 vias), then from a fab profile (`fab`, `margin` `tightest` = the fab's limits, `comfortable` = limits + 25 %
-rounded up to 10 µm, default track/via never below the class 2 defaults), then from explicit fields; only the
+rounded up to 10 µm (silk limits as published since D45), default track/via never below the class 2 defaults), then from explicit fields; only the
 resulting numbers are stored, with no reference to the preset or fab. IPC values whose standard text could not
 be read are documented as unverified with their secondary sources (docs/BOARD.md). The DRC keeps reading net
 class values over the rules, and now also warns about vias smaller than their class and class values below
@@ -334,7 +334,7 @@ footprints; KiCad's libraries are still never read or converted (D7). Identical 
 and a footprint equal (within 3 nm, any item order) to a project footprint reuses it. Shapes cadlab cannot
 represent are approximated conservatively (custom pads were bounding rectangles until the
 corpus, D35, made them polygon pads, slots round holes until D40 modeled them, trapezoid and chamfered pads
-bounding or rounded rectangles and drill offsets ignored until D43) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
+bounding or rounded rectangles and drill offsets ignored until D44) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
 project it wins: footprints match by designator, pads to pins through the part's pin map, board nets take the
 circuit's names, and disagreements are reported for the user to fix; footprints the circuit lacks are not
 placed. Without one, the circuit is built from the board through the netlist importer (D27), so parts are
@@ -544,7 +544,7 @@ one footprint touch (its drawings bridge the group's nets) but keeps the nets ap
 and any other copper touching a tied pad is still a short. Slots are routed in the XNC drill files
 (`G00`/`M15`/`G01`/`M16`/`G05`, the documented XNC route mode) and drawn in X2 drill files. KiCad's
 custom rules import when their conditions are conjunctions of the supported terms; everything else is
-reported, never dropped silently. Left for later: per-layer pad stacks (front shape kept; still open after D43), footprint
+reported, never dropped silently. Left for later: per-layer pad stacks (front shape kept; still open after D44), footprint
 texts, zones inside footprints, rule severities and exclusions, inner-layer footprint copper.
 *Why:* the corpus showed these settings change real outputs (mask openings, stencils, neck-down
 clearances, Kelvin resistors, card-edge pads) by more than the comparison tolerances, and an import that
@@ -651,6 +651,23 @@ front layer's shape is still kept with `import.pad_approximated`. The corpus man
 *Why:* trapezoid, chamfered and offset pads are design data that changes copper, masks and drill positions
 beyond the comparison tolerances when approximated; one outline definition keeps every output consistent,
 and writing them back lets the KiCad DRC oracle check them.
+
+### D45. Agent session ergonomics: CLI shortcuts, argument forms, ERC drivers, silk margins (2026-10-14)
+The first scripted agent session (docs/TESTING.md, "Agent sessions"; `tests/agent_session.rs`) drove these
+choices. The CLI gains two top-level aliases, `cadlab erc` and `cadlab lint`, and `cadlab drc` alone runs
+`drc.run`: they are not new operations (the registry is unchanged, MCP needs none), only the spellings agents try
+first, like `undo`/`redo`. JSON-valued flags accept `@file`; schema tuples of strings (points) take `x,y` on the
+CLI. Route commands take `budget` with a unit ("60s"), `budget_ms` stays for compatibility, and a bare number
+is rejected like a unitless length. Command groups get one-line summaries (`commands::GROUP_SUMMARIES`) shared
+by CLI help and MCP tool descriptions. Text summaries print enum values as arguments spell them. Render commands
+all take the output path positionally. ERC counts output pins of one component that share a name as one driver
+(a USB-C receptacle's two VBUS contacts are one node); outputs of different components still conflict. The
+`comfortable` fab margin applies to copper and drill limits only: silkscreen limits are taken as published,
+since the fab clips silk at pads and a margin buys no yield, and with it cadlab's own generated footprints
+(silk 0.15 mm from pads) failed every fab-derived rule set.
+*Why:* each of these cost the agent at least one failed call or a misleading fix (moving parts to cure a
+footprint's own silk); the aliases and argument forms make the documented examples true without adding
+operations outside the registry.
 
 ## Open questions
 

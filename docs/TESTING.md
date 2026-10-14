@@ -372,3 +372,54 @@ timing rule).
   and oracle inputs. Not vendored into the repo, and their licenses are recorded in the corpus manifest
   (`tests/corpus/projects.toml`, `scripts/fetch-corpus.sh`; see "Open-source corpus" above, D35).
 - **Router benchmarks:** DSN files from the generated designs plus fetched projects; synthetic stress cases.
+
+## Agent sessions
+
+The roadmap's "agent ergonomics" item: an agent designs a board from a prompt using only the built `cadlab` binary
+(`--help`, `describe`, `--json`, error messages; no source), keeps a log of every place it got stuck, the
+friction points are fixed with a test each, and the final session is kept as a regression test.
+
+### Session 1 (2026-10-14): ATmega328P, USB-C power, JLCPCB bundle
+
+Prompt: *"Design a 2-layer 50x40 mm board: ATmega328P or STM32 MCU, USB-C power input with ESD protection, 3.3 V
+LDO, crystal, SWD/ISP header, two status LEDs, I2C header with pull-ups. Generic parts are fine where no supplier
+is configured. Place, autoroute, pass ERC/lint and DRC, render schematic and board, and export a JLCPCB fab
+bundle."*
+
+Result: 24 components (ATmega328P-AU TQFP-32, AP2112K-3.3 LDO, SMF5.0A TVS on VBUS, 5.1 kΩ CC pull-downs,
+8 MHz 3225 crystal with 22 pF loads, 2x3 ISP header, 1x4 I2C header with 4.7 kΩ pull-ups, two LEDs), auto-placed
+around a locked USB-C connector, 100 % routed in ~0.1 s, ERC/lint/DRC clean, JLCPCB bundle exported. Replayed by
+`tests/agent_session.rs` (fixtures in `tests/fixtures/agent_session/`: the MCU pin list and a hand-written
+USB-C land pattern); each fix below has a test in `tests/agent_ergonomics.rs`.
+
+Friction log, and what was done:
+
+| # | Where the agent got stuck | Fix |
+|---|---|---|
+| 1 | `cadlab --help` listed groups as "part commands", "net commands": no clue where `erc` lives | One-line group summaries (`commands::GROUP_SUMMARIES`), used by CLI help and MCP tool descriptions |
+| 2 | `cadlab erc` (as in INTERFACES.md) failed, and clap suggested `drc`; `cadlab drc` printed help with exit 2 | Top-level `cadlab erc` / `cadlab lint` (aliases of `circuit erc` / `circuit lint`); `cadlab drc` alone runs `drc run` |
+| 3 | `--pins @pins.json` rejected: long pin lists had to be pasted inline | Every JSON-valued flag (and `cadlab call`) accepts `@file` |
+| 4 | `place set --at "25mm,35mm"` → "expected JSON: trailing characters"; points had to be written `'["25mm","35mm"]'` | Fixed-size tuples (points) take `x,y` on the CLI (`--at <X,Y>`); JSON still works |
+| 5 | Unknown package (`USB-C`, `HC-49`): no hint; "or give explicit dimensions" did not say how; `TQFP-N` and `PinHeader 2xN` worked but were not listed | `footprint.unknown_package` hint names `spec` / `package_spec` and `footprint.import_kicad`; list completed |
+| 6 | `part.create` of a connector without `package` succeeded silently, leaving a part that can never be placed | `part.no_footprint` warning with the fix; `part.show` prints `footprint: none` |
+| 7 | `part.show` printed `PowerOut`, `(Led)`, while arguments are `power_out`, `led` | Summaries print enum values as typed in arguments (`util::wire_name`), also in `footprint.show` |
+| 8 | ERC `erc.output_conflict` on VBUS and GND: the USB-C connector's two VBUS (A9/B9) and GND contacts counted as two drivers | Same-named output pins of one component count as one driver; two parts still conflict |
+| 9 | After `board.rules --fab jlcpcb`, 17 `drc.silk_over_pad` warnings on cadlab's own generated footprints (silk 0.15 mm from pads vs a "comfortable" 0.19 mm), with the hint "move the part", which cannot help | `comfortable` keeps silk limits as published (the fab clips silk, a margin buys no yield); silk of a footprint near its own pads gets a hint that fits |
+| 10 | `fab.no_suppliers` hint ("configure DigiKey") disagreed with `supplier.none` (catalog import, Mouser, Nexar); `catalog list` said "no providers" without a hint | One shared hint, `supplier::NO_SUPPLIERS_HINT` |
+| 11 | `fab.silk_width` hint: "widen the footprint's silk lines in the project library", but no command edits silk widths | Hint names re-importing (`footprint.import_kicad --replace`) or regenerating |
+| 12 | `route all --budget-ms 60000`: the only unitless quantity in the CLI; docs said `--budget 60s` | `budget` with a unit (`60s`, `500ms`, `2min`) on every route command; `budget_ms` kept |
+| 13 | `render board out/x.png` and `render schematic out/x.svg` take the path positionally, `render footprint/symbol` needed `--path` | Path positional for all render commands |
+| 14 | Subcommand help mixed `-p/--json/--dry-run/-q` into each command's options | Global options under their own "Global options" heading |
+| 15 | INTERFACES.md examples (`cadlab erc`, `place U2 10mm 15mm`, `board outline rect`, `route --all --budget`, `bom add`, `export fab --fab`, `project new --layers`) did not exist | Examples rewritten to the real commands |
+
+Seen but left as they are (noted for the next session):
+
+- `place.auto` packs everything into a narrow column (here ~18 mm wide on a 50 mm board) rather than using the
+  board; fine for routing, but connectors and headers are not pulled to edges unless placed and locked first.
+- `drc` before routing lists every unrouted connection (59 errors here); `route status` is the better first look.
+- Text `describe` shows nested object fields (`pins: {number, name?, kind?, ...}[]`) without their enum values;
+  `describe --json` has them.
+- `footprint.import_kicad` names a footprint after its file, not the `(footprint "...")` name inside; the
+  not-found error's "did you mean" recovered it at once.
+- No `footprint.create` from a pad list: land patterns no generator family covers (USB-C) go through a hand-written
+  `.kicad_mod`, which an agent can write from KiCad's published format but which is a detour.

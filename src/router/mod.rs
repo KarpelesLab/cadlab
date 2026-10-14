@@ -2462,7 +2462,10 @@ fn explain(
     if kind == Some(FailKind::Budget) {
         rep.reason = Some("the time budget ran out before this connection was routed".into());
         rep.at = Some(c.from_at.to_point());
-        rep.hints.push("raise budget_ms or the effort, or route the remaining nets with route.nets".into());
+        rep.hints.push(
+            "raise the budget (`budget`, e.g. `120s`) or the effort, or route the remaining nets with route.nets"
+                .into(),
+        );
         return;
     }
     // Access.

@@ -16,8 +16,10 @@ use crate::units::Nm;
 pub enum Margin {
     /// Every minimum at the fab's published limit; default track and via at those minimums.
     Tightest,
-    /// Minimums 25 % above the fab's limits (rounded up to 10 µm); default track width and via
-    /// never below cadlab's class 2 defaults (0.25 mm, 0.3/0.6 mm).
+    /// Copper and drill minimums 25 % above the fab's limits (rounded up to 10 µm); default
+    /// track width and via never below cadlab's class 2 defaults (0.25 mm, 0.3/0.6 mm).
+    /// Silkscreen limits are taken as published: the fab clips silk at pads, so a margin buys
+    /// no yield, and generated footprints are drawn to the usual published limit.
     #[default]
     Comfortable,
 }
@@ -88,8 +90,10 @@ pub fn derive(process: &Process, margin: Margin, base: &Rules) -> (Rules, Vec<De
     };
     for (rule, field) in MAP {
         let Some(limit) = process_value(process, field) else { continue };
+        let silk = rule.starts_with("silk") || rule.ends_with("silk_width");
         let value = match margin {
             Margin::Tightest => limit,
+            Margin::Comfortable if silk => limit,
             Margin::Comfortable => comfortable(limit),
         };
         set(&mut out, rule, value, field, limit);
@@ -156,6 +160,8 @@ mod tests {
             (Nm::from_um(300), Nm::from_um(600), Nm::from_um(70))
         );
         assert_eq!(c.ipc_class, 2);
+        // Silk limits as published, so generated footprints (silk 0.15 mm off pads) pass.
+        assert_eq!((c.silk_to_pad, c.min_silk_width), (Nm::from_um(150), Nm::from_um(150)));
         let fields: Vec<&str> = d.iter().map(|r| r.field.as_str()).collect();
         assert_eq!(fields[..3], ["clearance", "track_width", "min_track_width"]);
     }

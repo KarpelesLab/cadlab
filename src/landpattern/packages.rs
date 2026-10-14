@@ -122,15 +122,25 @@ fn len_mm(s: &str) -> Option<Nm> {
     Nm::parse(&format!("{s}mm")).ok()
 }
 
+/// Fix hint for an unknown package name, naming the argument that takes explicit dimensions
+/// (`spec` for `footprint.generate`, `package_spec` for `part.create`).
+pub fn unknown_package_hint(spec_arg: &str) -> String {
+    format!(
+        "give the datasheet dimensions with `{spec_arg}` (`describe footprint.generate` lists the families: chip, \
+         gull_wing, qfp, dfn, qfn, ...), or import a land pattern for parts no family covers (USB-C, crystals \
+         with odd pads, modules) with `footprint.import_kicad` and use it with `footprint`"
+    )
+}
+
 /// Parses a package name. `kind` sets the chip body type for two-terminal chips.
 pub fn parse(name: &str, kind: ChipKind) -> Result<PackageSpec, String> {
     let n = norm(name);
     let unknown = || {
         format!(
             "unknown package `{name}`; known: chip sizes (0402, 0603, ...), SOT-23[-5|-6], SOT-223, DPAK, D2PAK, \
-             SOIC-N, SOIC-NW, TSSOP-N, MSOP-8/10, LQFP-N, SOD-123/123F/323/523, MINIMELF, MELF, SMA, SMB, SMC, \
+             SOIC-N, SOIC-NW, TSSOP-N, MSOP-8/10, LQFP-N, TQFP-N, SOD-123/123F/323/523, MINIMELF, MELF, SMA, SMB, SMC, \
              DIP-N, DIP-NW, `QFN-32 5x5mm P0.5mm EP3.1mm`, `DFN-8 3x3mm P0.65mm EP1.6x2.4mm`, \
-             `BGA-64 8x8 P0.8mm 6x6mm`, `PinHeader 1x04`; or give explicit dimensions"
+             `BGA-64 8x8 P0.8mm 6x6mm`, `PinHeader 1x04` / `PinHeader 2x03`"
         )
     };
 

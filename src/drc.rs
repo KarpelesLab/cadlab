@@ -1033,7 +1033,16 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
         )
         .with_subject(item_ref(owner))
         .at(at)
-        .with_hint("move the silkscreen or the part; fabs clip silkscreen over pads");
+        .with_hint(if *owner == pp.refdes {
+            // Moving the part cannot fix the footprint's own drawing.
+            format!(
+                "the footprint's own silkscreen is that close to its pads: if `board.rules` asks for more than the \
+                 fab's published limit, lower it (`board.rules --silk-to-pad`), or regenerate/re-import the \
+                 footprint with silk farther from the pads; fabs clip silkscreen over pads anyway (minimum {min})"
+            )
+        } else {
+            "move the silkscreen or the part; fabs clip silkscreen over pads".to_string()
+        });
         d.subjects.extend(pad_subjects(pp));
         out.push(d);
     }

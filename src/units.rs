@@ -597,10 +597,39 @@ fn format_fixed(q: i128, frac_digits: u32) -> String {
     }
 }
 
+/// Parses a duration with a mandatory unit (`"60s"`, `"500ms"`, `"2min"`, `"1.5s"`) to whole
+/// milliseconds. Like lengths, a bare number is rejected: `60` could mean seconds or milliseconds.
+pub fn parse_duration_ms(s: &str) -> Result<u64, String> {
+    let t = s.trim();
+    let split = t.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(t.len());
+    let (num, unit) = (&t[..split], t[split..].trim());
+    let factor = match unit {
+        "ms" => 1.0,
+        "s" | "sec" => 1_000.0,
+        "min" | "m" => 60_000.0,
+        "h" => 3_600_000.0,
+        "" => return Err(format!("`{s}` has no unit; durations need one (examples: \"60s\", \"500ms\", \"2min\")")),
+        u => return Err(format!("unknown duration unit `{u}` in `{s}` (use ms, s, min or h)")),
+    };
+    let v: f64 = num.parse().map_err(|_| format!("`{s}` is not a duration (examples: \"60s\", \"500ms\")"))?;
+    Ok((v * factor).round() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn durations_need_units() {
+        assert_eq!(parse_duration_ms("60s"), Ok(60_000));
+        assert_eq!(parse_duration_ms(" 500ms "), Ok(500));
+        assert_eq!(parse_duration_ms("2min"), Ok(120_000));
+        assert_eq!(parse_duration_ms("1.5s"), Ok(1_500));
+        assert!(parse_duration_ms("60").unwrap_err().contains("no unit"));
+        assert!(parse_duration_ms("3 parsecs").is_err());
+        assert!(parse_duration_ms("s").is_err());
+    }
 
     #[test]
     fn scale_factors() {

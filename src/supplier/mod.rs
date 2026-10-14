@@ -183,6 +183,11 @@ pub struct Results {
     pub errors: Vec<String>,
 }
 
+/// Fix hint for every "no supplier configured" diagnostic, so they all name the same options.
+pub const NO_SUPPLIERS_HINT: &str = "import a parts list with `catalog.import`, add catalog files to \
+     ~/.config/cadlab/catalogs/ or CADLAB_CATALOGS, or configure DigiKey, Mouser or Nexar with `cadlab config` \
+     (docs/PARTS.md)";
+
 /// The configured providers.
 #[derive(Clone, Default)]
 pub struct Suppliers {

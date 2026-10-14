@@ -302,6 +302,18 @@ fn report_pairs(ctx: &mut Context<'_>, pairs: &[PairReport], left_hint: bool) ->
     Ok(())
 }
 
+/// The time budget in milliseconds from `budget` ("60s") or `budget_ms`.
+fn budget_of(budget: &Option<String>, budget_ms: Option<u64>) -> Result<Option<u64>, CommandError> {
+    match (budget, budget_ms) {
+        (Some(_), Some(_)) => Err(CommandError::invalid_args("route.budget", "give `budget` or `budget_ms`, not both")
+            .with_hint("`budget` takes a unit (\"60s\"); `budget_ms` is the same in milliseconds")),
+        (Some(b), None) => crate::units::parse_duration_ms(b).map(Some).map_err(|e| {
+            CommandError::invalid_args("route.budget", e).with_hint("write the budget as \"60s\" or \"500ms\"")
+        }),
+        (None, ms) => Ok(ms),
+    }
+}
+
 fn options(budget_ms: Option<u64>, layers: &[String], effort: Option<Effort>, seed: Option<u64>) -> RouteOptions {
     RouteOptions {
         budget: Some(Duration::from_millis(budget_ms.unwrap_or(DEFAULT_BUDGET_MS))),
@@ -384,6 +396,9 @@ pub struct RouteAll {
     /// runs out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_ms: Option<u64>,
+    /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<String>,
     /// Copper layers to route on (default: all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
@@ -434,7 +449,7 @@ impl Command for RouteAll {
     type Output = Routed;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Routed, CommandError> {
-        let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
+        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
         opts.pairs = self.pairs;
@@ -459,6 +474,9 @@ pub struct RouteNets {
     /// Time budget in milliseconds (default 60000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_ms: Option<u64>,
+    /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<String>,
     /// Copper layers to route on (default: all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
@@ -527,7 +545,7 @@ impl Command for RouteNets {
         }
         nets.sort();
         nets.dedup();
-        let mut opts = options(self.budget_ms, &self.layers, self.effort, self.seed);
+        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
         opts.pairs = self.pairs;
@@ -567,6 +585,9 @@ pub struct RouteConnection {
     /// Time budget in milliseconds (default 60000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_ms: Option<u64>,
+    /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<String>,
     /// Copper layers to route on (default: all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
@@ -611,7 +632,7 @@ impl Command for RouteConnection {
     fn run(self, ctx: &mut Context<'_>) -> Result<Routed, CommandError> {
         let p = ctx.project()?;
         let (from, to) = (pad_label(p, &self.from)?, pad_label(p, &self.to)?);
-        let mut opts = options(self.budget_ms, &self.layers, self.effort, None);
+        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, self.effort, None);
         opts.shove = self.shove.unwrap_or(true);
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         opts.search = self.router;
@@ -1045,6 +1066,9 @@ pub struct RouteDiffpair {
     /// Time budget in milliseconds (default 60000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_ms: Option<u64>,
+    /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<String>,
     /// Compensate the skew with small bumps on the shorter net (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skew: Option<bool>,
@@ -1075,7 +1099,7 @@ impl Command for RouteDiffpair {
             return Err(CommandError::conflict("diffpair.none", "the circuit has no differential pairs")
                 .with_hint("define one with diffpair.add (diffpair.suggest finds them by net names)"));
         }
-        let mut opts = options(self.budget_ms, &self.layers, None, None);
+        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, None, None);
         opts.skew = self.skew;
         let result = {
             let progress = |done: u64, total: Option<u64>, msg: &str| ctx.progress(done, total, msg);

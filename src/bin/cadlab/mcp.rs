@@ -180,7 +180,10 @@ impl Server {
         let dry_run_prop = json!({"type": "boolean", "description": "Run, report the result, then roll back"});
         let mut tools = Vec::new();
         for (group, entries) in self.registry.groups() {
-            let mut desc = format!("{group} commands. Actions:");
+            let mut desc = match cadlab::commands::group_summary(group) {
+                Some(summary) => format!("{summary}. Actions:"),
+                None => format!("{group} commands. Actions:"),
+            };
             for e in &entries {
                 desc += &format!("\n- {}: {}. args: {}", e.action(), e.summary, args_signature(&e.input_schema));
             }

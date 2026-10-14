@@ -255,4 +255,5 @@ Research-sized items beyond the milestones above; none blocks a release.
   Markdown reports as artifacts.
 - **Determinism:** golden files for every exporter and renderer.
 - **Agent ergonomics:** after each milestone, run a scripted agent session that designs a board from a prompt,
-  and fix whatever the agent got stuck on.
+  and fix whatever the agent got stuck on. Session 1 done (ATmega328P + USB-C, JLCPCB bundle; 15 friction points
+  fixed, D45); log in docs/TESTING.md "Agent sessions", replayed by `tests/agent_session.rs`.
