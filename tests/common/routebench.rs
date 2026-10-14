@@ -430,6 +430,8 @@ pub struct Metrics {
     pub ms: u128,
     /// DRC errors other than unrouted connections.
     pub drc_errors: usize,
+    /// Whether the time budget ran out (cadlab only; the result then depends on the machine).
+    pub budget_exhausted: bool,
 }
 
 /// Counts corners of 90° or sharper (two segments of one net and layer meeting at a point
@@ -493,6 +495,7 @@ pub fn measure(router: &str, r: &Registry, s: &mut Session, ms: u128, drc_before
         any_angle: any,
         ms,
         drc_errors: drc_errors(p).saturating_sub(drc_before),
+        budget_exhausted: false,
     }
 }
 
@@ -519,7 +522,9 @@ pub fn run_cadlab(case: &Case, budget_ms: u64, render: Option<&Path>) -> Metrics
         let path = dir.join(format!("{}.png", case.name));
         exec(&r, &mut s, "render.board", json!({"path": path, "px_per_mm": 30}));
     }
-    measure("cadlab", &r, &mut s, ms, before)
+    let mut m = measure("cadlab", &r, &mut s, ms, before);
+    m.budget_exhausted = o["output"]["stats"]["budget_exhausted"].as_bool().expect("route.all stats.budget_exhausted");
+    m
 }
 
 /// The freerouting jar or launcher from `CADLAB_ORACLE_FREEROUTING`, if set.

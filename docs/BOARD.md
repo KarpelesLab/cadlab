@@ -426,6 +426,14 @@ net's MST in one pass per step and reuses net costs across swap candidates (it s
 1 s in validity checks); `polyclip` 0.0.4. The router keeps its bucket grid: its index changes while routing
 (an R-tree packed once does not fit) and queries are under 10 % of `route.all` on the small boards.
 
+**Tracked in CI** (D43): `big_board_timings` in `tests/perf.rs` compares every step above with
+`tests/golden/bench/perf.json` (release, `RAYON_NUM_THREADS=1`, best of 3; one thread because the parallel steps
+scale with the core count: zone fill is 7× faster with 64 threads than with one, which would make the baseline
+depend on the machine). A step fails only when it is more than 250 ms slower than its baseline and either 3× slower
+than the run's median ratio to the baseline (one step regressing while the rest run at the machine's speed) or 8×
+slower outright. The `bench` CI job runs it and uploads `perf.json`/`perf.md` (every step, its baseline and
+ratio); `CADLAB_BLESS=1` rewrites the baseline.
+
 `cargo run --release --example bigboard corpus` times the open-source corpus boards (`CADLAB_CORPUS_DIR`,
 docs/TESTING.md), cold (fill cache cleared), before → after D42 → with `polyclip` 0.0.6:
 

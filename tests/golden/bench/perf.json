@@ -1,0 +1,24 @@
+{
+  "measured": "release build, RAYON_NUM_THREADS=1, best of 3",
+  "steps": {
+    "Project::load": 7.9,
+    "base_copper_items": 18.0,
+    "board.export_kicad": 30.2,
+    "board.ratsnest (fills cached)": 86.3,
+    "copper_items (with fill)": 1313.1,
+    "drc.run (fills cached)": 221.1,
+    "drc::check": 1514.4,
+    "export.gerber": 1441.0,
+    "export.gerber (fills cached)": 183.2,
+    "generate": 16.8,
+    "islands": 45.6,
+    "placed_pads": 4.6,
+    "project.save": 13.1,
+    "ratsnest (with fill)": 1386.8,
+    "ratsnest_items (islands + MST)": 47.5,
+    "render.board (PNG)": 1754.5,
+    "render.board (fills cached)": 386.0,
+    "render.schematic (layout+PNG)": 1060.3,
+    "zone fill (4 inner pours)": 1317.7
+  }
+}

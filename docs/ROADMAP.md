@@ -244,8 +244,11 @@ Research-sized items beyond the milestones above; none blocks a release.
 - **Docs:** every command documented from its schema; examples doubled as tests.
 - **Performance:** benchmarks tracked in CI from M4 on (load, DRC, zone fill, route). A synthetic 500-component,
   four-layer board and timings of every heavy operation exist (`cargo run --release --example bigboard`,
-  `tests/perf.rs`, the corpus boards with `--example bigboard corpus`; numbers in docs/BOARD.md "Performance");
-  tracking them in CI is still to do.
+  `tests/perf.rs`, the corpus boards with `--example bigboard corpus`; numbers in docs/BOARD.md "Performance").
+  **Tracked in CI** (`bench` job, DECISIONS D43): router results on the generated boards against
+  `tests/golden/bench/route.json` (fails on a completion drop, any DRC error, vias or length beyond tolerance) and
+  the large-board timings against `tests/golden/bench/perf.json` (fails only on large regressions), with JSON and
+  Markdown reports as artifacts.
 - **Determinism:** golden files for every exporter and renderer.
 - **Agent ergonomics:** after each milestone, run a scripted agent session that designs a board from a prompt,
   and fix whatever the agent got stuck on.

@@ -673,4 +673,14 @@ With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes 
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).
 
 The older `bench_generated_boards` in `tests/route.rs` (M5 table above) still runs the SOIC grids and the dense
-LQFP-32 board. Still to come: a CI job that fails on a completion or DRC regression.
+LQFP-32 board.
+
+**Regression check in CI** (D43): `route_benchmark_regression` in `tests/route_bench.rs` routes every board above
+except the budget-bound `big-4l` (600 s budget, never reached, so the results are deterministic: identical on
+macOS and Linux, and with any number of threads) and compares them with `tests/golden/bench/route.json`. It fails
+on any DRC error, an exhausted budget, a lower completion (more unrouted connections or a lower routed share), more
+than max(2, 5 %) extra vias or more than 2 % extra track length, and on a large slowdown (the timing rule of
+`tests/common/bench.rs`, below and in docs/TESTING.md). A change within tolerance is reported as such, to be
+recorded with `CADLAB_BLESS=1` (in release with `RAYON_NUM_THREADS=1`, like the CI job). The `bench` CI job runs
+it and uploads `route.json`/`route.md` reports; the default `cargo test` checks that the baseline lists exactly
+these boards and that `attiny-2l` routes exactly as recorded.

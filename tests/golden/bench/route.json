@@ -1,0 +1,75 @@
+{
+  "measured": "release build, RAYON_NUM_THREADS=1, budget 600000 ms, seed 1",
+  "cases": {
+    "attiny-2l": {
+      "connections": 22,
+      "unrouted": 0,
+      "vias": 4,
+      "segments": 56,
+      "length_um": 104081,
+      "sharp_corners": 0,
+      "drc_errors": 0,
+      "ms": 27
+    },
+    "bga144-4l": {
+      "connections": 141,
+      "unrouted": 0,
+      "vias": 146,
+      "segments": 872,
+      "length_um": 2209278,
+      "sharp_corners": 2,
+      "drc_errors": 0,
+      "ms": 8976
+    },
+    "fine-4l": {
+      "connections": 100,
+      "unrouted": 0,
+      "vias": 111,
+      "segments": 400,
+      "length_um": 812874,
+      "sharp_corners": 0,
+      "drc_errors": 0,
+      "ms": 1222
+    },
+    "qfp-qfn-4l": {
+      "connections": 155,
+      "unrouted": 0,
+      "vias": 128,
+      "segments": 709,
+      "length_um": 2000244,
+      "sharp_corners": 0,
+      "drc_errors": 0,
+      "ms": 3556
+    },
+    "soic24-2l": {
+      "connections": 184,
+      "unrouted": 0,
+      "vias": 141,
+      "segments": 578,
+      "length_um": 1690606,
+      "sharp_corners": 0,
+      "drc_errors": 0,
+      "ms": 421
+    },
+    "stm32-2l": {
+      "connections": 109,
+      "unrouted": 0,
+      "vias": 57,
+      "segments": 453,
+      "length_um": 968884,
+      "sharp_corners": 0,
+      "drc_errors": 0,
+      "ms": 509
+    },
+    "stm32-4l": {
+      "connections": 109,
+      "unrouted": 0,
+      "vias": 53,
+      "segments": 404,
+      "length_um": 893132,
+      "sharp_corners": 2,
+      "drc_errors": 0,
+      "ms": 3482
+    }
+  }
+}

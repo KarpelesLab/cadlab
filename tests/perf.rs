@@ -2,8 +2,9 @@
 //! ratsnest and zone fill with the straightforward versions on generated boards, and
 //! `#[ignore]`d timings on the 500-component synthetic board and, when `CADLAB_CORPUS_DIR` is
 //! set, the corpus boards (`cargo test --release --test perf -- --ignored --nocapture`, or
-//! `cargo run --release --example bigboard [corpus]`). The timing test only fails on
-//! pathological times (a minute per step), so it cannot flap.
+//! `cargo run --release --example bigboard [corpus]`). The timing test compares the synthetic
+//! board with the committed baseline `tests/golden/bench/perf.json` and fails only on large
+//! regressions (`tests/common/bench.rs`, DECISIONS D43); the `bench` CI job runs it.
 
 use std::collections::BTreeMap;
 
@@ -11,6 +12,8 @@ use cadlab::board::{self, CopperItem, ItemRef, RatLine};
 use cadlab::geom::poly;
 use cadlab::{Nm, Point};
 
+#[path = "common/bench.rs"]
+mod bench;
 #[path = "common/bigboard.rs"]
 mod bigboard;
 #[path = "common/fill_reference.rs"]
@@ -241,16 +244,88 @@ fn large_zone_fills_match_reference() {
 }
 
 #[test]
+fn timing_rule() {
+    let base: BTreeMap<String, f64> =
+        [("a", 100.0), ("b", 1000.0), ("c", 2000.0), ("d", 10.0)].into_iter().map(|(n, t)| (n.into(), t)).collect();
+    let run = |times: [f64; 4]| {
+        let m: Vec<(String, f64)> = ["a", "b", "c", "d"].into_iter().zip(times).map(|(n, t)| (n.into(), t)).collect();
+        let (v, _) = bench::check_timings_with(&m, &base, true);
+        v.iter().filter(|v| v.failure.is_some()).map(|v| v.name.clone()).collect::<Vec<_>>()
+    };
+    // A machine twice as slow: nothing fails.
+    assert!(run([200.0, 2000.0, 4000.0, 20.0]).is_empty());
+    // One step 4× slower than the others: fails.
+    assert_eq!(run([100.0, 4000.0, 2000.0, 10.0]), ["b"]);
+    // Tiny steps never fail, however slow (under the noise floor).
+    assert!(run([100.0, 1000.0, 2000.0, 200.0]).is_empty());
+    // Everything 10× slower: the absolute limit.
+    assert_eq!(run([1000.0, 10_000.0, 20_000.0, 100.0]), ["a", "b", "c"]);
+    // A step without a baseline is reported, not checked.
+    let (v, _) = bench::check_timings_with(&[("new".into(), 1e6)], &base, true);
+    assert!(v[0].failure.is_none() && v[0].baseline_ms.is_none());
+}
+
+/// Committed timings of the synthetic board (`tests/golden/bench/perf.json`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PerfBaseline {
+    /// How the baseline was measured.
+    measured: String,
+    /// Best time of each step (ms).
+    steps: BTreeMap<String, f64>,
+}
+
+/// Timings of every heavy step on the synthetic board, compared with `tests/golden/bench/perf.json`
+/// under the generous rule of `tests/common/bench.rs` (D43): run in release by the `bench` CI job
+/// (`RAYON_NUM_THREADS=1`), which uploads `$CARGO_TARGET_TMPDIR/bench/perf.{json,md}`.
+/// `CADLAB_BLESS=1` rewrites the baseline. Corpus boards (`CADLAB_CORPUS_DIR`) are timed and
+/// reported, not compared.
+#[test]
 #[ignore = "timing; run in release with --ignored --nocapture"]
 fn big_board_timings() {
-    let (summary, rows) = bigboard::timings(bigboard::Spec::default(), 1);
+    let (summary, rows) = bigboard::timings(bigboard::Spec::default(), 3);
     println!("{}", bigboard::report(&summary, &rows));
     let get = |name: &str| rows.iter().find(|t| t.name == name).unwrap();
     assert!(get("islands").note.ends_with("islands"));
     assert!(rows.iter().all(|t| t.time.as_secs() < 60), "something is pathologically slow");
+    let measured: Vec<(String, f64)> = rows.iter().map(|t| (t.name.to_string(), t.time.as_secs_f64() * 1e3)).collect();
+    let baseline: Option<PerfBaseline> = bench::read_baseline("perf.json");
+    let bless = bench::blessing();
+    assert!(bless || baseline.is_some(), "tests/golden/bench/perf.json missing: run with CADLAB_BLESS=1");
+    let (verdicts, median) =
+        bench::check_timings(&measured, &baseline.as_ref().map(|b| b.steps.clone()).unwrap_or_default());
+    let mut markdown =
+        format!("## Large-board timings\n\nboard: {summary}\n\n{}", bench::timing_table(&verdicts, median));
+    let mut corpus = Vec::new();
     // Corpus boards, when fetched (`CADLAB_CORPUS_DIR`, scripts/fetch-corpus.sh).
     for (name, rows) in bigboard::corpus_timings(&[], 1) {
         println!("{}", bigboard::report(&format!("{name}: {}", rows[0].note), &rows));
         assert!(rows.iter().all(|t| t.time.as_secs() < 60), "{name}: something is pathologically slow");
+        let steps: BTreeMap<&str, f64> = rows.iter().map(|t| (t.name, t.time.as_secs_f64() * 1e3)).collect();
+        markdown.push_str(&format!("\n### {name}\n\n{}\n", bigboard::report(&rows[0].note, &rows)));
+        corpus.push(serde_json::json!({"name": name, "steps": steps}));
     }
+    let failures: Vec<String> =
+        verdicts.iter().filter_map(|v| v.failure.as_ref().map(|f| format!("{}: {f}", v.name))).collect();
+    let report = serde_json::json!({
+        "profile": bench::profile(),
+        "rayon_threads": std::env::var("RAYON_NUM_THREADS").ok(),
+        "board": summary,
+        "steps": verdicts,
+        "median_ratio": median,
+        "corpus": corpus,
+        "failures": failures,
+    });
+    bench::write_report("perf", &report, &markdown);
+    println!("{markdown}");
+    if bless {
+        let measured_how = format!(
+            "{} build, RAYON_NUM_THREADS={}, best of 3",
+            bench::profile(),
+            std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "unset".into())
+        );
+        let steps = measured.into_iter().map(|(n, ms)| (n, (ms * 10.0).round() / 10.0)).collect();
+        bench::write_baseline("perf.json", &PerfBaseline { measured: measured_how, steps });
+        return;
+    }
+    assert!(failures.is_empty(), "performance regressions:\n{}", failures.join("\n"));
 }

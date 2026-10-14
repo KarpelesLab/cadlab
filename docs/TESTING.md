@@ -13,7 +13,7 @@ up to comparison against independent tools.
 | Round-trip | save→load→save identical; export→import→compare for interop formats | `tests/roundtrip/` |
 | **Oracle tests** | compare cadlab results with independent external tools | `tests/oracle/` |
 | Agent scenarios | scripted MCP sessions designing a board from a prompt | `tests/agent/` |
-| Benchmarks | load, DRC, zone fill, routing, render (`criterion`) | `benches/` |
+| Benchmarks | router results and timings of load, DRC, zone fill, render, export against committed baselines (see "Benchmarks in CI") | `tests/route_bench.rs`, `tests/perf.rs`, `tests/golden/bench/` |
 
 ## Oracles
 
@@ -338,6 +338,28 @@ closed solid of the box's volume (`--test models3d`).
   outputs uploaded as an artifact. The job is `continue-on-error` while the PPA install proves stable; the PPA
   follows 10.0.x patch releases, so results are reproducible per KiCad minor version only. Target: a container
   with pinned versions of each oracle.
+
+## Benchmarks in CI
+
+The `bench` job (`.github/workflows/ci.yml`, blocking, D43) runs two `#[ignore]`d tests in release with
+`RAYON_NUM_THREADS=1`, uploads their reports (`target/tmp/bench/{route,perf}.{json,md}`, the Markdown also in the
+job summary) and fails on:
+
+- **Router regressions** (`tests/route_bench.rs`, `route_benchmark_regression`): the generated boards of the
+  router benchmark (all but the budget-bound `big-4l`) against `tests/golden/bench/route.json`: any DRC error, an
+  exhausted budget, a completion drop, more than max(2, 5 %) extra vias or 2 % extra track length. The routes are
+  deterministic, so the baseline is exact; the tolerances only keep small trade-offs from failing CI. The default
+  `cargo test` checks the baseline's board list and routes the smallest board (exact match).
+- **Large slowdowns** (`tests/perf.rs`, `big_board_timings`, and the routing time of each board above): every
+  heavy step on the synthetic board (load, save, zone fill, connectivity, ratsnest, DRC, render, Gerber and KiCad
+  export, schematic) against `tests/golden/bench/perf.json`. CI machines vary, so a step fails only when it is
+  more than 250 ms slower than its baseline and either 3× slower than the run's median ratio to the baseline (the
+  machine's speed cancels out) or 8× slower outright (`tests/common/bench.rs`). Debug builds report, never fail.
+
+Locally: `RAYON_NUM_THREADS=1 cargo test --release --test route_bench --test perf -- --ignored --nocapture
+route_benchmark_regression big_board_timings`; add `CADLAB_BLESS=1` to rewrite both baselines after an intended
+change (commit them with it; the router baseline's `ms` and the timings are machine-dependent and only feed the
+timing rule).
 
 ## Test corpus
 

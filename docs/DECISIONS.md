@@ -601,6 +601,24 @@ add edges and move vertices by snap rounding, which it does not. The remaining z
 `polyclip`'s offsets and booleans; what it would need is measured in docs/POLYGON_LIB.md §8 instead of being
 worked around in cadlab.
 
+### D43. Benchmarks tracked in CI: exact router baseline, timings with a machine-relative rule (2026-10-14)
+A blocking `bench` CI job runs the router benchmark and the large-board timings in release and compares them with
+committed baselines in `tests/golden/bench/` (`route.json`, `perf.json`, rewritten by `CADLAB_BLESS=1`),
+uploading JSON and Markdown reports. Router: every generated board except `big-4l` is routed with a budget it
+never reaches, so its result is deterministic (identical on macOS and Linux and with any thread count), and the
+check fails on any DRC error, an exhausted budget, a completion drop, more than max(2, 5 %) extra vias or 2 % extra
+length; `big-4l` stays out because it is budget-bound and its result depends on the machine. Timings: one rayon
+thread (`RAYON_NUM_THREADS=1`) so parallel steps do not scale with the runner's cores, best of 3, and a step fails
+only when it is more than 250 ms slower than its baseline and either 3× slower than the run's median ratio to the
+baseline or 8× slower outright; debug builds never fail on time. The default `cargo test` only checks the
+baseline's board list and routes the smallest board exactly.
+*Why:* routing quality is deterministic, so it can be held exactly where it matters (completion, DRC) with slack
+only for trade-offs (vias, length) that a deliberate improvement may make. Absolute times are not comparable
+between a development machine and shared CI runners, but a single step regressing stands out against the run's
+own median, which cancels the machine's speed; the absolute 8× limit catches a uniform slowdown only when it is
+gross, which is the price of a job that does not flap. Making the timings blocking with such a rule, rather than
+purely informative, means a pathological regression (a quadratic loop, a lost index) fails the PR that causes it.
+
 ## Open questions
 
 None currently.

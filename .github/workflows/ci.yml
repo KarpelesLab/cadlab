@@ -139,6 +139,40 @@ jobs:
             target/tmp/corpus/*/reexport/drc.json
           if-no-files-found: ignore
 
+  bench:
+    name: Benchmarks (router regression, large-board timings)
+    runs-on: ubuntu-24.04
+    # Blocking (DECISIONS D43): the router results are deterministic and compared with
+    # tests/golden/bench/route.json (completion, DRC, vias, length); timings fail only on large
+    # regressions relative to the run's own median (tests/common/bench.rs), so a slower runner
+    # does not fail it. One rayon thread keeps the timings comparable between machines.
+    timeout-minutes: 45
+    env:
+      RAYON_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - name: Router regression and timings
+        run: >-
+          cargo test --release --all-features --test route_bench --test perf --
+          --ignored --nocapture --test-threads 1 route_benchmark_regression big_board_timings
+      - name: Summary
+        if: always()
+        run: |
+          for f in target/tmp/bench/route.md target/tmp/bench/perf.md; do
+            if [ -f "$f" ]; then cat "$f" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report
+          path: target/tmp/bench/
+          if-no-files-found: ignore
+
   msrv:
     name: MSRV (1.89)
     runs-on: ubuntu-latest
