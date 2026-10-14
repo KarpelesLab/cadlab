@@ -203,8 +203,8 @@ impl Ctx<'_> {
     }
 
     /// The pad's shape and rotation to flash ([`super::oriented`]).
-    fn oriented(&self, pp: &PlacedPad) -> (PadShape, Angle) {
-        super::oriented(pp, super::fp_rotation(self.p, &pp.refdes))
+    fn oriented(&self, pp: &PlacedPad, layer: &str) -> (PadShape, Angle) {
+        super::oriented(pp, layer, super::fp_rotation(self.p, &pp.refdes))
     }
 
     fn out(&self, kind: FileKind, function: &str, g: Gerber) -> OutFile {
@@ -227,11 +227,11 @@ impl Ctx<'_> {
         for pp in self.mask_pads(side) {
             let m = super::mask_margin(self.p, self.o, pp);
             if m == 0 {
-                set.push(pp.shape.clone());
+                set.push(pp.shape_facing(side).clone());
             } else {
                 let tol =
                     polyclip::ArcTol::new(1_000, if m > 0 { polyclip::Side::Outside } else { polyclip::Side::Inside });
-                set.extend(polyclip::offset(&pp.shape, m, Join::Round, tol).unwrap_or_default());
+                set.extend(polyclip::offset(pp.shape_facing(side), m, Join::Round, tol).unwrap_or_default());
             }
         }
         set.extend(super::footprint_openings(self.p, GraphicLayer::Mask, side));
@@ -303,7 +303,7 @@ fn copper(ctx: &Ctx<'_>, i: usize, items: &[CopperItem]) -> OutFile {
 
     g.comment("Pads");
     for pp in ctx.pads.iter().filter(|pp| pp.layers.contains(layer)) {
-        let (shape, a) = ctx.oriented(pp);
+        let (shape, a) = ctx.oriented(pp, layer);
         let ap = pad_aperture(&mut g, shape, a);
         let f = match pp.pad.kind {
             PadKind::Smd if is_heatsink(&pp.pad) => "HeatsinkPad",
@@ -380,7 +380,7 @@ fn mask(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
         return ctx.out(FileKind::Mask(side), &function, g);
     }
     for pp in ctx.mask_pads(side) {
-        let (shape, a) = super::mask_opening(ctx.p, ctx.o, pp);
+        let (shape, a) = super::mask_opening(ctx.p, ctx.o, pp, side);
         let ap = pad_aperture(&mut g, shape, a);
         let d = g.aperture(&ap, Some("Material"));
         g.attrs(&[(".C", field(&pp.refdes))]);

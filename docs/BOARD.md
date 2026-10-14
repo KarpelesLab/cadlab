@@ -135,6 +135,7 @@ footprint follows; nothing in them names a fab (D12).
 | `mask` | pad | openings on the pad's outer copper (default), on the footprint's side only (`front`) or the other side only (`back`) for holes, or none (`none`: tented thermal vias, covered heat spreaders) |
 | `slot` | through-hole and non-plated pads | an oval hole (size along the pad's X and Y); the drill is its width |
 | `drill_offset` | through-hole and non-plated pads | the hole center relative to the pad center, before the pad rotation (copper off center on its hole) |
+| `stack` | through-hole pads | per-layer copper shapes (a pad stack): `inner` (every inner layer), `back` (the outer layer on the other side of the footprint) and `layers` (single inner layers, numbered from the footprint's side, so a bottom-side footprint reverses them); the pad's `shape` is the footprint side's and every layer left out. Each shape is its own copper item on its layers (one island through the hole) for the DRC, zone fills and the router; Gerber, IPC-2581 and DSN padstacks draw each layer's shape, mask openings the outer shape of their side, the annular ring is the narrowest layer's |
 | `paste: pad` | through-hole pads | paste-in-hole on the footprint's side (SMD pads have paste unless `paste: none`) |
 | `net_ties` | footprint | groups of pad numbers whose nets the footprint joins on purpose |
 | copper, mask, paste drawings | footprint graphics (`back` for the other side) | copper: copper items (DRC, fills, Gerber, IPC-2581) on the net of the first pad they touch; mask, paste: openings on those layers |
@@ -281,6 +282,7 @@ the library stay).
 | pads: chamfered (`chamfer_ratio`, `chamfer` corners on `rect`/`roundrect`) | chamfered rectangles (`chamfered_rect`: chamfer = ratio × shorter side, the other corners rounded by `roundrect_rratio`) |
 | oval drill (slot) | a slotted hole (`slot`) |
 | drill `offset` | KiCad's pad position is the hole and the offset moves the copper: the cadlab pad is centered on the copper and its `drill_offset` points back to the hole (SMD pads: the copper moves) |
+| `padstack` (KiCad 9, modes `front_inner_back` and `custom`) | the pad's `stack`: KiCad keys it by board layer (the pad's own shape is `F.Cu`'s, `Inner` every inner layer, `In<k>.Cu` one, `B.Cu`), so on a bottom-side footprint `B.Cu`'s shape becomes the pad's and inner layers reverse; a layer's `offset` other than the pad's moves its shape (as a polygon); per-layer thermal and zone settings use the pad's; written back the same way (`custom` when single inner layers differ). A stack on an SMD pad keeps the front shape (`import.pad_approximated`) |
 | SMD pad with copper only on the other side of its footprint | a pad on the back (`back`) |
 | pad layers without `*.Mask` / `F.Mask` / `B.Mask` | the pad's `mask`: none (tented), front or back only |
 | through-hole pad with `F.Paste` | paste-in-hole (`paste: pad`; paste on the other side only: `import.tht_paste`) |

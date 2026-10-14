@@ -544,3 +544,171 @@ fn trapezoid_chamfered_and_drill_offset_pads() {
         assert!(close(&rel(pp), &rel(qq)), "{}.{}", pp.refdes, pp.number);
     }
 }
+
+/// KiCad 9 pad stacks on a four-layer board: a `front_inner_back` pad (rectangle on top,
+/// circle inside, oval below) and a `custom` one (a circle per inner layer) on a top footprint,
+/// and the same footprint flipped to the bottom side (its stack keyed by board layers, so its
+/// own side's shape is `B.Cu`'s and its inner layers are reversed). A track of another net on
+/// `In1.Cu` passes where the top shape would be (clear of the inner circle), the same track on
+/// `F.Cu` hits it, and a pour on `In2.Cu` fills up to the inner circle.
+const PAD_STACKS: &str = r#"(kicad_pcb (version 20241229) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (footprint "Test:Stack" (layer "F.Cu") (at 110 60)
+    (property "Reference" "J1")
+    (pad "1" thru_hole rect (at 0 0) (size 2 2) (drill 0.8) (layers "*.Cu" "*.Mask") (net 1 "A")
+      (padstack (mode front_inner_back)
+        (layer "Inner" (shape circle) (size 1.2 1.2))
+        (layer "B.Cu" (shape oval) (size 2 1.5))))
+    (pad "2" thru_hole circle (at 4 0) (size 1.7 1.7) (drill 0.8) (layers "*.Cu" "*.Mask")
+      (padstack (mode custom)
+        (layer "In1.Cu" (shape circle) (size 1 1))
+        (layer "In2.Cu" (shape circle) (size 1.4 1.4))
+        (layer "B.Cu" (shape circle) (size 1.7 1.7)))))
+  (footprint "Test:Stack" (layer "B.Cu") (at 120 60)
+    (property "Reference" "J2")
+    (pad "1" thru_hole oval (at 0 0) (size 2 1.5) (drill 0.8) (layers "*.Cu" "*.Mask")
+      (padstack (mode front_inner_back)
+        (layer "Inner" (shape circle) (size 1.2 1.2))
+        (layer "B.Cu" (shape rect) (size 2 2))))
+    (pad "2" thru_hole circle (at -4 0) (size 1.7 1.7) (drill 0.8) (layers "*.Cu" "*.Mask")
+      (padstack (mode custom)
+        (layer "In1.Cu" (shape circle) (size 1.4 1.4))
+        (layer "In2.Cu" (shape circle) (size 1 1))
+        (layer "B.Cu" (shape circle) (size 1.7 1.7)))))
+  (segment (start 108 61) (end 111.5 61) (width 0.2) (layer "In1.Cu") (net 2) (uuid "t1"))
+  (segment (start 108 61) (end 111.5 61) (width 0.2) (layer "F.Cu") (net 2) (uuid "t2"))
+  (zone (net 0) (net_name "") (layers "In2.Cu") (uuid "z1") (name "pour") (hatch edge 0.5)
+    (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes)
+    (polygon (pts (xy 106 56) (xy 116 56) (xy 116 64) (xy 106 64))))
+  (gr_rect (start 100 50) (end 130 70) (stroke (width 0.1)) (fill none) (layer "Edge.Cuts"))
+)"#;
+
+#[test]
+fn per_layer_pad_stacks() {
+    use crate::board::{ItemRef, PlacedPad};
+    use crate::model::footprint::{PadStack, StackLayer};
+    let mut p = Project::new("t");
+    let (_, d) = import(&mut p, PAD_STACKS, &opts()).unwrap();
+    assert!(!codes(&d).contains(&"import.pad_approximated"), "{:?}", codes(&d));
+    let circle = |d: f64| PadShape::Circle { d: Nm((d * 1e6).round() as i64) };
+    // The model: the footprint's side first, layers counted from it; both placements alike.
+    let want1 = PadStack {
+        inner: Some(circle(1.2)),
+        back: Some(PadShape::Oval { w: mmu(2), h: Nm(1_500_000) }),
+        ..Default::default()
+    };
+    let want2 = PadStack { layers: [(1, circle(1.0)), (2, circle(1.4))].into(), ..Default::default() };
+    for r in ["J1", "J2"] {
+        let f = crate::board::footprint_for(&p, r).unwrap();
+        let pad = |n: &str| f.pads.iter().find(|x| x.number == n).unwrap();
+        assert_eq!(pad("1").shape, PadShape::Rect { w: mmu(2), h: mmu(2) }, "{r}");
+        assert_eq!(pad("1").stack.as_ref(), Some(&want1), "{r}");
+        assert_eq!(pad("2").shape, circle(1.7), "{r}");
+        assert_eq!(pad("2").stack.as_ref(), Some(&want2), "{r}");
+        assert_eq!(pad("2").shape_on(StackLayer::Inner(2)), &circle(1.4));
+        assert_eq!(pad("1").size(), (mmu(2), mmu(2)));
+    }
+    // Board copper per layer: J1 counts from the top, J2 from the bottom.
+    let pads = crate::board::placed_pads(&p);
+    let get = |r: &str, n: &str| pads.iter().find(|pp| pp.refdes == r && pp.number == n).unwrap();
+    let width = |pp: &PlacedPad, l: &str| {
+        let xs: Vec<i64> = pp.shape_on(l).outer.0.iter().map(|q| q.x).collect();
+        xs.iter().max().unwrap() - xs.iter().min().unwrap()
+    };
+    let near = |a: i64, b: f64| (a - (b * 1e6) as i64).abs() <= 2_000;
+    let (j1, j2) = (get("J1", "1"), get("J2", "1"));
+    for pp in [j1, j2] {
+        assert!(near(width(pp, "F.Cu"), 2.0) && near(width(pp, "B.Cu"), 2.0));
+        assert!(near(width(pp, "In1.Cu"), 1.2) && near(width(pp, "In2.Cu"), 1.2));
+    }
+    // The top footprint's front is the rectangle, the bottom one's is on B.Cu.
+    assert_eq!(j1.pad_shape_on("F.Cu"), &PadShape::Rect { w: mmu(2), h: mmu(2) });
+    assert_eq!(j2.pad_shape_on("B.Cu"), &PadShape::Rect { w: mmu(2), h: mmu(2) });
+    assert!(matches!(j2.pad_shape_on("F.Cu"), PadShape::Oval { .. }));
+    assert!(near(width(get("J1", "2"), "In1.Cu"), 1.0) && near(width(get("J1", "2"), "In2.Cu"), 1.4));
+    assert!(near(width(get("J2", "2"), "In1.Cu"), 1.4) && near(width(get("J2", "2"), "In2.Cu"), 1.0));
+
+    // Copper items: one per shape, joined into one island through the hole.
+    let items = crate::board::copper_items(&p);
+    let isl = crate::board::islands(&items);
+    let of = |r: &str, n: &str| -> Vec<usize> {
+        (0..items.len()).filter(|&i| items[i].item == ItemRef::Pad(r.into(), n.into())).collect()
+    };
+    let j1i = of("J1", "1");
+    assert_eq!(j1i.len(), 3);
+    assert_eq!(items[j1i[1]].layers, vec!["In1.Cu".to_string(), "In2.Cu".to_string()]);
+    assert!(j1i.iter().all(|&i| isl[i] == isl[j1i[0]]));
+    assert_eq!(of("J1", "2").len(), 3, "F.Cu and B.Cu alike, two inner circles");
+
+    // DRC: the F.Cu track hits the rectangle, the In1.Cu one clears the inner circle.
+    let track = |l: &str| p.board().tracks.iter().find(|t| t.layer == l).unwrap().id.0;
+    let drc = crate::drc::check(&p);
+    let about = |id: u64| {
+        drc.iter()
+            .filter(|d| d.severity == crate::diag::Severity::Error && d.message.contains(&format!("track#{id}")))
+            .count()
+    };
+    assert!(about(track("F.Cu")) > 0, "{drc:?}");
+    assert_eq!(about(track("In1.Cu")), 0, "{drc:?}");
+    // The annular ring is the narrowest layer's: pad 2's 1 mm inner circle on its 0.8 mm hole.
+    let rings: Vec<&str> =
+        drc.iter().filter(|d| d.code == "drc.pad_annular_ring").map(|d| d.message.as_str()).collect();
+    assert_eq!(rings.len(), 2, "{rings:?}");
+    assert!(rings.iter().all(|m| m.contains(".2 annular ring 0.1mm")), "{rings:?}");
+
+    // Zone fill on In2.Cu reaches inside the top rectangle's outline, outside the inner circle.
+    let probe = |x: i64, y: i64| {
+        use crate::geom::poly::{Point as P, Polygon};
+        let s = 50_000;
+        Polygon::new(
+            vec![P::new(x - s, y - s), P::new(x + s, y - s), P::new(x + s, y + s), P::new(x - s, y + s)],
+            vec![],
+        )
+    };
+    let fill: Vec<_> = items
+        .iter()
+        .filter(|it| matches!(&it.item, ItemRef::Zone(_, l, _) if l == "In2.Cu"))
+        .flat_map(|it| it.shape.clone())
+        .collect();
+    let (cx, cy) = (j1.center.x.0, j1.center.y.0);
+    assert!(fill.iter().any(|pg| crate::geom::poly::contains(pg, &probe(cx + 920_000, cy))), "no fill at the pad");
+    assert!(!fill.iter().any(|pg| crate::geom::poly::intersects(pg, &probe(cx + 600_000, cy))));
+
+    // Outputs: Gerber flashes per layer, IPC-2581 per layer, DSN padstacks per layer.
+    let files = crate::fabout::all(&p, &Default::default());
+    let file = |f: &str| files.iter().find(|x| x.function.starts_with(f)).map(|x| x.content.clone()).unwrap();
+    let (l1, l2, l4) = (file("Copper,L1"), file("Copper,L2"), file("Copper,L4"));
+    assert!(l1.contains("R,2X2") && l1.contains("O,2X1.5") && !l1.contains("C,1.2*"), "{l1}");
+    assert!(l2.contains("C,1.2*") && l2.contains("C,1*") && l2.contains("C,1.4*") && !l2.contains("R,2X2"), "{l2}");
+    assert!(l4.contains("R,2X2") && l4.contains("O,2X1.5"), "{l4}");
+    let ipc = crate::fabout::ipc2581::document(&p, &Default::default()).content;
+    assert!(ipc.contains("<Circle diameter=\"1.2\"/>") && ipc.contains("<LayerFeature layerRef=\"In1.Cu\">"));
+    let dsn = crate::specctra::export::export(&p, "t", &Default::default()).dsn.write();
+    for s in ["(rect F.Cu -1000 -1000 1000 1000)", "(circle In1.Cu 1200)", "(path B.Cu 1500 -250 0 250 0)"] {
+        assert!(dsn.contains(s), "{s}: {dsn}");
+    }
+    assert!(dsn.contains("(circle In1.Cu 1000)") && dsn.contains("(circle In2.Cu 1400)"), "{dsn}");
+    assert!(dsn.contains("(padstack tht_d800_rect_2000x2000_stack_"), "{dsn}");
+
+    // Exported back (stacks keyed by board layer again) and imported: the same footprints.
+    let out = crate::kicad_pcb::to_kicad_pcb(&p);
+    assert_eq!(out.matches("(padstack (mode front_inner_back)").count(), 2, "{out}");
+    assert_eq!(out.matches("(padstack (mode custom)").count(), 2, "{out}");
+    assert!(out.contains("(layer \"Inner\" (shape circle) (size 1.2 1.2))"), "{out}");
+    let mut q = Project::new("t");
+    let (_, d) = import(&mut q, &out, &opts()).unwrap();
+    assert!(!codes(&d).contains(&"import.pad_approximated"), "{:?}", codes(&d));
+    for r in ["J1", "J2"] {
+        let (a, b) = (crate::board::footprint_for(&p, r).unwrap(), crate::board::footprint_for(&q, r).unwrap());
+        assert!(footprint::equivalent(a, b), "{r}: {:?}\n{:?}", a.pads, b.pads);
+    }
+    // The project format keeps the stack.
+    let f = crate::board::footprint_for(&p, "J1").unwrap();
+    let json = serde_json::to_string(f).unwrap();
+    let back: crate::model::footprint::Footprint = serde_json::from_str(&json).unwrap();
+    assert_eq!(&back, f);
+}

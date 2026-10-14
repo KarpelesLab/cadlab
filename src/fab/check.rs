@@ -348,6 +348,7 @@ impl Ctx<'_> {
                 let (w, h) = pp.pad.shape.size();
                 let ring = if matches!(pp.pad.shape, PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. })
                     || pp.pad.drill_offset.is_some()
+                    || pp.pad.has_stack()
                 {
                     crate::drc::annular_ring(&pp.pad, drill)
                 } else {

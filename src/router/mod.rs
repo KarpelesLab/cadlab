@@ -1819,8 +1819,11 @@ fn route_once(
     if !fan_ids.is_empty() {
         let mut pads_in: BTreeMap<usize, usize> = BTreeMap::new();
         let mut track_island: BTreeMap<ObjectId, usize> = BTreeMap::new();
+        let mut stacked: BTreeSet<usize> = BTreeSet::new();
         for (it, &k) in fitems.iter().zip(&fisl) {
             match &it.item {
+                // A pad with a pad stack is several items: counted once.
+                geo_board::ItemRef::Pad(..) if it.local.stack.is_some_and(|s| !stacked.insert(s)) => {}
                 geo_board::ItemRef::Pad(..) => *pads_in.entry(k).or_default() += 1,
                 geo_board::ItemRef::Track(id) => {
                     track_island.insert(*id, k);

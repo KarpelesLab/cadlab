@@ -36,7 +36,7 @@ use crate::geom::{BBox, Point};
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind, PadConnection, PlacedFootprint, Segment};
 use crate::model::footprint::{
-    Corner, Footprint, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Pad, PadKind, PadShape, Paste,
+    Corner, Footprint, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Pad, PadKind, PadShape, Paste, StackLayer,
 };
 use crate::model::part::PinKind;
 use crate::netlist::{LIB, kicad_pin_type};
@@ -650,65 +650,21 @@ fn write_pad(
             (if matches!(pad.kind, PadKind::Tht { .. }) { "thru_hole" } else { "np_thru_hole" }, l)
         }
     };
-    // A polygon pad is a custom pad: a 1 µm circular anchor at the center plus the outline as a
-    // filled polygon primitive, in KiCad's pad coordinates (Y down; mirrored on the bottom side).
-    let custom = match (&pad.kind, &pad.shape) {
-        (PadKind::Npth { .. }, _) => None,
-        (_, PadShape::Polygon { points }) => Some(
-            points
-                .iter()
-                .map(|q| match f.pf.side {
-                    BoardSide::Top => format!("(xy {} {})", mm(q.x), mm(-q.y)),
-                    BoardSide::Bottom => format!("(xy {} {})", mm(-q.x), mm(-q.y)),
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
-        _ => None,
+    // The shape written as the pad's own. KiCad's pad stack keys shapes by board layer, its
+    // pad's own shape being `F.Cu`'s: on a bottom-side footprint, the other side's.
+    let stacked = pad.has_stack();
+    let own = if stacked && f.pf.side == BoardSide::Bottom { pad.shape_on(StackLayer::Back) } else { &pad.shape };
+    let ks = match pad.kind {
+        PadKind::Npth { drill } => {
+            KShape { name: "circle", size: (drill, drill), rr: None, extra: String::new(), custom: None }
+        }
+        _ => kicad_shape(f, own),
     };
     // KiCad pad coordinates (Y down) of a pad-relative cadlab offset: the inverse of the
     // import's mapping (mirrored in X on the bottom side).
     let kxy = |q: Point| match f.pf.side {
         BoardSide::Top => (q.x, -q.y),
         BoardSide::Bottom => (-q.x, -q.y),
-    };
-    let mut extra = String::new();
-    let (shape, size, rr) = match (pad.kind, &pad.shape) {
-        (PadKind::Npth { drill }, _) => ("circle", (drill, drill), None),
-        (_, PadShape::Polygon { .. }) => ("custom", (Nm(1_000), Nm(1_000)), None),
-        (_, &PadShape::Trapezoid { w, h, dx, dy }) => {
-            // `rect_delta`: X lengthens the left edge, Y widens the lower edge (KiCad Y down,
-            // which is cadlab's bottom edge on either side).
-            let dx = if f.pf.side == BoardSide::Bottom { -dx } else { dx };
-            let _ = write!(extra, " (rect_delta {} {})", mm(dx), mm(dy));
-            ("trapezoid", (w, h), None)
-        }
-        (_, PadShape::ChamferedRect { w, h, r, chamfer, corners }) => {
-            let m = w.0.min(h.0).max(1) as f64;
-            let mut names: Vec<&str> = corners
-                .iter()
-                .map(|c| if f.pf.side == BoardSide::Bottom { c.mirrored_x() } else { *c })
-                .map(|c| match c {
-                    Corner::TopLeft => "top_left",
-                    Corner::TopRight => "top_right",
-                    Corner::BottomLeft => "bottom_left",
-                    Corner::BottomRight => "bottom_right",
-                })
-                .collect();
-            names.sort_by_key(|n| ["top_left", "top_right", "bottom_left", "bottom_right"].iter().position(|x| x == n));
-            let _ = write!(extra, " (chamfer_ratio {})", ratio((chamfer.0 as f64 / m).clamp(0.0, 0.5)));
-            if !names.is_empty() {
-                let _ = write!(extra, " (chamfer {})", names.join(" "));
-            }
-            ("roundrect", (*w, *h), Some((r.0 as f64 / m).clamp(0.0, 0.5)))
-        }
-        (_, &PadShape::Rect { w, h }) => ("rect", (w, h), None),
-        (_, &PadShape::RoundRect { w, h, r }) => {
-            let m = w.0.min(h.0).max(1) as f64;
-            ("roundrect", (w, h), Some((r.0 as f64 / m).clamp(0.0, 0.5)))
-        }
-        (_, &PadShape::Oval { w, h }) => ("oval", (w, h), None),
-        (_, &PadShape::Circle { d }) => ("circle", (d, d), None),
     };
     let layers: Vec<String> = layers.iter().map(|l| q(l)).collect();
     // A drill offset: KiCad's pad position is the hole, its offset moves the copper.
@@ -723,11 +679,12 @@ fn write_pad(
     };
     let anchor = if offset.is_some() { pad.hole_center() } else { pad.at };
     let mut s = format!(
-        "(pad {} {kind} {shape} (at {} {angle}) (size {} {}) ",
+        "(pad {} {kind} {} (at {} {angle}) (size {} {}) ",
         q(&pad.number),
+        ks.name,
         f.local(anchor),
-        mm(size.0),
-        mm(size.1)
+        mm(ks.size.0),
+        mm(ks.size.1)
     );
     match (pad.kind, pad.slot) {
         (PadKind::Tht { .. } | PadKind::Npth { .. }, Some((sx, sy))) => {
@@ -739,16 +696,19 @@ fn write_pad(
         (PadKind::Smd, _) => {}
     }
     let _ = write!(s, "(layers {})", layers.join(" "));
-    if let Some(pts) = &custom {
+    if let Some(pts) = &ks.custom {
         let _ = write!(
             s,
             " (options (clearance outline) (anchor circle)) (primitives (gr_poly (pts {pts}) (width 0) (fill yes)))"
         );
     }
-    if let Some(r) = rr {
+    if let Some(r) = ks.rr {
         let _ = write!(s, " (roundrect_rratio {})", ratio(r));
     }
-    s.push_str(&extra);
+    s.push_str(&ks.extra);
+    if stacked {
+        s.push_str(&padstack_text(f, pad, &w.p.board().stackup.copper_names(), &offset_text));
+    }
     if !pad.number.is_empty() {
         if let Some(net) = nets.get(&pad.number) {
             let _ = write!(s, " (net {} {})", w.net(Some(net)), q(net));
@@ -782,6 +742,110 @@ fn write_pad(
             );
         }
     }
+}
+
+/// A pad shape as KiCad writes it: shape name, size, rounded corner ratio, other tokens
+/// (`rect_delta`, chamfers; each with a leading space) and a custom pad's polygon points.
+struct KShape {
+    name: &'static str,
+    size: (Nm, Nm),
+    rr: Option<f64>,
+    extra: String,
+    custom: Option<String>,
+}
+
+/// A copper pad shape in KiCad's terms, for a pad of the footprint `f`. A polygon pad is a
+/// custom pad: a 1 µm circular anchor at the center plus the outline as a filled polygon
+/// primitive, in KiCad's pad coordinates (Y down; mirrored on the bottom side).
+fn kicad_shape(f: &FpFrame<'_>, shape: &PadShape) -> KShape {
+    let custom = match shape {
+        PadShape::Polygon { points } => Some(
+            points
+                .iter()
+                .map(|q| match f.pf.side {
+                    BoardSide::Top => format!("(xy {} {})", mm(q.x), mm(-q.y)),
+                    BoardSide::Bottom => format!("(xy {} {})", mm(-q.x), mm(-q.y)),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        _ => None,
+    };
+    let mut extra = String::new();
+    let (name, size, rr) = match shape {
+        PadShape::Polygon { .. } => ("custom", (Nm(1_000), Nm(1_000)), None),
+        &PadShape::Trapezoid { w, h, dx, dy } => {
+            // `rect_delta`: X lengthens the left edge, Y widens the lower edge (KiCad Y down,
+            // which is cadlab's bottom edge on either side).
+            let dx = if f.pf.side == BoardSide::Bottom { -dx } else { dx };
+            let _ = write!(extra, " (rect_delta {} {})", mm(dx), mm(dy));
+            ("trapezoid", (w, h), None)
+        }
+        PadShape::ChamferedRect { w, h, r, chamfer, corners } => {
+            let m = w.0.min(h.0).max(1) as f64;
+            let mut names: Vec<&str> = corners
+                .iter()
+                .map(|c| if f.pf.side == BoardSide::Bottom { c.mirrored_x() } else { *c })
+                .map(|c| match c {
+                    Corner::TopLeft => "top_left",
+                    Corner::TopRight => "top_right",
+                    Corner::BottomLeft => "bottom_left",
+                    Corner::BottomRight => "bottom_right",
+                })
+                .collect();
+            names.sort_by_key(|n| ["top_left", "top_right", "bottom_left", "bottom_right"].iter().position(|x| x == n));
+            let _ = write!(extra, " (chamfer_ratio {})", ratio((chamfer.0 as f64 / m).clamp(0.0, 0.5)));
+            if !names.is_empty() {
+                let _ = write!(extra, " (chamfer {})", names.join(" "));
+            }
+            ("roundrect", (*w, *h), Some((r.0 as f64 / m).clamp(0.0, 0.5)))
+        }
+        &PadShape::Rect { w, h } => ("rect", (w, h), None),
+        &PadShape::RoundRect { w, h, r } => {
+            let m = w.0.min(h.0).max(1) as f64;
+            ("roundrect", (w, h), Some((r.0 as f64 / m).clamp(0.0, 0.5)))
+        }
+        &PadShape::Oval { w, h } => ("oval", (w, h), None),
+        &PadShape::Circle { d } => ("circle", (d, d), None),
+    };
+    KShape { name, size, rr, extra, custom }
+}
+
+/// A through-hole pad's stack (KiCad 9 `padstack`, each token with a leading space): mode
+/// `front_inner_back` (`Inner` and `B.Cu` layers) unless single inner layers differ (`custom`:
+/// every inner layer and `B.Cu`), in board layers; `offset` is the pad's drill offset tokens,
+/// repeated on each layer.
+fn padstack_text(f: &FpFrame<'_>, pad: &Pad, copper: &[String], offset: &str) -> String {
+    let entry = |name: &str, shape: &PadShape| -> String {
+        let k = kicad_shape(f, shape);
+        let mut e = format!(" (layer {} (shape {}) (size {} {}){offset}", q(name), k.name, mm(k.size.0), mm(k.size.1));
+        if let Some(r) = k.rr {
+            let _ = write!(e, " (roundrect_rratio {})", ratio(r));
+        }
+        e.push_str(&k.extra);
+        if let Some(pts) = &k.custom {
+            let _ = write!(
+                e,
+                " (options (clearance outline) (anchor circle)) (primitives (gr_poly (pts {pts}) (width 0) (fill yes)))"
+            );
+        }
+        e.push(')');
+        e
+    };
+    let side = f.pf.side;
+    let custom = pad.stack.as_ref().is_some_and(|s| !s.layers.is_empty());
+    let mut s = format!(" (padstack (mode {})", if custom { "custom" } else { "front_inner_back" });
+    if custom {
+        for l in copper.iter().skip(1) {
+            s.push_str(&entry(l, pad.shape_on(geo::stack_layer(copper, l, side))));
+        }
+    } else {
+        s.push_str(&entry("Inner", pad.shape_on(StackLayer::Inner(1))));
+        let b = if side == BoardSide::Bottom { &pad.shape } else { pad.shape_on(StackLayer::Back) };
+        s.push_str(&entry("B.Cu", b));
+    }
+    s.push(')');
+    s
 }
 
 /// KiCad's zone connection number: 0 none, 1 thermal, 2 solid, 3 thermal for through-hole pads.

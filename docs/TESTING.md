@@ -280,10 +280,11 @@ known differences fell from 46 DRC entries (812 findings at most) and 48 Gerber 
 
 - footprints with designators cadlab cannot use (`POWER SW`), logos with a schematic symbol (unplaced), and
   board footprints missing from the schematic (fiducials, placeholders) are not imported;
-- per-layer pad stacks (KiCad 9 `padstack` modes other than `normal`: the front layer's shape is kept on
-  every layer, `import.pad_approximated`). Trapezoid and chamfered pads and drill offsets, earlier
-  approximated, are modeled since D44; the corpus has not been re-run with them here (no `kicad-cli` in that
-  environment), so the manifest's per-board counts still date from before and may now be lower;
+- trapezoid and chamfered pads and drill offsets (D44) and per-layer pad stacks (KiCad 9 `padstack` modes
+  `front_inner_back` and `custom`, D48), earlier approximated, are modeled; the corpus has not been re-run
+  with them (no `kicad-cli` in the environments that wrote them), so the manifest's per-board counts still
+  date from before and may now be lower. Pad stacks on SMD pads keep the front shape
+  (`import.pad_approximated`), and per-layer thermal and zone settings take the pad's;
 - custom DRC rules cadlab has no counterpart for (`hasComponentClass`, terms relating both items such as
   `A.Net == B.Net`, disallowed `text`/`hole`/`footprint`, track widths conditioned on `B`) and DRC
   exclusions stored in the project (layer-marker texts outside the outline, overlapping PMOD headers);

@@ -312,7 +312,7 @@ pub enum PasteChoice {
 
 /// Change a footprint's local settings, for the whole footprint (defaults of its pads) or for
 /// some pads: solder mask and paste margins, clearance, zone connection; and per pad the side
-/// (`back`), a slotted hole and paste-in-hole; and the footprint's net ties. Only given values
+/// (`back`), a slotted hole, paste-in-hole and per-layer shapes (`stack`); and the footprint's net ties. Only given values
 /// change; `unset` resets values to "inherited". Every placement using the footprint follows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -348,7 +348,7 @@ pub struct FootprintSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_angle: Option<crate::units::Angle>,
     /// Settings to reset to inherited: mask_margin, paste_margin, paste_ratio, clearance,
-    /// zone_connection, thermal_gap, thermal_spoke, thermal_angle; for pads also slot.
+    /// zone_connection, thermal_gap, thermal_spoke, thermal_angle; for pads also slot, stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unset: Vec<String>,
     /// Pads only: SMD pads on the other side of the footprint (true) or on its side (false).
@@ -365,6 +365,13 @@ pub struct FootprintSet {
     /// Pads only: solder paste (default, none, or pad for paste-in-hole).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paste: Option<PasteChoice>,
+    /// Through-hole pads only: per-layer copper shapes (a pad stack), replacing the current
+    /// one: `inner` (every inner layer), `back` (the other side of the footprint) and `layers`
+    /// (single inner layers by number from the footprint's side), each a pad shape
+    /// (`{"shape": "circle", "d": "1.2mm"}`). Layers left out keep the pad's shape; `unset`
+    /// `stack` removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::model::footprint::PadStack>,
     /// Footprint only: net-tie groups of pad numbers (`[["1", "2"]]`), replacing the current
     /// ones; `[]` removes them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -391,6 +398,9 @@ pub struct PadSettings {
     /// Paste setting, when not the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paste: Option<crate::model::footprint::Paste>,
+    /// Per-layer copper shapes (pad stack).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::model::footprint::PadStack>,
 }
 
 /// A footprint's local settings after `footprint.set`.
@@ -420,7 +430,12 @@ impl FootprintSettings {
                     PadKind::Smd => p.paste.is_none(),
                     _ => p.paste.is_none() || p.paste == Some(Paste::None),
                 };
-                !p.overrides.is_empty() || p.back || !p.mask.is_default() || p.slot.is_some() || !default_paste
+                !p.overrides.is_empty()
+                    || p.back
+                    || !p.mask.is_default()
+                    || p.slot.is_some()
+                    || !default_paste
+                    || p.stack.is_some()
             })
             .map(|p| PadSettings {
                 number: p.number.clone(),
@@ -429,6 +444,7 @@ impl FootprintSettings {
                 mask: p.mask,
                 slot: p.slot,
                 paste: p.paste.clone().filter(|x| !matches!(x, Paste::None) || matches!(p.kind, PadKind::Smd)),
+                stack: p.stack.clone(),
             })
             .collect();
         FootprintSettings { name: f.name.clone(), overrides: f.overrides.clone(), net_ties: f.net_ties.clone(), pads }
@@ -469,7 +485,7 @@ fn overrides_text(o: &crate::model::footprint::Overrides) -> Vec<String> {
 
 impl Command for FootprintSet {
     const NAME: &'static str = "footprint.set";
-    const SUMMARY: &'static str = "Set a footprint's or its pads' mask/paste margins, clearance, zone connection, net ties, back-side pads, slots, paste-in-hole";
+    const SUMMARY: &'static str = "Set a footprint's or its pads' mask/paste margins, clearance, zone connection, net ties, back-side pads, slots, paste-in-hole, pad stacks";
     const KIND: CommandKind = CommandKind::Mutation;
     const POSITIONAL: &'static [&'static str] = &["name"];
     type Output = FootprintSettings;
@@ -492,7 +508,7 @@ impl Command for FootprintSet {
             )
             .with_hint("e.g. -0.05 for 5 % smaller openings"));
         }
-        const FIELDS: [&str; 9] = [
+        const FIELDS: [&str; 10] = [
             "mask_margin",
             "paste_margin",
             "paste_ratio",
@@ -502,17 +518,25 @@ impl Command for FootprintSet {
             "thermal_spoke",
             "thermal_angle",
             "slot",
+            "stack",
         ];
         for u in &self.unset {
-            if !FIELDS.contains(&u.as_str()) || (u == "slot" && self.pads.is_empty()) {
+            if !FIELDS.contains(&u.as_str()) || ((u == "slot" || u == "stack") && self.pads.is_empty()) {
                 return Err(bad("footprint.invalid_setting", format!("`{u}` cannot be unset here"))
                     .with_hint(format!("give one of {}", FIELDS.join(", "))));
             }
         }
-        let pad_only = self.back.is_some() || self.mask.is_some() || self.slot.is_some() || self.paste.is_some();
+        let pad_only = self.back.is_some()
+            || self.mask.is_some()
+            || self.slot.is_some()
+            || self.paste.is_some()
+            || self.stack.is_some();
         if self.pads.is_empty() && pad_only {
-            return Err(bad("footprint.pads_required", "`back`, `mask`, `slot` and `paste` apply to pads".into())
-                .with_hint("name the pads with `pads`"));
+            return Err(bad(
+                "footprint.pads_required",
+                "`back`, `mask`, `slot`, `paste` and `stack` apply to pads".into(),
+            )
+            .with_hint("name the pads with `pads`"));
         }
         if !self.pads.is_empty() && self.net_ties.is_some() {
             return Err(bad("footprint.invalid_setting", "`net_ties` belongs to the footprint, not to pads".into())
@@ -604,6 +628,25 @@ impl Command for FootprintSet {
                 if self.unset.iter().any(|u| u == "slot") {
                     pad.slot = None;
                 }
+                if self.unset.iter().any(|u| u == "stack") {
+                    pad.stack = None;
+                }
+                if let Some(st) = &self.stack {
+                    if !matches!(pad.kind, PadKind::Tht { .. }) {
+                        return Err(bad(
+                            "footprint.invalid_setting",
+                            format!("pad {} has no plated hole: only through-hole pads have a pad stack", pad.number),
+                        )
+                        .with_hint("give `stack` to through-hole pads only"));
+                    }
+                    if st.layers.keys().any(|k| *k == 0) {
+                        return Err(bad(
+                            "footprint.invalid_setting",
+                            "pad stack inner layers are numbered from 1 (the inner layer nearest the footprint)".into(),
+                        ));
+                    }
+                    pad.stack = Some(st.clone()).filter(|s| !s.is_empty());
+                }
                 if let Some((sx, sy)) = self.slot {
                     let (PadKind::Tht { drill } | PadKind::Npth { drill }) = &mut pad.kind else {
                         return Err(bad(
@@ -661,6 +704,12 @@ impl Command for FootprintSet {
             }
             if let Some(pp) = &pad.paste {
                 v.push(format!("paste {}", serde_json::to_value(pp).ok().map(|v| v.to_string()).unwrap_or_default()));
+            }
+            if let Some(st) = &pad.stack {
+                v.push(format!(
+                    "pad stack {}",
+                    serde_json::to_value(st).ok().map(|v| v.to_string()).unwrap_or_default()
+                ));
             }
             s += &format!("\n  pad {}: {}", pad.number, v.join(", "));
         }

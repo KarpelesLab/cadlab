@@ -145,7 +145,7 @@ fn local_courtyard(fp: &crate::model::footprint::Footprint) -> Vec<Point> {
         return fp.courtyard.clone();
     }
     let pts = fp.pads.iter().flat_map(|pd| {
-        let (w, h) = pd.shape.size();
+        let (w, h) = pd.size();
         let (hw, hh) = (Nm(w.0 / 2 + 250_000), Nm(h.0 / 2 + 250_000));
         [Point::new(-hw, -hh), Point::new(hw, hh), Point::new(-hw, hh), Point::new(hw, -hh)]
             .map(|c| c.rotated(pd.rotation) + pd.at)

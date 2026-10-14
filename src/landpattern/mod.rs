@@ -949,6 +949,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                         mask: Default::default(),
                         slot: None,
                         drill_offset: None,
+                        stack: None,
                         overrides: Default::default(),
                     }
                 })
@@ -978,6 +979,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                     mask: Default::default(),
                     slot: None,
                     drill_offset: None,
+                    stack: None,
                     overrides: Default::default(),
                 })
                 .collect();
@@ -1011,6 +1013,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                         mask: Default::default(),
                         slot: None,
                         drill_offset: None,
+                        stack: None,
                         overrides: Default::default(),
                     });
                 }
@@ -1096,6 +1099,7 @@ fn smd_pad(number: &str, at: Point, len: Nm, width: Nm, opts: &GenOptions) -> Pa
         mask: Default::default(),
         slot: None,
         drill_offset: None,
+        stack: None,
         overrides: Default::default(),
     }
 }

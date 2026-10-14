@@ -56,8 +56,8 @@ pub(crate) fn mask_pads(pads: &[PlacedPad], side: BoardSide) -> impl Iterator<It
 }
 
 /// A pad's mask opening as drawn: shape and rotation ([`oriented`]) grown by the margin.
-pub(crate) fn mask_opening(p: &Project, o: &Options, pp: &PlacedPad) -> (PadShape, Angle) {
-    let (s, a) = oriented(pp, fp_rotation(p, &pp.refdes));
+pub(crate) fn mask_opening(p: &Project, o: &Options, pp: &PlacedPad, side: BoardSide) -> (PadShape, Angle) {
+    let (s, a) = oriented(pp, board::outer_layer(side), fp_rotation(p, &pp.refdes));
     (grow(s, mask_margin(p, o, pp)), a)
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn paste_growth(p: &Project, pp: &PlacedPad, shape: &PadShape) -> (i6
 /// ([`oriented`]) resized by the paste margins (a size change, not an offset: rectangles stay
 /// sharp and rounded rectangles keep their corner ratio, as KiCad plots paste).
 pub(crate) fn paste_opening(p: &Project, pp: &PlacedPad) -> (PadShape, Angle) {
-    let (s, a) = oriented(pp, fp_rotation(p, &pp.refdes));
+    let (s, a) = oriented(pp, board::outer_layer(pp.pad_side), fp_rotation(p, &pp.refdes));
     let (dx, dy) = paste_growth(p, pp, &pp.pad.shape);
     (resize_xy(s, dx, dy), a)
 }
@@ -383,12 +383,13 @@ pub(crate) fn grow_xy(shape: PadShape, dx: i64, dy: i64) -> PadShape {
 /// shapes keep the pad's own shape and its board rotation ([`pad_rotation`]), trapezoids and
 /// chamfered rectangles too, mirrored on the bottom side; a polygon pad comes out in board
 /// orientation (rotation and bottom-side mirroring applied, from the pad's board copper) with
-/// no further rotation.
-pub(crate) fn oriented(pp: &PlacedPad, fp_rotation: Angle) -> (PadShape, Angle) {
-    match &pp.pad.shape {
+/// no further rotation. The shape is the pad's on `layer` (a pad stack differs between layers).
+pub(crate) fn oriented(pp: &PlacedPad, layer: &str, fp_rotation: Angle) -> (PadShape, Angle) {
+    let copper = pp.shape_on(layer);
+    match pp.pad_shape_on(layer) {
         PadShape::Polygon { .. } => {
             // Holes joined back to the outline (the board copper keeps them apart).
-            let ring = crate::geom::poly::fracture(&pp.shape).unwrap_or_else(|_| pp.shape.outer.clone());
+            let ring = crate::geom::poly::fracture(copper).unwrap_or_else(|_| copper.outer.clone());
             let points = ring.0.iter().map(|&q| Point::from(q) - pp.center).collect();
             (PadShape::Polygon { points }, Angle::ZERO)
         }

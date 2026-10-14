@@ -621,3 +621,55 @@ fn kicad_round_trip() {
     };
     assert_eq!(codes(&q), codes(&before));
 }
+
+#[test]
+fn pad_stacks_through_footprint_set() {
+    let (_d, r, mut s) = setup();
+    exec(&r, &mut s, "part.create", json!({"id": "HDR2", "category": "connector", "package": "PinHeader 1x02"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "HDR2"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J1", "at": ["4mm", "3mm"]}));
+    let hdr = footprint_name(&mut s, "J1");
+    // Pad 1: a 2 mm square on the other side of the footprint (the bottom here).
+    let o = exec(
+        &r,
+        &mut s,
+        "footprint.set",
+        json!({"name": hdr, "pads": ["1"], "stack": {"back": {"shape": "rect", "w": "2mm", "h": "2mm"}}}),
+    );
+    assert!(o["output"]["pads"][0]["stack"]["back"].is_object(), "{o}");
+    let p = project(&mut s).clone();
+    let pp = board::placed_pads(&p).into_iter().find(|x| x.refdes == "J1" && x.number == "1").unwrap();
+    let w = |l: &str| {
+        let b = cadlab::geom::poly::Geometry::bbox(pp.shape_on(l)).unwrap();
+        b.max.x - b.min.x
+    };
+    assert_eq!(w("B.Cu"), 2_000_000);
+    assert!(w("F.Cu") < 2_000_000);
+    let files = cadlab::fabout::gerbers(&p, &Default::default());
+    let file = |suffix: &str| files.iter().find(|f| f.name.ends_with(suffix)).unwrap().content.clone();
+    assert!(file("-B_Cu.gbr").contains("R,2X2*"), "{}", file("-B_Cu.gbr"));
+    assert!(!file("-F_Cu.gbr").contains("R,2X2*"));
+    // The bottom mask opening follows the bottom copper (grown by the board's expansion).
+    assert!(
+        file("-B_Mask.gbr").contains("R,2X2*") && !file("-F_Mask.gbr").contains("R,2X2*"),
+        "{}",
+        file("-B_Mask.gbr")
+    );
+    // Copper items: one per shape, one island.
+    let items = board::copper_items(&p);
+    let mine: Vec<_> = items.iter().filter(|it| it.item == ItemRef::Pad("J1".into(), "1".into())).collect();
+    assert_eq!(mine.len(), 2);
+    assert_eq!(mine[1].layers, ["B.Cu"]);
+    // SMD pads have no pad stack; unset removes it.
+    let ldo = footprint_name(&mut s, "U1");
+    let err = fails(
+        &r,
+        &mut s,
+        "footprint.set",
+        json!({"name": ldo, "pads": ["1"], "stack": {"inner": {"shape": "circle", "d": "1mm"}}}),
+    );
+    assert_eq!(err, "footprint.invalid_setting");
+    assert_eq!(fails(&r, &mut s, "footprint.set", json!({"name": hdr, "stack": {}})), "footprint.pads_required");
+    exec(&r, &mut s, "footprint.set", json!({"name": hdr, "pads": ["1"], "unset": ["stack"]}));
+    assert!(board::footprint_for(project(&mut s), "J1").unwrap().pads[0].stack.is_none());
+}

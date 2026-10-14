@@ -733,6 +733,33 @@ work. The required `Actor` refers to an `EDMDPerson` whose surname is an argumen
 *Why:* these were the "not yet" items of MANUFACTURING.md that depend only on cadlab; STEP/VRML model import
 stays with the oxideav decoders (D36).
 
+### D48. Per-layer pad stacks: footprint-relative layers, one copper item per shape (2026-10-14)
+A through-hole pad may carry a `stack` (`PadStack`): its shape on every inner layer (`inner`), on the outer
+layer on the other side of the footprint (`back`) and on single inner layers (`layers`, numbered from the
+footprint's side); the pad's `shape` is the footprint side's and every layer left out. Layers are relative to
+the footprint, like the rest of a footprint, so a library footprint keeps one meaning on either side: on a
+bottom-side placement `back` is `F.Cu` and inner layer 1 the deepest. SMD and non-plated pads ignore it.
+Additive (schema version unchanged; projects without stacks are written as before). `PlacedPad` keeps its
+footprint-side `shape` and lists the layers whose shape differs (`layer_shapes`, `shape_on`), and the board
+copper is one item per distinct shape on the layers having it; the items of one pad share `ItemLocal::stack`
+and `islands` joins them (the plated hole), so DRC, zone fills (clearances and thermal reliefs per layer),
+connectivity, the ratsnest and the router follow without layer-specific code. Gerber copper flashes each
+layer's shape, masks the outer shape of their side, IPC-2581 the layer's shape in each copper feature (the
+package land pattern keeps the footprint side's), Specctra padstacks one shape per layer (named by the front
+shape plus a hash when they differ), the annular ring checks (DRC, fab) the narrowest layer's, the IPC-D-356
+record and the footprint preview the footprint side's. `footprint.set` sets or unsets a pad's `stack`.
+KiCad 9: `(padstack (mode front_inner_back|custom) (layer "Inner"|"In<k>.Cu"|"B.Cu" (shape …) (size …) …))`
+with the pad's own shape being `F.Cu`'s; stacks are keyed by board layers (a flipped footprint's stack
+flipped), so the importer takes `B.Cu`'s shape as a bottom-side pad's own and reverses inner layers, and the
+writer does the inverse (`front_inner_back` unless single inner layers differ, then `custom` with every inner
+layer and `B.Cu`). A layer `offset` other than the pad's turns that layer's shape into a polygon around the
+pad's center; per-layer thermal and zone settings are not modeled (the pad's apply). Read from the published
+format documentation and files KiCad writes, not from its code; not checked against `kicad-cli` here (none in
+this environment), and the corpus was not re-run.
+*Why:* per-layer shapes are design data (smaller inner pads for clearance between inner traces, different
+back pads) that changed clearances, fills and outputs when the front shape was copied to every layer.
+Splitting a stacked pad into per-shape copper items reuses every item-based consumer unchanged, and pads
+without a stack keep exactly their former single item, so every existing output is byte-identical.
 
 ## Open questions
 

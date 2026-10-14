@@ -605,16 +605,22 @@ fn pad_holes(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
 /// rectangular, rounded and oval pads: per pad axis (a slot leaves less copper along its
 /// length). Trapezoids, chamfered rectangles and holes off center (drill offsets): the distance
 /// from the hole (its slot axis) to the outline's edges, negative when the hole leaves the copper.
+/// A pad with a pad stack: the narrowest over its layers' shapes.
 pub(crate) fn annular_ring(pad: &crate::model::footprint::Pad, drill: Nm) -> Nm {
+    pad.shapes().into_iter().map(|s| annular_ring_of(pad, s, drill)).min().unwrap_or(Nm::ZERO)
+}
+
+/// [`annular_ring`] of one of the pad's copper shapes.
+fn annular_ring_of(pad: &crate::model::footprint::Pad, shape: &crate::model::footprint::PadShape, drill: Nm) -> Nm {
     use crate::model::footprint::PadShape;
     let (sx, sy) = pad.hole_size().unwrap_or((drill, drill));
-    let exact = matches!(pad.shape, PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. })
+    let exact = matches!(shape, PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. })
         || pad.drill_offset.is_some_and(|o| o != Point::ORIGIN);
     if !exact {
-        let (w, h) = pad.shape.size();
+        let (w, h) = shape.size();
         return Nm(((w.0 - sx.0) / 2).min((h.0 - sy.0) / 2));
     }
-    let outline = geo::pad_outline_local(&pad.shape);
+    let outline = geo::pad_outline_local(shape);
     if outline.len() < 3 {
         return Nm(-(drill.0 / 2));
     }
@@ -1048,17 +1054,17 @@ fn mask_openings<'a>(ctx: &Ctx, pads: &'a [geo::PlacedPad]) -> Vec<(Opening<'a>,
         for pp in pads.iter().filter(|pp| pp.mask_on(side)) {
             if !mask {
                 if pp.layers.iter().any(|l| l == layer) {
-                    out.push((Opening::Pad(pp), side, vec![pp.shape.clone()]));
+                    out.push((Opening::Pad(pp), side, vec![pp.shape_on(layer).clone()]));
                 }
                 continue;
             }
             let m = pp.overrides.mask_margin.unwrap_or(board.rules.mask_expansion).0;
             let shape = if m == 0 {
-                vec![pp.shape.clone()]
+                vec![pp.shape_on(layer).clone()]
             } else {
                 let tol =
                     polyclip::ArcTol::new(1_000, if m > 0 { polyclip::Side::Outside } else { polyclip::Side::Inside });
-                polyclip::offset(&pp.shape, m, Join::Round, tol).unwrap_or_default()
+                polyclip::offset(pp.shape_on(layer), m, Join::Round, tol).unwrap_or_default()
             };
             if !shape.is_empty() {
                 out.push((Opening::Pad(pp), side, shape));

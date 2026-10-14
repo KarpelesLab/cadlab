@@ -229,14 +229,32 @@ fn pad_padstack(pad: &Pad, copper: &[String]) -> Option<Padstack> {
         PadKind::Npth { .. } => return None,
     };
     let mut name = String::new();
+    // Image layers are the footprint's on the top side (the router flips a bottom-side
+    // component's), so a pad stack's layers count from the first copper layer.
+    let stacked = pad.has_stack();
+    let mut names: Vec<String> = Vec::new();
     let shapes = layers
         .iter()
         .map(|l| {
-            let (n, s) = pad_shape(&pad.shape, pad.rotation, l);
+            let shape = if stacked {
+                pad.shape_on(crate::board::stack_layer(copper, l, crate::model::board::BoardSide::Top))
+            } else {
+                &pad.shape
+            };
+            let (n, s) = pad_shape(shape, pad.rotation, l);
             name = format!("{prefix}_{n}");
+            names.push(n);
             s
         })
         .collect();
+    if stacked && names.iter().any(|n| *n != names[0]) {
+        // Named by the front shape and a hash of every layer's (FNV-1a, deterministic).
+        let mut hash: u32 = 0x811c_9dc5;
+        for b in names.join("|").bytes() {
+            hash = (hash ^ b as u32).wrapping_mul(0x0100_0193);
+        }
+        name = format!("{prefix}_{}_stack_{hash:08x}", names[0]);
+    }
     Some(Padstack { name, shapes, attach: false })
 }
 

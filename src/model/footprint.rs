@@ -3,6 +3,8 @@
 //! Coordinates are footprint-local, Y up, origin at the package center, in IPC-7351 zero
 //! orientation (pin 1 top-left for dual and quad packages, pin 1 left for two-terminal parts).
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -310,9 +312,92 @@ pub struct Pad {
     /// is not centered on it (KiCad's drill offset). Through-hole and non-plated pads only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drill_offset: Option<Point>,
+    /// Per-layer copper shapes of a through-hole pad (a pad stack): its shape on inner layers
+    /// and on the other side of the footprint when they differ from `shape`, which is the
+    /// shape on the footprint's side. Absent: `shape` on every layer. SMD and non-plated pads
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<PadStack>,
     /// Local settings of this pad, overriding the footprint's and the board's.
     #[serde(flatten)]
     pub overrides: Overrides,
+}
+
+/// A copper layer of a pad, relative to its footprint: the footprint's side, the other side, or
+/// an inner layer counted from the footprint's side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StackLayer {
+    /// The outer layer on the footprint's side.
+    Front,
+    /// An inner layer: 1 is the one nearest the footprint's side.
+    Inner(u32),
+    /// The outer layer on the other side of the footprint.
+    Back,
+}
+
+/// Copper shapes of a through-hole pad on layers other than the footprint's side (KiCad 9 pad
+/// stacks: `front_inner_back` sets `inner` and `back`, `custom` lists inner layers one by one).
+/// A shape left out is the pad's own `shape`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PadStack {
+    /// Shape on the inner copper layers (those not in `layers`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner: Option<PadShape>,
+    /// Shape on the outer layer on the other side of the footprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<PadShape>,
+    /// Shapes of single inner layers, by number counted from the footprint's side (1: the inner
+    /// layer nearest it; `In1.Cu` on a top-side footprint, the deepest inner layer on a
+    /// bottom-side one).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layers: BTreeMap<u32, PadShape>,
+}
+
+impl PadStack {
+    /// Whether no layer differs from the pad's own shape.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_none() && self.back.is_none() && self.layers.is_empty()
+    }
+}
+
+impl Pad {
+    /// The copper shape on a layer: `shape` on the footprint's side, else the pad stack's
+    /// shape for that layer when it has one. SMD and non-plated pads have one shape.
+    pub fn shape_on(&self, layer: StackLayer) -> &PadShape {
+        let Some(st) = self.stack.as_ref().filter(|_| matches!(self.kind, PadKind::Tht { .. })) else {
+            return &self.shape;
+        };
+        match layer {
+            StackLayer::Front => &self.shape,
+            StackLayer::Back => st.back.as_ref().unwrap_or(&self.shape),
+            StackLayer::Inner(k) => st.layers.get(&k).or(st.inner.as_ref()).unwrap_or(&self.shape),
+        }
+    }
+
+    /// Whether the copper differs between layers (a non-empty pad stack on a through-hole
+    /// pad).
+    pub fn has_stack(&self) -> bool {
+        matches!(self.kind, PadKind::Tht { .. }) && self.stack.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Every copper shape of the pad: `shape`, then the pad stack's (back, inner, single inner
+    /// layers), repeats included.
+    pub fn shapes(&self) -> Vec<&PadShape> {
+        let mut v = vec![&self.shape];
+        if self.has_stack()
+            && let Some(st) = &self.stack
+        {
+            v.extend(st.back.iter().chain(st.inner.iter()).chain(st.layers.values()));
+        }
+        v
+    }
+
+    /// Width and height of the box around every copper shape of the pad, centered on the pad
+    /// center, before the pad rotation ([`PadShape::size`] of `shape` without a pad stack).
+    pub fn size(&self) -> (Nm, Nm) {
+        self.shapes().iter().map(|s| s.size()).fold((Nm::ZERO, Nm::ZERO), |(w, h), (a, b)| (w.max(a), h.max(b)))
+    }
 }
 
 impl Pad {
@@ -329,6 +414,7 @@ impl Pad {
             mask: Default::default(),
             slot: None,
             drill_offset: None,
+            stack: None,
             overrides: Overrides::default(),
         }
     }

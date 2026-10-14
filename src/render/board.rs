@@ -549,7 +549,8 @@ fn pad_openings(
                 None | Some(Paste::Pad) => fill_set(s, &vec![pp.shape.clone()], c.alpha(140)),
             }
         } else if pp.mask_on(if layer.starts_with("F.") { BoardSide::Top } else { BoardSide::Bottom }) {
-            let ring: Vec<(f64, f64)> = pp.shape.outer.0.iter().map(|q| (q.x as f64 / 1e6, q.y as f64 / 1e6)).collect();
+            let ring: Vec<(f64, f64)> =
+                pp.shape_on(cu).outer.0.iter().map(|q| (q.x as f64 / 1e6, q.y as f64 / 1e6)).collect();
             s.outline(ring, hair, c);
         }
     }
@@ -625,7 +626,7 @@ fn realistic(p: &Project, side: BoardSide, items: &[geo::CopperItem]) -> Scene {
     let exposed: Vec<Polygon> = pads
         .iter()
         .filter(|pp| pp.mask_on(side) && pp.layers.iter().any(|l| l == cu))
-        .map(|pp| pp.shape.clone())
+        .map(|pp| pp.shape_on(cu).clone())
         .collect();
     fill_set(&mut s, &union(exposed), lk.finish);
     for (c, d, _, slot) in holes(p, &pads) {

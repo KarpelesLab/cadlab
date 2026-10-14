@@ -188,8 +188,9 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
   through-hole pads, slots (routed in XNC), geometric custom rules (`board.custom_rule`); `footprint.set`
 - [x] Trapezoid and chamfered pads, drill offsets (D44): modeled, imported, exported back and carried through
   DRC, zone fill, Gerber macros, IPC-2581, IPC-D-356, Specctra, router, renders and 3D/STEP drills
-- [ ] Per-layer pad stacks (KiCad 9 `padstack` modes `front_inner_back`, `custom`; the front shape is kept
-  today, D44 lists what they need)
+- [x] Per-layer pad stacks (D48): KiCad 9 `padstack` modes `front_inner_back` and `custom` modeled as the
+  pad's `stack`, imported, exported back and carried through DRC, zone fill, Gerber, IPC-2581, Specctra
+  padstacks, router obstacles, masks and renders; corpus counts still to re-measure with `kicad-cli`
 - [x] DRC and pour parity with KiCad (D46): silkscreen against solder mask openings (`silk_check`), thermal
   spoke angle/count and per-pad thermal settings (imported and exported), custom rule pairs (conditions on
   `B`), `disallow` and severities; corpus known differences still to re-measure with `kicad-cli`

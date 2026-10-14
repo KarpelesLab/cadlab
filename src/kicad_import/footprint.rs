@@ -20,7 +20,7 @@ use crate::geom::{BBox, Point};
 use crate::model::board::{BoardSide, PadConnection, PlacedFootprint};
 use crate::model::footprint::{
     Corner, Footprint, Graphic, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Overrides, Pad, PadKind, PadShape,
-    Paste,
+    PadStack, Paste,
 };
 use crate::model::part::{PinKind, slugify, valid_id};
 use crate::netlist::import::pin_kind;
@@ -821,7 +821,7 @@ fn chain_loop(mut paths: Vec<Vec<Point>>) -> Option<Vec<Point>> {
 fn pad_box(pads: &[Pad]) -> Vec<Point> {
     let mut pts = Vec::new();
     for p in pads {
-        let (w, h) = p.shape.size();
+        let (w, h) = p.size();
         let r = Nm(w.0.max(h.0) / 2);
         pts.push(p.at - Point::new(r, r));
         pts.push(p.at + Point::new(r, r));
@@ -882,96 +882,22 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
                 .with_hint("check clearances around it, or replace the footprint with one cadlab generates (`footprint.generate`)"),
         );
     };
-    if let Some(ps) = c.get("padstack")
-        && ps.child_value("mode").is_some_and(|m| m != "normal")
-    {
-        approx("its per-layer pad stack is reduced to the front layer's shape".into(), notes);
-    }
-    let mut pshape = match shape {
-        "rect" if chamfered_corners(c, loc).is_none() => PadShape::Rect { w, h },
-        "circle" => PadShape::Circle { d: w },
-        "oval" => PadShape::Oval { w, h },
-        "roundrect" | "rect" if chamfered_corners(c, loc).is_some() => {
-            let corners = chamfered_corners(c, loc).expect("checked");
-            let min = w.0.min(h.0) as f64;
-            let ratio = |k: &str, default: f64| -> f64 {
-                c.child_value(k).and_then(|r| r.parse::<f64>().ok()).unwrap_or(default).clamp(0.0, 0.5)
-            };
-            let r = if shape == "roundrect" { (ratio("roundrect_rratio", 0.25) * min).round() as i64 } else { 0 };
-            let chamfer = (ratio("chamfer_ratio", 0.2) * min).round() as i64;
-            PadShape::ChamferedRect { w, h, r: Nm(r), chamfer: Nm(chamfer), corners }
-        }
-        "roundrect" => {
-            let ratio: f64 = c.child_value("roundrect_rratio").and_then(|r| r.parse().ok()).unwrap_or(0.25);
-            let r = (ratio.clamp(0.0, 0.5) * w.0.min(h.0) as f64).round() as i64;
-            PadShape::RoundRect { w, h, r: Nm(r) }
-        }
-        "trapezoid" => {
-            // `rect_delta` (KiCad pad coordinates, Y down): X lengthens the left edge and
-            // shortens the right one, Y widens the lower edge and narrows the upper one.
-            let (dx, dy) = child_xy(c, "rect_delta").unwrap_or((Nm::ZERO, Nm::ZERO));
-            if dx.0 == 0 && dy.0 == 0 {
-                PadShape::Rect { w, h }
-            } else {
-                // The lower edge (KiCad +Y) is cadlab's −Y edge on both sides; a bottom-side
-                // footprint mirrors left and right.
-                let dx = if loc.side == BoardSide::Bottom { -dx } else { dx };
-                PadShape::Trapezoid { w, h, dx, dy }
-            }
-        }
-        "custom" if custom_outline(c, (w, h)).is_some() => {
-            let (ring, parts) = custom_outline(c, (w, h)).expect("checked");
-            if parts > 1 {
-                approx(format!("a custom shape in {parts} separate parts keeps only its largest part"), notes);
-            }
-            PadShape::Polygon { points: ring.into_iter().map(|k| loc.pad_offset(k)).collect() }
-        }
-        "custom" => {
-            // Bounding box of the anchor and the primitives, in KiCad pad coordinates.
-            let anchor_circle = c.get("options").and_then(|o| o.child_value("anchor")) == Some("circle");
-            let (hw, hh) = if anchor_circle { (Nm(w.0 / 2), Nm(w.0 / 2)) } else { (Nm(w.0 / 2), Nm(h.0 / 2)) };
-            let mut bb = BBox::new(Point::new(-hw, -hh), Point::new(hw, hh));
-            if let Some(prims) = c.get("primitives") {
-                for g in prims.items().iter().skip(1) {
-                    let half = Nm(width_of(g).0 / 2);
-                    let mut pts: Vec<Point> = Vec::new();
-                    let xy = |h: &str| child_xy(g, h).map(|(x, y)| Point::new(x, y));
-                    match g.head() {
-                        Some("gr_poly") => {
-                            pts.extend(pts_of(g).unwrap_or_default().into_iter().map(|(x, y)| Point::new(x, y)))
-                        }
-                        Some("gr_line" | "gr_rect") => pts.extend([xy("start"), xy("end")].into_iter().flatten()),
-                        Some("gr_arc") => {
-                            if let (Some(s), Some(m), Some(en)) = (xy("start"), xy("mid"), xy("end")) {
-                                pts.extend(arc_points(s, m, en, DRAW_TOL));
-                            }
-                        }
-                        Some("gr_circle") => {
-                            if let (Some(ce), Some(en)) = (xy("center"), xy("end")) {
-                                let d = en - ce;
-                                let r = Nm(((d.x.0 as f64).hypot(d.y.0 as f64)).round() as i64);
-                                pts.push(ce - Point::new(r, r));
-                                pts.push(ce + Point::new(r, r));
-                            }
-                        }
-                        _ => {}
-                    }
-                    for q in pts {
-                        bb.add_point(q - Point::new(half, half));
-                        bb.add_point(q + Point::new(half, half));
-                    }
-                }
-            }
-            let center = Point::new(Nm((bb.min.x.0 + bb.max.x.0) / 2), Nm((bb.min.y.0 + bb.max.y.0) / 2));
-            at = at + loc.pad_offset((center.x, center.y)).rotated(rotation);
-            approx("a custom shape is drawn as its bounding rectangle".into(), notes);
-            PadShape::Rect { w: bb.width(), h: bb.height() }
-        }
-        other => {
-            skip(&format!("unknown shape `{other}`"), notes);
-            return None;
-        }
+    let mut msgs: Vec<String> = Vec::new();
+    let Some((mut pshape, shift)) = convert_shape(c, shape, (w, h), loc, &mut msgs) else {
+        skip(&format!("unknown shape `{shape}`"), notes);
+        return None;
     };
+    for m in msgs {
+        approx(m, notes);
+    }
+    // KiCad pad coordinates of the copper center relative to the hole (drill offset and a
+    // custom pad recentered on its bounding box).
+    let mut copper_off: K = c.get("drill").and_then(|d| child_xy(d, "offset")).unwrap_or((Nm::ZERO, Nm::ZERO));
+    if let Some(s) = shift {
+        at = at + loc.pad_offset(s).rotated(rotation);
+        copper_off = (copper_off.0 + s.0, copper_off.1 + s.1);
+    }
+
     let layers: Vec<String> = c
         .get("layers")
         .map(|l| l.items().iter().skip(1).filter_map(Sexpr::atom).flat_map(|x| ctx.expand_layer(x)).collect())
@@ -1048,6 +974,7 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
                             mask: Default::default(),
                             slot: None,
                             drill_offset: None,
+                            stack: None,
                             overrides: Default::default(),
                         },
                         role: PadRole::Aperture { paste, mask: mask_only },
@@ -1065,6 +992,28 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
             return None;
         }
     };
+    // KiCad 9 pad stacks (modes other than `normal`): the pad's own shape is `F.Cu`'s, the
+    // stack's layers (`Inner` for every inner layer, `In<k>.Cu`, `B.Cu`) the others, all in
+    // board layers (a flipped footprint's stack is flipped).
+    let mut stack = None;
+    if let Some(ps) = c.get("padstack").filter(|ps| ps.child_value("mode").is_some_and(|m| m != "normal")) {
+        if matches!(pkind, PadKind::Tht { .. }) {
+            let mut msgs = Vec::new();
+            let read = read_stack(ps, (pshape.clone(), copper_off), (w, h), loc, ctx.copper.len(), &mut msgs);
+            for m in msgs {
+                approx(m, notes);
+            }
+            if let Some((front, front_off, st)) = read {
+                if front_off != copper_off {
+                    at = anchor + loc.pad_offset(front_off).rotated(rotation);
+                }
+                pshape = front;
+                stack = Some(st).filter(|s| !s.is_empty());
+            }
+        } else {
+            approx("a per-layer pad stack on a pad without a plated hole keeps its front layer's shape".into(), notes);
+        }
+    }
     let paste = match (&pkind, &role) {
         (PadKind::Smd | PadKind::Tht { .. }, PadRole::Copper { paste: false }) => Some(Paste::None),
         (PadKind::Tht { .. }, PadRole::Copper { paste: true }) => Some(Paste::Pad),
@@ -1106,9 +1055,214 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         mask,
         slot,
         drill_offset,
+        stack,
         overrides,
     };
     Some(PadConv { pad, role, net })
+}
+
+/// A layer of a KiCad pad stack, in board layers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoardStackLayer {
+    /// `F.Cu`.
+    Front,
+    /// `B.Cu`.
+    Back,
+    /// `Inner`: every inner layer (mode `front_inner_back`).
+    AllInner,
+    /// `In<k>.Cu`.
+    Inner(u32),
+}
+
+/// Reads a KiCad pad stack (`padstack` of a through-hole pad, mode `front_inner_back` or
+/// `custom`) given the pad's own shape (`F.Cu`'s) and its copper offset from the hole (KiCad
+/// pad coordinates). Returns the shape on the footprint's side, its copper offset, and the
+/// other layers' shapes relative to it (a layer whose copper is centered elsewhere becomes a
+/// polygon), normalized: layers equal to the shape they would default to are left out.
+fn read_stack(
+    ps: &Sexpr,
+    top: (PadShape, K),
+    size: K,
+    loc: &Local,
+    copper: usize,
+    msgs: &mut Vec<String>,
+) -> Option<(PadShape, K, PadStack)> {
+    let mut entries: Vec<(BoardStackLayer, PadShape, K)> = vec![(BoardStackLayer::Front, top.0, top.1)];
+    for e in ps.items().iter().skip(1).filter(|e| e.head() == Some("layer")) {
+        let Some(name) = e.items().get(1).and_then(Sexpr::atom) else { continue };
+        let key = match name {
+            "F.Cu" => BoardStackLayer::Front,
+            "B.Cu" => BoardStackLayer::Back,
+            "Inner" => BoardStackLayer::AllInner,
+            n => match n.strip_prefix("In").and_then(|r| r.strip_suffix(".Cu")).and_then(|k| k.parse().ok()) {
+                Some(k) if k > 0 => BoardStackLayer::Inner(k),
+                _ => {
+                    msgs.push(format!("its pad stack layer `{n}` is not a copper layer and is ignored"));
+                    continue;
+                }
+            },
+        };
+        let shape = e.child_value("shape").unwrap_or("circle");
+        let sz = child_xy(e, "size").unwrap_or(size);
+        let Some((s, shift)) = convert_shape(e, shape, sz, loc, msgs) else {
+            msgs.push(format!("its pad stack layer `{name}` has an unknown shape `{shape}` and is ignored"));
+            continue;
+        };
+        let mut off = child_xy(e, "offset").unwrap_or((Nm::ZERO, Nm::ZERO));
+        if let Some(c) = shift {
+            off = (off.0 + c.0, off.1 + c.1);
+        }
+        entries.retain(|x| x.0 != key);
+        entries.push((key, s, off));
+    }
+    // The footprint's side: `F.Cu` on top, `B.Cu` on a bottom-side footprint.
+    let own = if loc.side == BoardSide::Bottom { BoardStackLayer::Back } else { BoardStackLayer::Front };
+    let fi = entries.iter().position(|x| x.0 == own).unwrap_or(0);
+    let (_, front, front_off) = entries[fi].clone();
+    let rel = |s: PadShape, off: K| -> PadShape {
+        if off == front_off {
+            return s;
+        }
+        let d = loc.pad_offset((off.0 - front_off.0, off.1 - front_off.1));
+        PadShape::Polygon { points: crate::board::pad_outline_local(&s).into_iter().map(|q| q + d).collect() }
+    };
+    let mut st = PadStack::default();
+    for (i, (key, s, off)) in entries.into_iter().enumerate() {
+        if i == fi {
+            continue;
+        }
+        let s = rel(s, off);
+        let bottom = loc.side == BoardSide::Bottom;
+        match key {
+            BoardStackLayer::Front | BoardStackLayer::Back => st.back = Some(s),
+            BoardStackLayer::AllInner => st.inner = Some(s),
+            BoardStackLayer::Inner(k) if !bottom => {
+                st.layers.insert(k, s);
+            }
+            BoardStackLayer::Inner(k) if (k as usize) + 1 < copper => {
+                st.layers.insert((copper - 1 - k as usize) as u32, s);
+            }
+            BoardStackLayer::Inner(k) => {
+                msgs.push(format!("its pad stack layer `In{k}.Cu` is not on the board and is ignored"))
+            }
+        }
+    }
+    // Normalized: an inner layer of every inner layer's shape, all inner layers alike, shapes
+    // equal to their default.
+    let inner_count = copper.saturating_sub(2) as u32;
+    if st.inner.is_none() && inner_count > 0 && (1..=inner_count).all(|k| st.layers.contains_key(&k)) {
+        let first = st.layers[&1].clone();
+        if st.layers.values().all(|s| *s == first) {
+            st.inner = Some(first);
+            st.layers.clear();
+        }
+    }
+    let inner_default = st.inner.clone().unwrap_or_else(|| front.clone());
+    st.layers.retain(|_, s| *s != inner_default);
+    if st.inner.as_ref() == Some(&front) {
+        st.inner = None;
+    }
+    if st.back.as_ref() == Some(&front) {
+        st.back = None;
+    }
+    Some((front, front_off, st))
+}
+
+/// A KiCad pad shape (`shape` with the size, ratios, deltas, chamfers and primitives found in
+/// `c`: the pad, or a layer of its pad stack) as a cadlab shape, and for a custom pad drawn as
+/// its bounding rectangle the rectangle's center (KiCad pad coordinates) the copper moves to.
+/// Approximations are appended to `msgs`; `None` for an unknown shape.
+fn convert_shape(
+    c: &Sexpr,
+    shape: &str,
+    (w, h): K,
+    loc: &Local,
+    msgs: &mut Vec<String>,
+) -> Option<(PadShape, Option<K>)> {
+    let mut shift: Option<K> = None;
+    let s = match shape {
+        "rect" if chamfered_corners(c, loc).is_none() => PadShape::Rect { w, h },
+        "circle" => PadShape::Circle { d: w },
+        "oval" => PadShape::Oval { w, h },
+        "roundrect" | "rect" if chamfered_corners(c, loc).is_some() => {
+            let corners = chamfered_corners(c, loc).expect("checked");
+            let min = w.0.min(h.0) as f64;
+            let ratio = |k: &str, default: f64| -> f64 {
+                c.child_value(k).and_then(|r| r.parse::<f64>().ok()).unwrap_or(default).clamp(0.0, 0.5)
+            };
+            let r = if shape == "roundrect" { (ratio("roundrect_rratio", 0.25) * min).round() as i64 } else { 0 };
+            let chamfer = (ratio("chamfer_ratio", 0.2) * min).round() as i64;
+            PadShape::ChamferedRect { w, h, r: Nm(r), chamfer: Nm(chamfer), corners }
+        }
+        "roundrect" => {
+            let ratio: f64 = c.child_value("roundrect_rratio").and_then(|r| r.parse().ok()).unwrap_or(0.25);
+            let r = (ratio.clamp(0.0, 0.5) * w.0.min(h.0) as f64).round() as i64;
+            PadShape::RoundRect { w, h, r: Nm(r) }
+        }
+        "trapezoid" => {
+            // `rect_delta` (KiCad pad coordinates, Y down): X lengthens the left edge and
+            // shortens the right one, Y widens the lower edge and narrows the upper one.
+            let (dx, dy) = child_xy(c, "rect_delta").unwrap_or((Nm::ZERO, Nm::ZERO));
+            if dx.0 == 0 && dy.0 == 0 {
+                PadShape::Rect { w, h }
+            } else {
+                // The lower edge (KiCad +Y) is cadlab's −Y edge on both sides; a bottom-side
+                // footprint mirrors left and right.
+                let dx = if loc.side == BoardSide::Bottom { -dx } else { dx };
+                PadShape::Trapezoid { w, h, dx, dy }
+            }
+        }
+        "custom" if custom_outline(c, (w, h)).is_some() => {
+            let (ring, parts) = custom_outline(c, (w, h)).expect("checked");
+            if parts > 1 {
+                msgs.push(format!("a custom shape in {parts} separate parts keeps only its largest part"));
+            }
+            PadShape::Polygon { points: ring.into_iter().map(|k| loc.pad_offset(k)).collect() }
+        }
+        "custom" => {
+            // Bounding box of the anchor and the primitives, in KiCad pad coordinates.
+            let anchor_circle = c.get("options").and_then(|o| o.child_value("anchor")) == Some("circle");
+            let (hw, hh) = if anchor_circle { (Nm(w.0 / 2), Nm(w.0 / 2)) } else { (Nm(w.0 / 2), Nm(h.0 / 2)) };
+            let mut bb = BBox::new(Point::new(-hw, -hh), Point::new(hw, hh));
+            if let Some(prims) = c.get("primitives") {
+                for g in prims.items().iter().skip(1) {
+                    let half = Nm(width_of(g).0 / 2);
+                    let mut pts: Vec<Point> = Vec::new();
+                    let xy = |h: &str| child_xy(g, h).map(|(x, y)| Point::new(x, y));
+                    match g.head() {
+                        Some("gr_poly") => {
+                            pts.extend(pts_of(g).unwrap_or_default().into_iter().map(|(x, y)| Point::new(x, y)))
+                        }
+                        Some("gr_line" | "gr_rect") => pts.extend([xy("start"), xy("end")].into_iter().flatten()),
+                        Some("gr_arc") => {
+                            if let (Some(s), Some(m), Some(en)) = (xy("start"), xy("mid"), xy("end")) {
+                                pts.extend(arc_points(s, m, en, DRAW_TOL));
+                            }
+                        }
+                        Some("gr_circle") => {
+                            if let (Some(ce), Some(en)) = (xy("center"), xy("end")) {
+                                let d = en - ce;
+                                let r = Nm(((d.x.0 as f64).hypot(d.y.0 as f64)).round() as i64);
+                                pts.push(ce - Point::new(r, r));
+                                pts.push(ce + Point::new(r, r));
+                            }
+                        }
+                        _ => {}
+                    }
+                    for q in pts {
+                        bb.add_point(q - Point::new(half, half));
+                        bb.add_point(q + Point::new(half, half));
+                    }
+                }
+            }
+            let center = Point::new(Nm((bb.min.x.0 + bb.max.x.0) / 2), Nm((bb.min.y.0 + bb.max.y.0) / 2));
+            shift = Some((center.x, center.y));
+            msgs.push("a custom shape is drawn as its bounding rectangle".into());
+            PadShape::Rect { w: bb.width(), h: bb.height() }
+        }
+        _ => return None,
+    };
+    Some((s, shift))
 }
 
 /// The chamfered corners of a KiCad `rect`/`roundrect` pad (`chamfer top_left ...`) in cadlab
@@ -1306,6 +1460,19 @@ pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {
                 (a, b) => a == b,
             }
             && x.overrides == y.overrides
+            && match (&x.stack, &y.stack) {
+                (Some(a), Some(b)) => {
+                    let opt = |p: &Option<PadShape>, q: &Option<PadShape>| match (p, q) {
+                        (Some(p), Some(q)) => shape_eq(p, q),
+                        (p, q) => p == q,
+                    };
+                    opt(&a.inner, &b.inner)
+                        && opt(&a.back, &b.back)
+                        && a.layers.len() == b.layers.len()
+                        && a.layers.iter().zip(&b.layers).all(|((k, p), (l, q))| k == l && shape_eq(p, q))
+                }
+                (a, b) => a == b,
+            }
     };
     let graphic_eq = |x: &Graphic, y: &Graphic| {
         x.layer == y.layer

@@ -15,7 +15,7 @@ use crate::geom::Point;
 use crate::id::ObjectId;
 use crate::model::Project;
 use crate::model::board::{BoardSide, Contour, GraphicKind, PadConnection, PlacedFootprint, Segment, Track, Via};
-use crate::model::footprint::{Footprint, Overrides, Pad, PadKind, PadShape};
+use crate::model::footprint::{Footprint, Overrides, Pad, PadKind, PadShape, StackLayer};
 use crate::units::{Angle, Nm};
 
 /// Arc approximation tolerance for copper shapes (1 µm, outward: never smaller than true copper).
@@ -66,10 +66,15 @@ pub struct PlacedPad {
     /// Center of the hole on the board: the pad center unless the pad has a drill offset
     /// ([`Pad::drill_offset`]); the middle of a slot.
     pub hole_at: Point,
-    /// Copper shape on the board.
+    /// Copper shape on the board: on the footprint's side, and on every layer not in
+    /// `layer_shapes`.
     pub shape: Polygon,
     /// Copper layers it exists on.
     pub layers: Vec<String>,
+    /// Layers where a pad stack gives the copper another shape ([`Pad::stack`]): the layer, the
+    /// pad's shape there (footprint-local, before the pad rotation) and its copper on the
+    /// board. Empty for pads with one shape.
+    pub layer_shapes: Vec<(String, PadShape, Polygon)>,
     /// Hole, if any: (diameter, plated).
     pub hole: Option<(Nm, bool)>,
     /// The footprint pad.
@@ -122,6 +127,67 @@ impl PlacedPad {
     pub fn plated(&self) -> bool {
         matches!(self.hole, Some((_, true)))
     }
+
+    /// The pad's copper on a board layer ([`PlacedPad::shape`] unless its pad stack differs
+    /// there).
+    pub fn shape_on(&self, layer: &str) -> &Polygon {
+        self.layer_shapes.iter().find(|(l, _, _)| l == layer).map(|(_, _, s)| s).unwrap_or(&self.shape)
+    }
+
+    /// The footprint pad's shape on a board layer (footprint-local, before the pad rotation).
+    pub fn pad_shape_on(&self, layer: &str) -> &PadShape {
+        self.layer_shapes.iter().find(|(l, _, _)| l == layer).map(|(_, s, _)| s).unwrap_or(&self.pad.shape)
+    }
+
+    /// The pad's copper facing `side` (on its outer layer there).
+    pub fn shape_facing(&self, side: BoardSide) -> &Polygon {
+        self.shape_on(outer_layer(side))
+    }
+}
+
+/// The outer copper layer on a board side.
+pub fn outer_layer(side: BoardSide) -> &'static str {
+    match side {
+        BoardSide::Top => "F.Cu",
+        BoardSide::Bottom => "B.Cu",
+    }
+}
+
+/// The pad stack layer ([`StackLayer`]) a board copper layer is for a footprint on `side`:
+/// layers counted from the footprint's side (inner layers reversed on the bottom side).
+pub fn stack_layer(copper: &[String], layer: &str, side: BoardSide) -> StackLayer {
+    let n = copper.len();
+    let Some(i) = copper.iter().position(|l| l == layer) else {
+        return if layer == outer_layer(side) { StackLayer::Front } else { StackLayer::Back };
+    };
+    if n <= 1 {
+        return if side == BoardSide::Top { StackLayer::Front } else { StackLayer::Back };
+    }
+    let k = if side == BoardSide::Bottom { n - 1 - i } else { i };
+    match k {
+        0 => StackLayer::Front,
+        k if k == n - 1 => StackLayer::Back,
+        k => StackLayer::Inner(k as u32),
+    }
+}
+
+/// The board copper layer of a pad stack layer for a footprint on `side` (the inverse of
+/// [`stack_layer`]); `None` for an inner layer the board does not have.
+pub fn board_layer(copper: &[String], layer: StackLayer, side: BoardSide) -> Option<String> {
+    let n = copper.len();
+    let k = match layer {
+        StackLayer::Front => 0,
+        StackLayer::Back => n.checked_sub(1)?,
+        StackLayer::Inner(k) => {
+            let k = k as usize;
+            if k == 0 || k + 1 >= n {
+                return None;
+            }
+            k
+        }
+    };
+    let i = if side == BoardSide::Bottom { n.checked_sub(1)? - k } else { k };
+    copper.get(i).cloned()
 }
 
 /// The side an SMD pad's copper is on: its footprint's, or the other one for a pad on the
@@ -262,21 +328,36 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
         let nets = pad_nets_in(p, refdes, index.get(refdes.as_str()));
         let tf = transform(pf);
         for pad in &fp.pads {
-            let Ok(local) = pad_shape_local(&pad.shape) else { continue };
-            let place = |q: polyclip::Point| -> polyclip::Point {
-                let lp = Point::new(Nm(q.x), Nm(q.y)).rotated(pad.rotation) + pad.at;
-                pt(tf(lp))
+            let place_shape = |s: &PadShape| -> Option<Polygon> {
+                let local = pad_shape_local(s).ok()?;
+                let place = |q: polyclip::Point| -> polyclip::Point {
+                    let lp = Point::new(Nm(q.x), Nm(q.y)).rotated(pad.rotation) + pad.at;
+                    pt(tf(lp))
+                };
+                let mut shape = Polygon::new(
+                    local.outer.0.iter().map(|q| place(*q)).collect::<Vec<_>>(),
+                    local.holes.iter().map(|h| h.0.iter().map(|q| place(*q)).collect::<Vec<_>>().into()).collect(),
+                );
+                // The bottom side mirrors: restore the outer ring's counter-clockwise orientation
+                // (and the holes' clockwise one), or a union of shapes under the non-zero rule
+                // (zone keep-away offsets) would cancel where a bottom pad overlaps a track.
+                if pf.side == BoardSide::Bottom {
+                    shape.outer.reverse_orientation();
+                    shape.holes.iter_mut().for_each(|h| h.reverse_orientation());
+                }
+                Some(shape)
             };
-            let mut shape = Polygon::new(
-                local.outer.0.iter().map(|q| place(*q)).collect::<Vec<_>>(),
-                local.holes.iter().map(|h| h.0.iter().map(|q| place(*q)).collect::<Vec<_>>().into()).collect(),
-            );
-            // The bottom side mirrors: restore the outer ring's counter-clockwise orientation
-            // (and the holes' clockwise one), or a union of shapes under the non-zero rule (zone
-            // keep-away offsets) would cancel where a bottom pad overlaps a track.
-            if pf.side == BoardSide::Bottom {
-                shape.outer.reverse_orientation();
-                shape.holes.iter_mut().for_each(|h| h.reverse_orientation());
+            let Some(shape) = place_shape(&pad.shape) else { continue };
+            let mut layer_shapes = Vec::new();
+            if pad.has_stack() {
+                for l in &copper {
+                    let s = pad.shape_on(stack_layer(&copper, l, pf.side));
+                    if s != &pad.shape
+                        && let Some(pg) = place_shape(s)
+                    {
+                        layer_shapes.push((l.clone(), s.clone(), pg));
+                    }
+                }
             }
             let ps = match pad.kind {
                 PadKind::Smd => pad_side(pf.side, pad.back),
@@ -296,6 +377,7 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
                 hole_at: tf(pad.hole_center()),
                 shape,
                 layers,
+                layer_shapes,
                 hole,
                 pad: pad.clone(),
                 side: pf.side,
@@ -426,6 +508,10 @@ impl ItemRef {
 pub struct ItemLocal {
     /// Local clearance (a pad's, else its footprint's).
     pub clearance: Option<Nm>,
+    /// A pad with a pad stack is one item per distinct shape (each on its layers); its items
+    /// share this number (unique per pad) and are one island through the plated hole. `None`
+    /// for every other item.
+    pub stack: Option<usize>,
     /// Zone connection override (pads).
     pub connection: Option<PadConnection>,
     /// A plated through-hole pad.
@@ -490,7 +576,8 @@ pub struct CopperItem {
     pub net: Option<String>,
     /// Layers.
     pub layers: Vec<String>,
-    /// Shape (same on every layer).
+    /// Shape (same on every layer; a pad whose shape differs between layers is one item per
+    /// shape, see [`ItemLocal::stack`]).
     pub shape: PolygonSet,
     /// A representative point (pad center, via center, track start).
     pub anchor: Point,
@@ -510,17 +597,17 @@ pub fn copper_items(p: &Project) -> Vec<CopperItem> {
 /// Copper items other than zone fills: pads, tracks, vias, then copper drawings (footprint and
 /// board).
 pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
-    let mut out: Vec<CopperItem> = placed_pads(p)
-        .into_iter()
-        .filter(|pp| !pp.layers.is_empty())
-        .map(|pp| CopperItem {
+    let mut out: Vec<CopperItem> = Vec::new();
+    for (k, pp) in placed_pads(p).into_iter().enumerate().filter(|(_, pp)| !pp.layers.is_empty()) {
+        let item = |layers: Vec<String>, shape: &Polygon, pad_shape: &PadShape, stack: Option<usize>| CopperItem {
             item: ItemRef::Pad(pp.refdes.clone(), pp.number.clone()),
             net: pp.net.clone(),
-            layers: pp.layers.clone(),
-            shape: vec![pp.shape.clone()],
+            layers,
+            shape: vec![shape.clone()],
             anchor: pp.center,
             local: ItemLocal {
                 clearance: pp.overrides.clearance,
+                stack,
                 connection: pp.overrides.zone_connection,
                 through: pp.plated(),
                 tie: pp.tie.map(|g| (pp.refdes.clone(), g)),
@@ -538,11 +625,27 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
                         .normalized()
                     },
                     mirrored: pp.side == BoardSide::Bottom,
-                    round: matches!(pp.pad.shape, PadShape::Circle { .. }),
+                    round: matches!(pad_shape, PadShape::Circle { .. }),
                 }),
             },
-        })
-        .collect();
+        };
+        if pp.layer_shapes.is_empty() {
+            out.push(item(pp.layers.clone(), &pp.shape, &pp.pad.shape, None));
+            continue;
+        }
+        // One item per distinct shape, on the layers having it (in layer order).
+        let mut groups: Vec<(&PadShape, &Polygon, Vec<String>)> = Vec::new();
+        for l in &pp.layers {
+            let s = pp.pad_shape_on(l);
+            match groups.iter_mut().find(|g| g.0 == s) {
+                Some(g) => g.2.push(l.clone()),
+                None => groups.push((s, pp.shape_on(l), vec![l.clone()])),
+            }
+        }
+        for (s, pg, layers) in groups {
+            out.push(item(layers, pg, s, Some(k)));
+        }
+    }
     for t in &p.board().tracks {
         out.push(CopperItem {
             item: ItemRef::Track(t.id),
@@ -786,6 +889,15 @@ fn layer_masks(items: &[CopperItem]) -> Option<Vec<u128>> {
 pub fn islands(items: &[CopperItem]) -> Vec<usize> {
     let n = items.len();
     let mut sets = MinRootSets::new(n);
+    // The items of one pad with a pad stack are joined by its plated hole.
+    let mut first_of: BTreeMap<usize, usize> = BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if let Some(k) = it.local.stack {
+            let f = *first_of.entry(k).or_insert(i);
+            let (a, b) = (sets.find(f), sets.find(i));
+            sets.join_roots(a, b);
+        }
+    }
     let masks = layer_masks(items);
     let share = |i: usize, j: usize| match &masks {
         Some(m) => m[i] & m[j] != 0,

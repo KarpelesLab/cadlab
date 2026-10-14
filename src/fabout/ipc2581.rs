@@ -440,8 +440,8 @@ impl Ctx<'_> {
     }
 
     /// The pad's shape and rotation on the board ([`super::oriented`]).
-    fn oriented(&self, pp: &PlacedPad) -> (PadShape, Angle) {
-        super::oriented(pp, fp_rotation(self.p, &pp.refdes))
+    fn oriented(&self, pp: &PlacedPad, layer: &str) -> (PadShape, Angle) {
+        super::oriented(pp, layer, fp_rotation(self.p, &pp.refdes))
     }
 
     fn is_component(&self, pp: &PlacedPad) -> bool {
@@ -493,7 +493,7 @@ fn copper_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, layer: &str, items: &[
         if !np.is_empty() || !nt.is_empty() || !nf.is_empty() {
             x.open("Set", &net_attrs(net));
             for pp in &np {
-                let (s, r) = c.oriented(pp);
+                let (s, r) = c.oriented(pp, layer);
                 pad(x, d, pp.center, s, r, c.pin(pp));
             }
             if !nt.is_empty() || !nf.is_empty() {
@@ -561,7 +561,7 @@ fn mask_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
     x.open("LayerFeature", &[a("layerRef", side_layer(side, "F.Mask"))]);
     x.open("Set", &[]);
     for pp in pads {
-        let (s, r) = super::mask_opening(c.p, c.o, pp);
+        let (s, r) = super::mask_opening(c.p, c.o, pp, side);
         pad(x, d, pp.center, s, r, c.pin(pp));
     }
     x.close("Set");
@@ -733,7 +733,7 @@ fn package(x: &mut Xml, d: &mut Dict, fp: &Footprint) {
         // No courtyard: the pads' bounding box.
         let mut bb: Option<(i64, i64, i64, i64)> = None;
         for p in &fp.pads {
-            let (w, h) = p.shape.size();
+            let (w, h) = p.size();
             let r = w.0.max(h.0) / 2;
             let e = (p.at.x.0 - r, p.at.y.0 - r, p.at.x.0 + r, p.at.y.0 + r);
             bb = Some(match bb {
