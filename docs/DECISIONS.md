@@ -265,7 +265,7 @@ leftovers, same-net via spacing) and those fixes were cheaper and safer than a n
 the last word (D22, D23) stay non-negotiable, which rules out thread-timing-dependent merge orders.
 
 ### D29. Electrical calculations: published closed forms, exact stored values, heuristics as warnings (2026-10-04)
-Impedance comes from published closed-form models, not a field solver: Hammerstad–Jensen for surface
+Impedance comes from published closed-form models (a field solver became an option in D49): Hammerstad–Jensen for surface
 microstrip, Wheeler (as given by Wadell) for stripline with a parallel-combination approximation for
 asymmetric striplines, IPC-2141A for embedded microstrip and the IPC-2141 coupling formulas for edge-coupled
 differential pairs; each formula, its source and its accuracy range are listed in docs/ELECTRICAL.md, and
@@ -760,6 +760,33 @@ this environment), and the corpus was not re-run.
 back pads) that changed clearances, fills and outputs when the front shape was copied to every layer.
 Splitting a stacked pad into per-shape copper items reuses every item-based consumer unchanged, and pads
 without a stack keep exactly their former single item, so every existing output is byte-identical.
+
+### D49. Impedance field solver: 2D boundary elements with plane Green's functions, closed forms stay the default (2026-10-14)
+`impedance.calc` / `impedance.solve` gain `method: closed_form | field_solver`. The field solver
+(`electrical::fieldsolver`) is a quasi-static boundary element method (method of moments): piecewise-constant
+total charge on conductor surfaces and dielectric interfaces, point matching at panel midpoints (conductor
+potential; continuity of normal D), in a vacuum Green's function that already satisfies the ground planes
+(one image for microstrip, the closed-form parallel-plate function for stripline), so planes are never
+discretized. Log-kernel panel integrals are analytic, the parallel-plate remainder uses Gauss quadrature.
+Panels grade towards conductor corners; every structure is symmetric about the line centre, so half is
+solved with even/odd mirror kernels; the dense system is solved by LU in a fixed order (deterministic,
+single-threaded). From C and C₀: Z₀, εeff, C, L, and for pairs Zdiff / Zcomm from the mixed-mode transform of
+Z = C⁻¹(CL)^½ (odd/even for symmetric pairs, also defined for the asymmetric broadside microstrip pair).
+Modeled: microstrip, embedded microstrip, stripline (a stackup stripline keeps its two dielectrics apart),
+edge-coupled and broadside pairs (broadside: the layer and the next one down), grounded coplanar ground,
+conformal solder mask, trapezoidal etch. A field-solver-only option (`etch`, `mask`, `coplanar_gap`,
+`broadside`, `er2`) selects the field solver when `method` is unset, and is refused with an explicit
+`closed_form` (`impedance.needs_field_solver`). Default mask εr 3.8 (typical LPI; noted as assumed). The DRC
+keeps the closed forms. Losses are not computed.
+*Why:* boundary elements fit layered PCB sections best: unknowns live only on boundaries (a few hundred
+instead of tens of thousands of grid nodes), open regions need no artificial box, edge singularities are
+resolved by grading panels rather than refining a 2D grid, and exact panel integrals give 0.02–0.1 % against
+the exact (Cohn) stripline results at a few milliseconds per line; a finite-difference SOR grid would need
+nonuniform meshing, an outer boundary and many iterations for the same accuracy, and staircases trapezoids.
+Plane Green's functions avoid truncating the planes, the largest source of error in free-space BEM. The
+closed forms stay the default: they are instant, exactly reproducible across versions, already within a
+few percent in their ranges, and the DRC evaluates them per track; the solver is one option away, and
+picked automatically when the closed forms cannot model the request.
 
 ## Open questions
 

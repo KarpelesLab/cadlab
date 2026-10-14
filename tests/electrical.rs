@@ -132,6 +132,100 @@ fn stackup_and_impedance() {
     assert!(codes(&o).contains(&"board.dielectrics_cleared".to_string()));
 }
 
+#[test]
+fn field_solver_impedance() {
+    let r = Registry::with_builtins();
+    let (_dir, mut s) = new_project(&r, "fs");
+    exec(&r, &mut s, "board.setup", json!({"layers": 4}));
+    exec(&r, &mut s, "board.dielectric", json!({"thickness": "0.2mm", "er": "4.4"}));
+    exec(&r, &mut s, "board.dielectric", json!({"gap": 2, "thickness": "1.065mm", "er": "4.6"}));
+
+    // Same microstrip, both methods: within 1.5 % (Hammerstad-Jensen's thickness correction).
+    let cf = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm"}));
+    let fs = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "method": "field_solver"}));
+    assert_eq!(cf["output"]["method"], "closed_form");
+    assert_eq!(fs["output"]["method"], "field_solver");
+    let (zc, zf) = (ohms(&cf["output"]["z0"]), ohms(&fs["output"]["z0"]));
+    assert!((zf - zc).abs() < 0.015 * zc, "{zc} {zf}");
+    assert!(fs["output"]["geometry"]["formula"].as_str().unwrap().contains("field solver"));
+    assert!(fs["output"]["c_per_m"].as_str().unwrap().ends_with("pF"), "{}", fs["output"]);
+
+    // Solder mask selects the field solver and lowers the impedance; εr assumed is noted.
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "mask": "25um", "mask_copper": "15um"}));
+    assert_eq!(o["output"]["method"], "field_solver");
+    let zm = ohms(&o["output"]["z0"]);
+    assert!(zm < zf - 1.0 && zm > zf - 3.0, "{zf} {zm}");
+    assert!(codes(&o).contains(&"impedance.mask_er_assumed".to_string()));
+    assert_eq!(o["output"]["geometry"]["mask"]["er"], "3.8");
+    assert_eq!(
+        fail(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "mask": "25um", "method": "closed_form"})),
+        "impedance.needs_field_solver"
+    );
+    assert_eq!(
+        fail(&r, &mut s, "impedance.calc", json!({"width": "0.15mm", "layer": "In1.Cu", "mask": "25um"})),
+        "impedance.invalid_geometry"
+    );
+
+    // Coplanar ground and etch, an edge-coupled pair with Zcomm.
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "coplanar_gap": "0.15mm", "etch": "10um"}));
+    assert!(ohms(&o["output"]["z0"]) < zf, "{}", o["output"]);
+    assert_eq!(o["output"]["geometry"]["coplanar_gap"], "0.15mm");
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.2mm", "gap": "0.15mm", "method": "field_solver"}));
+    for k in ["zdiff", "zcomm", "z_odd", "z_even", "er_eff_odd", "er_eff_even"] {
+        assert!(o["output"].get(k).is_some(), "{k}: {}", o["output"]);
+    }
+
+    // Stripline on In1.Cu: the two dielectrics are kept apart by the field solver.
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.15mm", "layer": "In1.Cu", "method": "field_solver"}));
+    assert_eq!(o["output"]["geometry"]["er"], "4.4");
+    assert_eq!(o["output"]["geometry"]["er2"], "4.6");
+    let ee: f64 = o["output"]["er_eff"].as_str().unwrap().parse().unwrap();
+    assert!(ee > 4.4 && ee < 4.6, "{ee}");
+
+    // Broadside pair In1.Cu / In2.Cu between F.Cu and B.Cu.
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.15mm", "layer": "In1.Cu", "broadside": true}));
+    let g = &o["output"]["geometry"];
+    assert_eq!(g["broadside"]["layer"], "In2.Cu");
+    assert_eq!(g["broadside"]["gap"], "1.065mm");
+    assert_eq!(g["references"], json!(["F.Cu", "B.Cu"]));
+    assert!(o["output"]["zdiff"].is_string());
+    assert_eq!(
+        fail(&r, &mut s, "impedance.calc", json!({"width": "0.15mm", "layer": "B.Cu", "broadside": true})),
+        "impedance.no_pair_layer"
+    );
+    // Explicit broadside geometry; a tighter coupling gives a lower Zdiff.
+    let o = exec(
+        &r,
+        &mut s,
+        "impedance.calc",
+        json!({"width": "0.15mm", "layer": "In1.Cu", "broadside": true, "broadside_gap": "0.1mm"}),
+    );
+    assert!(ohms(&o["output"]["zdiff"]) < 100.0, "{}", o["output"]);
+
+    // Solve with the field solver: round trip, written into a class.
+    let o = exec(
+        &r,
+        &mut s,
+        "impedance.solve",
+        json!({"target": "50", "mask": "20um", "mask_er": "3.5", "netclass": "rf"}),
+    );
+    let w = o["output"]["width"].clone();
+    assert!((ohms(&o["output"]["z0"]) - 50.0).abs() < 0.3, "{}", o["output"]);
+    let class = exec(&r, &mut s, "netclass.show", json!({"name": "rf"}));
+    assert_eq!(class["output"]["track_width"], w);
+    let o = exec(
+        &r,
+        &mut s,
+        "impedance.solve",
+        json!({"target": "90", "gap": "0.15mm", "coplanar_gap": "0.2mm", "netclass": "usb"}),
+    );
+    assert!((ohms(&o["output"]["zdiff"]) - 90.0).abs() < 0.5, "{}", o["output"]);
+    assert_eq!(
+        fail(&r, &mut s, "impedance.solve", json!({"target": "900", "method": "field_solver"})),
+        "impedance.unreachable"
+    );
+}
+
 /// Two resistors joined by net `SIG` on a 30 × 20 mm board, ready for tracks.
 fn two_resistor_board(r: &Registry, s: &mut Session) {
     exec(r, s, "circuit.add", json!({"part": "R 10k 1% 0603", "count": 2}));

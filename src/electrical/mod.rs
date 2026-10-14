@@ -3,6 +3,7 @@
 //! `docs/ELECTRICAL.md`.
 
 pub mod current;
+pub mod fieldsolver;
 pub mod impedance;
 
 use std::collections::BTreeMap;
@@ -43,6 +44,23 @@ pub struct LayerGeometry {
     pub references: Vec<String>,
     /// Whether the dielectrics were assumed (the stackup does not specify them).
     pub assumed: bool,
+    /// Permittivities below and above the trace when they differ (stripline between two
+    /// dielectrics; `er` is then their thickness-weighted mean, used by the closed forms). The
+    /// field solver uses them separately.
+    pub er_split: Option<(f64, f64)>,
+    /// Broadside-coupled pair: the second trace and the dielectric between the two.
+    pub broadside: Option<Broadside>,
+}
+
+/// The second trace of a broadside-coupled pair, above the first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Broadside {
+    /// Dielectric thickness between the two traces (copper to copper).
+    pub gap: Nm,
+    /// Its permittivity.
+    pub er: f64,
+    /// Copper layer of the second trace (from the stackup).
+    pub layer: Option<String>,
 }
 
 impl LayerGeometry {
@@ -50,6 +68,64 @@ impl LayerGeometry {
     pub fn geometry(&self) -> Geometry {
         Geometry { model: self.model, h: mm(self.h), h2: mm(self.h2), t: mm(self.t), er: self.er }
     }
+
+    /// The cross-section for the field solver, in millimeters.
+    pub fn structure(&self, o: &FieldOptions) -> fieldsolver::Structure {
+        let (er, er2) = self.er_split.unwrap_or((self.er, self.er));
+        fieldsolver::Structure {
+            model: self.model,
+            h: mm(self.h),
+            er,
+            h2: mm(self.h2),
+            er2,
+            t: mm(self.t),
+            etch: mm(o.etch),
+            broadside: self.broadside.as_ref().map(|b| (mm(b.gap), b.er)),
+            coplanar_gap: o.coplanar_gap.map(mm),
+            mask: o.mask.map(|m| fieldsolver::Mask {
+                thickness: mm(m.thickness),
+                over_copper: mm(m.over_copper),
+                er: m.er,
+            }),
+        }
+    }
+}
+
+/// How impedance is computed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Solver {
+    /// Published closed-form models: instant, within their stated ranges (DECISIONS D29).
+    ClosedForm,
+    /// 2D quasi-static boundary element field solver: also models solder mask, coplanar ground,
+    /// trapezoidal etch, broadside coupling and split dielectrics (tens of milliseconds).
+    FieldSolver,
+}
+
+/// Permittivity assumed for a solder mask when none is given: 3.8, a typical value for liquid
+/// photoimageable masks (datasheets give about 3.3 to 4.2 near 1 GHz).
+pub const DEFAULT_MASK_ER: f64 = 3.8;
+
+/// Solder mask over an outer layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaskSpec {
+    /// Thickness over the laminate.
+    pub thickness: Nm,
+    /// Thickness over the copper.
+    pub over_copper: Nm,
+    /// Relative permittivity.
+    pub er: f64,
+}
+
+/// Cross-section details only the field solver models.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FieldOptions {
+    /// Top-edge inset per side (trapezoidal etch; the width is the bottom width).
+    pub etch: Nm,
+    /// Solder mask (outer layers).
+    pub mask: Option<MaskSpec>,
+    /// Coplanar ground on both sides at this gap.
+    pub coplanar_gap: Option<Nm>,
 }
 
 /// Why a layer has no geometry.
@@ -57,8 +133,10 @@ impl LayerGeometry {
 pub enum GeometryError {
     /// The layer is not a copper layer of the board.
     UnknownLayer,
-    /// Single-layer board: no reference plane.
+    /// Single-layer board (or, for a broadside pair, a two-layer board): no reference plane.
     NoReference,
+    /// Broadside pair on the bottom copper layer: no next layer for the second trace.
+    NoPairLayer,
 }
 
 /// Index of copper layer `layer` in the stackup.
@@ -89,6 +167,8 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
             er: er(gap),
             references: vec![names[refl].clone()],
             assumed,
+            er_split: None,
+            broadside: None,
         });
     }
     let (h1, h2) = (diel[k - 1].thickness, diel[k].thickness);
@@ -102,6 +182,55 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
         er: er_mean,
         references: vec![names[k - 1].clone(), names[k + 1].clone()],
         assumed,
+        er_split: (er(k - 1) != er(k)).then(|| (er(k - 1), er(k))),
+        broadside: None,
+    })
+}
+
+/// Geometry of a broadside-coupled pair on copper layer `layer` and the next one down. In the
+/// returned geometry the first trace is the lower one, on its own reference plane at `h`:
+/// with planes on both sides it is a stripline pair (the layer above `layer` and the one below
+/// the next), with only one, a microstrip pair whose upper trace is on the outer layer.
+pub fn broadside_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, GeometryError> {
+    let names = stackup.copper_names();
+    let k = layer_index(stackup, layer).ok_or(GeometryError::UnknownLayer)?;
+    let n = names.len();
+    if k + 1 >= n {
+        return Err(GeometryError::NoPairLayer);
+    }
+    let (diel, assumed) = stackup.effective_dielectrics();
+    let er = |i: usize| diel[i].er.to_f64();
+    let t = copper_thickness(stackup, layer).max(copper_thickness(stackup, &names[k + 1]));
+    let above = k >= 1;
+    let below = k + 2 < n;
+    // Stackup order is top to bottom; the solver's is bottom (first plane) to top.
+    let (model, h, er_h, h2, er_h2, refs) = match (above, below) {
+        (true, true) => (
+            Model::Stripline,
+            diel[k + 1].thickness,
+            er(k + 1),
+            diel[k - 1].thickness,
+            er(k - 1),
+            vec![names[k - 1].clone(), names[k + 2].clone()],
+        ),
+        (false, true) => {
+            (Model::Microstrip, diel[k + 1].thickness, er(k + 1), Nm::ZERO, 1.0, vec![names[k + 2].clone()])
+        }
+        (true, false) => {
+            (Model::Microstrip, diel[k - 1].thickness, er(k - 1), Nm::ZERO, 1.0, vec![names[k - 1].clone()])
+        }
+        (false, false) => return Err(GeometryError::NoReference),
+    };
+    Ok(LayerGeometry {
+        model,
+        h,
+        h2,
+        t,
+        er: er_h,
+        references: refs,
+        assumed,
+        er_split: (model == Model::Stripline).then_some((er_h, er_h2)),
+        broadside: Some(Broadside { gap: diel[k].thickness, er: er(k), layer: Some(names[k + 1].clone()) }),
     })
 }
 

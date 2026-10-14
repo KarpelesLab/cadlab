@@ -245,11 +245,14 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 
 Research-sized items beyond the milestones above; none blocks a release.
 
-- [ ] 2D cross-section field solver (quasi-static, e.g. boundary or finite elements from textbook methods):
+- [x] 2D cross-section field solver (quasi-static, e.g. boundary or finite elements from textbook methods):
       Z₀, εeff and losses of single lines and coupled pairs from the stackup; covers what the closed forms of
       D29 do not (coplanar waveguide with ground, broadside and asymmetric coupling, solder-mask cover,
       trapezoidal etch profiles, tight coupling). Selectable in `impedance.calc/solve`, checked against the
-      closed forms in their accurate range and against published reference values
+      closed forms in their accurate range and against published reference values. Done as a boundary
+      element solver (`method: field_solver`, D49; ELECTRICAL.md "Field solver"): Z₀, εeff, Zdiff, Zcomm,
+      odd/even modes, C and L; within 0.1 % of the exact stripline and coupled-stripline results. Losses
+      (skin effect, loss tangent) are not computed yet
 - [ ] 3D full-wave EM solver (e.g. FDTD or FEM) for S-parameters of vias, transitions, connectors and short
       interconnects, and an export of the board geometry to an external solver (openEMS) as a first step
 
