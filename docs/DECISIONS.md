@@ -332,8 +332,9 @@ Coordinates are parsed from decimal millimeters to `Nm` exactly and converted wi
 cadlab board comes back equal. Footprints embedded in the board are the user's design data and become project
 footprints; KiCad's libraries are still never read or converted (D7). Identical instances share one footprint,
 and a footprint equal (within 3 nm, any item order) to a project footprint reuses it. Shapes cadlab cannot
-represent are approximated conservatively (trapezoid pads as bounding rectangles; custom pads were bounding rectangles until the
-corpus, D35, made them polygon pads, and slots round holes until D40 modeled them) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
+represent are approximated conservatively (custom pads were bounding rectangles until the
+corpus, D35, made them polygon pads, slots round holes until D40 modeled them, trapezoid and chamfered pads
+bounding or rounded rectangles and drill offsets ignored until D43) with a warning; items without counterpart are reported, never dropped silently. With a circuit in the
 project it wins: footprints match by designator, pads to pins through the part's pin map, board nets take the
 circuit's names, and disagreements are reported for the user to fix; footprints the circuit lacks are not
 placed. Without one, the circuit is built from the board through the netlist importer (D27), so parts are
@@ -543,7 +544,7 @@ one footprint touch (its drawings bridge the group's nets) but keeps the nets ap
 and any other copper touching a tied pad is still a short. Slots are routed in the XNC drill files
 (`G00`/`M15`/`G01`/`M16`/`G05`, the documented XNC route mode) and drawn in X2 drill files. KiCad's
 custom rules import when their conditions are conjunctions of the supported terms; everything else is
-reported, never dropped silently. Left for later: per-layer pad stacks (front shape kept), footprint
+reported, never dropped silently. Left for later: per-layer pad stacks (front shape kept; still open after D43), footprint
 texts, zones inside footprints, rule severities and exclusions, inner-layer footprint copper.
 *Why:* the corpus showed these settings change real outputs (mask openings, stencils, neck-down
 clearances, Kelvin resistors, card-edge pads) by more than the comparison tolerances, and an import that
@@ -618,6 +619,38 @@ between a development machine and shared CI runners, but a single step regressin
 own median, which cancels the machine's speed; the absolute 8× limit catches a uniform slowdown only when it is
 gross, which is the price of a job that does not flap. Making the timings blocking with such a rule, rather than
 purely informative, means a pathological regression (a quadratic loop, a lost index) fails the PR that causes it.
+
+### D44. Trapezoid and chamfered pads, drill offsets (KiCad pad shapes) (2026-10-14)
+Two pad shapes join the model: `trapezoid` (`w`, `h`, `dx`: the left edge is `h + dx` long and the right
+`h − dx`, `dy`: the lower (−Y) edge is `w + dy` wide and the upper `w − dy`) and `chamfered_rect` (`w`, `h`,
+`chamfer` cut along both edges of each listed corner at 45°, the other corners rounded by `r`), and pads get
+an optional `drill_offset`: the hole center relative to the pad (copper) center, before the pad rotation.
+Additive, so the schema version stays 1 (older projects read unchanged; only projects using them need this
+version). Each shape has one outline definition (`PadShape::outline_path`: vertices, rounded corners as arcs
+with their centers) used everywhere: the board copper (exact arcs through `polyclip` curves, so DRC, zone fill,
+router obstacles and renders follow), Gerber (a trapezoid is one outline primitive; a chamfered rectangle an
+outline through its chamfers and its rounded corners' chords plus a circle on each rounded corner, which
+unions to the exact shape; no macro variables, as for the other pads), IPC-2581 (`RectCham` when no corner is
+rounded, else a `Contour`; trapezoids as contours), Specctra (polygons). A bottom-side footprint mirrors the
+shape (`PadShape::mirrored_x`: `dx` negated, corners left↔right) where outputs draw a pad shape with a board
+rotation. Mask openings grow these shapes as polygons (exact offsets with round corners); paste margins too.
+Holes everywhere (drill files, IPC-D-356 hole records, X2 drill, hole-to-hole, NPTH zone clearance, router,
+3D and STEP drills, renders) are taken from `PlacedPad::hole_at`, the pad's hole center on the board; the
+annular ring of an offset hole or of the new shapes is the distance from the hole (its slot axis) to the
+outline. KiCad: `rect_delta (dx dy)` in its pad frame (Y down) has `dx` lengthen the left edge and `dy` widen
+the edge toward +Y (cadlab's lower edge); chamfers are `chamfer_ratio` × shorter side on the listed corners
+of a `roundrect` (rounded others by `roundrect_rratio`) or `rect`; the pad position is the hole and
+`(drill … (offset x y))` moves the copper by the offset in the pad frame. These are read from the published
+format documentation and checked through the importer's custom-pad path (the hand-written test board puts
+each shape next to a custom pad of the same outline on a top and a bottom footprint), not by KiCad's code.
+Not done: per-layer pad stacks (KiCad 9 `padstack` modes `front_inner_back` and `custom`): the board copper
+is one shape per pad for every layer (`PlacedPad::shape`), so they need a per-layer shape there and in every
+consumer (DRC per layer, zone fill per layer, Gerber per layer, DSN padstacks per layer, the export); the
+front layer's shape is still kept with `import.pad_approximated`. The corpus manifest was not re-run here
+(no `kicad-cli`); its notes did not name these items, so they were left unchanged.
+*Why:* trapezoid, chamfered and offset pads are design data that changes copper, masks and drill positions
+beyond the comparison tolerances when approximated; one outline definition keeps every output consistent,
+and writing them back lets the KiCad DRC oracle check them.
 
 ## Open questions
 

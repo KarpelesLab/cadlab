@@ -430,7 +430,7 @@ fn npth_holes(p: &Project) -> Vec<NpthHole> {
         .into_iter()
         .filter_map(|pp| match pp.hole {
             Some((d, false)) => {
-                let (a, b) = pp.slot.unwrap_or((pp.center, pp.center));
+                let (a, b) = pp.slot.unwrap_or((pp.hole_at, pp.hole_at));
                 Some((a.into(), b.into(), d.0 / 2))
             }
             _ => None,

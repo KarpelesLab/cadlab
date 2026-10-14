@@ -20,7 +20,7 @@ use crate::board::{
 use crate::geom::Point;
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind, Segment};
-use crate::model::footprint::{GraphicGeometry, GraphicLayer, Mount, PadKind, PadShape, Paste};
+use crate::model::footprint::{Corner, GraphicGeometry, GraphicLayer, Mount, PadKind, PadShape, Paste};
 use crate::render::font::{self, HAlign, VAlign};
 use crate::units::{Angle, Nm};
 
@@ -78,7 +78,7 @@ pub(crate) fn pad_aperture(g: &mut Gerber, shape: PadShape, a: Angle) -> String 
     let q = a.quarter_turns();
     let swap = |w: Nm, h: Nm| if q.is_some_and(|q| q % 2 == 1) { (h.0, w.0) } else { (w.0, h.0) };
     match shape {
-        PadShape::Polygon { points } => {
+        PadShape::Polygon { ref points } => {
             // The outline may join holes to it by zero-width cuts; macro outlines must not touch
             // themselves, so each part is its own outline: exposed, holes cleared.
             let ring: Vec<polyclip::Point> =
@@ -89,6 +89,57 @@ pub(crate) fn pad_aperture(g: &mut Gerber, shape: PadShape, a: Angle) -> String 
             for pg in &set {
                 prims.push(outline_prim(&xy(&pg.outer)));
                 prims.extend(pg.holes.iter().map(|h| outline_prim(&xy(h)).replacen("4,1,", "4,0,", 1)));
+            }
+            g.macro_def(prims.join("*\n"))
+        }
+        PadShape::Trapezoid { w, h, dx, dy } if dx.0 == 0 && dy.0 == 0 => pad_aperture(g, PadShape::Rect { w, h }, a),
+        PadShape::ChamferedRect { w, h, r, ref corners, chamfer } if corners.is_empty() || chamfer.0 <= 0 => {
+            pad_aperture(g, PadShape::RoundRect { w, h, r }, a)
+        }
+        PadShape::Trapezoid { w, h, dx, dy } => {
+            // An outline primitive through the four corners (exact).
+            let path = shape.outline_path().unwrap_or_default();
+            let pts: Vec<Xy> = path.iter().map(|(q, _)| rot(q.x.0, q.y.0, a)).collect();
+            let head = format!(
+                "0 Pad trapezoid {}x{} delta {} {} rotated {}",
+                mm(w.0),
+                mm(h.0),
+                mm(dx.0),
+                mm(dy.0),
+                super::deg(a)
+            );
+            g.macro_def(format!("{head}*\n{}", outline_prim(&pts)))
+        }
+        PadShape::ChamferedRect { w, h, r, chamfer, ref corners } => {
+            // The outline with rounded corners cut along their chords, plus a circle on each
+            // rounded corner's center: their union is the exact shape.
+            let path = shape.outline_path().unwrap_or_default();
+            let pts: Vec<Xy> = path.iter().map(|(q, _)| rot(q.x.0, q.y.0, a)).collect();
+            let names: Vec<&str> = corners
+                .iter()
+                .map(|c| match c {
+                    Corner::TopLeft => "TL",
+                    Corner::TopRight => "TR",
+                    Corner::BottomLeft => "BL",
+                    Corner::BottomRight => "BR",
+                })
+                .collect();
+            let mut prims = vec![
+                format!(
+                    "0 Pad chamfered {}x{} r{} chamfer {} {} rotated {}",
+                    mm(w.0),
+                    mm(h.0),
+                    mm(r.0),
+                    mm(chamfer.0),
+                    names.join(""),
+                    super::deg(a)
+                ),
+                outline_prim(&pts),
+            ];
+            let rr = r.0.clamp(0, w.0.min(h.0) / 2);
+            for c in path.iter().filter_map(|(_, c)| *c) {
+                let c = rot(c.x.0, c.y.0, a);
+                prims.push(format!("1,1,{},{},{}", mm(2 * rr), mm(c.0), mm(c.1)));
             }
             g.macro_def(prims.join("*\n"))
         }
@@ -796,6 +847,38 @@ mod tests {
         pad_aperture(&mut g, PadShape::Polygon { points: tri }, Angle::DEG_90);
         let body = g.finish();
         assert!(body.contains(",0,0.4,"), "{body}");
+    }
+
+    #[test]
+    fn trapezoid_and_chamfered_apertures() {
+        let mut g = Gerber::new("t", "Copper,L1,Top", Polarity::Positive);
+        // Left edge 0.8 long, right edge 0.4 (dx 0.2 on a 0.6 high, 1 wide trapezoid).
+        let t = PadShape::Trapezoid { w: Nm(1_000_000), h: Nm(600_000), dx: Nm(200_000), dy: Nm::ZERO };
+        pad_aperture(&mut g, t, Angle::ZERO);
+        let body = g.finish();
+        assert!(body.contains("4,1,4,-0.5,-0.4,0.5,-0.2,0.5,0.2,-0.5,0.4,-0.5,-0.4,0"), "{body}");
+        // Without a delta: a plain rectangle aperture.
+        let mut g = Gerber::new("t", "Copper,L1,Top", Polarity::Positive);
+        let t = PadShape::Trapezoid { w: Nm(1_000_000), h: Nm(600_000), dx: Nm::ZERO, dy: Nm::ZERO };
+        assert_eq!(pad_aperture(&mut g, t, Angle::ZERO), "R,1X0.6");
+        // Chamfered top left, the other corners rounded by 0.1: the outline through the
+        // chamfer and the rounded corners' chords, a circle on each rounded corner.
+        let mut g = Gerber::new("t", "Copper,L1,Top", Polarity::Positive);
+        let c = PadShape::ChamferedRect {
+            w: Nm(1_000_000),
+            h: Nm(800_000),
+            r: Nm(100_000),
+            chamfer: Nm(200_000),
+            corners: vec![Corner::TopLeft],
+        };
+        pad_aperture(&mut g, c, Angle::ZERO);
+        let body = g.finish();
+        assert!(
+            body.contains("4,1,8,0.4,-0.4,0.5,-0.3,0.5,0.3,0.4,0.4,-0.3,0.4,-0.5,0.2,-0.5,-0.3,-0.4,-0.4,0.4,-0.4,0"),
+            "{body}"
+        );
+        assert_eq!(body.matches("1,1,0.2,").count(), 3, "{body}");
+        assert!(body.contains("1,1,0.2,-0.4,-0.3"), "{body}");
     }
 
     #[test]

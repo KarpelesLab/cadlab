@@ -284,7 +284,7 @@ impl RouterBoard {
         let mut holes = Vec::new();
         for pp in &pads {
             if let Some((d, plated)) = pp.hole {
-                let c = P::of(pp.center);
+                let c = P::of(pp.hole_at);
                 holes.push(Hole { at: c, r: d.0 as f64 / 2.0, via: None });
                 if !plated {
                     let shape = Shape::Capsule { a: c, b: c, r: d.0 as f64 / 2.0 };

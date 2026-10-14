@@ -186,6 +186,10 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
   and zone connections, net ties, pads on the other side of their footprint and per-side mask openings,
   copper (and mask, paste) drawings in footprints and copper drawings and texts on the board, paste on
   through-hole pads, slots (routed in XNC), geometric custom rules (`board.custom_rule`); `footprint.set`
+- [x] Trapezoid and chamfered pads, drill offsets (D44): modeled, imported, exported back and carried through
+  DRC, zone fill, Gerber macros, IPC-2581, IPC-D-356, Specctra, router, renders and 3D/STEP drills
+- [ ] Per-layer pad stacks (KiCad 9 `padstack` modes `front_inner_back`, `custom`; the front shape is kept
+  today, D44 lists what they need)
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
 

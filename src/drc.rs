@@ -553,10 +553,7 @@ fn pad_holes(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
             out.push(d);
         }
         if matches!(pp.pad.kind, PadKind::Tht { .. }) {
-            // Per pad axis: a slot leaves less copper along its length.
-            let (w, h) = pp.pad.shape.size();
-            let (sx, sy) = pp.pad.hole_size().unwrap_or((drill, drill));
-            let ring = Nm(((w.0 - sx.0) / 2).min((h.0 - sy.0) / 2));
+            let ring = annular_ring(&pp.pad, drill);
             if ring < ctx.rules.min_annular_ring {
                 let mut d = Diagnostic::error(
                     "drc.pad_annular_ring",
@@ -573,6 +570,46 @@ fn pad_holes(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
             }
         }
     }
+}
+
+/// The narrowest copper between a through-hole pad's hole and its outline. Centered holes in
+/// rectangular, rounded and oval pads: per pad axis (a slot leaves less copper along its
+/// length). Trapezoids, chamfered rectangles and holes off center (drill offsets): the distance
+/// from the hole (its slot axis) to the outline's edges, negative when the hole leaves the copper.
+pub(crate) fn annular_ring(pad: &crate::model::footprint::Pad, drill: Nm) -> Nm {
+    use crate::model::footprint::PadShape;
+    let (sx, sy) = pad.hole_size().unwrap_or((drill, drill));
+    let exact = matches!(pad.shape, PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. })
+        || pad.drill_offset.is_some_and(|o| o != Point::ORIGIN);
+    if !exact {
+        let (w, h) = pad.shape.size();
+        return Nm(((w.0 - sx.0) / 2).min((h.0 - sy.0) / 2));
+    }
+    let outline = geo::pad_outline_local(&pad.shape);
+    if outline.len() < 3 {
+        return Nm(-(drill.0 / 2));
+    }
+    let c = pad.drill_offset.unwrap_or(Point::ORIGIN);
+    let half = Nm((sx.0 - sy.0).abs() / 2);
+    let d = if sx > sy { Point::new(half, Nm::ZERO) } else { Point::new(Nm::ZERO, half) };
+    let axis = (c - d, c + d);
+    let edge = (0..outline.len())
+        .map(|i| segment_distance(axis, (outline[i], outline[(i + 1) % outline.len()])).0)
+        .fold(f64::INFINITY, f64::min);
+    let r = drill.0 as f64 / 2.0;
+    // Even-odd test of the hole center against the outline.
+    let mut inside = false;
+    for i in 0..outline.len() {
+        let (a, b) = (outline[i], outline[(i + 1) % outline.len()]);
+        if (a.y > c.y) != (b.y > c.y) {
+            let t = (c.y.0 - a.y.0) as f64 / (b.y.0 - a.y.0) as f64;
+            if (c.x.0 as f64) < a.x.0 as f64 + t * (b.x.0 - a.x.0) as f64 {
+                inside = !inside;
+            }
+        }
+    }
+    let ring = if inside { edge - r } else { -edge - r };
+    Nm(ring.round() as i64)
 }
 
 /// Edge-to-edge distance between drilled holes (vias, THT pads, NPTH).
@@ -600,7 +637,7 @@ fn hole_to_hole(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     }
     for pp in pads {
         if let Some((d, _)) = pp.hole {
-            let (at, end) = pp.slot.unwrap_or((pp.center, pp.center));
+            let (at, end) = pp.slot.unwrap_or((pp.hole_at, pp.hole_at));
             let pin = (!pp.number.is_empty()).then(|| (pp.refdes.clone(), pp.number.clone()));
             holes.push(Hole { at, end, pin, r: d.0 / 2, label: pad_label(pp), subjects: pad_subjects(pp) });
         }

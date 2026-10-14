@@ -139,7 +139,8 @@ pub fn netlist(p: &Project, o: &Options) -> OutFile {
             mid: false,
             hole: pp.hole,
             access,
-            at: pp.center,
+            // A hole's record is at the hole (off the copper center with a drill offset).
+            at: if pp.hole.is_some() { pp.hole_at } else { pp.center },
             size: pp.pad.shape.size(),
             rotation: rot,
             mask: 0,

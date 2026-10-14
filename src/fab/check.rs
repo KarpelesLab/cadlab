@@ -344,8 +344,15 @@ impl Ctx<'_> {
                 )));
             }
             if plated && let Some(m) = q.min_pth_ring {
+                use crate::model::footprint::PadShape;
                 let (w, h) = pp.pad.shape.size();
-                let ring = Nm((w.0.min(h.0) - drill.0) / 2);
+                let ring = if matches!(pp.pad.shape, PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. })
+                    || pp.pad.drill_offset.is_some()
+                {
+                    crate::drc::annular_ring(&pp.pad, drill)
+                } else {
+                    Nm((w.0.min(h.0) - drill.0) / 2)
+                };
                 if ring < m {
                     out.push(with(
                         Diagnostic::error(

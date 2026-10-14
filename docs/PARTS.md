@@ -160,8 +160,7 @@ cadlab lib import-kicad MyLib.kicad_sym --footprints MyLib.pretty [--library tea
 
 - **Footprints** (`.kicad_mod`, or every `.kicad_mod` of a `.pretty` directory) are converted like the
   footprints of an imported board (D32): named after the file, pads of every shape (custom pads as polygon
-  pads; trapezoids as their bounding box, chamfers as rounded corners, each with an
-  `import.pad_approximated` warning; oval holes as slots), drills, paste (paste-only apertures become paste
+  pads, trapezoids and chamfered rectangles as such; oval holes as slots, drill offsets kept), drills, paste (paste-only apertures become paste
   windows or paste drawings), local settings (mask and paste margins, clearances, zone connections, net ties,
   pads on the back, per-side mask openings, paste-in-hole; D40), copper, mask and paste drawings of either
   side, silkscreen, fab and courtyard drawings of the footprint's side (arcs as polylines; a courtyard made of lines, a

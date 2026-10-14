@@ -83,7 +83,7 @@ with the same matching and allowlist as the DRC cross-check below. `CADLAB_KICAD
 every `.kicad_pcb` under a directory (ad-hoc boards; nothing is downloaded by the test) and, with oracles, has
 KiCad load the re-exported result; the pinned open-source corpus below is the systematic version. Unit tests
 in `src/kicad_import/tests.rs` cover the older syntax (net tables, `fp_text reference`), custom pads (polygon
-outlines, rings), trapezoid pads, slots, paste apertures, bottom footprints, mounting holes, board-only
+outlines, rings), trapezoid and chamfered pads and drill offsets (each next to a custom pad of the same outline, on both sides, exported back), slots, paste apertures, bottom footprints, mounting holes, board-only
 stitching vias and hole patterns, logos, keep-outs with wildcard layers and with holes, circle courtyards, text
 variables and every unsupported-item diagnostic.
 
@@ -280,7 +280,10 @@ known differences fell from 46 DRC entries (812 findings at most) and 48 Gerber 
 
 - footprints with designators cadlab cannot use (`POWER SW`), logos with a schematic symbol (unplaced), and
   board footprints missing from the schematic (fiducials, placeholders) are not imported;
-- trapezoid and chamfered pads (bounding rectangles, rounded corners), per-layer pad stacks, drill offsets;
+- per-layer pad stacks (KiCad 9 `padstack` modes other than `normal`: the front layer's shape is kept on
+  every layer, `import.pad_approximated`). Trapezoid and chamfered pads and drill offsets, earlier
+  approximated, are modeled since D44; the corpus has not been re-run with them here (no `kicad-cli` in that
+  environment), so the manifest's per-board counts still date from before and may now be lower;
 - custom DRC rules cadlab has no counterpart for (`hasComponentClass`, `disallow`, conditions on `B`) and
   rule severities or exclusions (layer-marker texts outside the outline, overlapping PMOD headers);
 - texts on copper layers are drawn in cadlab's stroke font, whose glyphs differ from KiCad's (Gerber

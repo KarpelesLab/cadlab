@@ -127,6 +127,7 @@ footprint follows; nothing in them names a fab (D12).
 | `back` | SMD pad | the pad's copper, mask and paste are on the other side of its footprint (card-edge fingers, heat sinks soldered from the back) |
 | `mask` | pad | openings on the pad's outer copper (default), on the footprint's side only (`front`) or the other side only (`back`) for holes, or none (`none`: tented thermal vias, covered heat spreaders) |
 | `slot` | through-hole and non-plated pads | an oval hole (size along the pad's X and Y); the drill is its width |
+| `drill_offset` | through-hole and non-plated pads | the hole center relative to the pad center, before the pad rotation (copper off center on its hole) |
 | `paste: pad` | through-hole pads | paste-in-hole on the footprint's side (SMD pads have paste unless `paste: none`) |
 | `net_ties` | footprint | groups of pad numbers whose nets the footprint joins on purpose |
 | copper, mask, paste drawings | footprint graphics (`back` for the other side) | copper: copper items (DRC, fills, Gerber, IPC-2581) on the net of the first pad they touch; mask, paste: openings on those layers |
@@ -253,8 +254,10 @@ the library stay).
 | embedded footprint | a project footprint (shared by identical instances, reusing a project footprint equal within 3 nm) and a placement: position, rotation, side, lock |
 | pads: rect, circle, oval, roundrect | the same shapes (rounded corner = ratio × shorter side) |
 | pads: custom | polygon pads: anchor ∪ primitives (filled polygons, stroked lines and arcs, circles, rectangles; curves within 1 µm outside), holes joined by zero-width cuts; only the largest part of a pad in separate parts (`import.pad_approximated`) |
-| pads: trapezoid, chamfered | bounding rectangle, rounded corners (`import.pad_approximated`) |
-| oval drill (slot) | a slotted hole (`slot`); a drill offset is ignored, the hole centered (`import.pad_approximated`) |
+| pads: trapezoid (`rect_delta`) | trapezoid pads (`trapezoid`: `dx` lengthens the left edge, `dy` widens the lower edge; mirrored in X on bottom-side footprints) |
+| pads: chamfered (`chamfer_ratio`, `chamfer` corners on `rect`/`roundrect`) | chamfered rectangles (`chamfered_rect`: chamfer = ratio × shorter side, the other corners rounded by `roundrect_rratio`) |
+| oval drill (slot) | a slotted hole (`slot`) |
+| drill `offset` | KiCad's pad position is the hole and the offset moves the copper: the cadlab pad is centered on the copper and its `drill_offset` points back to the hole (SMD pads: the copper moves) |
 | SMD pad with copper only on the other side of its footprint | a pad on the back (`back`) |
 | pad layers without `*.Mask` / `F.Mask` / `B.Mask` | the pad's `mask`: none (tented), front or back only |
 | through-hole pad with `F.Paste` | paste-in-hole (`paste: pad`; paste on the other side only: `import.tht_paste`) |
@@ -305,8 +308,7 @@ it).
 Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
 notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
 (members are imported), footprint texts, 3D models, copper drawings on inner layers of footprints, zones
-inside footprints, per-layer pad stacks (the front layer's shape is kept, `import.pad_approximated`),
-drill offsets, hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
+inside footprints, per-layer pad stacks (the front layer's shape is kept, `import.pad_approximated`), hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
 can be read against the imported project.
 
 ## Placement (`src/board/place.rs`)

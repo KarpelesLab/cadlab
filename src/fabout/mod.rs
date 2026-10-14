@@ -288,7 +288,7 @@ pub fn holes(p: &Project) -> Vec<Hole> {
     for pp in board::placed_pads(p) {
         let Some((d, plated)) = pp.hole else { continue };
         out.push(Hole {
-            at: pp.center,
+            at: pp.hole_at,
             diameter: d,
             plated,
             span: (1, n),
@@ -371,13 +371,19 @@ pub(crate) fn grow_xy(shape: PadShape, dx: i64, dy: i64) -> PadShape {
             PadShape::Polygon { points }
         }
         s @ PadShape::Polygon { .. } => s,
+        s @ (PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. }) if d == 0 && dx == dy => s,
+        // Offsets of straight-edged shapes round their corners: grown as polygons.
+        s @ (PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. }) => {
+            grow_xy(PadShape::Polygon { points: board::pad_outline_local(&s) }, dx, dy)
+        }
     }
 }
 
 /// A placed pad's shape relative to its center and the rotation to draw it with: standard
-/// shapes keep the pad's own shape and its board rotation ([`pad_rotation`]); a polygon pad
-/// comes out in board orientation (rotation and bottom-side mirroring applied, from the pad's
-/// board copper) with no further rotation.
+/// shapes keep the pad's own shape and its board rotation ([`pad_rotation`]), trapezoids and
+/// chamfered rectangles too, mirrored on the bottom side; a polygon pad comes out in board
+/// orientation (rotation and bottom-side mirroring applied, from the pad's board copper) with
+/// no further rotation.
 pub(crate) fn oriented(pp: &PlacedPad, fp_rotation: Angle) -> (PadShape, Angle) {
     match &pp.pad.shape {
         PadShape::Polygon { .. } => {
@@ -385,6 +391,9 @@ pub(crate) fn oriented(pp: &PlacedPad, fp_rotation: Angle) -> (PadShape, Angle) 
             let ring = crate::geom::poly::fracture(&pp.shape).unwrap_or_else(|_| pp.shape.outer.clone());
             let points = ring.0.iter().map(|&q| Point::from(q) - pp.center).collect();
             (PadShape::Polygon { points }, Angle::ZERO)
+        }
+        s @ (PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. }) if pp.side == BoardSide::Bottom => {
+            (s.mirrored_x(), pad_rotation(pp, fp_rotation))
         }
         s => (s.clone(), pad_rotation(pp, fp_rotation)),
     }

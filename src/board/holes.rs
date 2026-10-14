@@ -27,6 +27,7 @@ pub fn hole_pad(h: &Hole) -> Pad {
         back: false,
         mask: Default::default(),
         slot: None,
+        drill_offset: None,
         overrides: Default::default(),
     }
 }
@@ -47,6 +48,7 @@ pub fn hole_pads(p: &Project) -> Vec<PlacedPad> {
                 number: pad.number.clone(),
                 net: if h.pad.is_some() { h.net.clone() } else { None },
                 center: h.at,
+                hole_at: h.at,
                 shape: Polygon::new(ring, vec![]),
                 layers: if h.pad.is_some() { copper.clone() } else { Vec::new() },
                 hole: Some((h.drill, h.pad.is_some())),

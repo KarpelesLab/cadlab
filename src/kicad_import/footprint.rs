@@ -19,7 +19,8 @@ use crate::diag::Diagnostic;
 use crate::geom::{BBox, Point};
 use crate::model::board::{BoardSide, PadConnection, PlacedFootprint};
 use crate::model::footprint::{
-    Footprint, Graphic, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Overrides, Pad, PadKind, PadShape, Paste,
+    Corner, Footprint, Graphic, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Overrides, Pad, PadKind, PadShape,
+    Paste,
 };
 use crate::model::part::{PinKind, slugify, valid_id};
 use crate::netlist::import::pin_kind;
@@ -860,6 +861,12 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
     let mut on_back = false;
     let mut at = loc.pt(pos);
     let rotation = loc.pad_rot(a);
+    // KiCad's pad position is the hole; a drill offset moves the copper away from it (SMD pads
+    // too: there it only moves the copper).
+    let anchor = at;
+    if let Some(o) = c.get("drill").and_then(|d| child_xy(d, "offset")).filter(|(x, y)| x.0 != 0 || y.0 != 0) {
+        at = at + loc.pad_offset(o).rotated(rotation);
+    }
     let (w, h) = size;
     let approx = |what: String, notes: &mut Notes| {
         notes.agg(
@@ -876,21 +883,36 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         approx("its per-layer pad stack is reduced to the front layer's shape".into(), notes);
     }
     let mut pshape = match shape {
-        "rect" => PadShape::Rect { w, h },
+        "rect" if chamfered_corners(c, loc).is_none() => PadShape::Rect { w, h },
         "circle" => PadShape::Circle { d: w },
         "oval" => PadShape::Oval { w, h },
+        "roundrect" | "rect" if chamfered_corners(c, loc).is_some() => {
+            let corners = chamfered_corners(c, loc).expect("checked");
+            let min = w.0.min(h.0) as f64;
+            let ratio = |k: &str, default: f64| -> f64 {
+                c.child_value(k).and_then(|r| r.parse::<f64>().ok()).unwrap_or(default).clamp(0.0, 0.5)
+            };
+            let r = if shape == "roundrect" { (ratio("roundrect_rratio", 0.25) * min).round() as i64 } else { 0 };
+            let chamfer = (ratio("chamfer_ratio", 0.2) * min).round() as i64;
+            PadShape::ChamferedRect { w, h, r: Nm(r), chamfer: Nm(chamfer), corners }
+        }
         "roundrect" => {
             let ratio: f64 = c.child_value("roundrect_rratio").and_then(|r| r.parse().ok()).unwrap_or(0.25);
             let r = (ratio.clamp(0.0, 0.5) * w.0.min(h.0) as f64).round() as i64;
-            if c.get("chamfer").is_some_and(|ch| ch.items().len() > 1) {
-                approx("chamfered corners are drawn rounded".into(), notes);
-            }
             PadShape::RoundRect { w, h, r: Nm(r) }
         }
         "trapezoid" => {
-            let d = child_xy(c, "rect_delta").unwrap_or((Nm::ZERO, Nm::ZERO));
-            approx("a trapezoid is drawn as its bounding rectangle".into(), notes);
-            PadShape::Rect { w: w + d.1.abs(), h: h + d.0.abs() }
+            // `rect_delta` (KiCad pad coordinates, Y down): X lengthens the left edge and
+            // shortens the right one, Y widens the lower edge and narrows the upper one.
+            let (dx, dy) = child_xy(c, "rect_delta").unwrap_or((Nm::ZERO, Nm::ZERO));
+            if dx.0 == 0 && dy.0 == 0 {
+                PadShape::Rect { w, h }
+            } else {
+                // The lower edge (KiCad +Y) is cadlab's −Y edge on both sides; a bottom-side
+                // footprint mirrors left and right.
+                let dx = if loc.side == BoardSide::Bottom { -dx } else { dx };
+                PadShape::Trapezoid { w, h, dx, dy }
+            }
         }
         "custom" if custom_outline(c, (w, h)).is_some() => {
             let (ring, parts) = custom_outline(c, (w, h)).expect("checked");
@@ -962,9 +984,6 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         };
         let a = mm(nums.first()?)?;
         let b = nums.get(1).and_then(|s| mm(s)).unwrap_or(a);
-        if child_xy(d, "offset").is_some_and(|(x, y)| x.0 != 0 || y.0 != 0) {
-            approx("its drill offset is ignored (the hole is at the pad center)".into(), notes);
-        }
         let slot = (oval && a != b).then_some((a, b));
         Some((Nm(a.0.min(b.0)), slot))
     });
@@ -1023,6 +1042,7 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
                             back: false,
                             mask: Default::default(),
                             slot: None,
+                            drill_offset: None,
                             overrides: Default::default(),
                         },
                         role: PadRole::Aperture { paste, mask: mask_only },
@@ -1046,6 +1066,15 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         _ => None,
     };
     let slot = if matches!(pkind, PadKind::Smd) { None } else { slot };
+    // The hole stays at KiCad's pad position: relative to the copper center when the copper
+    // moved (drill offset, custom pad recentered); a non-plated hole is its own pad.
+    let drill_offset = match pkind {
+        PadKind::Tht { .. } if at != anchor => Some((anchor - at).rotated(-rotation)),
+        _ => None,
+    };
+    if matches!(pkind, PadKind::Npth { .. }) {
+        at = anchor;
+    }
     // Mask openings: on the pad's side (both sides for a hole), one side, or none (tented).
     let (mf, mb) = (has(&format!("{front}Mask")), has(&format!("{back}Mask")));
     let mask = match (pkind, mf, mb) {
@@ -1066,9 +1095,34 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
         back: on_back,
         mask,
         slot,
+        drill_offset,
         overrides: read_overrides(c),
     };
     Some(PadConv { pad, role, net })
+}
+
+/// The chamfered corners of a KiCad `rect`/`roundrect` pad (`chamfer top_left ...`) in cadlab
+/// pad orientation (mirrored in X on a bottom-side footprint), sorted; `None` without any.
+fn chamfered_corners(c: &Sexpr, loc: &Local) -> Option<Vec<Corner>> {
+    let ch = c.get("chamfer")?;
+    let mut out: Vec<Corner> = ch
+        .items()
+        .iter()
+        .skip(1)
+        .filter_map(Sexpr::atom)
+        .filter_map(|k| match k {
+            "top_left" => Some(Corner::TopLeft),
+            "top_right" => Some(Corner::TopRight),
+            "bottom_left" => Some(Corner::BottomLeft),
+            "bottom_right" => Some(Corner::BottomRight),
+            _ => None,
+        })
+        .map(|k| if loc.side == BoardSide::Bottom { k.mirrored_x() } else { k })
+        .collect();
+    out.sort();
+    out.dedup();
+    let ratio = c.child_value("chamfer_ratio").and_then(|r| r.parse::<f64>().ok()).unwrap_or(0.2);
+    (!out.is_empty() && ratio > 0.0).then_some(out)
 }
 
 /// A paste-only aperture: center, rotation and size, in footprint coordinates.
@@ -1078,6 +1132,9 @@ type Aperture = (Point, Angle, (Nm, Nm));
 fn pad_outline(p: &Pad) -> Vec<Point> {
     let local: Vec<Point> = match &p.shape {
         PadShape::Polygon { points } => points.clone(),
+        s @ (PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. }) => {
+            s.outline_points(Nm(1_000)).unwrap_or_default()
+        }
         s => {
             let (w, h) = s.size();
             let r = match *s {
@@ -1212,6 +1269,10 @@ pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {
             w == w2 && h == h2 && (r.0 - r2.0).abs() <= 10
         }
         (PadShape::Polygon { points: p }, PadShape::Polygon { points: q }) => close_pts(p, q),
+        (
+            PadShape::ChamferedRect { w, h, r, chamfer, corners },
+            PadShape::ChamferedRect { w: w2, h: h2, r: r2, chamfer: c2, corners: k2 },
+        ) => w == w2 && h == h2 && corners == k2 && (r.0 - r2.0).abs() <= 10 && (chamfer.0 - c2.0).abs() <= 10,
         _ => x == y,
     };
     let paste_eq = |x: &Option<Paste>, y: &Option<Paste>| match (x, y) {
@@ -1230,6 +1291,10 @@ pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {
             && x.back == y.back
             && x.mask == y.mask
             && x.slot == y.slot
+            && match (x.drill_offset, y.drill_offset) {
+                (Some(a), Some(b)) => close(a, b),
+                (a, b) => a == b,
+            }
             && x.overrides == y.overrides
     };
     let graphic_eq = |x: &Graphic, y: &Graphic| {

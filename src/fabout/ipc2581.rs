@@ -38,7 +38,7 @@ use crate::geom::Point;
 use crate::mcad::{Edge, Loop, arc_edge, board_profile};
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind};
-use crate::model::footprint::{Footprint, GraphicGeometry, GraphicLayer, Mount, PadKind, PadShape, Paste};
+use crate::model::footprint::{Corner, Footprint, GraphicGeometry, GraphicLayer, Mount, PadKind, PadShape, Paste};
 use crate::units::{Angle, Nm};
 
 /// Namespace of IPC-2581.
@@ -147,6 +147,41 @@ impl Dict {
                     }
                 };
                 return Some(id);
+            }
+            PadShape::Trapezoid { .. } => {
+                let points = shape.outline_path().unwrap_or_default().into_iter().map(|(q, _)| q).collect();
+                return self.prim(PadShape::Polygon { points });
+            }
+            PadShape::ChamferedRect { w, h, r, chamfer, ref corners } => {
+                if corners.is_empty() || chamfer.0 <= 0 {
+                    return self.prim(PadShape::RoundRect { w, h, r });
+                }
+                if r.0 > 0 {
+                    // Rounded and chamfered corners together: a contour (arcs within 1 µm).
+                    return self.prim(PadShape::Polygon { points: board::pad_outline_local(&shape) });
+                }
+                if w.0 <= 0 || h.0 <= 0 {
+                    return None;
+                }
+                let c = chamfer.0.clamp(0, w.0.min(h.0) / 2);
+                let has = |k: Corner| if corners.contains(&k) { "true" } else { "false" };
+                let tag: String = [Corner::TopRight, Corner::TopLeft, Corner::BottomRight, Corner::BottomLeft]
+                    .iter()
+                    .map(|k| if corners.contains(k) { '1' } else { '0' })
+                    .collect();
+                (
+                    format!("RCHAM_{}X{}C{}_{tag}", mm(w.0), mm(h.0), mm(c)),
+                    "RectCham",
+                    vec![
+                        a("width", mm(w.0)),
+                        a("height", mm(h.0)),
+                        a("chamfer", mm(c)),
+                        a("upperRight", has(Corner::TopRight)),
+                        a("upperLeft", has(Corner::TopLeft)),
+                        a("lowerRight", has(Corner::BottomRight)),
+                        a("lowerLeft", has(Corner::BottomLeft)),
+                    ],
+                )
             }
             PadShape::Circle { d } => {
                 if d.0 <= 0 {

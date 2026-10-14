@@ -393,3 +393,146 @@ fn corpus_features() {
     let nt = crate::board::footprint_for(&p, "NT1").unwrap();
     assert_eq!(nt.net_ties, vec![vec!["1".to_string(), "2".to_string()]]);
 }
+
+/// Trapezoid, chamfered and drill-offset pads on a top footprint (90°) and a bottom one, each
+/// next to a custom pad of the same outline (or a pad without offset at the copper center): the
+/// conversion custom pads already go through.
+const PAD_SHAPES: &str = r#"(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (footprint "Test:Shapes" (layer "F.Cu") (at 110 60 90)
+    (property "Reference" "J1")
+    PADS)
+  (footprint "Test:Shapes" (layer "B.Cu") (at 120 60)
+    (property "Reference" "J2")
+    PADS)
+  (gr_rect (start 100 50) (end 130 70) (stroke (width 0.1)) (fill none) (layer "Edge.Cuts"))
+)"#;
+
+fn pad_shapes_board(side: &str) -> String {
+    let (cu, mask, a) = if side == "F" { ("F.Cu", "F.Mask", " 90") } else { ("B.Cu", "B.Mask", "") };
+    let custom = |n: &str, at: &str, pts: &str| {
+        format!(
+            "(pad \"{n}\" smd custom (at {at}{a}) (size 0.01 0.01) (layers \"{cu}\" \"{mask}\")
+      (options (clearance outline) (anchor circle))
+      (primitives (gr_poly (pts {pts}) (width 0) (fill yes))))"
+        )
+    };
+    [
+        format!("(pad \"1\" smd trapezoid (at -2 0{a}) (size 1 0.6) (rect_delta 0.2 0) (layers \"{cu}\" \"{mask}\"))"),
+        custom("2", "-2 2", "(xy -0.5 0.4) (xy -0.5 -0.4) (xy 0.5 -0.2) (xy 0.5 0.2)"),
+        format!("(pad \"3\" smd trapezoid (at -2 4{a}) (size 1 0.6) (rect_delta 0 0.3) (layers \"{cu}\" \"{mask}\"))"),
+        custom("4", "-2 6", "(xy -0.65 0.3) (xy -0.35 -0.3) (xy 0.35 -0.3) (xy 0.65 0.3)"),
+        format!(
+            "(pad \"5\" smd roundrect (at 0 0{a}) (size 1 0.8) (layers \"{cu}\" \"{mask}\") (roundrect_rratio 0) (chamfer_ratio 0.25) (chamfer top_left bottom_right))"
+        ),
+        custom("6", "0 2", "(xy -0.3 -0.4) (xy 0.5 -0.4) (xy 0.5 0.2) (xy 0.3 0.4) (xy -0.5 0.4) (xy -0.5 -0.2)"),
+        format!(
+            "(pad \"7\" smd roundrect (at 0 4{a}) (size 1 0.8) (layers \"{cu}\" \"{mask}\") (roundrect_rratio 0.25) (chamfer_ratio 0.25) (chamfer top_right))"
+        ),
+        format!("(pad \"8\" thru_hole rect (at 2 0{a}) (size 1.5 1) (drill 0.6 (offset 0.3 0.1)) (layers \"*.Cu\" \"*.Mask\"))"),
+        format!("(pad \"9\" thru_hole rect (at 2 0{a}) (size 1.5 1) (drill 0.6) (layers \"*.Cu\" \"*.Mask\"))"),
+        format!("(pad \"10\" smd rect (at 2.3 0.1{a}) (size 1.5 1) (layers \"{cu}\" \"{mask}\"))"),
+    ]
+    .join("\n    ")
+}
+
+#[test]
+fn trapezoid_chamfered_and_drill_offset_pads() {
+    use crate::model::footprint::Corner;
+    let text = PAD_SHAPES.replacen("PADS", &pad_shapes_board("F"), 1).replacen("PADS", &pad_shapes_board("B"), 1);
+    let mut p = Project::new("t");
+    let (_, d) = import(&mut p, &text, &opts()).unwrap();
+    assert!(!codes(&d).contains(&"import.pad_approximated"), "{:?}", codes(&d));
+    let pads = crate::board::placed_pads(&p);
+    let get = |r: &str, n: &str| pads.iter().find(|pp| pp.refdes == r && pp.number == n).unwrap();
+    // The board copper of a pad relative to its center, as sorted vertices.
+    let rel = |pp: &crate::board::PlacedPad| {
+        let mut v: Vec<(i64, i64)> =
+            pp.shape.outer.0.iter().map(|q| (q.x - pp.center.x.0, q.y - pp.center.y.0)).collect();
+        v.sort();
+        v
+    };
+    let close = |a: &[(i64, i64)], b: &[(i64, i64)]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x.0 - y.0).abs() <= 2 && (x.1 - y.1).abs() <= 2)
+    };
+    for r in ["J1", "J2"] {
+        for (shape, custom) in [("1", "2"), ("3", "4"), ("5", "6")] {
+            let (a, b) = (rel(get(r, shape)), rel(get(r, custom)));
+            assert!(close(&a, &b), "{r}.{shape} {a:?} vs {r}.{custom} {b:?}");
+        }
+        // The drill offset moves the copper: pad 8's copper is pad 10's, its hole pad 9's.
+        let (p8, p9, p10) = (get(r, "8"), get(r, "9"), get(r, "10"));
+        assert_eq!(p8.hole_at, p9.hole_at, "{r}");
+        assert_eq!(p8.center, p10.center, "{r}");
+        assert!(close(&rel(p8), &rel(p10)), "{r}");
+        assert_ne!(p8.center, p8.hole_at);
+    }
+    // The model: shapes in cadlab pad orientation (Y up; the bottom side mirrored in X).
+    let j1 = crate::board::footprint_for(&p, "J1").unwrap();
+    let j2 = crate::board::footprint_for(&p, "J2").unwrap();
+    let pad = |f: &crate::model::footprint::Footprint, n: &str| f.pads.iter().find(|x| x.number == n).unwrap().clone();
+    let trapezoid = |dx: i64, dy: i64| PadShape::Trapezoid { w: mmu(1), h: Nm(600_000), dx: Nm(dx), dy: Nm(dy) };
+    assert_eq!(pad(j1, "1").shape, trapezoid(200_000, 0));
+    assert_eq!(pad(j2, "1").shape, trapezoid(-200_000, 0));
+    assert_eq!(pad(j1, "3").shape, trapezoid(0, 300_000));
+    let chamfered = |corners: Vec<Corner>, r: i64| PadShape::ChamferedRect {
+        w: mmu(1),
+        h: Nm(800_000),
+        r: Nm(r),
+        chamfer: Nm(200_000),
+        corners,
+    };
+    assert_eq!(pad(j1, "5").shape, chamfered(vec![Corner::TopLeft, Corner::BottomRight], 0));
+    assert_eq!(pad(j2, "5").shape, chamfered(vec![Corner::TopRight, Corner::BottomLeft], 0));
+    assert_eq!(pad(j1, "7").shape, chamfered(vec![Corner::TopRight], 200_000));
+    let p8 = pad(j1, "8");
+    assert_eq!(p8.drill_offset, Some(pt(-0.3, 0.1)));
+    assert_eq!(p8.hole_center(), pad(j1, "9").at);
+
+    // Consumers: Gerber macros, IPC-2581 primitives, drill files at the hole, DSN, DRC.
+    let files = crate::fabout::all(&p, &Default::default());
+    let file = |f: &str| files.iter().find(|x| x.function.starts_with(f)).map(|x| x.content.clone()).unwrap();
+    let top = file("Copper,L1");
+    assert!(top.contains("Pad trapezoid 1x0.6 delta 0.2 0"), "{top}");
+    assert!(top.contains("Pad chamfered 1x0.8 r0 chamfer 0.2 TLBR"), "{top}");
+    let bottom = file("Copper,L2");
+    assert!(bottom.contains("Pad trapezoid 1x0.6 delta 0.2 0"), "mirrored back on the bottom: {bottom}");
+    let ipc = crate::fabout::ipc2581::document(&p, &Default::default()).content;
+    assert!(ipc.contains("<RectCham"), "{ipc}");
+    let hole = |r: &str| get(r, "8").hole_at;
+    let holes = crate::fabout::holes(&p);
+    for r in ["J1", "J2"] {
+        let h = holes.iter().find(|h| h.pad == Some((r.to_string(), "8".to_string()))).unwrap();
+        assert_eq!(h.at, hole(r));
+    }
+    let dsn = crate::specctra::export::export(&p, "t", &Default::default()).dsn.write();
+    assert!(dsn.contains("poly_"), "{dsn}");
+    let drc = crate::drc::check(&p);
+    // The offset hole is 0.1 mm closer to one long edge: (1 − 0.6) / 2 − 0.1.
+    let rings: Vec<&str> =
+        drc.iter().filter(|d| d.code == "drc.pad_annular_ring").map(|d| d.message.as_str()).collect();
+    assert_eq!(rings.len(), 2, "{rings:?}");
+    assert!(rings.iter().all(|m| m.contains("annular ring 0.1mm")), "{rings:?}");
+
+    // Exported back and imported again: the same land patterns and board copper.
+    let out = crate::kicad_pcb::to_kicad_pcb(&p);
+    // As written in the source on both sides (the bottom side mirrors back).
+    assert_eq!(out.matches("(rect_delta 0.2 0)").count(), 2, "{out}");
+    assert!(out.contains("(chamfer_ratio 0.25) (chamfer top_left bottom_right)"), "{out}");
+    assert!(out.contains("(drill 0.6 (offset 0.3 0.1))"), "{out}");
+    let mut q = Project::new("t");
+    let (_, d) = import(&mut q, &out, &opts()).unwrap();
+    assert!(!codes(&d).contains(&"import.pad_approximated"), "{:?}", codes(&d));
+    for r in ["J1", "J2"] {
+        let (a, b) = (crate::board::footprint_for(&p, r).unwrap(), crate::board::footprint_for(&q, r).unwrap());
+        assert!(footprint::equivalent(a, b), "{r}: {:?}\n{:?}", a.pads, b.pads);
+    }
+    let again = crate::board::placed_pads(&q);
+    for pp in &pads {
+        let qq = again.iter().find(|x| x.refdes == pp.refdes && x.number == pp.number).unwrap();
+        assert_eq!((pp.center, pp.hole_at), (qq.center, qq.hole_at), "{}.{}", pp.refdes, pp.number);
+        assert!(close(&rel(pp), &rel(qq)), "{}.{}", pp.refdes, pp.number);
+    }
+}

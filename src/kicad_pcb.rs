@@ -36,7 +36,7 @@ use crate::geom::{BBox, Point};
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind, PadConnection, PlacedFootprint, Segment};
 use crate::model::footprint::{
-    Footprint, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Pad, PadKind, PadShape, Paste,
+    Corner, Footprint, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Pad, PadKind, PadShape, Paste,
 };
 use crate::model::part::PinKind;
 use crate::netlist::{LIB, kicad_pin_type};
@@ -654,9 +654,42 @@ fn write_pad(
         ),
         _ => None,
     };
+    // KiCad pad coordinates (Y down) of a pad-relative cadlab offset: the inverse of the
+    // import's mapping (mirrored in X on the bottom side).
+    let kxy = |q: Point| match f.pf.side {
+        BoardSide::Top => (q.x, -q.y),
+        BoardSide::Bottom => (-q.x, -q.y),
+    };
+    let mut extra = String::new();
     let (shape, size, rr) = match (pad.kind, &pad.shape) {
         (PadKind::Npth { drill }, _) => ("circle", (drill, drill), None),
         (_, PadShape::Polygon { .. }) => ("custom", (Nm(1_000), Nm(1_000)), None),
+        (_, &PadShape::Trapezoid { w, h, dx, dy }) => {
+            // `rect_delta`: X lengthens the left edge, Y widens the lower edge (KiCad Y down,
+            // which is cadlab's bottom edge on either side).
+            let dx = if f.pf.side == BoardSide::Bottom { -dx } else { dx };
+            let _ = write!(extra, " (rect_delta {} {})", mm(dx), mm(dy));
+            ("trapezoid", (w, h), None)
+        }
+        (_, PadShape::ChamferedRect { w, h, r, chamfer, corners }) => {
+            let m = w.0.min(h.0).max(1) as f64;
+            let mut names: Vec<&str> = corners
+                .iter()
+                .map(|c| if f.pf.side == BoardSide::Bottom { c.mirrored_x() } else { *c })
+                .map(|c| match c {
+                    Corner::TopLeft => "top_left",
+                    Corner::TopRight => "top_right",
+                    Corner::BottomLeft => "bottom_left",
+                    Corner::BottomRight => "bottom_right",
+                })
+                .collect();
+            names.sort_by_key(|n| ["top_left", "top_right", "bottom_left", "bottom_right"].iter().position(|x| x == n));
+            let _ = write!(extra, " (chamfer_ratio {})", ratio((chamfer.0 as f64 / m).clamp(0.0, 0.5)));
+            if !names.is_empty() {
+                let _ = write!(extra, " (chamfer {})", names.join(" "));
+            }
+            ("roundrect", (*w, *h), Some((r.0 as f64 / m).clamp(0.0, 0.5)))
+        }
         (_, &PadShape::Rect { w, h }) => ("rect", (w, h), None),
         (_, &PadShape::RoundRect { w, h, r }) => {
             let m = w.0.min(h.0).max(1) as f64;
@@ -666,19 +699,30 @@ fn write_pad(
         (_, &PadShape::Circle { d }) => ("circle", (d, d), None),
     };
     let layers: Vec<String> = layers.iter().map(|l| q(l)).collect();
+    // A drill offset: KiCad's pad position is the hole, its offset moves the copper.
+    let offset = pad.drill_offset.filter(|o| *o != Point::ORIGIN && !matches!(pad.kind, PadKind::Smd));
+    let offset_text = match offset {
+        // A non-plated hole is written as a round pad on the hole (no copper to move).
+        Some(o) if !matches!(pad.kind, PadKind::Npth { .. }) => {
+            let (x, y) = kxy(-o);
+            format!(" (offset {} {})", mm(x), mm(y))
+        }
+        _ => String::new(),
+    };
+    let anchor = if offset.is_some() { pad.hole_center() } else { pad.at };
     let mut s = format!(
         "(pad {} {kind} {shape} (at {} {angle}) (size {} {}) ",
         q(&pad.number),
-        f.local(pad.at),
+        f.local(anchor),
         mm(size.0),
         mm(size.1)
     );
     match (pad.kind, pad.slot) {
         (PadKind::Tht { .. } | PadKind::Npth { .. }, Some((sx, sy))) => {
-            let _ = write!(s, "(drill oval {} {}) ", mm(sx), mm(sy));
+            let _ = write!(s, "(drill oval {} {}{offset_text}) ", mm(sx), mm(sy));
         }
         (PadKind::Tht { drill } | PadKind::Npth { drill }, None) => {
-            let _ = write!(s, "(drill {}) ", mm(drill));
+            let _ = write!(s, "(drill {}{offset_text}) ", mm(drill));
         }
         (PadKind::Smd, _) => {}
     }
@@ -692,6 +736,7 @@ fn write_pad(
     if let Some(r) = rr {
         let _ = write!(s, " (roundrect_rratio {})", ratio(r));
     }
+    s.push_str(&extra);
     if !pad.number.is_empty() {
         if let Some(net) = nets.get(&pad.number) {
             let _ = write!(s, " (net {} {})", w.net(Some(net)), q(net));

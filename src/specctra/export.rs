@@ -149,6 +149,11 @@ fn round_rect(w: Nm, h: Nm, r: Nm) -> Vec<Point> {
 
 /// Copper shape of a pad on `layer`, pad rotation applied, and a name for it.
 fn pad_shape(shape: &PadShape, rotation: Angle, layer: &str) -> (String, Shape) {
+    if let PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. } = shape {
+        // Straight-edged outlines (rounded corners within 1 µm outside the copper).
+        let points = crate::board::pad_outline_local(shape);
+        return pad_shape(&PadShape::Polygon { points }, rotation, layer);
+    }
     if let PadShape::Polygon { points } = shape {
         // Any outline: named by a hash of its rotated vertices (FNV-1a, deterministic).
         let pts: Vec<Point> = points.iter().map(|p| p.rotated(rotation.normalized())).collect();
@@ -209,7 +214,9 @@ fn pad_shape(shape: &PadShape, rotation: Angle, layer: &str) -> (String, Shape) 
                 Shape::Path { layer, width: minor, points: ends.iter().map(|p| p.rotated(rot)).collect() },
             )
         }
-        PadShape::Polygon { .. } => unreachable!("handled above"),
+        PadShape::Polygon { .. } | PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -260,7 +267,7 @@ pub fn export(p: &Project, name: &str, opts: &Options) -> DsnExport {
                     keepouts.push(Keepout {
                         kind: KeepoutKind::All,
                         name: String::new(),
-                        shape: Shape::Circle { layer: ALL_SIGNAL.into(), diameter: drill, at: pad.at },
+                        shape: Shape::Circle { layer: ALL_SIGNAL.into(), diameter: drill, at: pad.hole_center() },
                     });
                 }
                 continue;

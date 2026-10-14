@@ -376,7 +376,7 @@ fn holes(p: &Project, pads: &[geo::PlacedPad]) -> Vec<HoleDraw> {
                 .slot
                 .and_then(|_| pp.hole_shape())
                 .map(|s| s.outer.0.iter().map(|q| (q.x as f64 / 1e6, q.y as f64 / 1e6)).collect());
-            Some((mp(pp.center), mm(d), plated, slot))
+            Some((mp(pp.hole_at), mm(d), plated, slot))
         })
         .collect();
     v.extend(p.board().vias.iter().map(|vi| (mp(vi.at), mm(vi.drill), true, None)));

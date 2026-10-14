@@ -75,13 +75,7 @@ fn footprints_from_a_pretty_directory() {
         changes(&o, "footprints"),
         ["CUSTOM_TEST", "HDR_1x03_TEST", "R0603_TEST", "SOT23_TEST"].map(|n| (n.to_string(), "added".to_string()))
     );
-    for c in [
-        "import.footprint_layer",
-        "import.pad_approximated",
-        "import.footprint_model",
-        "import.footprint_text",
-        "import.footprint_arc",
-    ] {
+    for c in ["import.footprint_layer", "import.footprint_model", "import.footprint_text", "import.footprint_arc"] {
         assert!(codes.iter().any(|x| x == c), "missing {c} in {codes:?}");
     }
     // B.SilkS and Edge.Cuts drawings of CUSTOM_TEST (its F.Cu line is a copper drawing, D40).
@@ -132,7 +126,8 @@ fn footprints_from_a_pretty_directory() {
         PadShape::Polygon { points: vec![pt("-1", "0.4"), pt("1", "0.4"), pt("0", "-0.6")] },
         "custom pad: anchor inside the triangle"
     );
-    assert_eq!(pad("4").shape, PadShape::Rect { w: mm("1.2"), h: mm("0.6") }, "trapezoid as its bounding box");
+    // rect_delta (0, 0.2): the lower edge (KiCad Y down, cadlab −Y) is 0.2 mm wider.
+    assert_eq!(pad("4").shape, PadShape::Trapezoid { w: mm("1"), h: mm("0.6"), dx: Nm::ZERO, dy: mm("0.2") });
     assert_eq!(pad("5").paste, Some(Paste::None), "no F.Paste layer");
     assert_eq!(pad("5").overrides.mask_margin, Some(mm("0.05")), "local mask margin kept");
     assert_eq!(custom.graphics.iter().filter(|g| g.layer == GraphicLayer::Copper).count(), 1, "copper drawing kept");

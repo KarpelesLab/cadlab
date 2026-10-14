@@ -63,6 +63,9 @@ pub struct PlacedPad {
     pub net: Option<String>,
     /// Center on the board.
     pub center: Point,
+    /// Center of the hole on the board: the pad center unless the pad has a drill offset
+    /// ([`Pad::drill_offset`]); the middle of a slot.
+    pub hole_at: Point,
     /// Copper shape on the board.
     pub shape: Polygon,
     /// Copper layers it exists on.
@@ -91,7 +94,7 @@ impl PlacedPad {
         let (d, _) = self.hole?;
         let path = match self.slot {
             Some((a, b)) => vec![pt(a), pt(b)],
-            None => vec![pt(self.center)],
+            None => vec![pt(self.hole_at)],
         };
         if path.len() == 1 {
             let ring = Circle { center: path[0], radius: d.0 / 2 }.to_ring(COPPER_TOL).ok()?;
@@ -140,11 +143,18 @@ pub fn slot_ends(pad: &Pad) -> Option<(Point, Point)> {
     }
     let d = if sx > sy { Point::new(half, Nm::ZERO) } else { Point::new(Nm::ZERO, half) };
     let d = d.rotated(pad.rotation);
-    Some((pad.at - d, pad.at + d))
+    let c = pad.hole_center();
+    Some((c - d, c + d))
 }
 
 fn pt(p: Point) -> polyclip::Point {
     p.into()
+}
+
+/// A footprint pad's outline relative to its center, before the pad rotation, as a polygon
+/// (arcs within [`COPPER_TOL`], outside the true copper); empty for a degenerate shape.
+pub fn pad_outline_local(shape: &PadShape) -> Vec<Point> {
+    pad_shape_local(shape).map(|pg| pg.outer.0.iter().map(|&q| q.into()).collect()).unwrap_or_default()
 }
 
 /// Local pad outline as a curved shape centered at the origin (before pad rotation).
@@ -178,6 +188,23 @@ fn pad_shape_local(shape: &PadShape) -> Result<Polygon, polyclip::Error> {
             Circle { center: polyclip::Point::new(0, 0), radius: d.0 / 2 }.to_ring(COPPER_TOL)?,
             vec![],
         )),
+        PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. } => {
+            let path = shape.outline_path().unwrap_or_default();
+            if path.len() < 3 {
+                return Ok(Polygon::new(vec![], vec![]));
+            }
+            let curves: Vec<Curve> = path
+                .iter()
+                .map(|&(q, center)| match center {
+                    Some(c) => Curve::CenterArc { center: pt(c), end: pt(q), ccw: true },
+                    None => Curve::Line(pt(q)),
+                })
+                .collect();
+            let raw = Shape::new(curves, vec![]).to_polygon(COPPER_TOL)?;
+            // A degenerate trapezoid (a delta beyond the side) crosses itself: normalized.
+            let set = polyclip::union_all(&raw.outer.0, polyclip::FillRule::NonZero)?;
+            Ok(set.into_iter().max_by_key(|pg| pg.outer.signed_area2()).unwrap_or_else(|| Polygon::new(vec![], vec![])))
+        }
         PadShape::Polygon { ref points } => {
             // Normalized (any orientation, self-touching outlines); a degenerate outline is
             // no copper.
@@ -266,6 +293,7 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
                 number: pad.number.clone(),
                 net: if pad.number.is_empty() { None } else { nets.get(&pad.number).cloned() },
                 center: tf(pad.at),
+                hole_at: tf(pad.hole_center()),
                 shape,
                 layers,
                 hole,

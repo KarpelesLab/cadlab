@@ -292,6 +292,10 @@ pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
                 s.fill(round_rect(cx, cy, mm(w), mm(h), r), copper, None);
             }
             PadShape::Circle { d } => s.circle((cx, cy), mm(d) / 2.0, Some(copper), None),
+            PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. } => {
+                let pts = p.shape.outline_points(Nm(1_000)).unwrap_or_default();
+                s.fill(pts.iter().map(|q| (cx + mm(q.x), cy + mm(q.y))).collect(), copper, None)
+            }
         }
         if let Some(crate::model::footprint::Paste::Windows { size, at }) = &p.paste {
             for w in at {
@@ -310,7 +314,8 @@ pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
             }
         }
         if let PadKind::Tht { drill: d } | PadKind::Npth { drill: d } = p.kind {
-            s.circle((cx, cy), mm(d) / 2.0, Some(drill), None);
+            let hc = p.hole_center();
+            s.circle((mm(hc.x), mm(hc.y)), mm(d) / 2.0, Some(drill), None);
         }
         let (pw, ph) = p.shape.size();
         let size = (mm(pw.min(ph)) * 0.5).clamp(0.2, 1.0);

@@ -1639,7 +1639,7 @@ fn as_hole(c: &Converted, in_circuit: bool) -> Option<Hole> {
     if !(lib.contains("mountinghole") || matches!(prefix.as_str(), "H" | "MH")) {
         return None;
     }
-    if !(pad.number.is_empty() || pad.number == "1") {
+    if !(pad.number.is_empty() || pad.number == "1") || pad.drill_offset.is_some() {
         return None;
     }
     let round = match pad.shape {
@@ -1667,6 +1667,9 @@ fn board_only_holes(c: &Converted) -> Option<Vec<(Hole, Option<String>)>> {
     let tf = transform(&c.placement);
     let mut out = Vec::new();
     for pad in &c.fp.pads {
+        if pad.drill_offset.is_some() {
+            return None;
+        }
         let round = match pad.shape {
             PadShape::Circle { d } => Some(d),
             PadShape::Oval { w, h } if w == h => Some(w),

@@ -212,7 +212,7 @@ fn board_rings(p: &Project) -> Vec<Vec<(f64, f64)>> {
 fn drill_holes(p: &Project) -> Vec<((f64, f64), f64, bool)> {
     let mut v: Vec<((f64, f64), f64, bool)> = geo::placed_pads(p)
         .iter()
-        .filter_map(|pp| pp.hole.map(|(d, plated)| ((mm(pp.center.x), mm(pp.center.y)), mm(d), plated)))
+        .filter_map(|pp| pp.hole.map(|(d, plated)| ((mm(pp.hole_at.x), mm(pp.hole_at.y)), mm(d), plated)))
         .collect();
     v.extend(p.board().vias.iter().map(|vi| ((mm(vi.at.x), mm(vi.at.y)), mm(vi.drill), true)));
     v
