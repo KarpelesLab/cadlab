@@ -48,6 +48,17 @@ const CASE_ALLOW: &[Allow<'static>] = &[
         reason: "KiCad assigned the netless 0.25 mm track to GND (see the drc.short entry), whose power class asks \
                  for 0.4 mm; cadlab checks the class width of a track's own net, and it has none",
     },
+    Allow {
+        case: Some("silk_near_pad"),
+        side: Side::Cadlab,
+        rule: "drc.silk_over_pad",
+        when: None,
+        max: Some(1),
+        involving: &[],
+        reason: "cadlab keeps silkscreen `silk_to_pad` (0.15 mm, exported as min_silk_clearance) from pad copper, \
+                 a fab limit; KiCad's silk_over_copper only reports silkscreen overlapping a mask opening (its \
+                 silk clearance applies between silkscreen items), so a line 0.08 mm from C2.1 passes there",
+    },
 ];
 
 /// The finding names pad 5 of U1 (the 3V3 pad the `short` case's GND track passes).

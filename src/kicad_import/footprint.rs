@@ -67,6 +67,9 @@ pub(super) struct Converted {
     pub edges: Vec<EdgeItem>,
     /// (uuid, what it is: `fp`, `pad:<n>`, `prop:<name>`).
     pub uuids: Vec<(String, String)>,
+    /// UUIDs of the KiCad drawings each of `fp.graphics` was made of, by index (graphics
+    /// added after the drawings, mask and paste apertures, have none).
+    pub graphic_uuids: Vec<Vec<String>>,
 }
 
 /// Footprint layer of a KiCad layer name, for a footprint on `side`, and whether it is on the
@@ -300,6 +303,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
 
     // Graphics.
     let mut graphics: Vec<Graphic> = Vec::new();
+    let mut graphic_uuids: Vec<Vec<String>> = Vec::new();
     let mut edges = Vec::new();
     let tf_point = |q: Point| -> Point {
         let q = if side == BoardSide::Bottom { Point::new(-q.x, q.y) } else { q };
@@ -311,8 +315,10 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         if !shape {
             continue;
         }
-        if let Some(u) = c.child_value("uuid") {
-            uuids.push((u.to_string(), "fp".to_string()));
+        // KiCad 6/7 drawings carry a `tstamp`, KiCad 8+ a `uuid`.
+        let uuid = c.child_value("uuid").or(c.child_value("tstamp")).map(String::from);
+        if let Some(u) = &uuid {
+            uuids.push((u.clone(), "fp".to_string()));
         }
         let layer = layer_of(c).unwrap_or("");
         let width = width_of(c);
@@ -398,6 +404,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                     );
                 }
                 graphics.push(Graphic { layer: gl, width, geometry: geom, back });
+                graphic_uuids.push(uuid.into_iter().collect());
             }
             None => notes.not_imported_agg(
                 "import.footprint_layer",
@@ -417,7 +424,14 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         }
     }
     // Consecutive segments of one layer and width that join become one polyline.
-    graphics = merge_paths(graphics);
+    (graphics, graphic_uuids) = merge_paths(graphics, graphic_uuids);
+    // take_courtyard removes every courtyard drawing.
+    let graphic_uuids: Vec<Vec<String>> = graphics
+        .iter()
+        .zip(graphic_uuids)
+        .filter(|(g, _)| g.layer != GraphicLayer::Courtyard)
+        .map(|(_, u)| u)
+        .collect();
     let courtyard = take_courtyard(&mut graphics);
 
     // Pads.
@@ -545,6 +559,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         pads: pad_nets,
         edges,
         uuids,
+        graphic_uuids,
     }
 }
 
@@ -597,9 +612,10 @@ pub(super) fn bezier(c: &[Point]) -> Option<Vec<Point>> {
 }
 
 /// Joins consecutive two-point paths of one layer and width that share an end point.
-fn merge_paths(gs: Vec<Graphic>) -> Vec<Graphic> {
+fn merge_paths(gs: Vec<Graphic>, uuids: Vec<Vec<String>>) -> (Vec<Graphic>, Vec<Vec<String>>) {
     let mut out: Vec<Graphic> = Vec::new();
-    for g in gs {
+    let mut out_uuids: Vec<Vec<String>> = Vec::new();
+    for (g, u) in gs.into_iter().zip(uuids) {
         if let (Some(last), GraphicGeometry::Path { points: new }) = (out.last_mut(), &g.geometry)
             && last.layer == g.layer
             && last.back == g.back
@@ -610,11 +626,13 @@ fn merge_paths(gs: Vec<Graphic>) -> Vec<Graphic> {
             && points.first() != points.last()
         {
             points.push(new[1]);
+            out_uuids.last_mut().expect("one per graphic").extend(u);
             continue;
         }
         out.push(g);
+        out_uuids.push(u);
     }
-    out
+    (out, out_uuids)
 }
 
 /// Takes the courtyard outline out of the courtyard drawings (a cadlab footprint has one

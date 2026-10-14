@@ -233,6 +233,9 @@ fn label(r: &ObjectRef) -> Option<String> {
         ObjectRef::Net(_) | ObjectRef::Layer(_) => None,
         // Zone islands (`zone#3@B.Cu/0`) are reported per zone by KiCad.
         ObjectRef::Name(n) if n.starts_with("zone#") => Some(n.split('@').next().unwrap().to_string()),
+        // An unnumbered pad (an NPTH hole of a footprint) is named by its footprint, as in the
+        // importer's and exporter's UUID tables.
+        ObjectRef::Pin { component, pin } if pin.is_empty() => Some(component.clone()),
         r => Some(r.to_string()),
     }
 }

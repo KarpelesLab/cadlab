@@ -527,7 +527,7 @@ pub fn import(
 
     // Read every top-level item.
     let mut edges: Vec<(EdgeItem, Option<String>)> = Vec::new();
-    let mut graphics: Vec<(BoardGraphic, Option<String>)> = Vec::new();
+    let mut graphics: Vec<(BoardGraphic, Vec<String>)> = Vec::new();
     let mut raw: Vec<RawItem> = Vec::new();
     let mut fps: Vec<Converted> = Vec::new();
     let mut fills = false;
@@ -871,9 +871,9 @@ pub fn import(
             }
         }
     }
-    for (mut g, uuid) in graphics {
+    for (mut g, uuids) in graphics {
         g.id = p.alloc_id();
-        if let Some(u) = uuid {
+        for u in uuids {
             report.uuids.insert(u, format!("graphic#{}", g.id.0));
         }
         p.board_mut().graphics.push(g);
@@ -1028,7 +1028,7 @@ fn read_drawing(
     known: &BTreeSet<String>,
     uuid: Option<String>,
     edges: &mut Vec<(EdgeItem, Option<String>)>,
-    graphics: &mut Vec<(BoardGraphic, Option<String>)>,
+    graphics: &mut Vec<(BoardGraphic, Vec<String>)>,
     notes: &mut Notes,
 ) {
     let layer = layer_of(e).unwrap_or("").to_string();
@@ -1180,7 +1180,7 @@ fn read_drawing(
     } else {
         GraphicKind::Line { points, width }
     };
-    graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, uuid));
+    graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, uuid.into_iter().collect()));
 }
 
 fn read_text(
@@ -1188,7 +1188,7 @@ fn read_text(
     ctx: &Ctx,
     known: &BTreeSet<String>,
     uuid: Option<String>,
-    graphics: &mut Vec<(BoardGraphic, Option<String>)>,
+    graphics: &mut Vec<(BoardGraphic, Vec<String>)>,
     notes: &mut Notes,
 ) {
     let layer = layer_of(e).unwrap_or("").to_string();
@@ -1240,7 +1240,7 @@ fn read_text(
             layer,
             kind: GraphicKind::Text { text, at: ctx.frame(at), size, rotation: rotation.normalized() },
         },
-        uuid,
+        uuid.into_iter().collect(),
     ));
 }
 
@@ -1692,16 +1692,11 @@ fn board_only_holes(c: &Converted) -> Option<Vec<(Hole, Option<String>)>> {
 }
 
 /// A footprint without pads (logo, marking): its drawings become board graphics.
-fn footprint_drawings(
-    p: &Project,
-    c: &Converted,
-    graphics: &mut Vec<(BoardGraphic, Option<String>)>,
-    notes: &mut Notes,
-) {
+fn footprint_drawings(p: &Project, c: &Converted, graphics: &mut Vec<(BoardGraphic, Vec<String>)>, notes: &mut Notes) {
     let _ = p;
     let side = c.placement.side;
     let mut n = 0;
-    for g in &c.fp.graphics {
+    for (i, g) in c.fp.graphics.iter().enumerate() {
         let layer = side_layer(crate::board::pad_side(side, g.back), g.layer.front_name());
         let mut points = footprint::to_board(&c.placement, &g.geometry);
         if points.len() < 2 {
@@ -1716,7 +1711,9 @@ fn footprint_drawings(
         } else {
             GraphicKind::Line { points, width: g.width }
         };
-        graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, None));
+        // The KiCad drawings this graphic was made of name it in the UUID table.
+        let uuids = c.graphic_uuids.get(i).cloned().unwrap_or_default();
+        graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, uuids));
         n += 1;
     }
     let what = if c.refdes.is_empty() { c.lib_id.clone() } else { c.refdes.clone() };

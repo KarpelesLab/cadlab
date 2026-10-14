@@ -293,19 +293,28 @@ fn silkscreen_against_mask_openings() {
     let silk = format!("graphic#{}", id.0);
     let d0 = drc(&s);
     assert!(of(&d0, "drc.silk_over_pad", &silk).is_empty(), "{:#?}", of(&d0, "drc.silk_over_pad", &silk));
-    // A 0.1 mm mask expansion brings the opening within 0.1 mm.
+    // A 0.1 mm mask expansion brings the opening within 0.1 mm: openings only forbid overlaps
+    // (the minimum is measured to the copper, not added to the margin).
     exec(&r, &mut s, "board.rules", json!({"mask_expansion": "0.1mm"}));
+    assert!(of(&drc(&s), "drc.silk_over_pad", &silk).is_empty());
+    // A 0.25 mm one reaches under the silk.
+    exec(&r, &mut s, "board.rules", json!({"mask_expansion": "0.25mm"}));
     let d = drc(&s);
     let w = of(&d, "drc.silk_over_pad", &silk);
     assert_eq!(w.len(), 1, "{d:#?}");
-    assert!(w[0].message.contains("solder mask opening of pad C1.1"), "{}", w[0].message);
-    assert!(w[0].message.contains("is 0.1mm from"), "{}", w[0].message);
+    assert!(w[0].message.contains("overlaps the solder mask opening of pad C1.1"), "{}", w[0].message);
     // ... unless the check is against copper.
     exec(&r, &mut s, "board.rules", json!({"silk_check": "copper"}));
     assert!(of(&drc(&s), "drc.silk_over_pad", &silk).is_empty());
-    exec(&r, &mut s, "board.rules", json!({"silk_check": "mask", "mask_expansion": "0mm"}));
+    // Copper closer than the minimum is reported either way, measured to the copper.
+    exec(&r, &mut s, "board.rules", json!({"silk_check": "mask", "mask_expansion": "0mm", "silk_to_pad": "0.25mm"}));
+    let d = drc(&s);
+    let w = of(&d, "drc.silk_over_pad", &silk);
+    assert_eq!(w.len(), 1, "{d:#?}");
+    assert!(w[0].message.contains("is 0.2mm from pad C1.1"), "{}", w[0].message);
+    exec(&r, &mut s, "board.rules", json!({"silk_to_pad": "0.15mm"}));
     // A pad's own (smaller) margin wins over the board's expansion.
-    exec(&r, &mut s, "board.rules", json!({"mask_expansion": "0.1mm"}));
+    exec(&r, &mut s, "board.rules", json!({"mask_expansion": "0.25mm"}));
     let cap = footprint_name(&mut s, "C1");
     exec(&r, &mut s, "footprint.set", json!({"name": cap, "pads": ["1"], "mask_margin": "0.01mm"}));
     assert!(of(&drc(&s), "drc.silk_over_pad", &silk).is_empty());

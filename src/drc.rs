@@ -1101,8 +1101,10 @@ fn mask_openings<'a>(ctx: &Ctx, pads: &'a [geo::PlacedPad]) -> Vec<(Opening<'a>,
     out
 }
 
-/// Silkscreen over or too close to solder mask openings (pads grown by their mask margin, and
-/// mask drawings), or with `silk_check: copper` to exposed pad copper.
+/// Silkscreen too close to exposed pad copper (`silk_to_pad`) or, with `silk_check: mask`, over
+/// a solder mask opening (pads grown by their mask margin, non-plated holes, mask drawings).
+/// Openings only forbid overlaps: the mask margin is already a clearance around the copper, so
+/// `silk_to_pad` is measured to the copper rather than added on top of the margin.
 fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     let silk = silk_shapes(ctx.p);
     if silk.is_empty() {
@@ -1111,9 +1113,16 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     let openings = mask_openings(ctx, pads);
     let min = ctx.rules.silk_to_pad;
     let limit = (min.0 - TOLERANCE.0).max(1);
-    let against = match ctx.p.board().rules.silk_check {
-        SilkCheck::Mask => "the solder mask opening of",
-        SilkCheck::Copper => "",
+    let mask = ctx.p.board().rules.silk_check == SilkCheck::Mask;
+    // Silk within the minimum of pad copper. A minimum within the tolerance only forbids
+    // overlaps, which must then be wider than the tolerance (silk touching a pad overlaps it by
+    // the outward arc approximation).
+    let near = |shape: &PolygonSet, copper: &PolygonSet| {
+        if min > TOLERANCE {
+            polyclip::distance_less_than(shape, copper, limit)
+        } else {
+            overlap(shape, copper).is_some()
+        }
     };
     // One index over silk owners then openings.
     let mut boxes: Vec<Option<Rect>> = silk.iter().map(|(_, _, s)| s.bbox()).collect();
@@ -1127,25 +1136,32 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
         if side != oside {
             continue;
         }
-        // A minimum within the tolerance only forbids overlaps, which must then be wider than the
-        // tolerance (silk touching a pad overlaps it by the outward arc approximation).
-        let close = if min > TOLERANCE {
-            polyclip::distance_less_than(shape, opening, limit)
-        } else {
-            overlap(shape, opening).is_some()
+        let layer = if *side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
+        // The pad copper the minimum applies to (with `copper`, the opening is that copper;
+        // non-plated holes and drawings have none).
+        let copper: Option<PolygonSet> = match what_is {
+            Opening::Pad(_) if !mask => Some(opening.clone()),
+            Opening::Pad(pp) if pp.layers.iter().any(|l| l == layer) => Some(vec![pp.shape_on(layer).clone()]),
+            _ => None,
         };
-        if !close {
+        let over_opening = mask && overlap(shape, opening).is_some();
+        if !over_opening && !copper.as_ref().is_some_and(|c| near(shape, c)) {
             continue;
         }
         let anchor = match what_is {
             Opening::Pad(pp) => pp.center,
             Opening::Drawn(_) => opening.bbox().map(|b| from_f(b.min.x as f64, b.min.y as f64)).unwrap_or_default(),
         };
-        let (dist, at) = gap(shape, opening).unwrap_or((0.0, anchor));
+        let measured = match &copper {
+            Some(c) if !over_opening => c,
+            _ => opening,
+        };
+        let (dist, at) = gap(shape, measured).unwrap_or((0.0, anchor));
         let what = if dist == 0.0 { "overlaps".to_string() } else { format!("is {} from", nm_f(dist)) };
         let mut d = match what_is {
             Opening::Pad(pp) => {
-                let target = if against.is_empty() { pad_label(pp) } else { format!("{against} {}", pad_label(pp)) };
+                let target =
+                    if over_opening { format!("the solder mask opening of {}", pad_label(pp)) } else { pad_label(pp) };
                 let mut d = Diagnostic::warning(
                     "drc.silk_over_pad",
                     format!("silkscreen of {owner} {what} {target}, minimum is {min}"),
@@ -1167,7 +1183,7 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
             }
             Opening::Drawn(o) => Diagnostic::warning(
                 "drc.silk_over_mask_opening",
-                format!("silkscreen of {owner} {what} a solder mask opening drawn by {o}, minimum is {min}"),
+                format!("silkscreen of {owner} {what} a solder mask opening drawn by {o}"),
             )
             .with_subject(item_ref(owner))
             .with_subject(item_ref(o))
