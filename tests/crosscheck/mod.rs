@@ -383,6 +383,16 @@ pub fn cases() -> Vec<Case> {
             },
         },
         Case {
+            name: "silk_near_pad",
+            what: "a silkscreen line 0.08 mm above C2.1, closer than the 0.15 mm silk clearance",
+            expect: &["drc.silk_over_pad"],
+            build: |r, s| {
+                route_all(r, s);
+                // C2.1's top edge is at 10.285; the 0.15 mm line's lower edge at 10.365.
+                silk_line(s, (14.3, 10.44), (14.8, 10.44));
+            },
+        },
+        Case {
             name: "unrouted",
             what: "the 3V3 tracks removed",
             expect: &["drc.unrouted"],

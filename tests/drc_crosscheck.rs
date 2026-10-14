@@ -50,8 +50,36 @@ const CASE_ALLOW: &[Allow<'static>] = &[
     },
 ];
 
-fn allowlist() -> Vec<Allow<'static>> {
-    ALLOW.iter().chain(CASE_ALLOW).cloned().collect()
+/// The finding names pad 5 of U1 (the 3V3 pad the `short` case's GND track passes).
+fn names_u1_pad5(f: &drc_compare::Finding) -> bool {
+    f.items.contains("U1.5")
+}
+
+/// Allowances for KiCad 10.0.7 and later only (each must be used there, and would be unused
+/// before).
+const KICAD_10_0_7_ALLOW: &[Allow<'static>] = &[Allow {
+    case: Some("short"),
+    side: Side::Cadlab,
+    rule: "drc.clearance",
+    when: Some(names_u1_pad5),
+    max: Some(1),
+    involving: &[],
+    reason: "KiCad 10.0.7 no longer reports the GND track's clearance violation to pad U1.5 (3V3, 0.156 mm against \
+             0.2 mm) once the same track is reported crossing a 3V3 track; KiCad 10.0.6 reported it (actual \
+             0.1562 mm) on the identical board, and the gap is a real violation, so cadlab keeps it",
+}];
+
+/// `kicad-cli version` as (major, minor, patch); unparsable parts are 0.
+fn kicad_version(cli: &Path) -> (u32, u32, u32) {
+    let out = oracle::run(cli, &["version"]);
+    let mut parts = out.trim().split(['.', '-', ' ', '+']).map(|p| p.parse().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
+fn allowlist(cli: &Path) -> Vec<Allow<'static>> {
+    let newer = kicad_version(cli) >= (10, 0, 7);
+    let extra: &[Allow<'static>] = if newer { KICAD_10_0_7_ALLOW } else { &[] };
+    ALLOW.iter().chain(CASE_ALLOW).chain(extra).cloned().collect()
 }
 
 /// Compares KiCad's DRC report on the export of a cross-check case with cadlab's DRC on `p`
@@ -81,7 +109,7 @@ fn kicad_drc(cli: &Path, pcb: &Path) -> Value {
 fn kicad_and_cadlab_drc_agree() {
     let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
     let mut problems = Vec::new();
-    let allow = allowlist();
+    let allow = allowlist(&cli);
     let mut used = vec![0; allow.len()];
     for case in crosscheck::cases() {
         let (_d, _r, s) = crosscheck::build(&case);
@@ -105,7 +133,7 @@ fn kicad_drc_of_export_matches_cadlab_drc_of_import() {
     use cadlab::kicad_import::{self, BoardImportOptions, rules};
     let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
     let mut problems = Vec::new();
-    let allow = allowlist();
+    let allow = allowlist(&cli);
     let mut used = vec![0; allow.len()];
     for case in crosscheck::cases() {
         let (_d, _r, s) = crosscheck::build(&case);
