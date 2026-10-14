@@ -225,6 +225,18 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
       and component placements with body heights; validated against the published schema; D37). Change and
       response messages later
 
+## Stretch goals (XL)
+
+Research-sized items beyond the milestones above; none blocks a release.
+
+- [ ] 2D cross-section field solver (quasi-static, e.g. boundary or finite elements from textbook methods):
+      Z₀, εeff and losses of single lines and coupled pairs from the stackup; covers what the closed forms of
+      D29 do not (coplanar waveguide with ground, broadside and asymmetric coupling, solder-mask cover,
+      trapezoidal etch profiles, tight coupling). Selectable in `impedance.calc/solve`, checked against the
+      closed forms in their accurate range and against published reference values
+- [ ] 3D full-wave EM solver (e.g. FDTD or FEM) for S-parameters of vias, transitions, connectors and short
+      interconnects, and an export of the board geometry to an external solver (openEMS) as a first step
+
 ---
 
 ## Cross-cutting, always on
