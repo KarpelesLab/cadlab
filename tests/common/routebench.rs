@@ -133,7 +133,8 @@ fn attiny() -> (tempfile::TempDir, Registry, Session) {
     let (d, r, mut s) = new_project();
     common::boards::build_board(&r, &mut s);
     exec(&r, &mut s, "board.outline", json!({"width": "40mm", "height": "30mm", "corner_radius": "2mm"}));
-    exec(&r, &mut s, "place.auto", json!({"spacing": "1.5mm"}));
+    // Compact (D50): the benchmark measures the router on the placement its baseline was taken on.
+    exec(&r, &mut s, "place.auto", json!({"spacing": "1.5mm", "compact": true}));
     (d, r, s)
 }
 
@@ -142,7 +143,7 @@ fn stm32(layers: u8) -> (tempfile::TempDir, Registry, Session) {
     common::boards::build_stm32_board(&r, &mut s);
     exec(&r, &mut s, "board.setup", json!({"layers": layers}));
     exec(&r, &mut s, "board.outline", json!({"width": "60mm", "height": "45mm", "corner_radius": "2mm"}));
-    exec(&r, &mut s, "place.auto", json!({"spacing": "1mm"}));
+    exec(&r, &mut s, "place.auto", json!({"spacing": "1mm", "compact": true}));
     (d, r, s)
 }
 

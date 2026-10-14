@@ -788,6 +788,36 @@ closed forms stay the default: they are instant, exactly reproducible across ver
 few percent in their ranges, and the DRC evaluates them per track; the solver is one option away, and
 picked automatically when the closed forms cannot model the request.
 
+### D50. Agent session 2: spread automatic placement, unrouted summary, KiCad footprint names, `footprint.create` (2026-10-14)
+The items session 1 left open (docs/TESTING.md, "Agent sessions") are fixed, and the session replays with them.
+**Placement:** `place.auto` (groups) now spreads groups over the board by default: each anchor's room is its
+group's area times the free area's share (rooms taking `SPREAD_DENSITY` = 60 % of the free area in all, at most
+2.5 times the group), the largest IC goes first to the center even when other parts are locked, connectors
+are penalized per pad for each other connector closer than a quarter of the board's width plus height, small
+ICs whose signal nets reach one larger IC only are its satellites (inside its room), and improvement keeps
+anchors in their room; part boxes then also cover each footprint's silkscreen (generated pin-1 dots sit
+outside the IPC courtyard and landed on neighbours' pads once groups moved). `compact: true` is the former
+placement exactly, and the router benchmark boards use it, so `tests/golden/bench/route.json` stays the
+router's baseline rather than the placer's: with spreading the same boards route at 100 % with more track
+(ATtiny 104 → 136 mm; STM32 2-layer 57 → 84 vias), the expected cost of using the board. **DRC:** `drc.run` takes `unrouted` (`auto` default: more than 10 unrouted
+connections become one `drc.unrouted` with the count per net and the nets as subjects; `each`; `summary`) and
+reports the total in `unrouted`; the library's `drc::check` still returns one finding per connection (the router
+and the KiCad cross-checks use them). **describe:** text output lists enum values of fields nested in objects
+(`pins[].kind: ...`); the compact type label is unchanged. **KiCad footprint import:** a footprint is named after
+the name inside the file (`(footprint "NAME"`), the file name only when there is none; an info
+`import.name_from_file` notes a difference; `footprint` filters match either name; `footprint.import_kicad`
+gains `name` to choose the project name (one footprint); symbols' `Footprint` fields, which use file names
+like KiCad's library table, are resolved through the imported items' KiCad names. Footprints imported
+earlier keep their names; re-importing such a file adds the internally named footprint next to them.
+**`footprint.create`:** a footprint from a pad list (number, at, size, shape, radius, rotation, drill or slot,
+layers `top|bottom|all|npth`, rows by `count` + `pitch`), optional body centered on the origin, built by
+`landpattern::from_pads` with the generator's silkscreen, pin-1, fab and courtyard drawing.
+*Why:* an agent's first placement should look like a board, not a cluster, while keeping what made the packed
+placement route well (passives at their pins, connectors at edges); a list of 59 identical errors hides the
+one real problem in a pre-route check; the footprint name an agent reads in the file is the one it types
+next; and land patterns are datasheet tables of pads, which a command should take directly, rather than a
+detour through KiCad's file format.
+
 ## Open questions
 
 

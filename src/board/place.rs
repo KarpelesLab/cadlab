@@ -32,6 +32,10 @@ pub const DEFAULT_GAP: Nm = Nm(250_000);
 const GRID: i64 = 50_000;
 /// Fine search step.
 const STEP: i64 = 250_000;
+/// Share of the free board area the groups' rooms take in all when `place.auto` spreads them.
+pub const SPREAD_DENSITY: f64 = 0.6;
+/// Largest room of a group, relative to its parts' area, when spreading.
+const SPREAD_MAX: f64 = 2.5;
 
 /// A placement failure, with a stable code and a fix hint.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +162,29 @@ fn local_courtyard(fp: &crate::model::footprint::Footprint) -> Vec<Point> {
     }
 }
 
+/// Corners of the box of a footprint's silkscreen (strokes included), if it has any.
+fn silk_extent(fp: &crate::model::footprint::Footprint) -> Vec<Point> {
+    use crate::model::footprint::{GraphicGeometry, GraphicLayer};
+    let mut pts = Vec::new();
+    for g in fp.graphics.iter().filter(|g| g.layer == GraphicLayer::Silk) {
+        let (centers, r): (Vec<Point>, Nm) = match &g.geometry {
+            GraphicGeometry::Path { points } | GraphicGeometry::Polygon { points } => {
+                (points.clone(), Nm(g.width.0 / 2))
+            }
+            GraphicGeometry::Circle { center, radius, .. } => (vec![*center], Nm(radius.0 + g.width.0 / 2)),
+        };
+        for c in centers {
+            pts.extend([Point::new(c.x - r, c.y - r), Point::new(c.x + r, c.y + r)]);
+        }
+    }
+    match Rect::of(pts) {
+        Some(r) => {
+            [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)].map(|(x, y)| Point::new(Nm(x), Nm(y))).to_vec()
+        }
+        None => vec![],
+    }
+}
+
 /// What a part is for grouping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -241,13 +268,24 @@ struct Engine<'a> {
     center: Point,
     /// Passives kept next to their target pin during improvement: (part, own pad, target, weight).
     tethers: Vec<(usize, usize, Pin, f64)>,
+    /// Room of each anchor when spreading: improvement keeps its courtyard inside.
+    rooms: Vec<Option<Rect>>,
+    /// Connector spacing when spreading: centers of connectors that stay, and the distance
+    /// below which connectors crowd each other (0: no spacing).
+    crowd: (Vec<Point>, f64),
 }
 
-fn build_part(p: &Project, refdes: &str, net_index: &BTreeMap<String, usize>) -> Option<Part> {
+/// With `silk`, the part's box also covers its silkscreen.
+fn build_part(p: &Project, refdes: &str, net_index: &BTreeMap<String, usize>, silk: bool) -> Option<Part> {
     let fp = footprint_for(p, refdes)?;
-    let courtyard = local_courtyard(fp);
+    let mut courtyard = local_courtyard(fp);
     if courtyard.is_empty() {
         return None;
+    }
+    // Silkscreen reaching past the courtyard (pin-1 marks) is part of the box, so it does not
+    // land on a neighbour's pads.
+    if silk {
+        courtyard.extend(silk_extent(fp));
     }
     let nets = pad_nets(p, refdes);
     let comp = p.circuit().components.get(refdes)?;
@@ -328,7 +366,7 @@ fn free_area(p: &Project, side: BoardSide, gap: i64, edge: i64, moving: &BTreeSe
 }
 
 impl<'a> Engine<'a> {
-    fn new(p: &'a Project, moving: &[String], gap: i64) -> Result<Self, PlaceError> {
+    fn new(p: &'a Project, moving: &[String], gap: i64, silk: bool) -> Result<Self, PlaceError> {
         let b = p.board();
         let c = b.outline.contours.first().ok_or_else(PlaceError::no_outline)?;
         let board =
@@ -337,7 +375,7 @@ impl<'a> Engine<'a> {
         let net_index: BTreeMap<String, usize> = net_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
         let mut parts = Vec::new();
         for r in moving {
-            if let Some(part) = build_part(p, r, &net_index) {
+            if let Some(part) = build_part(p, r, &net_index, silk) {
                 parts.push(part);
             }
         }
@@ -388,6 +426,8 @@ impl<'a> Engine<'a> {
             board,
             center: center.unwrap_or_else(|| board.center()),
             tethers: Vec::new(),
+            rooms: vec![None; n],
+            crowd: (Vec::new(), 0.0),
         })
     }
 
@@ -519,6 +559,26 @@ impl<'a> Engine<'a> {
     fn edge_distance(&self, r: &Rect) -> i64 {
         let b = &self.board;
         (r.x0 - b.x0).min(b.x1 - r.x1).min(r.y0 - b.y0).min(b.y1 - r.y1).max(0)
+    }
+
+    /// Penalty of connector `i` at `pose` for crowding other connectors (placed ones being
+    /// moved, and the fixed ones): per pad, how much closer than the crowding distance their
+    /// centers are. Zero unless spreading, and for other parts.
+    fn crowding(&self, i: usize, pose: &Pose) -> f64 {
+        let (fixed, reach) = &self.crowd;
+        if *reach <= 0.0 || self.parts[i].kind != Kind::Connector {
+            return 0.0;
+        }
+        let c = self.parts[i].rect(pose).center();
+        let others = self
+            .poses
+            .iter()
+            .enumerate()
+            .filter(|&(j, q)| j != i && q.is_some() && self.parts[j].kind == Kind::Connector)
+            .filter_map(|(j, q)| q.map(|q| self.parts[j].rect(&q).center()))
+            .chain(fixed.iter().copied());
+        let close: f64 = others.map(|o| (reach - dist(c, o)).max(0.0)).sum();
+        self.parts[i].pads.len().max(2) as f64 * close
     }
 
     /// Grid step for whole-board searches: at least 0.5 mm, about 4000 positions.
@@ -737,6 +797,35 @@ fn assign(e: &Engine, nets: &NetInfo, ap: &AnchorPads) -> BTreeMap<usize, Target
     out
 }
 
+/// Satellites among the ICs being placed: an IC whose signal nets (neither power nor ground)
+/// reach exactly one other anchor, an IC with more pins, is that IC's satellite.
+fn satellites(e: &Engine, nets: &NetInfo, ap: &AnchorPads) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for part in &e.parts {
+        let r = &part.refdes;
+        if part.kind != Kind::Ic {
+            continue;
+        }
+        let Some(pads) = ap.pads.get(r) else { continue };
+        let signal: BTreeSet<usize> = pads.iter().map(|x| x.1).filter(|&n| !nets.power[n] && !nets.ground[n]).collect();
+        if signal.is_empty() {
+            continue;
+        }
+        let others: BTreeSet<&String> = ap
+            .pads
+            .iter()
+            .filter(|(a, v)| *a != r && v.iter().any(|x| signal.contains(&x.1)))
+            .map(|(a, _)| a)
+            .collect();
+        if let [m] = others.into_iter().collect::<Vec<_>>()[..]
+            && ap.info.get(m).is_some_and(|&(ic, pins)| ic && pins > ap.info[r].1)
+        {
+            out.insert(r.clone(), m.clone());
+        }
+    }
+    out
+}
+
 /// Root anchor of a passive's target chain.
 fn root_of<'t>(e: &Engine, targets: &'t BTreeMap<usize, Target>, i: usize) -> Option<&'t str> {
     let mut cur = i;
@@ -768,28 +857,76 @@ pub struct AutoPlacement {
 /// next to the anchor pin they connect to (decoupling capacitors next to their power pin),
 /// rotated to face it; then local moves (shifts, rotations, swaps of identical footprints)
 /// shorten the total ratsnest. `gap` is the courtyard-to-courtyard clearance.
-pub fn auto_place(p: &Project, moving: &[String], gap: Nm) -> Result<AutoPlacement, PlaceError> {
-    let mut e = Engine::new(p, moving, gap.0.max(0))?;
+///
+/// With `spread`, each group's room grows with the free board area (up to [`SPREAD_DENSITY`]
+/// of it in all), anchors keep to that room during improvement, and connectors keep apart
+/// from each other along the edges, so a board larger than its parts is used rather than
+/// packed into one cluster. Without it groups are packed as tightly as their passives allow.
+pub fn auto_place(p: &Project, moving: &[String], gap: Nm, spread: bool) -> Result<AutoPlacement, PlaceError> {
+    let mut e = Engine::new(p, moving, gap.0.max(0), spread)?;
     let nets = net_info(&e);
     let ap = anchor_pads(&e);
     let targets = assign(&e, &nets, &ap);
     let n = e.parts.len();
 
-    // Room around each anchor for its passives.
+    // Satellites (when spreading): small ICs whose signal nets reach one larger IC only (a
+    // crystal, a buffer next to an MCU). They share that IC's room instead of claiming their own.
+    let satellite: BTreeMap<String, String> = if spread { satellites(&e, &nets, &ap) } else { BTreeMap::new() };
+    let group_of = |r: &str| satellite.get(r).cloned().unwrap_or_else(|| r.to_string());
+
+    // Room around each anchor for its passives (and satellites).
     let mut group_area: BTreeMap<String, f64> = BTreeMap::new();
+    let mut parts_area = 0.0;
     for i in 0..n {
-        if let Some(root) = root_of(&e, &targets, i) {
-            let r = e.parts[i].rel[0][0].0;
-            *group_area.entry(root.to_string()).or_default() += ((r.w() + e.gap) as f64) * ((r.h() + e.gap) as f64);
+        let r = e.parts[i].rel[0][0].0;
+        let a = ((r.w() + e.gap) as f64) * ((r.h() + e.gap) as f64);
+        parts_area += a;
+        let root = if e.parts[i].kind == Kind::Passive {
+            root_of(&e, &targets, i)
+        } else {
+            satellite.get(&e.parts[i].refdes).map(String::as_str)
+        };
+        if let Some(root) = root {
+            *group_area.entry(group_of(root)).or_default() += a;
         }
     }
+    // Spread: the share of the free area each unit of part area gets as room (1 when packed),
+    // at most SPREAD_MAX: beyond that groups drift apart for nothing.
+    let free_area = polyclip::area2(&e.free[0]) as f64 / 2.0;
+    let factor =
+        if spread && parts_area > 0.0 { (free_area * SPREAD_DENSITY / parts_area).clamp(1.0, SPREAD_MAX) } else { 1.0 };
+    let max_halo = if spread { (e.board.w().min(e.board.h()) / 4).max(8_000_000) } else { 8_000_000 };
     let halo_of = |e: &Engine, i: usize| -> i64 {
         let r = e.parts[i].rel[0][0].0;
-        let a = group_area.get(&e.parts[i].refdes).copied().unwrap_or(0.0) * 1.6;
+        let own = ((r.w() + e.gap) as f64) * ((r.h() + e.gap) as f64);
+        let refdes = &e.parts[i].refdes;
+        let passives = group_area.get(refdes).copied().unwrap_or(0.0);
+        // Ring area around the courtyard: room for the passives, or the group's share of the board.
+        let f = if satellite.contains_key(refdes) { 1.0 } else { factor };
+        let a = (passives * 1.6).max((own + passives) * f - own);
         let s = (r.w() + r.h()) as f64;
         let h = (-s + (s * s + 4.0 * a).sqrt()) / 4.0;
-        (h as i64).clamp(e.gap, 8_000_000)
+        (h as i64).clamp(e.gap, max_halo)
     };
+    // Connectors keep this far apart (center to center) when spreading: an eighth of the
+    // board's perimeter, so a few connectors take different edges or ends of one.
+    if spread {
+        let fixed: Vec<Point> = p
+            .board()
+            .footprints
+            .keys()
+            .filter(|r| !e.index.contains_key(*r))
+            .filter(|r| {
+                p.circuit()
+                    .components
+                    .get(*r)
+                    .and_then(|c| p.library().parts.get(&c.part))
+                    .is_some_and(|x| x.category == Category::Connector)
+            })
+            .filter_map(|r| courtyard_box(p, r).map(|b| b.center()))
+            .collect();
+        e.crowd = (fixed, ((e.board.w() + e.board.h()) / 4) as f64);
+    }
 
     // 1. Anchors, most connected to what is already placed first.
     let mut anchors: Vec<usize> = (0..n).filter(|&i| e.parts[i].kind != Kind::Passive).collect();
@@ -818,17 +955,29 @@ pub fn auto_place(p: &Project, moving: &[String], gap: Nm) -> Result<AutoPlaceme
                 })
                 .count()
         };
-        let k = (0..anchors.len())
-            .max_by(|&x, &y| connected(&e, anchors[x]).cmp(&connected(&e, anchors[y])).then(y.cmp(&x)))
-            .expect("non-empty");
+        // Spreading: the largest IC first (it takes the center), and satellites after their IC.
+        let waiting = |e: &Engine, i: usize| {
+            satellite.get(&e.parts[i].refdes).is_some_and(|m| {
+                e.index.get(m).is_some_and(|&j| e.poses[j].is_none() && anchors.contains(&j) && j != i)
+            })
+        };
+        let k = if spread && halos.is_empty() && e.parts[anchors[0]].kind == Kind::Ic {
+            0
+        } else {
+            (0..anchors.len())
+                .filter(|&x| !waiting(&e, anchors[x]))
+                .max_by(|&x, &y| connected(&e, anchors[x]).cmp(&connected(&e, anchors[y])).then(y.cmp(&x)))
+                .unwrap_or(0)
+        };
         let i = anchors.remove(k);
+        let master = satellite.get(&e.parts[i].refdes).and_then(|m| e.index.get(m).copied());
         let halo = halo_of(&e, i);
         let step = e.coarse_step();
         let cands = e.candidates(BoardSide::Top, None, step);
         let kind = e.parts[i].kind;
         let center = e.center;
         let board = e.board;
-        let is_first = kind == Kind::Ic && first_ic;
+        let is_first = kind == Kind::Ic && (first_ic || (spread && halos.is_empty()));
         let score = |e: &Engine, pose: &Pose| -> f64 {
             let r = e.parts[i].rect(pose);
             let mut s = e.attraction(i, pose);
@@ -847,6 +996,7 @@ pub fn auto_place(p: &Project, moving: &[String], gap: Nm) -> Result<AutoPlaceme
                     // Long side along the edge.
                     let across = if vertical { r.w() - r.h() } else { r.h() - r.w() };
                     s += across.max(0) as f64;
+                    s += e.crowding(i, pose);
                 }
             }
             s
@@ -855,7 +1005,7 @@ pub fn auto_place(p: &Project, moving: &[String], gap: Nm) -> Result<AutoPlaceme
         for h in [halo, halo / 2, 0] {
             let fits = |pose: &Pose| {
                 let hr = e.parts[i].rect(pose).expand(h);
-                halos.iter().all(|(_, o)| hr.clear_of(o, 0))
+                halos.iter().all(|(j, o)| Some(*j) == master || hr.clear_of(o, 0))
             };
             let c: Vec<Pose> = cands.iter().copied().filter(|c| fits(c)).collect();
             if let Some(pose) = e.best(i, c, |c| score(&e, c)) {
@@ -866,7 +1016,11 @@ pub fn auto_place(p: &Project, moving: &[String], gap: Nm) -> Result<AutoPlaceme
         match found {
             Some((pose, h)) => {
                 e.poses[i] = Some(pose);
-                halos.push((i, e.parts[i].rect(&pose).expand(h)));
+                let room = e.parts[i].rect(&pose).expand(h);
+                halos.push((i, room));
+                if spread && master.is_none() {
+                    e.rooms[i] = Some(room);
+                }
                 if kind == Kind::Ic {
                     first_ic = false;
                 }
@@ -981,7 +1135,7 @@ fn improve(e: &mut Engine, passes: usize) {
         for i in 0..n {
             let Some(cur) = e.poses[i] else { continue };
             let nets = e.part_nets[i].clone();
-            let before = e.local_cost(&[i], &nets);
+            let before = e.local_cost(&[i], &nets) + e.crowding(i, &cur);
             let mut moves: Vec<Pose> = Vec::new();
             for d in [250_000i64, 500_000, 1_000_000, 2_000_000, 4_000_000] {
                 for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
@@ -999,10 +1153,17 @@ fn improve(e: &mut Engine, passes: usize) {
                 let d0 = e.edge_distance(&e.parts[i].rect(&cur));
                 moves.retain(|m| e.edge_distance(&e.parts[i].rect(m)) <= d0);
             }
+            // Spread anchors stay in their room.
+            if let Some(room) = e.rooms[i] {
+                moves.retain(|m| {
+                    let r = e.parts[i].rect(m);
+                    r.x0 >= room.x0 && r.y0 >= room.y0 && r.x1 <= room.x1 && r.y1 <= room.y1
+                });
+            }
             let mut scored: Vec<(f64, usize, Pose)> = Vec::new();
             for (k, m) in moves.into_iter().enumerate() {
                 e.poses[i] = Some(m);
-                let after = e.local_cost(&[i], &nets);
+                let after = e.local_cost(&[i], &nets) + e.crowding(i, &m);
                 if after < before - EPS {
                     scored.push((after, k, m));
                 }
@@ -1055,7 +1216,7 @@ fn improve(e: &mut Engine, passes: usize) {
 /// Total ratsnest length of the placed footprints: minimum spanning tree per net over pad
 /// centers, ignoring copper (an estimate of the routing effort of a placement).
 pub fn ratsnest_length(p: &Project) -> Nm {
-    match Engine::new(p, &[], 0) {
+    match Engine::new(p, &[], 0, false) {
         Ok(e) => Nm(e.total().round() as i64),
         Err(_) => Nm::ZERO,
     }
@@ -1126,7 +1287,7 @@ pub fn place_near(
     let tpf = p.board().footprints.get(tref).ok_or_else(not_placed)?;
     let trect = courtyard_box(p, tref).ok_or_else(not_placed)?;
     let gap = distance.0.clamp(0, DEFAULT_GAP.0);
-    let mut e = Engine::new(p, &[refdes.to_string()], gap)?;
+    let mut e = Engine::new(p, &[refdes.to_string()], gap, false)?;
     let Some(&i) = e.index.get(refdes) else {
         return Err(PlaceError::new(
             "place.no_footprint",

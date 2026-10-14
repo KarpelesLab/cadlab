@@ -183,12 +183,12 @@ does not change).
 | Group | Commands |
 |---|---|
 | `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
-| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
+| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
 | `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given; `rule_area`: forbid nothing, a named area for custom rules), `remove`, `list` |
-| `drc` | `run` (plus `fab.check` warnings for the manifest `targets`) |
+| `drc` | `run` (plus `fab.check` warnings for the manifest `targets`; `unrouted`: `auto` lists up to 10 unrouted connections and summarizes more in one finding, `each`, `summary`) |
 | `board` (stackup) | `stackup` (copper, dielectrics, line model per layer), `dielectric` (thickness, εr, material per gap; [ELECTRICAL.md](ELECTRICAL.md)) |
 | `impedance` | `calc` (Z0 / Zdiff of a width on a layer), `solve` (width for a target, optionally into a net class) |
 | `current` | `width` (IPC-2152 width per layer for a current; optionally raises a net class width) |
@@ -356,12 +356,23 @@ the courtyards of footprints that stay (locked ones, and placed ones unless `rep
    sharing a power net.
 2. Anchors, most connected to what is already placed first, on a coarse grid (about 4000 positions, at least
    0.5 mm) with all rotations: the first IC near the center, other ICs pulled to their connections, connectors
-   to the nearest edge with their long side along it. Each anchor keeps a margin around it sized from its
+   to the nearest edge with their long side along it. Each anchor keeps a room around it sized from its
    group's area, so its passives fit.
+
+   **Spreading** (default since D50; `compact: true` turns it off): each group's room grows to its share of
+   the free board area (rooms taking 60 % of it in all, at most 2.5 times the group's own area); the largest
+   IC is placed first and centered even when other parts are locked; connectors keep apart along the edges
+   (penalized per pad for every other connector, placed or locked, closer than a quarter of the board's
+   width plus height); small ICs whose signal nets reach only one larger IC (a crystal next to its MCU) are
+   that IC's satellites, placed inside its room right after it; and during improvement anchors stay inside
+   their room, so the ratsnest cannot pull the groups back into one cluster.
 3. Passives, group by group (decoupling capacitors first, then chains), on a 0.25 mm grid within 3 mm, then
    8 mm, of their target pin, all rotations: the score is the distance from their connecting pad to the
    target pin (weighted 4 for decoupling, 2 otherwise) plus the distance of their other pads to the nearest
    placed pin of the same net (ground weighted 0.3). Candidates are tried best first; the first valid one wins.
+   When spreading, every part's box covers its courtyard and its silkscreen (pin-1 dots outside the
+   courtyard included), so no silkscreen lands on a neighbour's pads. `compact` is the placement as before
+   D50 (the router benchmark boards use it).
 4. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
    and swaps of identical footprints, accepting the best valid move that lowers the ratsnest (MST per net over
    pad centers) plus tethers keeping passives at their target pins; connectors never move away from the edge.
@@ -405,7 +416,7 @@ courtyards) count an overlap only where it is wider than 2 µm.
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
 | `drc.disallowed` | error (rule's severity) | a copper item of a kind a custom rule's `disallow` forbids in its scope |
 
-| `drc.unrouted` | error | a ratsnest connection, with both ends |
+| `drc.unrouted` | error | a ratsnest connection, with both ends; `drc.run` reports more than 10 as one finding with the count per net (`unrouted: each` lists them) and the total in `unrouted` |
 | `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |
 | `drc.impedance` | warning | tracks of a net whose class has an `impedance` target more than 10 % off on their layer |
 

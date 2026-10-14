@@ -271,4 +271,6 @@ Research-sized items beyond the milestones above; none blocks a release.
 - **Determinism:** golden files for every exporter and renderer.
 - **Agent ergonomics:** after each milestone, run a scripted agent session that designs a board from a prompt,
   and fix whatever the agent got stuck on. Session 1 done (ATmega328P + USB-C, JLCPCB bundle; 15 friction points
-  fixed, D45); log in docs/TESTING.md "Agent sessions", replayed by `tests/agent_session.rs`.
+  fixed, D45); log in docs/TESTING.md "Agent sessions", replayed by `tests/agent_session.rs`. Session 1's open
+  items fixed and the session replayed with them (D50: spread placement, unrouted summary, nested enums in
+  `describe`, KiCad footprint names, `footprint.create`).

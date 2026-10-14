@@ -1,0 +1,8 @@
+[{"number":"A12","at":["-2.5mm","2.5mm"],"size":["0.7mm","1.2mm"],"shape":"rect"},
+ {"number":"A9","at":["-1.5mm","2.5mm"],"size":["0.7mm","1.2mm"],"shape":"rect"},
+ {"number":"A5","at":["-0.5mm","2.5mm"],"size":["0.7mm","1.2mm"],"shape":"rect"},
+ {"number":"B5","at":["0.5mm","2.5mm"],"size":["0.7mm","1.2mm"],"shape":"rect"},
+ {"number":"B9","at":["1.5mm","2.5mm"],"size":["0.7mm","1.2mm"],"shape":"rect"},
+ {"number":"B12","at":["2.5mm","2.5mm"],"size":["0.7mm","1.2mm"],"shape":"rect"},
+ {"number":"S1","at":["-4.3mm","-0.5mm"],"size":["1.6mm","1.6mm"],"drill":"1mm"},
+ {"number":"S2","at":["4.3mm","-0.5mm"],"size":["1.6mm","1.6mm"],"drill":"1mm"}]

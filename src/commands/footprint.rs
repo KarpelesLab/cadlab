@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::util;
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::geom::BBox;
+use crate::geom::Point;
 use crate::landpattern::{self, ChipKind, Density, GenOptions, PackageSpec};
 use crate::model::Project;
-use crate::model::footprint::{Footprint, Mount};
+use crate::model::footprint::{Body, Footprint, Mount, Pad, PadKind, PadShape};
 use crate::model::model3d::{MAX_MODEL_BYTES, Model3d, ModelData, ModelUnit, ModelUp, valid_model_name};
 use crate::model::part::valid_id;
 use crate::models3d::{self, ModelError3d};
@@ -20,6 +21,7 @@ use crate::units::{Angle, Nm, Scale};
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<Generate>()
+        .register::<Create>()
         .register::<List>()
         .register::<Show>()
         .register::<Remove>()
@@ -167,6 +169,306 @@ impl Command for Generate {
                     format!("footprint `{name}` already exists with different content"),
                 )
                 .with_hint("pass `replace: true` to overwrite it, or `name` to store under another name"));
+            }
+            Some(name) => {
+                p.library_mut().footprints.remove(&name);
+                p.library_mut().footprints.insert(fp.name.clone(), fp.clone());
+                "replaced"
+            }
+            None => {
+                p.library_mut().footprints.insert(fp.name.clone(), fp.clone());
+                "created"
+            }
+        };
+        let p = ctx.project()?;
+        Ok(GenerateResult {
+            footprint: FootprintSummary::of(p, &p.library().footprints[&fp.name]),
+            status: status.into(),
+        })
+    }
+
+    fn summarize(o: &GenerateResult) -> String {
+        format!("{}: {}", o.status, o.footprint.line())
+    }
+}
+
+/// Copper shape of a pad given to `footprint.create`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PadShapeKind {
+    /// Rectangle.
+    Rect,
+    /// Rounded rectangle (`radius`, default 25 % of the shorter side, at most 0.25 mm).
+    #[serde(alias = "round_rect")]
+    Roundrect,
+    /// Circle of diameter `size[0]`.
+    Circle,
+    /// Stadium (obround).
+    Oval,
+}
+
+/// Which layers a pad of `footprint.create` is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PadLayers {
+    /// Surface-mount on the footprint's side (default without a drill).
+    Top,
+    /// Surface-mount on the other side (card-edge fingers).
+    Bottom,
+    /// Plated through-hole: copper on every layer (default with a drill).
+    All,
+    /// Non-plated hole: no copper, no number needed.
+    Npth,
+}
+
+/// A pad (or a row of pads) of `footprint.create`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PadSpec {
+    /// Pad number that pins map to (`1`, `A5`, `S1`); empty for a mounting hole. With `count`,
+    /// trailing digits count up (`A1`, `A2`, ...).
+    #[serde(default)]
+    pub number: String,
+    /// Center, from the footprint origin (Y up, as on the board).
+    pub at: Point,
+    /// Copper size `[width, height]` (X, Y before rotation); a circle uses the width. Optional
+    /// for `npth` holes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<(Nm, Nm)>,
+    /// Shape (default: `roundrect` for surface-mount pads; `circle`, or `oval` when not square,
+    /// with a drill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<PadShapeKind>,
+    /// Corner radius of a `roundrect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<Nm>,
+    /// Rotation around the center (degrees).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<Angle>,
+    /// Hole diameter (finished): a through-hole pad, or the hole of an `npth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drill: Option<Nm>,
+    /// Slotted hole `[x, y]` (before rotation) instead of a round one; `drill` is then optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<(Nm, Nm)>,
+    /// Layers: `top` (default without a drill), `bottom`, `all` (default with a drill), `npth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<PadLayers>,
+    /// Repeat the pad `count` times, each `pitch` further (a row of pins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    /// Offset between repeated pads `[dx, dy]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<Point>,
+}
+
+fn invalid_pad(number: &str, msg: impl Into<String>) -> CommandError {
+    let what = if number.is_empty() { "a hole".to_string() } else { format!("pad `{number}`") };
+    CommandError::invalid_args("footprint.invalid_pad", format!("{what}: {}", msg.into())).with_hint(
+        "each pad needs `at` and `size` ([w, h]); give `drill` for a through-hole pad, `layers: npth` for a plain hole",
+    )
+}
+
+/// `number` with its trailing digits increased by `k` (`A1` + 2 → `A3`); unchanged without digits.
+fn nth_number(number: &str, k: u32) -> String {
+    let digits = number.chars().rev().take_while(char::is_ascii_digit).count();
+    if digits == 0 || k == 0 {
+        return number.to_string();
+    }
+    let (head, tail) = number.split_at(number.len() - digits);
+    let n: u64 = tail.parse().unwrap_or(0) + u64::from(k);
+    format!("{head}{n}")
+}
+
+impl PadSpec {
+    /// The model pads this spec stands for.
+    fn pads(&self, opts: &landpattern::GenOptions) -> Result<Vec<Pad>, CommandError> {
+        let n = &self.number;
+        let hole = match (self.drill, self.slot) {
+            (_, Some((x, y))) => Some(x.min(y)),
+            (d, None) => d,
+        };
+        let layers = self.layers.unwrap_or(if hole.is_some() { PadLayers::All } else { PadLayers::Top });
+        let kind = match (layers, hole) {
+            (PadLayers::Top | PadLayers::Bottom, None) => PadKind::Smd,
+            (PadLayers::Top | PadLayers::Bottom, Some(_)) => {
+                return Err(invalid_pad(
+                    n,
+                    "a surface-mount pad has no drill; use `layers: all` for a through-hole pad",
+                ));
+            }
+            (PadLayers::All, Some(d)) => PadKind::Tht { drill: d },
+            (PadLayers::Npth, Some(d)) => PadKind::Npth { drill: d },
+            (PadLayers::All | PadLayers::Npth, None) => return Err(invalid_pad(n, "a hole needs `drill` or `slot`")),
+        };
+        if hole.is_some_and(|d| d <= Nm::ZERO) {
+            return Err(invalid_pad(n, "the drill must be positive"));
+        }
+        let (w, h) = match (self.size, kind) {
+            (Some(s), _) => s,
+            (None, PadKind::Npth { .. }) => self.slot.unwrap_or((hole.unwrap_or_default(), hole.unwrap_or_default())),
+            (None, _) => return Err(invalid_pad(n, "`size` is missing")),
+        };
+        if w <= Nm::ZERO || h <= Nm::ZERO {
+            return Err(invalid_pad(n, "the size must be positive"));
+        }
+        let shape_kind = self.shape.unwrap_or(match kind {
+            PadKind::Smd => PadShapeKind::Roundrect,
+            _ if w == h => PadShapeKind::Circle,
+            _ => PadShapeKind::Oval,
+        });
+        let shape = match shape_kind {
+            PadShapeKind::Rect => PadShape::Rect { w, h },
+            PadShapeKind::Roundrect => {
+                let r = self.radius.unwrap_or_else(|| landpattern::corner(w, h, opts));
+                if r < Nm::ZERO || r.0 * 2 > w.0.min(h.0) {
+                    return Err(invalid_pad(n, "the corner radius must be between 0 and half the shorter side"));
+                }
+                PadShape::RoundRect { w, h, r }
+            }
+            PadShapeKind::Circle => PadShape::Circle { d: w },
+            PadShapeKind::Oval => PadShape::Oval { w, h },
+        };
+        if let PadKind::Tht { .. } = kind {
+            let (sx, sy) = self.slot.unwrap_or((hole.unwrap_or_default(), hole.unwrap_or_default()));
+            let (cw, ch) = shape.size();
+            if sx >= cw || sy >= ch {
+                return Err(invalid_pad(n, "the hole is as large as the copper: no annular ring"));
+            }
+        }
+        let count = self.count.unwrap_or(1);
+        if count == 0 {
+            return Err(invalid_pad(n, "`count` must be at least 1"));
+        }
+        let pitch = match (count, self.pitch) {
+            (1, p) => p.unwrap_or(Point::ORIGIN),
+            (_, Some(p)) => p,
+            (_, None) => return Err(invalid_pad(n, "`count` needs `pitch` ([dx, dy] between pads)")),
+        };
+        let mut out = Vec::new();
+        for k in 0..count {
+            let k64 = i64::from(k);
+            let at = Point::new(self.at.x + Nm(pitch.x.0 * k64), self.at.y + Nm(pitch.y.0 * k64));
+            let number = if layers == PadLayers::Npth && n.is_empty() { String::new() } else { nth_number(n, k) };
+            let mut pad = Pad::new(number, at, shape.clone(), kind);
+            pad.rotation = self.rotation.unwrap_or(Angle::ZERO);
+            pad.back = layers == PadLayers::Bottom;
+            if self.slot.is_some() && !matches!(kind, PadKind::Smd) {
+                pad.slot = self.slot;
+            }
+            out.push(pad);
+        }
+        Ok(out)
+    }
+}
+
+/// Create a footprint from a list of pads, for land patterns no `footprint.generate` family
+/// covers (connectors, modules, odd packages): silkscreen, fab outline, pin-1 dot and
+/// courtyard are generated around the pads (and the body when given).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Create {
+    /// Footprint name in the project library.
+    pub name: String,
+    /// Pads, e.g. `[{"number": "1", "at": ["-1.27mm", "0mm"], "size": ["1.7mm", "1.7mm"],
+    /// "drill": "1mm"}]` (a JSON list, or `@pads.json`).
+    pub pads: Vec<PadSpec>,
+    /// Description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Package body, centered on the origin: silkscreen and fab outline follow it (default:
+    /// around the pads), and 3D previews use its height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Body>,
+    /// Courtyard margin around pads, body and silkscreen (default 0.25 mm, IPC nominal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub courtyard_margin: Option<Nm>,
+    /// Overwrite an existing footprint with the same name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
+}
+
+/// Pad boxes overlapping between different pad numbers (quarter-turn rotations exact).
+fn overlapping_pads(pads: &[Pad]) -> Vec<(String, String)> {
+    let boxes: Vec<(i64, i64, i64, i64)> = pads
+        .iter()
+        .map(|p| {
+            let (w, h) = p.shape.size();
+            let (w, h) = if p.rotation.quarter_turns().is_some_and(|q| q % 2 == 1) { (h, w) } else { (w, h) };
+            (p.at.x.0 - w.0 / 2, p.at.y.0 - h.0 / 2, p.at.x.0 + w.0 / 2, p.at.y.0 + h.0 / 2)
+        })
+        .collect();
+    let mut out = Vec::new();
+    for i in 0..pads.len() {
+        for j in i + 1..pads.len() {
+            let (a, b) = (boxes[i], boxes[j]);
+            if pads[i].number != pads[j].number
+                && pads[i].back == pads[j].back
+                && a.0 < b.2
+                && b.0 < a.2
+                && a.1 < b.3
+                && b.1 < a.3
+            {
+                out.push((pads[i].number.clone(), pads[j].number.clone()));
+            }
+        }
+    }
+    out
+}
+
+impl Command for Create {
+    const NAME: &'static str = "footprint.create";
+    const SUMMARY: &'static str = "Create a footprint from a pad list (number, at, size, shape, drill, layers); silkscreen and courtyard generated";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = GenerateResult;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<GenerateResult, CommandError> {
+        if !valid_id(&self.name) {
+            return Err(CommandError::invalid_args(
+                "footprint.invalid_name",
+                format!("invalid footprint name `{}`", self.name),
+            )
+            .with_hint("use letters, digits, `_`, `-`, `+` and `.`"));
+        }
+        if self.pads.is_empty() {
+            return Err(CommandError::invalid_args("footprint.no_pads", "a footprint needs at least one pad")
+                .with_hint(
+                    "give `pads`: [{\"number\": \"1\", \"at\": [\"0mm\", \"0mm\"], \"size\": [\"1mm\", \"1mm\"]}]",
+                ));
+        }
+        let opts = GenOptions::default();
+        let mut pads = Vec::new();
+        for spec in &self.pads {
+            pads.extend(spec.pads(&opts)?);
+        }
+        let margin = self.courtyard_margin.unwrap_or(Nm::from_um(250));
+        if margin < Nm::ZERO {
+            return Err(CommandError::invalid_args("footprint.invalid", "`courtyard_margin` cannot be negative"));
+        }
+        for (a, b) in overlapping_pads(&pads) {
+            ctx.report(
+                crate::diag::Diagnostic::warning("footprint.pads_overlap", format!("pads {a} and {b} overlap"))
+                    .with_subject(ObjectRef::Named { kind: "footprint".into(), name: self.name.clone() })
+                    .with_hint("check their `at` and `size`; pads that are one contact share a number"),
+            );
+        }
+        let mut fp = landpattern::from_pads(self.name.clone(), pads, self.body, margin, &opts)
+            .map_err(|e| CommandError::invalid_args("footprint.invalid", e.to_string()))?;
+        fp.description = self.description.unwrap_or_default();
+        let p = ctx.project_mut()?;
+        let existing = p.library().find_footprint_ci(&fp.name).map(String::from);
+        if let Some(name) = &existing {
+            fp.model = p.library().footprints[name].model.clone();
+        }
+        let status = match existing {
+            Some(name) if p.library().footprints[&name] == fp => "unchanged",
+            Some(name) if !self.replace => {
+                return Err(CommandError::conflict(
+                    "footprint.exists",
+                    format!("footprint `{name}` already exists with different content"),
+                )
+                .with_hint("pass `replace: true` to overwrite it, or choose another `name`"));
             }
             Some(name) => {
                 p.library_mut().footprints.remove(&name);

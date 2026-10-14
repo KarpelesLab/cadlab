@@ -327,9 +327,66 @@ pub fn describe_text(e: &cadlab::command::Entry) -> String {
             let req = if required.contains(&k.as_str()) { " (required)" } else { "" };
             let desc = v.get("description").and_then(Value::as_str).unwrap_or("");
             s += &format!("\n    {k}: {}{req}  {desc}", type_label(v));
+            // Values of enum fields inside objects, which the compact label leaves out.
+            let mut nested = Vec::new();
+            nested_enums(v, k, 0, &mut nested);
+            for (path, values) in nested {
+                s += &format!("\n      {path}: {values}");
+            }
         }
     }
     s
+}
+
+/// Whether a schema is a choice of string values (an enum, or a union of constants).
+fn is_enum(v: &Value) -> bool {
+    if v.get("enum").is_some() {
+        return true;
+    }
+    match v.get("anyOf").or_else(|| v.get("oneOf")).and_then(Value::as_array) {
+        Some(vs) => {
+            let vs: Vec<&Value> = vs.iter().filter(|x| x.get("type") != Some(&json!("null"))).collect();
+            !vs.is_empty() && vs.iter().all(|x| x.get("const").is_some() || is_enum(x))
+        }
+        None => false,
+    }
+}
+
+/// The enum-valued fields nested in objects of `v` (through arrays, maps and optional values),
+/// as (`path`, `a|b|c`), path from `prefix` (`pins[].kind`); `depth` stops runaway recursion.
+fn nested_enums(v: &Value, prefix: &str, depth: usize, out: &mut Vec<(String, String)>) {
+    if depth > 4 {
+        return;
+    }
+    if let Some(vs) = v.get("anyOf").or_else(|| v.get("oneOf")).and_then(Value::as_array) {
+        let vs: Vec<&Value> = vs.iter().filter(|x| x.get("type") != Some(&json!("null"))).collect();
+        // An optional value or a single shape: look inside. Tagged unions: each variant's fields.
+        for x in vs {
+            if x.get("const").is_none() {
+                nested_enums(x, prefix, depth + 1, out);
+            }
+        }
+        return;
+    }
+    if let Some(items) = v.get("items") {
+        nested_enums(items, &format!("{prefix}[]"), depth + 1, out);
+        return;
+    }
+    if let Some(a) = v.get("additionalProperties").filter(|a| a.is_object()) {
+        nested_enums(a, &format!("{prefix}.*"), depth + 1, out);
+    }
+    let Some(props) = v["properties"].as_object() else { return };
+    for (k, f) in props {
+        let path = format!("{prefix}.{k}");
+        if is_enum(f) {
+            let entry = (path, type_label(f));
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        } else if f.get("const").is_none() {
+            nested_enums(f, &path, depth + 1, out);
+        }
+    }
 }
 
 /// Compact type label for a property schema: `string`, `string[]`, `mm|mil|...`.

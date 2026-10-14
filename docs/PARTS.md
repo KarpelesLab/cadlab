@@ -134,6 +134,7 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `part.create` | concrete or custom part from a pin list + package name or dimensions |
 | `part.list / show / set / remove` | inspect and edit the library (removal refused while in use) |
 | `footprint.generate / list / show / remove` | land patterns |
+| `footprint.create <name> --pads ...` | a land pattern from a pad list, for what no generator family covers (below) |
 | `footprint.set` | local settings of a footprint or some of its pads: mask and paste margins, clearance, zone connection, net ties, pads on the back, mask openings per side, slots, paste-in-hole, per-layer pad stacks ([BOARD.md](BOARD.md), "Local settings, net ties and custom rules") |
 | `footprint.model_set / model_clear / model_list` | 3D models of footprints and parts (below) |
 | `footprint.import_kicad <path>` | the user's KiCad footprints (`.kicad_mod`, `.pretty`) into the project (below) |
@@ -148,6 +149,25 @@ form and ID (`R_10k_1pct_0402`), so the same requirement written differently reu
 | `bom.replace <from> <to>` | switch components to another part, warning about missing pins |
 | `bom.export <path> --format generic|jlcpcb|pcbway` | CSV; fab layouts omit DNP and warn about lines without MPN |
 
+### Footprints from a pad list
+
+`footprint.create` (D50) builds a footprint from the datasheet's land pattern when no `footprint.generate`
+family fits (connectors, modules, odd packages):
+
+```sh
+cadlab footprint create USB_C_6P --pads @pads.json --body '{"width": "8.94mm", "length": "6.6mm", "height": "3.2mm"}'
+```
+
+Each pad: `number`, `at` (from the origin, Y up), `size` `[w, h]`, `shape` (`roundrect` by default for SMD
+pads, `circle`/`oval` with a drill; `rect`, `radius`), `rotation`, `drill` or `slot` (plated through-hole),
+`layers` (`top`, `bottom` for the other side, `all`, `npth` for a plain hole), and `count` + `pitch` for a
+row (trailing digits of the number count up: `A1`, `A2`, ...). The silkscreen follows the body (centered on
+the origin) or the pads' box, clipped clear of the pads like generated footprints; a pin-1 dot marks pad `1`
+or `A1`; the fab outline is the body; the courtyard is `courtyard_margin` (0.25 mm) around everything.
+Through-hole when a pad is plated. Bad pads are refused with `footprint.invalid_pad` naming the pad (no size,
+hole without annular ring, a row without pitch); overlapping pads of different numbers warn
+(`footprint.pads_overlap`).
+
 ### Importing KiCad libraries
 
 Your own KiCad 6+ libraries (DECISIONS D41; KiCad's shipped libraries are never read or converted, D7):
@@ -159,7 +179,10 @@ cadlab lib import-kicad MyLib.kicad_sym --footprints MyLib.pretty [--library tea
 ```
 
 - **Footprints** (`.kicad_mod`, or every `.kicad_mod` of a `.pretty` directory) are converted like the
-  footprints of an imported board (D32): named after the file, pads of every shape (custom pads as polygon
+  footprints of an imported board (D32): named after the footprint inside the file (`(footprint "NAME"`),
+  else after the file; when the two differ, `import.name_from_file` (info) says so, `--footprint` selects by
+  either, and `--name` (one footprint) imports it under another name (D50). Symbols' `Footprint` fields,
+  which use the file name as KiCad's library table does, still find it. Pads of every shape (custom pads as polygon
   pads, trapezoids and chamfered rectangles as such; oval holes as slots, drill offsets kept), drills, paste (paste-only apertures become paste
   windows or paste drawings), local settings (mask and paste margins, clearances, zone connections, net ties,
   pads on the back, per-side mask openings, paste-in-hole; D40), copper, mask and paste drawings of either

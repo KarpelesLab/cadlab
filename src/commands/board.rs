@@ -1278,6 +1278,10 @@ pub struct PlaceAuto {
     /// Also re-place footprints already on the board (except locked ones).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace: bool,
+    /// Groups: pack them as tightly as their passives allow instead of spreading them over the
+    /// board (connectors still go to edges).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact: bool,
 }
 
 impl Command for PlaceAuto {
@@ -1309,7 +1313,7 @@ impl Command for PlaceAuto {
         let (mut out, outside) = match self.strategy.unwrap_or_default() {
             Strategy::Groups => {
                 let gap = self.spacing.unwrap_or(geo::place::DEFAULT_GAP);
-                let r = geo::place::auto_place(p, &moving, gap)
+                let r = geo::place::auto_place(p, &moving, gap, !self.compact)
                     .map_err(|e| CommandError::conflict(e.code, e.message).with_hint(e.hint))?;
                 (r.placements, r.unplaced)
             }

@@ -100,6 +100,9 @@ cadlab config digikey | show | path | remove        # user settings: supplier cr
 - Every length argument requires a unit; so do durations (`--budget 60s`).
 - JSON-valued flags take inline JSON or `@file.json`; points take `x,y` (`--at 12.7mm,8mm`) or JSON.
 - Summaries print enum values as arguments spell them (`power_out`, not `PowerOut`), so they can be typed back.
+- Text `describe` lists the values of enum fields nested in objects (`pins[].kind: input|output|...`).
+- Long lists of the same finding are summarized: `cadlab drc` before routing reports the unrouted connections
+  as one `drc.unrouted` with the count per net (`--unrouted each` lists them).
 
 ## MCP server
 

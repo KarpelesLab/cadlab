@@ -7,6 +7,7 @@
 //! the project's transaction, like `lib.publish`: skipped in dry runs, not undone by
 //! `history.undo`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
@@ -127,7 +128,8 @@ fn not_found(path: &Path, what: &str) -> CommandError {
 }
 
 /// Reads a `.kicad_mod` file or the `.kicad_mod` files of a directory (a `.pretty` library),
-/// keeping only `names` (KiCad names, case-insensitive) when given.
+/// keeping only `names` (file names without `.kicad_mod` or the names inside the files,
+/// case-insensitive) when given.
 fn footprint_files(path: &Path, names: &[String]) -> Result<(Vec<FootprintFile>, String), CommandError> {
     let label = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let mut files = Vec::new();
@@ -157,10 +159,21 @@ fn footprint_files(path: &Path, names: &[String]) -> Result<(Vec<FootprintFile>,
     } else {
         return Err(not_found(path, "`.kicad_mod` file or `.pretty` directory"));
     }
+    let mut out = Vec::new();
+    for (name, p) in files {
+        out.push(FootprintFile { name, text: read(&p)? });
+    }
     if !names.is_empty() {
-        let all: Vec<String> = files.iter().map(|(n, _)| n.clone()).collect();
+        // A footprint is selected by its file name or by the name inside the file.
+        let internal: Vec<Option<String>> =
+            out.iter().map(|f| crate::kicad_import::library::internal_footprint_name(&f.text)).collect();
+        let matches = |k: usize, n: &str| {
+            out[k].name.eq_ignore_ascii_case(n) || internal[k].as_deref().is_some_and(|i| i.eq_ignore_ascii_case(n))
+        };
+        let mut all: Vec<String> = out.iter().map(|f| f.name.clone()).collect();
+        all.extend(internal.iter().flatten().filter(|i| !out.iter().any(|f| &f.name == *i)).cloned());
         for n in names {
-            if !all.iter().any(|a| a.eq_ignore_ascii_case(n)) {
+            if !(0..out.len()).any(|k| matches(k, n)) {
                 let sug = crate::suggest::did_you_mean(n, all.iter().map(String::as_str), 3);
                 return Err(CommandError::not_found(
                     "import.footprint_not_found",
@@ -170,11 +183,12 @@ fn footprint_files(path: &Path, names: &[String]) -> Result<(Vec<FootprintFile>,
                 .with_hint_if_none(format!("footprints: {}", all.join(", "))));
             }
         }
-        files.retain(|(f, _)| names.iter().any(|n| n.eq_ignore_ascii_case(f)));
-    }
-    let mut out = Vec::new();
-    for (name, p) in files {
-        out.push(FootprintFile { name, text: read(&p)? });
+        let keep: Vec<bool> = (0..out.len()).map(|k| names.iter().any(|n| matches(k, n))).collect();
+        let mut k = 0;
+        out.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
     }
     Ok((out, label))
 }
@@ -334,11 +348,28 @@ fn import_footprints_into_project(
     names: &[String],
     replace: bool,
     license: Option<&str>,
+    rename: Option<&str>,
 ) -> Result<(Vec<ImportedItem>, usize, String), CommandError> {
     let path = resolve(ctx, path);
     let (files, label) = footprint_files(&path, names)?;
-    let FootprintSet { footprints, diagnostics, not_imported } =
+    let FootprintSet { mut footprints, mut diagnostics, not_imported } =
         read_footprints(&files, &label, license).map_err(to_error)?;
+    if let Some(name) = rename {
+        if footprints.len() != 1 {
+            return Err(CommandError::invalid_args(
+                "import.name_needs_one",
+                format!("`name` renames one footprint, but {label} has {}", footprints.len()),
+            )
+            .with_hint("select one with `footprint`, or leave `name` out"));
+        }
+        if !crate::model::part::valid_id(name) {
+            return Err(CommandError::invalid_args("import.invalid_name", format!("`{name}` is not a valid name"))
+                .with_hint("use letters, digits, `_`, `-`, `+` and `.`"));
+        }
+        footprints[0].footprint.name = name.to_string();
+        // The note about the name inside the file no longer applies.
+        diagnostics.retain(|d| d.code != "import.name_from_file");
+    }
     report(ctx, diagnostics);
     let items = merge_footprints(ctx.project_mut()?, footprints, replace)?;
     Ok((items, not_imported, label))
@@ -353,10 +384,14 @@ fn import_footprints_into_project(
 pub struct FootprintImportKicad {
     /// `.kicad_mod` file or `.pretty` directory (relative paths start at the project directory).
     pub path: PathBuf,
-    /// Only these footprints of a `.pretty` directory (KiCad names, the file names without
-    /// `.kicad_mod`).
+    /// Only these footprints of a `.pretty` directory: the names inside the files or the file
+    /// names without `.kicad_mod`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footprint: Vec<String>,
+    /// Name of the imported footprint in the project (one footprint only). Default: the name
+    /// inside the file (`(footprint "NAME" ...)`), else the file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Overwrite project footprints of the same name that differ.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace: bool,
@@ -375,8 +410,14 @@ impl Command for FootprintImportKicad {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<KicadLibImport, CommandError> {
         ctx.project()?;
-        let (footprints, not_imported, source) =
-            import_footprints_into_project(ctx, &self.path, &self.footprint, self.replace, self.license.as_deref())?;
+        let (footprints, not_imported, source) = import_footprints_into_project(
+            ctx,
+            &self.path,
+            &self.footprint,
+            self.replace,
+            self.license.as_deref(),
+            self.name.as_deref(),
+        )?;
         Ok(KicadLibImport { source, target: "project".into(), footprints, not_imported, ..Default::default() })
     }
 
@@ -432,7 +473,7 @@ impl Command for PartImportKicadSym {
         let mut source = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(fpath) = &self.footprints {
             let (items, n, label) =
-                import_footprints_into_project(ctx, fpath, &[], self.replace, self.license.as_deref())?;
+                import_footprints_into_project(ctx, fpath, &[], self.replace, self.license.as_deref(), None)?;
             out.footprints = items;
             out.not_imported = n;
             source = format!("{source} + {label}");
@@ -443,8 +484,15 @@ impl Command for PartImportKicadSym {
             license: self.license.clone(),
             source: path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
         };
+        // Symbols name footprints as KiCad's library table does, after the file.
+        let renamed: BTreeMap<String, String> = out
+            .footprints
+            .iter()
+            .filter_map(|i| i.kicad_name.as_ref().map(|k| (k.to_ascii_lowercase(), i.name.clone())))
+            .collect();
         let p = ctx.project()?;
         let lookup = |n: &str| {
+            let n = renamed.get(&n.to_ascii_lowercase()).map_or(n, String::as_str);
             let k = p.library().find_footprint_ci(n)?;
             Some((k.to_string(), p.library().footprints[k].clone()))
         };
@@ -546,7 +594,8 @@ impl Command for LibImportKicad {
         if is_sym {
             labels.push(path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
         }
-        let mut imported_fps: Vec<Footprint> = Vec::new();
+        // Imported footprints with their KiCad (file) names, which symbols refer to.
+        let mut imported_fps: Vec<(String, Footprint)> = Vec::new();
         if let Some(fp_path) = fp_path {
             let names: &[String] = if is_sym { &[] } else { &self.name };
             let (files, label) = footprint_files(&fp_path, names)?;
@@ -555,7 +604,7 @@ impl Command for LibImportKicad {
             report(ctx, set.diagnostics);
             out.not_imported = set.not_imported;
             for lf in set.footprints {
-                imported_fps.push(lf.footprint.clone());
+                imported_fps.push((lf.kicad_name.clone(), lf.footprint.clone()));
                 let ii = ImportedItem {
                     name: lf.footprint.name.clone(),
                     kicad_name: kicad_name(&lf.footprint.name, &lf.kicad_name),
@@ -578,7 +627,9 @@ impl Command for LibImportKicad {
                 source: labels[0].clone(),
             };
             let lookup = |n: &str| -> Option<(String, Footprint)> {
-                if let Some(f) = imported_fps.iter().find(|f| f.name.eq_ignore_ascii_case(n)) {
+                if let Some((_, f)) =
+                    imported_fps.iter().find(|(k, f)| k.eq_ignore_ascii_case(n) || f.name.eq_ignore_ascii_case(n))
+                {
                     return Some((f.name.clone(), f.clone()));
                 }
                 let k = lib.resolve(ItemKind::Footprint, n).ok()??;

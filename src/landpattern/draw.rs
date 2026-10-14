@@ -67,12 +67,33 @@ pub(super) fn finish(
     pin1_marker: bool,
     opts: &GenOptions,
 ) -> Result<Footprint, GenError> {
-    let bb = body_box(&body);
+    finish_box(name, mount, pads, body_box(&body), Some(body), courtyard_excess, pin1_marker, opts)
+}
+
+/// The box of a set of pads (their copper, rotations by quarter turns exact).
+pub(super) fn pads_box(pads: &[Pad]) -> Option<BBox> {
+    let mut it = pads.iter().map(|p| pad_box(p, Nm::ZERO));
+    let first = it.next()?;
+    Some(it.fold(first, union))
+}
+
+/// [`finish`] with the outline box `bb` given (the body, or the pads when there is no body).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_box(
+    name: String,
+    mount: Mount,
+    pads: Vec<Pad>,
+    bb: BBox,
+    body: Option<Body>,
+    courtyard_excess: Nm,
+    pin1_marker: bool,
+    opts: &GenOptions,
+) -> Result<Footprint, GenError> {
     let mut graphics = Vec::new();
 
     // Fabrication outline: the body, with a chamfered pin-1 corner on polarized packages.
     let fab = if pin1_marker {
-        let c = Nm(body.width.0.min(body.length.0) / 4).min(Nm::from_um(1000));
+        let c = Nm((bb.max.x - bb.min.x).0.min((bb.max.y - bb.min.y).0) / 4).min(Nm::from_um(1000));
         vec![
             Point::new(bb.min.x + c, bb.max.y),
             Point::new(bb.max.x, bb.max.y),
@@ -161,7 +182,7 @@ pub(super) fn finish(
         pads,
         courtyard: rect(cy.min, cy.max),
         graphics,
-        body: Some(body),
+        body,
         generator: None,
         model: None,
         provenance: None,

@@ -16,6 +16,7 @@ expression: names
   "part.remove",
   "part.search",
   "footprint.generate",
+  "footprint.create",
   "footprint.list",
   "footprint.show",
   "footprint.remove",

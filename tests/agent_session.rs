@@ -7,8 +7,12 @@
 //! DRC, render schematic and board, and export a JLCPCB fab bundle."
 //!
 //! Every step is a command line exactly as an agent types it, using the forms the friction log
-//! asked for (`cadlab erc`, `cadlab drc`, `--at 25mm,33.5mm`, `--budget 60s`, `--pins @file`).
+//! asked for (`cadlab erc`, `cadlab drc`, `--at 25mm,36mm`, `--budget 60s`, `--pins @file`).
 //! A step that fails, or a check that is not clean at the end, fails the test.
+//!
+//! Session 2 replays it with what session 1 asked for: the USB-C land pattern comes from
+//! `footprint create` (a pad list) instead of a hand-written `.kicad_mod`, the check before
+//! routing reads as one summary, and `place auto` spreads the groups over the board.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -78,9 +82,8 @@ fn atmega_usb_c_board_from_a_prompt() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let pins = fixtures().join("atmega328p_pins.json");
-    let usbc = fixtures().join("USB_C_6P.kicad_mod");
     let pins_arg = format!("@{}", pins.display());
-    let usbc = usbc.to_str().unwrap();
+    let usbc_pads = format!("@{}", fixtures().join("usb_c_6p_pads.json").display());
 
     step(root, &["project", "new", "demo", "--targets", "jlcpcb"]);
     let p = root.join("demo");
@@ -102,8 +105,11 @@ fn atmega_usb_c_board_from_a_prompt() {
           "--package", "PinHeader 1x04", "--pins", PIN_I2C],
         &["part", "create", "--category", "crystal", "--id", "XTAL_8MHz_3225", "--description", "8 MHz crystal 3.2x2.5mm",
           "--params", "frequency=8MHz", "--package", "DFN-4 3.2x2.5mm P1.6mm", "--pins", PIN_XTAL],
-        // No generator covers USB-C: import a hand-written land pattern, then use it.
-        &["footprint", "import-kicad", usbc, "--license", "own work"],
+        // No generator covers USB-C: the land pattern from the datasheet's pad list, body
+        // centered on the origin (silkscreen, courtyard and pin-1 mark are generated).
+        &["footprint", "create", "USB_C_6P", "--pads", &usbc_pads, "--body",
+          r#"{"width": "8.94mm", "length": "6.6mm", "height": "3.2mm"}"#,
+          "--description", "USB-C receptacle, power only (6 pin)"],
         &["part", "create", "--category", "connector", "--mpn", "USB-C-6P", "--description",
           "USB-C receptacle, power only (6 pin)", "--footprint", "USB_C_6P", "--pins", PIN_USBC],
     ];
@@ -172,20 +178,45 @@ fn atmega_usb_c_board_from_a_prompt() {
     let lint = step_json(p, &["lint"]);
     assert!(codes(&lint).is_empty(), "{:?}", codes(&lint));
 
-    // Board.
+    // Board. The USB-C pads sit 2.5 mm from the footprint origin (its body center): at 33.5 mm,
+    // the body reaching the top edge.
     #[rustfmt::skip]
     let board: &[&[&str]] = &[
         &["board", "setup", "--layers", "2", "--thickness", "1.6mm"],
         &["board", "outline", "--width", "50mm", "--height", "40mm", "--corner-radius", "1mm"],
         &["board", "rules", "--fab", "jlcpcb"],
-        &["place", "set", "J1", "--at", "25mm,33.5mm", "--rotation", "180"],
+        &["place", "set", "J1", "--at", "25mm,36mm", "--rotation", "180"],
         &["place", "lock", "J1"],
         &["place", "auto"],
-        &["route", "all", "--budget", "60s"],
     ];
     for a in board {
         step(p, a);
     }
+
+    // The placement uses the board: the MCU near the middle, the two headers on edges and
+    // apart from each other (session 1 had everything in an 18 mm column).
+    let placed = step_json(p, &["place", "list"]);
+    let at = |r: &str| -> (f64, f64) {
+        let fp = &placed["output"]["placements"][r];
+        let mm = |v: &Value| v.as_str().unwrap().trim_end_matches("mm").parse::<f64>().unwrap();
+        (mm(&fp["at"][0]), mm(&fp["at"][1]))
+    };
+    let (ux, uy) = at("U2");
+    assert!((ux - 25.0).abs() < 8.0 && (uy - 20.0).abs() < 8.0, "U2 at ({ux}, {uy})");
+    let edge = |(x, y): (f64, f64)| x.min(50.0 - x).min(y).min(40.0 - y);
+    let (j2, j3) = (at("J2"), at("J3"));
+    assert!(edge(j2) < 6.0 && edge(j3) < 6.0, "headers at edges: J2 {j2:?}, J3 {j3:?}");
+    let apart = ((j2.0 - j3.0).powi(2) + (j2.1 - j3.1).powi(2)).sqrt();
+    assert!(apart > 15.0, "headers {apart:.1} mm apart: J2 {j2:?}, J3 {j3:?}");
+
+    // Before routing, DRC reports the unrouted connections as one summary with the count.
+    let o = cadlab(p, &["--json", "drc"]);
+    assert_eq!(o.status.code(), Some(3), "errors before routing");
+    let drc: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(codes(&drc), ["drc.unrouted"], "one summary");
+    assert_eq!(drc["output"]["unrouted"], 59, "{drc}");
+
+    step(p, &["route", "all", "--budget", "60s"]);
     let status = step_json(p, &["route", "status"]);
     assert_eq!(status["output"]["unrouted"], 0, "{status}");
 

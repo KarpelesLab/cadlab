@@ -431,3 +431,38 @@ Seen but left as they are (noted for the next session):
   not-found error's "did you mean" recovered it at once.
 - No `footprint.create` from a pad list: land patterns no generator family covers (USB-C) go through a hand-written
   `.kicad_mod`, which an agent can write from KiCad's published format but which is a detour.
+
+### Session 2 (2026-10-14): session 1's open items
+
+The five items above were fixed (D50), each with a test in `tests/agent_ergonomics.rs`, and the session was
+replayed with them: `tests/agent_session.rs` now builds the USB-C land pattern with `footprint create` from a
+pad list (`tests/fixtures/agent_session/usb_c_6p_pads.json`) instead of importing the hand-written
+`.kicad_mod` (which stays as the fixture of the import-name test), checks that the placement uses the board and
+that the check before routing is one summary.
+
+| # | Open item | Fix |
+|---|---|---|
+| 1 | `place.auto` packed everything into an 18 mm column | Groups spread: rooms sized from the free board area, the largest IC centered first, connectors kept apart along the edges, satellites (a crystal) inside their IC's room, anchors held in their room during improvement; part boxes include silkscreen (a pin-1 dot fell on a neighbour's pad once groups moved); `compact: true` keeps the packed placement. Here: the MCU central, the ISP header at the bottom edge, the I2C header at the right edge, the LDO group by the USB connector |
+| 2 | `drc` before routing listed 59 unrouted connections | More than 10 become one `drc.unrouted` with the count per net (`59 connection(s) on 18 net(s) are not routed: GND 22, +3V3 12, ...`), the total in the output's `unrouted`; `--unrouted each` / `summary` choose |
+| 3 | Text `describe` hid enum values of nested fields | Listed under the argument: `pins[].kind: input|output|...`, `pins[].side: left|right|top|bottom` |
+| 4 | KiCad footprint import named after the file | Named after the footprint inside; `import.name_from_file` (info) when they differ; `--footprint` selects by either name; `--name` renames; symbols' `Footprint` fields (file names) still resolve |
+| 5 | No footprint from a pad list | `footprint create <name> --pads @pads.json [--body ...]`: pads with number, at, size, shape, drill/slot, layers, rows by `count` + `pitch`; silkscreen, pin-1 dot, fab outline and courtyard generated |
+
+Result: same 24 components, 100 % routed (59 connections), ERC/lint/DRC clean, JLCPCB bundle exported.
+
+What I would fix next (seen in the replay, not fixed):
+
+- `footprint create` centers the body on the origin, so a connector whose datasheet origin is at its pads
+  (the USB-C receptacle) needs its pads shifted by hand, and `place set` then positions the body center. A
+  body offset (`body.at`, also for 3D previews and MCAD exports) would remove that arithmetic.
+- `place auto` has no say in which edge a connector takes (the agent places and locks it first), and
+  indicator LEDs are not pulled to an edge where they would be visible: per-part hints (`--edge J2=bottom`,
+  `--edge D2,D3`) would cover both.
+- The USB-C shell pads (S1, S2) stay unmapped (`part.unconnected_pad` at `part create`); the hint says
+  `pin_map`, but the agent has no shield pin to map them to. A `SHIELD` pin mapped to both pads and tied to
+  GND through a net tie or a resistor is the usual answer and could be suggested in the hint.
+- Spreading leaves part of a roomy board empty (here the left third): groups follow their connections, which is
+  right for routing; a target density per board (`place auto --density`) would let an agent trade
+  compactness for room when it wants to. Spreading also costs track: the router benchmark boards (which stay
+  on `compact`) route at 100 % either way, but spread they need more length (ATtiny 104 → 136 mm) and vias
+  (STM32 2-layer 57 → 84); ordering pins of a connector to face its IC would win some of that back.

@@ -60,7 +60,7 @@ pub struct FootprintSet {
 /// One `.kicad_mod` file: the KiCad footprint name (file name without extension) and the text.
 #[derive(Clone, Debug)]
 pub struct FootprintFile {
-    /// Footprint name in the KiCad library.
+    /// Footprint name in the KiCad library: the file name without `.kicad_mod`.
     pub name: String,
     /// File content.
     pub text: String,
@@ -103,6 +103,12 @@ fn check_format(root: &Sexpr, head: &str, what: &str, upgrade: &str) -> Result<(
     Ok(())
 }
 
+/// The footprint name inside a `.kicad_mod` text (`(footprint "NAME" ...)`), if it reads.
+pub fn internal_footprint_name(text: &str) -> Option<String> {
+    let root = sexpr::parse(text).ok()?;
+    (root.head() == Some("footprint")).then(|| root.value().map(|n| n.trim().to_string())).flatten()
+}
+
 /// Reads footprint files. `source` names them in provenance and messages (`MyLib.pretty`).
 /// With one file, an unreadable file is an error; with several, it is skipped with a warning.
 pub fn read_footprints(
@@ -138,7 +144,24 @@ pub fn read_footprints(
                 continue;
             }
         };
-        let mut name = footprint_name(&f.name, "footprint");
+        // The name inside the file (`(footprint "NAME" ...)`) names the footprint; the file
+        // name only when the file has none (DECISIONS D50).
+        let internal = root.value().map(str::trim).filter(|n| !n.is_empty() && *n != f.name);
+        let mut name = footprint_name(internal.unwrap_or(&f.name), "footprint");
+        if let Some(i) = internal {
+            notes.push(
+                Diagnostic::info(
+                    "import.name_from_file",
+                    format!("`{}.kicad_mod` holds footprint `{i}`; imported as `{name}`", f.name),
+                )
+                .with_subject(ObjectRef::Named { kind: "footprint".into(), name: name.clone() })
+                .with_hint(format!(
+                    "refer to it as `{name}`; give `name` to import it under another name (KiCad's library \
+                     table calls it `{}`, after the file)",
+                    f.name
+                )),
+            );
+        }
         if !names.insert(name.to_ascii_lowercase()) {
             let base = name.clone();
             name = (2..).map(|i| format!("{base}_{i}")).find(|n| !names.contains(&n.to_ascii_lowercase())).unwrap();

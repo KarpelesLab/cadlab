@@ -720,6 +720,35 @@ impl PackageSpec {
     }
 }
 
+/// Builds a footprint from pads given one by one (land patterns no package family covers):
+/// silkscreen around the body (or the pads when `body` is `None`, a body centered on the
+/// origin otherwise) clipped clear of the pads, a pin-1 dot when a pad is numbered `1` or `A1`,
+/// a fab outline, and a courtyard `courtyard_excess` around pads, body and markings. Through-hole
+/// when a pad has a plated hole.
+pub fn from_pads(
+    name: String,
+    pads: Vec<Pad>,
+    body: Option<Body>,
+    courtyard_excess: Nm,
+    opts: &GenOptions,
+) -> Result<Footprint, GenError> {
+    let bb = match &body {
+        Some(b) => {
+            if b.width <= Nm::ZERO || b.length <= Nm::ZERO {
+                return Err(invalid("body width and length must be positive"));
+            }
+            crate::geom::BBox {
+                min: Point::new(-Nm(b.width.0 / 2), -Nm(b.length.0 / 2)),
+                max: Point::new(Nm(b.width.0 / 2), Nm(b.length.0 / 2)),
+            }
+        }
+        None => draw::pads_box(&pads).ok_or_else(|| invalid("a footprint needs at least one pad"))?,
+    };
+    let mount = if pads.iter().any(|p| matches!(p.kind, PadKind::Tht { .. })) { Mount::Tht } else { Mount::Smd };
+    let marker = pads.iter().any(|p| p.number == "1" || p.number == "A1");
+    draw::finish_box(name, mount, pads, bb, body, courtyard_excess, marker, opts)
+}
+
 /// Generates the footprint for `spec`.
 pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenError> {
     let name = spec.ipc_name(opts.density);
@@ -1076,7 +1105,8 @@ fn check_dims(dims: &[(&str, &Dim)]) -> Result<(), GenError> {
     Ok(())
 }
 
-fn corner(w: Nm, h: Nm, opts: &GenOptions) -> Nm {
+/// Corner radius of a generated rounded-rectangle pad `w` x `h`.
+pub fn corner(w: Nm, h: Nm, opts: &GenOptions) -> Nm {
     let r = Nm(w.0.min(h.0) * opts.corner_ratio_pct as i64 / 100);
     r.min(opts.max_corner_radius)
 }

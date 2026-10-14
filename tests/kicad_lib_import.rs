@@ -157,7 +157,9 @@ fn footprint_conflicts_selection_and_dry_run() {
     let file = fixtures().join("cadlab_test.pretty/SOT23_TEST.kicad_mod");
     let dir = tempfile::tempdir().unwrap();
     let other = dir.path().join("R0603_TEST.kicad_mod");
-    std::fs::copy(&file, &other).unwrap();
+    // The name inside the file names the footprint (D50): rename it too.
+    let text = std::fs::read_to_string(&file).unwrap().replacen("\"SOT23_TEST\"", "\"R0603_TEST\"", 1);
+    std::fs::write(&other, text).unwrap();
     let e = exec_err(&r, &mut s, "footprint.import_kicad", json!({"path": other}));
     assert_eq!(e.diagnostic.code, "import.conflict");
     // Dry run: reported as replaced, nothing changes.
