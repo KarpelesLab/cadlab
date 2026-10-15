@@ -1,7 +1,8 @@
 //! Differential pairs and length matching: the rules a pair is routed with, routed lengths
-//! (tracks along arcs plus vias through the stackup), coupled sections, the DRC checks for
-//! pairs and length groups, and pair detection from net names. See docs/ROUTER.md
-//! ("Differential pairs", "Length tuning") and DECISIONS D38.
+//! (tracks along arcs plus vias through the stackup) along each net's signal path between its
+//! end components, with the branches off it reported as stubs ([`path`]), coupled sections, the
+//! DRC checks for pairs and length groups, and pair detection from net names. See
+//! docs/ROUTER.md ("Differential pairs", "Length tuning") and DECISIONS D38, D55.
 //!
 //! Measured lengths are computed with floats and rounded to whole nanometers; nothing here is
 //! stored.
@@ -19,6 +20,9 @@ use crate::model::board::{Stackup, Track};
 use crate::model::circuit::{Circuit, DiffPair, LengthGroup};
 use crate::refs::ObjectRef;
 use crate::units::Nm;
+
+pub mod path;
+pub use path::{DEFAULT_MAX_STUB, Ends, SignalPath, Stub, signal_path, signal_paths};
 
 /// How far a coupled section's gap may be from the pair's gap before the DRC warns: 10 % of
 /// the gap, at least [`GAP_TOLERANCE_MIN`].
@@ -114,7 +118,8 @@ pub struct NetLength {
     pub total: Nm,
 }
 
-/// Routed length of `net` (see [`NetLength`]).
+/// Routed length of all of `net`'s copper, branches included (see [`NetLength`]; pairs and
+/// length groups use [`signal_length`] / [`pair_paths`]).
 pub fn net_length(p: &Project, net: &str) -> NetLength {
     let b = p.board();
     let tracks: Vec<&Track> = b.tracks.iter().filter(|t| t.net.as_deref() == Some(net)).collect();
@@ -199,20 +204,57 @@ pub struct CoupledSection {
 /// How a routed pair is coupled.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Coupling {
-    /// Routed length of the positive net.
+    /// Routed length of the positive net along its signal path (all its copper when the
+    /// path's ends are not connected yet).
     pub length_p: NetLength,
-    /// Routed length of the negative net.
+    /// Routed length of the negative net along its signal path.
     pub length_n: NetLength,
     /// `|length_p − length_n|` (totals, vias included).
     pub skew: Nm,
-    /// Track length of the positive net running coupled.
+    /// Track length of the positive net's signal path running coupled.
     pub coupled_p: Nm,
-    /// Track length of the negative net running coupled.
+    /// Track length of the negative net's signal path running coupled.
     pub coupled_n: Nm,
-    /// Largest uncoupled track length of the two nets.
+    /// Largest uncoupled track length along the two signal paths.
     pub uncoupled: Nm,
     /// The coupled sections (pairs of parallel segments).
     pub sections: Vec<CoupledSection>,
+    /// The positive net's signal path (with its stubs), once its ends are connected.
+    pub path_p: Option<SignalPath>,
+    /// The negative net's signal path.
+    pub path_n: Option<SignalPath>,
+}
+
+/// The end components a pair's length is measured between: its own `from`/`to`, else those
+/// of a length group it is in.
+pub fn pair_ends<'a>(c: &'a Circuit, d: &'a DiffPair) -> Ends<'a> {
+    let name = c.diffpairs.iter().find(|(_, x)| x.p == d.p && x.n == d.n).map(|(k, _)| k.as_str());
+    let group = name.and_then(|n| c.length_groups.values().find(|g| g.members.iter().any(|m| m == n)));
+    Ends {
+        from: d.from.as_deref().or(group.and_then(|g| g.from.as_deref())),
+        to: d.to.as_deref().or(group.and_then(|g| g.to.as_deref())),
+    }
+}
+
+/// The end components a net's length is measured between: those of a length group it is in.
+pub fn net_ends<'a>(c: &'a Circuit, net: &str) -> Ends<'a> {
+    let g = c.length_groups.values().find(|g| g.members.iter().any(|m| m == net));
+    Ends { from: g.and_then(|g| g.from.as_deref()), to: g.and_then(|g| g.to.as_deref()) }
+}
+
+/// The signal paths of a pair's two nets (see [`signal_paths`]).
+pub fn pair_paths(p: &Project, d: &DiffPair) -> (Option<SignalPath>, Option<SignalPath>) {
+    let mut v = signal_paths(p, &[&d.p, &d.n], pair_ends(p.circuit(), d));
+    let n = v.pop().flatten();
+    (v.pop().flatten(), n)
+}
+
+/// A net's length along its signal path (all its copper when its ends are not connected).
+pub fn signal_length(p: &Project, net: &str) -> NetLength {
+    match signal_path(p, net, net_ends(p.circuit(), net)) {
+        Some(sp) => sp.length,
+        None => net_length(p, net),
+    }
 }
 
 /// Length covered by a union of intervals.
@@ -244,6 +286,7 @@ pub fn coupling(p: &Project, d: &DiffPair, gap: Nm) -> Coupling {
         b.tracks.iter().filter(|t| t.net.as_deref() == Some(net)).map(|t| (t, pieces(t))).collect()
     };
     let (tp, tn) = (of(&d.p), of(&d.n));
+    let (path_p, path_n) = pair_paths(p, d);
     let range = gap.0 as f64 * COUPLED_RANGE + 1_000.0;
     // Per piece (net, track index, piece index): covered intervals along it.
     let mut cov_p: BTreeMap<(usize, usize), Vec<(f64, f64)>> = BTreeMap::new();
@@ -298,11 +341,42 @@ pub fn coupling(p: &Project, d: &DiffPair, gap: Nm) -> Coupling {
             }
         }
     }
-    let coupled = |cov: BTreeMap<(usize, usize), Vec<(f64, f64)>>| -> Nm {
-        Nm(cov.into_values().map(union_len).sum::<f64>().round() as i64)
+    // Coupled length along the signal path only (a stub running beside the partner does
+    // not count).
+    let coupled = |cov: BTreeMap<(usize, usize), Vec<(f64, f64)>>,
+                   tr: &[(&Track, Vec<Piece>)],
+                   path: &Option<SignalPath>|
+     -> Nm {
+        let total: f64 = cov
+            .into_iter()
+            .map(|((ti, _), iv)| {
+                let t = tr[ti].0;
+                match path {
+                    None => union_len(iv),
+                    Some(sp) if t.mid.is_some() => {
+                        if sp.contains_track(t.id.0) {
+                            union_len(iv)
+                        } else {
+                            0.0
+                        }
+                    }
+                    Some(sp) => {
+                        let on = sp.stretches(t.id.0);
+                        let cut: Vec<(f64, f64)> = iv
+                            .iter()
+                            .flat_map(|&(a, b)| on.iter().map(move |&(c, e)| (a.max(c), b.min(e))))
+                            .filter(|(a, b)| b > a)
+                            .collect();
+                        union_len(cut)
+                    }
+                }
+            })
+            .sum();
+        Nm(total.round() as i64)
     };
-    let (coupled_p, coupled_n) = (coupled(cov_p), coupled(cov_n));
-    let (length_p, length_n) = (net_length(p, &d.p), net_length(p, &d.n));
+    let (coupled_p, coupled_n) = (coupled(cov_p, &tp, &path_p), coupled(cov_n, &tn, &path_n));
+    let len = |sp: &Option<SignalPath>, net: &str| sp.as_ref().map_or_else(|| net_length(p, net), |s| s.length);
+    let (length_p, length_n) = (len(&path_p, &d.p), len(&path_n, &d.n));
     let uncoupled = Nm((length_p.tracks.0 - coupled_p.0).max(length_n.tracks.0 - coupled_n.0).max(0));
     Coupling {
         skew: Nm((length_p.total.0 - length_n.total.0).abs()),
@@ -312,6 +386,8 @@ pub fn coupling(p: &Project, d: &DiffPair, gap: Nm) -> Coupling {
         coupled_n,
         uncoupled,
         sections,
+        path_p,
+        path_n,
     }
 }
 
@@ -325,18 +401,20 @@ fn complete(p: &Project, net: &str, unrouted: &BTreeSet<String>) -> bool {
     !unrouted.contains(net) && p.board().tracks.iter().any(|t| t.net.as_deref() == Some(net))
 }
 
-/// The length of a group member: a net's total, or a pair's mean (`None` when the member is
-/// not fully routed or does not exist).
+/// The length of a group member along its signal path: a net's, or a pair's mean (`None` when
+/// the member is not fully routed or does not exist).
 pub fn member_length(p: &Project, name: &str, unrouted: &BTreeSet<String>) -> Option<Nm> {
     let c = p.circuit();
     if let Some(d) = c.diffpairs.get(name) {
         if !complete(p, &d.p, unrouted) || !complete(p, &d.n, unrouted) {
             return None;
         }
-        let (a, b) = (net_length(p, &d.p).total, net_length(p, &d.n).total);
+        let (pp, pn) = pair_paths(p, d);
+        let len = |sp: Option<SignalPath>, net: &str| sp.map_or_else(|| net_length(p, net), |s| s.length).total;
+        let (a, b) = (len(pp, &d.p), len(pn, &d.n));
         return Some(Nm((a.0 + b.0 + 1) / 2));
     }
-    (c.nets.contains_key(name) && complete(p, name, unrouted)).then(|| net_length(p, name).total)
+    (c.nets.contains_key(name) && complete(p, name, unrouted)).then(|| signal_length(p, name).total)
 }
 
 /// Where a length group stands.
@@ -518,8 +596,27 @@ pub fn checks(p: &Project, items: &[CopperItem]) -> Vec<Diagnostic> {
             dg.subjects.extend(nets());
             out.push(dg);
         }
+        if routed {
+            let group_limit =
+                c.length_groups.values().filter(|g| g.members.iter().any(|m| m == name)).find_map(|g| g.max_stub);
+            let lim = d.max_stub.or(group_limit).unwrap_or(DEFAULT_MAX_STUB);
+            for sp in [&cp.path_p, &cp.path_n].into_iter().flatten() {
+                out.extend(stub_warnings(sp, lim, "drc.diffpair_stub", &format!("differential pair {name}"), || {
+                    let mut v = vec![pair_subject(name)];
+                    v.extend(nets());
+                    v
+                }));
+            }
+        }
     }
     for (name, g) in &c.length_groups {
+        let lim = g.max_stub.unwrap_or(DEFAULT_MAX_STUB);
+        for m in g.members.iter().filter(|m| !c.diffpairs.contains_key(*m) && complete(p, m, &unrouted)) {
+            let Some(sp) = signal_path(p, m, net_ends(c, m)) else { continue };
+            out.extend(stub_warnings(&sp, lim, "drc.length_stub", &format!("length group {name}"), || {
+                vec![ObjectRef::Named { kind: "lengthgroup".into(), name: name.clone() }, ObjectRef::Net(m.clone())]
+            }));
+        }
         let st = group_status(p, name, g, &unrouted);
         for m in &st.members {
             let (Some(len), Some(err)) = (m.length, m.error) else { continue };
@@ -558,6 +655,41 @@ pub fn checks(p: &Project, items: &[CopperItem]) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+/// Warnings for the stubs of a signal path longer than `lim`.
+fn stub_warnings(
+    sp: &SignalPath,
+    lim: Nm,
+    code: &'static str,
+    what: &str,
+    subjects: impl Fn() -> Vec<ObjectRef>,
+) -> Vec<Diagnostic> {
+    sp.stubs
+        .iter()
+        .filter(|s| s.length > lim)
+        .map(|s| {
+            let to = if s.pads.is_empty() { String::new() } else { format!(" to {}", s.pads.join(", ")) };
+            let mut dg = Diagnostic::warning(
+                code,
+                format!(
+                    "{what}: {} has a {} stub{to} off its signal path {} → {} (limit {lim})",
+                    sp.net, s.length, sp.from, sp.to
+                ),
+            )
+            .at(s.at)
+            .with_hint(
+                "place the part next to the line (or route the line through its pad), set the path's ends \
+                 (diffpair.set --from --to, lengthgroup.set --from --to), or raise the limit (--max-stub)",
+            );
+            dg.subjects = subjects();
+            dg.subjects.extend(s.pads.iter().filter_map(|x| {
+                let (r, n) = x.split_once('.')?;
+                Some(ObjectRef::Pin { component: r.to_string(), pin: n.to_string() })
+            }));
+            dg
+        })
+        .collect()
 }
 
 /// A differential pair found by net names.

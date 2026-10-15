@@ -36,6 +36,18 @@ const STEP: i64 = 250_000;
 pub const SPREAD_DENSITY: f64 = 0.6;
 /// Largest room of a group, relative to its parts' area, when spreading.
 const SPREAD_MAX: f64 = 2.5;
+/// Widest empty band, as a share of the board's width or height, spread placement leaves along
+/// a side of the board at the default density (it scales inversely with the density).
+const SPREAD_MARGIN: f64 = 0.125;
+/// How much longer than before the stretch spread placement lets the ratsnest grow, at the
+/// default density (it scales with the density): the largest stretch within it is kept.
+const SPREAD_RATSNEST: f64 = 0.25;
+/// Windows per grid of the evenness measure of spread placement (`spread::Windows`).
+const SPREAD_WINDOWS: f64 = 12.0;
+/// Weight of the evenness when groups are moved after the stretch, per unit of the board's
+/// width plus height: a group moves into emptier windows when the ratsnest it adds is less
+/// than this times the unevenness removed.
+const SPREAD_EVEN: f64 = 5.0;
 
 /// A placement failure, with a stable code and a fix hint.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,6 +130,7 @@ impl Rect {
 }
 
 mod mst;
+mod spread;
 use mst::dist;
 
 fn snap(v: i64) -> i64 {
@@ -1059,7 +1072,10 @@ pub struct AutoPlacement {
 /// With `spread`, each group's room grows with the free board area (up to [`SPREAD_DENSITY`]
 /// of it in all, or `density`), anchors keep to that room during improvement, and connectors
 /// keep apart from each other along the edges, so a board larger than its parts is used
-/// rather than packed into one cluster. Without it groups are packed as tightly as their
+/// rather than packed into one cluster; then the groups' arrangement is stretched where it
+/// leaves a wide band of the board empty (an eighth of the board at the default density, more
+/// at lower ones) and groups move as
+/// blocks where that shortens the ratsnest or evens out the board (`spread` module). Without it groups are packed as tightly as their
 /// passives allow. Parts with an edge hint go to that edge (two-terminal parts then are
 /// placed like anchors rather than next to a pin) and only move along it or closer.
 pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<AutoPlacement, PlaceError> {
@@ -1331,6 +1347,51 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
             e.tethers.push((i, t.own_pad, target, if t.decap { 2.0 } else { 0.5 }));
         }
     }
+    // Spreading: the groups' arrangement is stretched over the board, then groups move (as
+    // rigid blocks) where that shortens the ratsnest or evens out the board; the largest
+    // stretch whose ratsnest stays within budget is kept.
+    if spread {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut slot: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, _) in &halos {
+            let root = group_of(&e.parts[*i].refdes);
+            let k = *slot.entry(root).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[k].push(*i);
+        }
+        for i in (0..n).filter(|&i| e.parts[i].kind == Kind::Passive) {
+            if let Some(&k) = root_of(&e, &targets, i).and_then(|r| slot.get(&group_of(r))) {
+                groups[k].push(i);
+            }
+        }
+        let win = spread::Windows::new(&e, parts_area, SPREAD_WINDOWS);
+        let weight = SPREAD_EVEN * (e.board.w() + e.board.h()) as f64;
+        // The central IC (placed first, at the center) stays.
+        let pivot = groups.first().filter(|g| g.first().is_some_and(|&i| e.parts[i].kind == Kind::Ic)).map(|_| 0);
+        let pinned: Vec<bool> = groups
+            .iter()
+            .enumerate()
+            .map(|(k, g)| Some(k) == pivot || g.iter().any(|&i| spread::pair_end(&e, i)))
+            .collect();
+        let margin = (SPREAD_MARGIN * SPREAD_DENSITY / density).min(0.5);
+        let budget = e.total() * (1.0 + SPREAD_RATSNEST * density / SPREAD_DENSITY);
+        let start = (e.poses.clone(), e.rooms.clone(), e.pair_zones.clone());
+        let mut kept = false;
+        for fill in [1.0, 0.75, 0.5, 0.25, 0.0] {
+            (e.poses, e.rooms, e.pair_zones) = start.clone();
+            spread::stretch_groups(&mut e, &groups, &pinned, pivot, margin, fill);
+            spread::relax_groups(&mut e, &groups, &pinned, pivot, &win, weight, 24);
+            if e.total() <= budget {
+                kept = true;
+                break;
+            }
+        }
+        if !kept {
+            (e.poses, e.rooms, e.pair_zones) = start;
+        }
+    }
     improve(&mut e, 12);
 
     let mut placements = BTreeMap::new();
@@ -1350,9 +1411,12 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
 fn improve(e: &mut Engine, passes: usize) {
     const EPS: f64 = 1_000.0;
     let n = e.parts.len();
+    // Spreading: the ends of differential pairs keep their places relative to each other (the
+    // pair's breakouts depend on them; the spread steps keep them too).
+    let held: Vec<bool> = (0..n).map(|i| e.spread && spread::pair_end(e, i)).collect();
     for _ in 0..passes {
         let mut improved = false;
-        for i in 0..n {
+        for i in (0..n).filter(|&i| !held[i]) {
             let Some(cur) = e.poses[i] else { continue };
             let nets = e.part_nets[i].clone();
             let before = e.local_cost(&[i], &nets) + e.crowding(i, &cur);
@@ -1403,7 +1467,9 @@ fn improve(e: &mut Engine, passes: usize) {
             for j in i + 1..n {
                 let (Some(a), Some(b)) = (e.poses[i], e.poses[j]) else { continue };
                 // Parts with different edge hints keep their edges.
-                if e.parts[i].footprint != e.parts[j].footprint
+                if held[i]
+                    || held[j]
+                    || e.parts[i].footprint != e.parts[j].footprint
                     || a.side != b.side
                     || e.parts[i].edge != e.parts[j].edge
                 {

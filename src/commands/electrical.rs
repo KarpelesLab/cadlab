@@ -243,16 +243,50 @@ impl Command for Stackup {
 
 /// Apply a stackup a fab publishes (from its fab profile): copper layer count, board
 /// thickness, copper weights and every dielectric (thickness, εr, material) in one step. The
-/// values are copied into the board (the design keeps no reference to the fab); without
-/// `stackup`, the error lists the fab's stackups.
+/// values are copied into the board (the design keeps no reference to the fab). Without
+/// `stackup`, lists the fab's stackups and changes nothing.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FabStackup {
     /// Fab profile (`jlcpcb`).
     pub fab: String,
-    /// The fab's stackup name (`JLC04161H-7628`); case-insensitive.
+    /// The fab's stackup name (`JLC04161H-7628`); case-insensitive. Omitted: list them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stackup: Option<String>,
+}
+
+/// A stackup a fab publishes, as listed by `board.fab_stackup` without a name.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FabStackupEntry {
+    /// The fab's name for it.
+    pub id: String,
+    /// Copper layers.
+    pub layers: usize,
+    /// Finished board thickness.
+    pub thickness: Nm,
+    /// Outer copper thickness.
+    pub outer_copper: Nm,
+    /// Inner copper thickness.
+    pub inner_copper: Nm,
+    /// Dielectrics between copper layers, top to bottom.
+    pub dielectrics: Vec<crate::fab::FabDielectric>,
+    /// The command that applies it.
+    pub apply: String,
+}
+
+/// Result of `board.fab_stackup`: the board's new stackup, or the fab's stackups to choose
+/// from.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FabStackupResult {
+    /// The board's stackup after applying one.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<StackupInfo>,
+    /// Fab profile listed (without a stackup name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fab: Option<String>,
+    /// The fab's stackups (without a stackup name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stackups: Vec<FabStackupEntry>,
 }
 
 impl Command for FabStackup {
@@ -261,9 +295,9 @@ impl Command for FabStackup {
         "Apply a fab's published layer stackup (layers, thickness, copper, dielectrics) from its fab profile";
     const KIND: CommandKind = CommandKind::Mutation;
     const POSITIONAL: &'static [&'static str] = &["fab", "stackup"];
-    type Output = StackupInfo;
+    type Output = FabStackupResult;
 
-    fn run(self, ctx: &mut Context<'_>) -> Result<StackupInfo, CommandError> {
+    fn run(self, ctx: &mut Context<'_>) -> Result<FabStackupResult, CommandError> {
         let ps = super::fab::profiles(ctx);
         let (profile, _) = super::fab::profile(&ps, &self.fab)?;
         let all: Vec<&crate::fab::FabStackup> = profile.processes.iter().flat_map(|q| q.stackups.iter()).collect();
@@ -285,11 +319,19 @@ impl Command for FabStackup {
             .with_hint("set the dielectrics from the fab's documentation with `board.dielectric --gap N --thickness .. --er ..`"));
         }
         let Some(want) = &self.stackup else {
-            return Err(CommandError::invalid_args(
-                "board.stackup_choose",
-                format!("name one of {}'s stackups", profile.name),
-            )
-            .with_hint(format!("stackups: {}", listing())));
+            let stackups = all
+                .iter()
+                .map(|st| FabStackupEntry {
+                    id: st.id.clone(),
+                    layers: st.layers(),
+                    thickness: st.thickness,
+                    outer_copper: st.outer_copper,
+                    inner_copper: st.inner_copper,
+                    dielectrics: st.dielectrics.clone(),
+                    apply: format!("board.fab_stackup {} {}", profile.id, st.id),
+                })
+                .collect();
+            return Ok(FabStackupResult { applied: None, fab: Some(profile.id.clone()), stackups });
         };
         let Some(st) = all.iter().find(|st| st.id.eq_ignore_ascii_case(want)) else {
             let near = crate::suggest::did_you_mean(want, all.iter().map(|st| st.id.as_str()), 3);
@@ -320,11 +362,32 @@ impl Command for FabStackup {
         for d in stackup_diagnostics(&o) {
             ctx.report(d);
         }
-        Ok(o)
+        Ok(FabStackupResult { applied: Some(o), fab: None, stackups: vec![] })
     }
 
-    fn summarize(o: &StackupInfo) -> String {
-        stackup_text(o)
+    fn summarize(o: &FabStackupResult) -> String {
+        if let Some(a) = &o.applied {
+            return stackup_text(a);
+        }
+        let mut lines = vec![format!(
+            "{} stackups (apply one with `board.fab_stackup {} NAME`):",
+            o.stackups.len(),
+            o.fab.as_deref().unwrap_or("FAB")
+        )];
+        for e in &o.stackups {
+            let d: Vec<String> =
+                e.dielectrics.iter().map(|d| format!("{} εr {} {}", d.thickness, d.er, d.material)).collect();
+            lines.push(format!(
+                "  {}: {} layers, {}, copper {} outer / {} inner; {}",
+                e.id,
+                e.layers,
+                e.thickness,
+                e.outer_copper,
+                e.inner_copper,
+                d.join(" / ")
+            ));
+        }
+        lines.join("\n")
     }
 }
 

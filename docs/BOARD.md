@@ -370,7 +370,8 @@ the courtyards of footprints that stay (locked ones, and placed ones unless `rep
    width plus height); small ICs whose signal nets reach only one larger IC (a crystal next to its MCU) are
    that IC's satellites, placed inside its room right after it; and during improvement anchors stay inside
    their room, so the ratsnest cannot pull the groups back into one cluster. `density` (percent, 10–100)
-   replaces the 60 % share (and raises the 2.5× cap in proportion above it): lower keeps groups closer.
+   replaces the 60 % share (and raises the 2.5× cap in proportion above it, and scales the spreading of
+   step 4): lower keeps groups closer.
 
    **Hints** (`place.hint`, D53): a part with an `edge` hint goes to that edge of the board's box (`any`:
    the nearest; `top` is the largest Y) and only moves along it or closer; a two-terminal part with a hint
@@ -391,7 +392,24 @@ the courtyards of footprints that stay (locked ones, and placed ones unless `rep
    input, and a passive without a signal net goes to the smallest power net it shares with an anchor (a
    buck's inductor to its switch pin, not to the largest IC on the output rail). `compact` is the placement
    as before D50 (the router benchmark boards use it).
-4. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
+4. **Spreading the groups** (spread placement only, D55; `src/board/place/spread.rs`). Connectivity pulls
+   every group towards the first ones placed, so a board larger than its parts kept a side empty (session
+   3's right third). Groups (an anchor with its passives and satellites) now move as rigid blocks: first a
+   *stretch* — where the box around all groups leaves an empty band along a side of the free area wider than
+   an eighth of the board (at density 60; `0.125 × 60 / density` of it otherwise), the groups on that side of
+   the central IC are spread towards it, each keeping its relative place in the slack along each axis, so
+   groups that were apart stay apart and the arrangement (the ratsnest's topology) is unchanged; then a
+   *relaxation* — moves of 1 to 8 mm in eight directions and to the group's mirror image across the central
+   IC, accepted where the ratsnest (with tethers and connector crowding) plus 5 × (width + height) times the
+   board's unevenness drops. Unevenness: two staggered grids of about twelve windows each; per window, the
+   squared difference between the courtyard area it holds and its share of the parts' area if they were
+   spread evenly over the free area, relative to a fully free window's share. The full stretch is tried
+   first, then three quarters, half, a quarter and none; the first whose ratsnest stays within 25 % (scaled
+   by the density) of the ratsnest before is kept, else the groups stay where they were. The central IC's
+   group and the groups holding ends of differential pairs (a part with pads of both nets) do not move,
+   here or in the improvement below: the pair's breakouts were planned for where they are. Groups at an edge
+   stay at it, facing it no worse; a move that does not fit is shortened or not made.
+5. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
    and swaps of identical footprints, accepting the best valid move that lowers the ratsnest (MST per net over
    pad centers) plus tethers keeping passives at their target pins; connectors never move away from the edge.
 

@@ -41,7 +41,8 @@ gaps, at εr 4.5 (a nominal FR-4 value near 1 GHz; laminate datasheets give 4.2�
 with an `impedance.stackup_assumed` warning. That assumption is a placeholder, not a fab value: real stackups
 (e.g. 0.2 mm prepreg outside a thick core on four layers) give very different outer-layer impedances, so set
 the dielectrics from the fab's published stackup: `board.fab_stackup jlcpcb JLC04161H-7628` copies one from
-the fab profile in a step (layer count, thickness, copper, every dielectric with εr and material; D53), and
+the fab profile in a step (layer count, thickness, copper, every dielectric with εr and material; D53; without
+a name it lists them, D55), and
 the fab export then names it in `fab-lock.json`. `board.stackup_thickness` warns when copper plus dielectrics
 differ from the board thickness by more than 10 %.
 

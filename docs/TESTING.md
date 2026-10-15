@@ -523,3 +523,12 @@ What I would fix next (seen in the session, not fixed):
 - `board fab-stackup jlcpcb` without a name is an error listing the stackups (`fab show` lists them too); a
   query form (`board fab-stackup jlcpcb --list`) would read better.
 
+Fixed afterwards (D55; the replay runs with them): pair and length-group lengths follow the signal path between
+the end components (here J1 → U3 by default), the D+ pull-up and the second contact row are stubs reported by
+`diffpair list` (`drc.diffpair_stub` above `--max-stub`, default 5 mm), so the routed pair shows no skew before
+tuning and `route tune` adds no bump (coupled 30 of 39 mm, the rest breakouts); spread placement stretches and
+relaxes the groups (the SWD header now on the right third, the MCU still central, the pair's ends where their
+breakouts were planned); `board fab-stackup jlcpcb` lists the stackups. Tests: `tests/agent_session3.rs`
+(tightened: path ends, stubs, at most 2 skew bumps, coupled ≥ 70 %, parts in every third of the board),
+`tests/diffpair.rs` (`pair_length_follows_the_signal_path_and_reports_stubs`), `tests/agent_ergonomics.rs`.
+

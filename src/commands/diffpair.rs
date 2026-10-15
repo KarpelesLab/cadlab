@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::Diagnostic;
-use crate::lengths::{self, GroupStatus, PairRules, PairSuggestion};
+use crate::lengths::{self, GroupStatus, PairRules, PairSuggestion, SignalPath};
 use crate::model::Project;
 use crate::model::circuit::{DiffPair, LengthGroup};
 use crate::refs::ObjectRef;
@@ -15,6 +15,7 @@ use crate::units::Nm;
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<PairAdd>()
+        .register::<PairSet>()
         .register::<PairRemove>()
         .register::<PairList>()
         .register::<PairSuggest>()
@@ -58,6 +59,12 @@ pub struct PairInfo {
     pub coupled: Nm,
     /// Largest uncoupled track length.
     pub uncoupled: Nm,
+    /// The positive net's signal path (end pads, length, stubs), once its ends are routed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_p: Option<SignalPath>,
+    /// The negative net's signal path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_n: Option<SignalPath>,
 }
 
 fn pair_info(p: &Project, name: &str) -> PairInfo {
@@ -72,8 +79,51 @@ fn pair_info(p: &Project, name: &str) -> PairInfo {
         skew: cp.skew,
         coupled: cp.coupled_p.min(cp.coupled_n),
         uncoupled: cp.uncoupled,
+        path_p: cp.path_p,
+        path_n: cp.path_n,
         pair: d,
     }
+}
+
+/// Summary of a signal path: its ends and stubs.
+pub(crate) fn path_text(sp: &SignalPath) -> String {
+    let mut s = format!("{} → {}", sp.from, sp.to);
+    if !sp.stubs.is_empty() {
+        let list: Vec<String> = sp
+            .stubs
+            .iter()
+            .map(|x| {
+                if x.pads.is_empty() { x.length.to_string() } else { format!("{} to {}", x.length, x.pads.join(", ")) }
+            })
+            .collect();
+        s.push_str(&format!(", stubs {}", list.join("; ")));
+    }
+    s
+}
+
+/// Checks a signal path end: `auto` clears it (`Some(None)`); a component must have pins on
+/// every net given.
+fn path_end(p: &Project, label: &str, v: Option<&str>, nets: &[&str]) -> Result<Option<Option<String>>, CommandError> {
+    let Some(v) = v.map(str::trim) else { return Ok(None) };
+    if v.eq_ignore_ascii_case("auto") || v.is_empty() {
+        return Ok(Some(None));
+    }
+    let key = super::util::refdes_key(p, v)?;
+    let c = p.circuit();
+    let missing: Vec<&str> = nets
+        .iter()
+        .copied()
+        .filter(|n| !c.nets.get(*n).is_some_and(|x| x.pins.iter().any(|pr| pr.refdes == key)))
+        .collect();
+    if !missing.is_empty() {
+        return Err(CommandError::invalid_args(
+            "diffpair.end_not_on_net",
+            format!("`{label}` {key} has no pin on {}", missing.join(", ")),
+        )
+        .with_subject(ObjectRef::Name(key))
+        .with_hint("a signal path ends at a component with pins on the nets (the connector, the driver, the receiver); `auto` picks them"));
+    }
+    Ok(Some(Some(key)))
 }
 
 fn pair_line(i: &PairInfo) -> String {
@@ -92,11 +142,21 @@ fn pair_line(i: &PairInfo) -> String {
     if let Some(m) = i.pair.max_uncoupled {
         s.push_str(&format!(", max uncoupled {m}"));
     }
+    if let Some(m) = i.pair.max_stub {
+        s.push_str(&format!(", max stub {m}"));
+    }
+    if i.pair.from.is_some() || i.pair.to.is_some() {
+        let e = |x: &Option<String>| x.clone().unwrap_or_else(|| "auto".into());
+        s.push_str(&format!(", from {} to {}", e(&i.pair.from), e(&i.pair.to)));
+    }
     if i.length_p > Nm::ZERO || i.length_n > Nm::ZERO {
         s.push_str(&format!(
             "; routed {} / {}, skew {}, coupled {}, uncoupled {}",
             i.length_p, i.length_n, i.skew, i.coupled, i.uncoupled
         ));
+    }
+    for sp in [&i.path_p, &i.path_n].into_iter().flatten() {
+        s.push_str(&format!("\n  {}: {}", sp.net, path_text(sp)));
     }
     s
 }
@@ -123,6 +183,15 @@ pub struct PairAdd {
     /// Largest allowed uncoupled length of either net ("3mm").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_uncoupled: Option<Nm>,
+    /// Component where the signal path starts ("J1"; `auto`: the default, see diffpair.set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Component where the signal path ends ("U3"; `auto`: the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Longest branch off the signal path before the DRC warns ("2mm"; default 5 mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stub: Option<Nm>,
 }
 
 impl Command for PairAdd {
@@ -140,7 +209,9 @@ impl Command for PairAdd {
             return Err(CommandError::invalid_args("diffpair.same_net", "the two nets of a pair must differ")
                 .with_hint("give the positive and the negative net"));
         }
-        for (label, v) in [("max_skew", self.max_skew), ("max_uncoupled", self.max_uncoupled)] {
+        for (label, v) in
+            [("max_skew", self.max_skew), ("max_uncoupled", self.max_uncoupled), ("max_stub", self.max_stub)]
+        {
             if v.is_some_and(|v| v < Nm::ZERO) {
                 return Err(CommandError::invalid_args(
                     "diffpair.invalid_value",
@@ -204,7 +275,20 @@ impl Command for PairAdd {
             class: None,
             max_skew: None,
             max_uncoupled: None,
+            from: None,
+            to: None,
+            max_stub: None,
         });
+        let nets = [d.p.as_str(), d.n.as_str()];
+        if let Some(v) = path_end(p, "from", self.from.as_deref(), &nets)? {
+            d.from = v;
+        }
+        if let Some(v) = path_end(p, "to", self.to.as_deref(), &nets)? {
+            d.to = v;
+        }
+        if self.max_stub.is_some() {
+            d.max_stub = self.max_stub;
+        }
         if self.class.is_some() {
             d.class = self.class;
         }
@@ -243,6 +327,99 @@ impl Command for PairAdd {
             );
         }
         Ok(info)
+    }
+
+    fn summarize(o: &PairInfo) -> String {
+        pair_line(o)
+    }
+}
+
+/// Change a differential pair's settings: where its signal path runs (`--from J1 --to U3`:
+/// lengths, skew and tuning follow the routing between these components' pads; other branches
+/// of the nets, like a pull-up's track, are stubs reported apart), its limits and class.
+/// Without ends, the path runs between the two components with pads on both nets that are
+/// farthest apart along the routing.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PairSet {
+    /// Pair name.
+    pub name: String,
+    /// Component where the signal path starts: the connector or driver ("J1"; `auto` clears it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Component where the signal path ends: the receiver ("U3"; `auto` clears it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Longest branch off the signal path before the DRC warns ("2mm"; default 5 mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stub: Option<Nm>,
+    /// Largest allowed length difference between the two nets ("0.1mm").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_skew: Option<Nm>,
+    /// Largest allowed uncoupled length of either net ("3mm").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_uncoupled: Option<Nm>,
+    /// Net class with the pair's width and gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+}
+
+impl Command for PairSet {
+    const NAME: &'static str = "diffpair.set";
+    const SUMMARY: &'static str =
+        "Change a differential pair: signal path ends (--from/--to), stub, skew and uncoupled limits, class";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = PairInfo;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<PairInfo, CommandError> {
+        let p = ctx.project()?;
+        let Some(d) = p.circuit().diffpairs.get(&self.name) else { return Err(pair_not_found(p, &self.name)) };
+        let mut d = d.clone();
+        for (label, v) in
+            [("max_skew", self.max_skew), ("max_uncoupled", self.max_uncoupled), ("max_stub", self.max_stub)]
+        {
+            if v.is_some_and(|v| v < Nm::ZERO) {
+                return Err(CommandError::invalid_args(
+                    "diffpair.invalid_value",
+                    format!("`{label}` cannot be negative"),
+                ));
+            }
+        }
+        if let Some(cl) = &self.class
+            && !p.circuit().netclasses.contains_key(cl)
+        {
+            let s = did_you_mean(cl, p.circuit().netclasses.keys().map(String::as_str), 3);
+            return Err(CommandError::not_found("netclass.not_found", format!("no net class `{cl}`"))
+                .with_suggestions(&s)
+                .with_hint_if_none("create it with netclass.set or impedance.solve --netclass"));
+        }
+        let nets = [d.p.clone(), d.n.clone()];
+        let nets: Vec<&str> = nets.iter().map(String::as_str).collect();
+        if let Some(v) = path_end(p, "from", self.from.as_deref(), &nets)? {
+            d.from = v;
+        }
+        if let Some(v) = path_end(p, "to", self.to.as_deref(), &nets)? {
+            d.to = v;
+        }
+        if d.from.is_some() && d.from == d.to {
+            return Err(CommandError::invalid_args("diffpair.same_end", "`from` and `to` are the same component")
+                .with_hint("give the components at both ends of the line"));
+        }
+        if self.max_stub.is_some() {
+            d.max_stub = self.max_stub;
+        }
+        if self.max_skew.is_some() {
+            d.max_skew = self.max_skew;
+        }
+        if self.max_uncoupled.is_some() {
+            d.max_uncoupled = self.max_uncoupled;
+        }
+        if self.class.is_some() {
+            d.class = self.class;
+        }
+        ctx.project_mut()?.circuit_mut().diffpairs.insert(self.name.clone(), d);
+        Ok(pair_info(ctx.project()?, &self.name))
     }
 
     fn summarize(o: &PairInfo) -> String {
@@ -391,6 +568,17 @@ pub struct GroupSet {
     /// Allowed deviation (default 0.1mm).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tolerance: Option<Nm>,
+    /// Component where every member's signal path starts ("U1", the driver; pairs with their
+    /// own ends keep them). Default: per member, the two components farthest apart along its
+    /// routing; branches off the path are stubs, not length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Component where every member's signal path ends ("U2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Longest branch off a member's signal path before the DRC warns ("2mm"; default 5 mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stub: Option<Nm>,
 }
 
 /// A length group with where its members stand.
@@ -479,10 +667,25 @@ impl Command for GroupSet {
             )
             .with_hint("give a target length, or more members"));
         }
-        ctx.project_mut()?
-            .circuit_mut()
-            .length_groups
-            .insert(name.clone(), LengthGroup { members, target: self.target, tolerance });
+        if self.max_stub.is_some_and(|v| v < Nm::ZERO) {
+            return Err(CommandError::invalid_args("lengthgroup.invalid_value", "max_stub cannot be negative"));
+        }
+        // Ends: every member net (a pair's two nets) must reach them.
+        let member_nets: Vec<&str> = members
+            .iter()
+            .flat_map(|m| match c.diffpairs.get(m) {
+                Some(d) => vec![d.p.as_str(), d.n.as_str()],
+                None => vec![m.as_str()],
+            })
+            .collect();
+        let from = path_end(p, "from", self.from.as_deref(), &member_nets)?.flatten();
+        let to = path_end(p, "to", self.to.as_deref(), &member_nets)?.flatten();
+        if from.is_some() && from == to {
+            return Err(CommandError::invalid_args("lengthgroup.same_end", "`from` and `to` are the same component")
+                .with_hint("give the components at both ends of the lines"));
+        }
+        let group = LengthGroup { members, target: self.target, tolerance, from, to, max_stub: self.max_stub };
+        ctx.project_mut()?.circuit_mut().length_groups.insert(name.clone(), group);
         Ok(group_info(ctx.project()?, &name))
     }
 

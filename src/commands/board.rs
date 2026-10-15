@@ -1287,7 +1287,9 @@ pub struct PlaceAuto {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact: bool,
     /// Groups: how much of the free board area the groups' rooms take, in percent (default 60;
-    /// lower keeps groups closer together, 100 uses the whole board). Not with `compact`.
+    /// lower keeps groups closer together, 100 uses the whole board). The groups' arrangement is
+    /// then stretched where it leaves an empty band along an edge wider than 12.5 % of the
+    /// board at 60 (wider at lower densities). Not with `compact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub density: Option<u32>,
 }

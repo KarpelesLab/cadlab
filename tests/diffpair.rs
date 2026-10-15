@@ -443,3 +443,88 @@ fn identical_for_any_thread_count() {
     }
     assert_eq!(results[0], results[1]);
 }
+
+/// A pair's length runs along its signal path between its end components: a D+ pull-up's
+/// branch is a stub, reported apart and left alone by `route.tune`, with a DRC warning past
+/// the pair's stub limit; ends can be given (`diffpair.set --from --to`) and follow renames.
+#[test]
+fn pair_length_follows_the_signal_path_and_reports_stubs() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    usb_board(&r, &mut s);
+    exec(&r, &mut s, "circuit.add", json!({"part": "R 1.5k 1% 0402", "refdes": "R1"}));
+    exec(&r, &mut s, "net.connect", json!({"net": "USB_DP", "pins": ["R1.2"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "R1", "at": ["23mm", "16mm"], "rotation": 90}));
+    exec(&r, &mut s, "diffpair.add", json!({"p": "USB_DP", "n": "USB_DM", "max_skew": "0.1mm"}));
+    let o = exec(&r, &mut s, "route.diffpair", json!({}));
+    assert_eq!(o["output"]["pairs"][0]["status"], "routed", "{}", o["output"]);
+    let list = |r: &Registry, s: &mut Session| exec(r, s, "diffpair.list", json!({}))["output"]["pairs"][0].clone();
+    let routed = list(&r, &mut s);
+    let o = exec(&r, &mut s, "route.nets", json!({"nets": ["USB_DP"]}));
+    assert_eq!(o["output"]["stats"]["completion"], 100.0, "{}", o["output"]);
+    render(&r, &mut s, "usb-stub");
+
+    // The pull-up's branch is a stub: the path's length, the skew and the coupling are the
+    // pair's own; the net's copper counts it.
+    let pr = list(&r, &mut s);
+    let path = &pr["path_p"];
+    assert!(
+        path["from"].as_str().unwrap().starts_with("J1.") && path["to"].as_str().unwrap().starts_with("U1."),
+        "{pr}"
+    );
+    assert_eq!(pr["length_p"], routed["length_p"], "{pr}");
+    assert_eq!(pr["skew"], routed["skew"], "{pr}");
+    let stubs = path["stubs"].as_array().unwrap();
+    assert_eq!(stubs.len(), 1, "{path}");
+    assert_eq!(stubs[0]["pads"], json!(["R1.2"]));
+    let stub = mm(&stubs[0]["length"]);
+    assert!(stub > 1.0 && stub < 10.0, "{path}");
+    let p = s.project.as_ref().unwrap();
+    let all = cadlab::lengths::net_length(p, "USB_DP").total.0 as f64 / 1e6;
+    assert!((all - mm(&pr["length_p"]) - stub).abs() < 0.005, "net {all} = path {} + stub {stub}", pr["length_p"]);
+    // Nothing for route.tune to do.
+    let o = exec(&r, &mut s, "route.tune", json!({}));
+    assert_eq!(o["output"]["pairs"][0]["bumps"], 0, "{}", o["output"]);
+    exec(&r, &mut s, "diffpair.set", json!({"name": "USB_D", "max_stub": "10mm"}));
+    assert_eq!(drc_codes(&s, "drc.diffpair"), Vec::<String>::new());
+
+    // A stub limit below the branch: one warning naming the pull-up's pad.
+    exec(&r, &mut s, "diffpair.set", json!({"name": "USB_D", "max_stub": "0.5mm"}));
+    let warn: Vec<cadlab::Diagnostic> = drc(&s).into_iter().filter(|d| d.code == "drc.diffpair_stub").collect();
+    assert_eq!(warn.len(), 1, "{warn:?}");
+    assert!(warn[0].message.contains("to R1.2"), "{}", warn[0].message);
+    assert!(warn[0].location.is_some());
+
+    // Ends: components with pins on both nets; `auto` clears them; they follow renames.
+    assert_eq!(fail(&r, &mut s, "diffpair.set", json!({"name": "USB_D", "from": "R1"})), "diffpair.end_not_on_net");
+    assert_eq!(fail(&r, &mut s, "diffpair.set", json!({"name": "USB_D", "from": "J9"})), "component.not_found");
+    assert_eq!(
+        fail(&r, &mut s, "diffpair.set", json!({"name": "USB_D", "from": "J1", "to": "J1"})),
+        "diffpair.same_end"
+    );
+    assert_eq!(fail(&r, &mut s, "diffpair.set", json!({"name": "NOPE"})), "diffpair.not_found");
+    let o = exec(&r, &mut s, "diffpair.set", json!({"name": "USB_D", "from": "J1", "to": "U2"}));
+    assert_eq!((o["output"]["from"].clone(), o["output"]["to"].clone()), (json!("J1"), json!("U2")));
+    assert!(o["output"]["path_p"]["to"].as_str().unwrap().starts_with("U2."), "{}", o["output"]);
+    assert!(mm(&o["output"]["length_p"]) < mm(&pr["length_p"]) - 5.0, "{}", o["output"]);
+    exec(&r, &mut s, "circuit.rename", json!({"from": "U2", "to": "U9"}));
+    assert_eq!(list(&r, &mut s)["to"], "U9");
+    let o = exec(&r, &mut s, "diffpair.set", json!({"name": "USB_D", "from": "auto", "to": "auto"}));
+    assert!(o["output"].get("from").is_none(), "{}", o["output"]);
+    assert_eq!(o["output"]["length_p"], pr["length_p"]);
+
+    // Length groups take ends too, checked against every member's nets.
+    let e =
+        fail(&r, &mut s, "lengthgroup.set", json!({"name": "G", "members": ["USB_D"], "target": "40mm", "from": "R1"}));
+    assert_eq!(e, "diffpair.end_not_on_net");
+    let o = exec(
+        &r,
+        &mut s,
+        "lengthgroup.set",
+        json!({"name": "G", "members": ["USB_D"], "target": "40mm", "from": "J1", "to": "U9", "max_stub": "1mm"}),
+    );
+    assert_eq!(o["output"]["group"]["to"], "U9", "{}", o["output"]);
+    let len = mm(&o["output"]["status"]["members"][0]["length"]);
+    assert!(len < mm(&pr["length_p"]) - 5.0, "the group's ends apply to its pair: {len}");
+}

@@ -778,15 +778,26 @@ fn buck_output_behind_its_inductor() {
     assert!(diag(&o, "erc.power_not_driven").is_some(), "{}", o["diagnostics"]);
 }
 
-/// `board.fab_stackup` applies a fab's published stackup in one step; the fab check accepts its
-/// copper, and the fab export names it in `fab-lock.json`.
+/// `board.fab_stackup` lists a fab's published stackups, applies one in one step; the fab check
+/// accepts its copper, and the fab export names it in `fab-lock.json`.
 #[test]
 fn fab_stackup_applies_and_is_locked() {
     let r = Registry::with_builtins();
     let (d, mut s) = new_project(&r);
-    let e = fail(&r, &mut s, "board.fab_stackup", json!({"fab": "jlcpcb"}));
-    assert_eq!(e.error.diagnostic.code, "board.stackup_choose");
-    assert!(e.error.diagnostic.hint.as_deref().unwrap().contains("JLC04161H-7628"), "{}", e.error);
+    // Without a name: the fab's stackups, listed (nothing changes).
+    let before = s.project.as_ref().unwrap().board().stackup.clone();
+    let o = exec(&r, &mut s, "board.fab_stackup", json!({"fab": "jlcpcb"}));
+    let ids: Vec<&str> =
+        o["output"]["stackups"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"JLC04161H-7628") && ids.len() >= 3, "{o}");
+    let first = &o["output"]["stackups"][0];
+    assert_eq!(first["layers"], 4, "{first}");
+    assert_eq!(first["dielectrics"].as_array().unwrap().len(), 3, "{first}");
+    assert!(first["apply"].as_str().unwrap().starts_with("board.fab_stackup jlcpcb JLC"), "{first}");
+    assert!(o["output"].get("copper").is_none(), "{o}");
+    assert_eq!(s.project.as_ref().unwrap().board().stackup, before);
+    let o = cadlab(&d.path().join("p"), &["board", "fab-stackup", "jlcpcb"]);
+    assert!(o.status.success() && text(&o).contains("JLC04161H-7628: 4 layers"), "{}", text(&o));
     let e = fail(&r, &mut s, "board.fab_stackup", json!({"fab": "jlcpcb", "stackup": "JLC04161H-762"}));
     assert_eq!(e.error.diagnostic.code, "board.unknown_stackup");
     let e = fail(&r, &mut s, "board.fab_stackup", json!({"fab": "oshpark", "stackup": "x"}));

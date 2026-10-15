@@ -190,6 +190,19 @@ pub struct DiffPair {
     /// Largest allowed uncoupled length of either net (breakouts from pads, skew bumps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_uncoupled: Option<Nm>,
+    /// Component where the signal path starts (a connector, the driver): lengths, skew and
+    /// tuning follow the routing between `from`'s and `to`'s pads; other branches are stubs.
+    /// Default: of the components with pads on both nets, the two farthest apart along the
+    /// routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Component where the signal path ends (the receiver).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Longest branch off the signal path (a pull-up's track, a second contact row's link)
+    /// before the DRC warns (`drc.diffpair_stub`; default 5 mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stub: Option<Nm>,
 }
 
 /// A length-matching group: nets and differential pairs whose routed lengths must agree
@@ -206,6 +219,17 @@ pub struct LengthGroup {
     pub target: Option<Nm>,
     /// Allowed deviation.
     pub tolerance: Nm,
+    /// Component where every member's signal path starts (pairs with their own `from` keep
+    /// it); default: per net, the two components farthest apart along its routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Component where every member's signal path ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Longest branch off a member net's signal path before the DRC warns
+    /// (`drc.length_stub`; default 5 mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stub: Option<Nm>,
 }
 
 /// A reusable subcircuit: components with local designators, nets with local names, and the
@@ -347,13 +371,28 @@ impl Circuit {
         self.nets.iter().flat_map(|(name, n)| n.pins.iter().map(move |p| (p, name.as_str()))).collect()
     }
 
-    /// Removes every pin of `refdes` from nets and no-connect marks; drops nets left empty.
+    /// Removes every pin of `refdes` from nets and no-connect marks; drops nets left empty and
+    /// signal path ends naming it.
     pub fn detach_component(&mut self, refdes: &str) {
         for n in self.nets.values_mut() {
             n.pins.retain(|p| p.refdes != refdes);
         }
         self.nets.retain(|_, n| !n.pins.is_empty());
         self.no_connect.retain(|p| p.refdes != refdes);
+        // Signal path ends naming it fall back to the default.
+        let ends = |e: &mut Option<String>| {
+            if e.as_deref() == Some(refdes) {
+                *e = None;
+            }
+        };
+        for d in self.diffpairs.values_mut() {
+            ends(&mut d.from);
+            ends(&mut d.to);
+        }
+        for g in self.length_groups.values_mut() {
+            ends(&mut g.from);
+            ends(&mut g.to);
+        }
     }
 
     /// Renames a component everywhere it is referenced.
@@ -372,6 +411,19 @@ impl Circuit {
             fix(&mut n.pins);
         }
         fix(&mut self.no_connect);
+        let ends = |e: &mut Option<String>| {
+            if e.as_deref() == Some(from) {
+                *e = Some(to.to_string());
+            }
+        };
+        for d in self.diffpairs.values_mut() {
+            ends(&mut d.from);
+            ends(&mut d.to);
+        }
+        for g in self.length_groups.values_mut() {
+            ends(&mut g.from);
+            ends(&mut g.to);
+        }
     }
 }
 

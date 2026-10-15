@@ -479,17 +479,31 @@ struct Stretch {
     hi: f64,
 }
 
-fn stretches(q: &Project, a: &str, b: &str, gap: f64, width: f64) -> Vec<Stretch> {
+/// Whether a track is on a net's signal path (every track when the path is not known).
+fn on_path(path: &Option<lengths::SignalPath>, id: ObjectId) -> bool {
+    path.as_ref().is_none_or(|sp| sp.contains_track(id.0))
+}
+
+/// Coupled stretches of nets `a` and `b` whose tracks are on the nets' signal paths (`pa`,
+/// `pb`): stubs are neither tuned nor used for skew compensation.
+fn stretches(
+    q: &Project,
+    (a, pa): (&str, &Option<lengths::SignalPath>),
+    (b, pb): (&str, &Option<lengths::SignalPath>),
+    gap: f64,
+    width: f64,
+) -> Vec<Stretch> {
     let tol = (gap * lengths::GAP_TOLERANCE).max(lengths::GAP_TOLERANCE_MIN.0 as f64);
     let mut out = Vec::new();
-    for ta in straight(q, a) {
+    let tbs: Vec<Track> = straight(q, b).into_iter().filter(|t| on_path(pb, t.id)).collect();
+    for ta in straight(q, a).into_iter().filter(|t| on_path(pa, t.id)) {
         let (pa, pb) = (P::of(ta.start), P::of(ta.end));
         let la = pa.dist(pb);
         if la < 1.0 {
             continue;
         }
         let u = unit(pa, pb);
-        for tb in straight(q, b).into_iter().filter(|t| t.layer == ta.layer) {
+        for tb in tbs.iter().filter(|t| t.layer == ta.layer).cloned() {
             let (qa, qb) = (P::of(tb.start), P::of(tb.end));
             if qa.dist(qb) < 1.0 || cross(u, unit(qa, qb)).abs() > 1e-3 {
                 continue;
@@ -552,8 +566,9 @@ impl Tuner<'_> {
         ids
     }
 
-    /// Adds `need` (nm) to a net with meanders. Returns (added, bumps).
+    /// Adds `need` (nm) to a net with meanders on its signal path. Returns (added, bumps).
     fn tune_net(&mut self, net: &str, need: f64) -> (f64, usize) {
+        let path = lengths::signal_path(&self.q, net, lengths::net_ends(self.q.circuit(), net));
         let ctx = Ctx::new(&self.q);
         let Some(&id) = ctx.rb.net_ids.get(net) else { return (0.0, 0) };
         let pr = ctx.rb.profile(id).clone();
@@ -563,7 +578,7 @@ impl Tuner<'_> {
         let mut count = 0;
         let mut changed: Vec<(Track, Vec<Prim>)> = Vec::new();
         let mut pref = 1.0;
-        for t in straight(&self.q, net) {
+        for t in straight(&self.q, net).into_iter().filter(|t| on_path(&path, t.id)) {
             if need - added <= 0.5 {
                 break;
             }
@@ -659,7 +674,8 @@ impl Tuner<'_> {
         let mut pref = 1.0;
         let mut used: BTreeSet<ObjectId> = BTreeSet::new();
         let mut changes: Vec<(Track, Vec<Prim>, Track, Vec<Prim>)> = Vec::new();
-        for st in stretches(&self.q, &d.p, &d.n, gap, w) {
+        let (path_p, path_n) = lengths::pair_paths(&self.q, d);
+        for st in stretches(&self.q, (&d.p, &path_p), (&d.n, &path_n), gap, w) {
             if need - added <= 0.5 {
                 break;
             }
@@ -771,15 +787,18 @@ impl Tuner<'_> {
     /// Compensates a pair's skew with small bumps on the shorter net.
     fn compensate(&mut self, name: &str, d: &DiffPair) -> SkewTuned {
         let r = lengths::pair_rules(&self.q, d);
-        let before = lengths::coupling(&self.q, d, r.gap).skew;
+        // Lengths along the signal paths: stubs (a pull-up, a second contact row) are not skew.
+        let cp = lengths::coupling(&self.q, d, r.gap);
+        let before = cp.skew;
         let mut out =
             SkewTuned { name: name.to_string(), before, after: before, max_skew: d.max_skew, bumps: 0, reason: None };
-        let (lp, ln) = (lengths::net_length(&self.q, &d.p).total, lengths::net_length(&self.q, &d.n).total);
+        let (lp, ln) = (cp.length_p.total, cp.length_n.total);
         let need = (lp.0 - ln.0).abs() as f64;
         if need <= SKEW_IGNORE {
             return out;
         }
         let (short, long) = if lp < ln { (&d.p, &d.n) } else { (&d.n, &d.p) };
+        let (path_s, path_l) = if lp < ln { (cp.path_p, cp.path_n) } else { (cp.path_n, cp.path_p) };
         let (w, gap, cl) = (r.width.0 as f64, r.gap.0 as f64, r.clearance.0 as f64);
         let gmin = gap.min(cl);
         let ctx = Ctx::new(&self.q);
@@ -787,14 +806,20 @@ impl Tuner<'_> {
             return out;
         };
         // Bends where the shorter net is the inner track.
-        let tracks: Vec<Track> =
-            self.q.board().tracks.iter().filter(|t| t.net.as_deref() == Some(short.as_str())).cloned().collect();
+        let tracks: Vec<Track> = self
+            .q
+            .board()
+            .tracks
+            .iter()
+            .filter(|t| t.net.as_deref() == Some(short.as_str()) && on_path(&path_s, t.id))
+            .cloned()
+            .collect();
         let partner: Vec<(String, P, P)> = self
             .q
             .board()
             .tracks
             .iter()
-            .filter(|t| t.net.as_deref() == Some(long.as_str()))
+            .filter(|t| t.net.as_deref() == Some(long.as_str()) && on_path(&path_l, t.id))
             .map(|t| (t.layer.clone(), P::of(t.start), P::of(t.end)))
             .collect();
         let mut inner: Vec<P> = Vec::new();
@@ -826,7 +851,7 @@ impl Tuner<'_> {
                 }
             }
         }
-        let mut cands = stretches(&self.q, short, long, gap, w);
+        let mut cands = stretches(&self.q, (short, &path_s), (long, &path_l), gap, w);
         let key = |st: &Stretch| {
             let c = st.f.at((st.lo + st.hi) / 2.0, 0.0);
             inner.iter().map(|v| v.dist(c)).fold(f64::INFINITY, f64::min)

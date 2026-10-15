@@ -285,8 +285,9 @@ The result lists the nets moved (`rerouted`) and replaces their old copper.
 
 ### Differential pairs (`pairs`, M8)
 
-A pair is a circuit-level definition (`diffpair.add P N [--name] [--class] [--max-skew] [--max-uncoupled]`,
-stored in `circuit.json` under `diffpairs`); `diffpair.suggest` proposes pairs from net names (`X_P`/`X_N`,
+A pair is a circuit-level definition (`diffpair.add P N [--name] [--class] [--max-skew] [--max-uncoupled]
+[--from] [--to] [--max-stub]`, changed by name with `diffpair.set NAME`, stored in `circuit.json` under
+`diffpairs`); `diffpair.suggest` proposes pairs from net names (`X_P`/`X_N`,
 `X+`/`X-`, `XDP`/`XDM` or `XDN`, `XP`/`XN`; nets already paired are skipped), `diffpair.list` shows each pair
 with its rules and measured lengths, skew and coupling. Width and gap come from the pair's net class (its
 `class`, else the positive net's): `diff_pair_width` and `diff_pair_gap`, which `impedance.solve --gap
@@ -342,7 +343,24 @@ nets and pairs (a pair counts as the mean of its two nets) that must be within `
 `target`, or without a target within `tolerance` below the longest member. Lengths (`crate::lengths`) are
 track lengths along arcs plus, for each via, the distance between the centers of the outermost copper layers
 where the net's tracks meet it, from the stackup (dielectrics in effect, as the impedance calculator assumes
-them; ELECTRICAL.md). A net's length is all of its copper, branches included.
+them; ELECTRICAL.md).
+
+**Signal paths** (`crate::lengths::path`, D55). A pair's and a length group member's length is measured
+along its signal path, not over all of its copper: a net's tracks, vias and pads form a graph (track ends and
+T-junctions are nodes per layer, tracks edges of their length, a via joins its layers with edges of their
+distance through the stackup, a pad joins the track ends and vias touching its copper), and the path is the
+shortest one between the pads of its two end components. Ends are given (`diffpair.set NAME --from J1 --to
+U3`, `lengthgroup.set ... --from --to` for every member; a pair's own ends win, `auto` clears them; they
+follow `circuit.rename` and are dropped by `circuit.remove`) or chosen: for a pair, among the components with
+pads on both nets (connector, ESD array, transceiver; a pull-up has a pad on one net only), the two farthest
+apart along the routing (straight-line when none are connected yet); for a net, among all its components (its
+pads when it has one). With several pads of an end component on the net (a USB-C receptacle's two rows), the
+path starts at the nearest one along the routing. Everything off the path is grouped into **stubs** (a
+pull-up's branch, the receptacle's row link), each with its length (tracks and via spans), where it leaves
+the path and the pads it reaches; `diffpair.list` shows both nets' paths and stubs. When the ends are not
+connected yet, the length falls back to all of the net's copper. Skew, the coupled and uncoupled lengths
+(coupling along the path only), group members' lengths, `route.tune` (meanders and skew bumps go on path
+tracks only) and the DRC all use the signal path, so a stub is neither skew nor tuned away.
 
 `route.tune {group?, style?, amplitude?, spacing?, corner?, arcs?, skew?}` (`router::tune`):
 
@@ -379,8 +397,10 @@ All warnings (the board is manufacturable either way); `crate::lengths::checks`,
 | `drc.diffpair_gap` | a coupled section's edge-to-edge gap differs from the pair's by more than 10 % (at least 5 µm), worst per layer |
 | `drc.diffpair_width` | a track in a coupled section is not the pair width |
 | `drc.diffpair_uncoupled` | a net's track length outside coupled sections exceeds `max_uncoupled` |
-| `drc.diffpair_skew` | the routed lengths (vias included) differ by more than `max_skew` (fully routed pairs only) |
+| `drc.diffpair_skew` | the signal paths' lengths (vias included) differ by more than `max_skew` (fully routed pairs only) |
 | `drc.length_mismatch` | a fully routed group member is outside its range, with how much too short or long |
+| `drc.diffpair_stub` | a branch off a fully routed pair net's signal path is longer than `max_stub` (pair's, else its group's, default 5 mm), with the pads it reaches |
+| `drc.length_stub` | the same for a net member of a length group (the group's `max_stub`) |
 | `drc.diffpair_invalid` | a pair names a net that does not exist |
 
 Coupled sections are pairs of parallel segments (within about 0.6°) of the two nets on one layer whose edges
@@ -419,8 +439,8 @@ its gap and skew. Results are identical for 1 and 4 threads.
   0°/45° centerlines only (no arcs while routing; meanders may use arcs), straight breakout stubs. Pads tapped
   from one side reverse a pair (reported as a polarity failure): such parts need flow-through pins or a route
   past them with stubs. Pads enclosed by a flow-through pair (an ESD array's GND) need a via placed first.
-- Tuning adds length only, on straight tracks (arcs are never meandered), and does not reroute to make room;
-  a net's length counts every branch.
+- Tuning adds length only, on straight tracks of the signal path (arcs are never meandered), and does not
+  reroute to make room. Copper reaching a net only through a zone is not part of its graph.
 - Parallelism is per batch of nets with disjoint regions: compact boards, where most nets meet near the same
   parts, get little of it. Memory is a few bytes per double-grid point per layer and profile, plus one search
   scratch (17 bytes per node) per thread.

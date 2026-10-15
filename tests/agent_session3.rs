@@ -94,8 +94,11 @@ fn stm32_usb_device_four_layers_from_a_prompt() {
     let p = root.join("usbdev");
     let p = p.as_path();
 
-    // The fab's impedance stackup in one step (session 3 set three dielectrics by hand, and the
-    // fab check then rejected the stackup page's 15.2 µm inner copper).
+    // The fab's impedance stackups listed, then one applied in one step (session 3 set three
+    // dielectrics by hand, and the fab check then rejected the stackup page's 15.2 µm inner
+    // copper).
+    let list = step_json(p, &["board", "fab-stackup", "jlcpcb"]);
+    assert!(list["output"]["stackups"].as_array().unwrap().iter().any(|x| x["id"] == "JLC04161H-7628"), "{list}");
     let st = step_json(p, &["board", "fab-stackup", "jlcpcb", "JLC04161H-7628"]);
     assert_eq!(st["output"]["copper"].as_array().unwrap().len(), 4, "{st}");
     assert_eq!(st["output"]["dielectrics"][0]["thickness"], "0.2104mm", "{st}");
@@ -275,6 +278,15 @@ fn stm32_usb_device_four_layers_from_a_prompt() {
     // The buck's inductor at its switch pin (it went to the MCU, the largest IC on +3V3).
     let d = |a: (f64, f64), b: (f64, f64)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
     assert!(d(xy("L1"), xy("U2")) < 6.0, "L1 {:?} next to U2 {:?}", xy("L1"), xy("U2"));
+    // The board is used across its width (the right third used to stay empty): parts in every
+    // third, the MCU still central.
+    let xs: Vec<f64> = placed["output"]["placements"].as_object().unwrap().keys().map(|r| xy(r).0).collect();
+    for third in 0..3 {
+        let (lo, hi) = (20.0 * third as f64, 20.0 * (third + 1) as f64);
+        assert!(xs.iter().any(|x| (lo..hi).contains(x)), "nothing between x = {lo} and {hi} mm: {xs:?}");
+    }
+    let (ux, uy) = xy("U3");
+    assert!((ux - 30.0).abs() < 6.0 && (uy - 22.5).abs() < 6.0, "MCU central: ({ux}, {uy})");
 
     // The pair first: coupled end to end (the D+ pull-up used to sit in its breakout, and the
     // receptacle's two contact rows were reported as a failed link).
@@ -283,10 +295,41 @@ fn stm32_usb_device_four_layers_from_a_prompt() {
     step(p, &["route", "all", "--budget", "120s"]);
     let status = step_json(p, &["route", "status"]);
     assert_eq!(status["output"]["unrouted"], 0, "{status}");
-    step(p, &["route", "tune"]);
+    // Lengths run along the signal path, receptacle to MCU: the D+ pull-up and the second
+    // contact row are stubs, reported apart, so they are not skew (session 3's tuning added 30
+    // bumps for them and left most of the pair uncoupled).
+    let before = step_json(p, &["diffpair", "list"]);
+    let pr = &before["output"]["pairs"][0];
+    for (net, path) in [("USB_DP", &pr["path_p"]), ("USB_DN", &pr["path_n"])] {
+        assert_eq!(path["net"], net, "{pr}");
+        assert!(path["from"].as_str().unwrap().starts_with("J1."), "{path}");
+        assert!(path["to"].as_str().unwrap().starts_with("U3."), "{path}");
+        assert!(!path["stubs"].as_array().unwrap().is_empty(), "the other contact row: {path}");
+    }
+    let pull_up: Vec<&Value> =
+        pr["path_p"]["stubs"].as_array().unwrap().iter().filter(|x| x["pads"] == serde_json::json!(["R3.2"])).collect();
+    assert_eq!(pull_up.len(), 1, "the D+ pull-up is a stub: {pr}");
+    assert!(mm(&pr["skew"]) <= 0.1, "skew along the paths before tuning: {pr}");
+    let tu = step_json(p, &["route", "tune"]);
+    let bumps = tu["output"]["pairs"][0]["bumps"].as_u64().unwrap();
+    assert!(bumps <= 2, "{bumps} skew bumps: {tu}");
     let pairs = step_json(p, &["diffpair", "list"]);
-    let skew = mm(&pairs["output"]["pairs"][0]["skew"]);
+    let pr = &pairs["output"]["pairs"][0];
+    let skew = mm(&pr["skew"]);
     assert!(skew <= 0.1, "skew {skew} mm: {pairs}");
+    // Mostly coupled: the uncoupled rest is the breakouts at the receptacle, the ESD array and
+    // the MCU.
+    let (coupled, uncoupled) = (mm(&pr["coupled"]), mm(&pr["uncoupled"]));
+    let length = mm(&pr["length_p"]);
+    assert!(coupled >= 0.7 * length && uncoupled < 10.0, "coupled {coupled} / uncoupled {uncoupled} of {length} mm");
+
+    // A stub limit tighter than the pull-up's branch is a DRC warning naming it.
+    step(p, &["diffpair", "set", "USB_D", "--max-stub", "1mm"]);
+    let drc = step_json(p, &["drc"]);
+    let stubs: Vec<&Value> =
+        drc["diagnostics"].as_array().unwrap().iter().filter(|x| x["code"] == "drc.diffpair_stub").collect();
+    assert!(stubs.iter().any(|x| x["subjects"].as_array().unwrap().contains(&serde_json::json!("R3.2"))), "{drc}");
+    step(p, &["diffpair", "set", "USB_D", "--max-stub", "5mm"]);
 
     let drc = step_json(p, &["drc"]);
     assert_eq!(drc["output"]["errors"], 0, "{:?}", codes(&drc));

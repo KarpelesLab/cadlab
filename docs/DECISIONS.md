@@ -942,6 +942,36 @@ loss tangent turned into a conductivity at one frequency keep the model small an
 conductivity, roughness and solder mask are documented as not modeled. A Touchstone reader closes the loop
 for agents: they run the driver and read the numbers back through a command, with no plotting tool.
 
+### D55. Pair and length-group lengths along the signal path (stubs apart); spread placement stretches and relaxes groups; fab stackups listed (2026-10-15)
+Session 3's open items (docs/TESTING.md). **Signal paths:** D38 measured a net's length over all of its copper,
+so a D+ pull-up's branch and a USB-C receptacle's row link counted as length: the pair showed 6 mm of "skew",
+and `route.tune` added 30 skew bumps that left most of the pair uncoupled. A pair's nets and a length group's
+members are now measured along their signal path, the shortest path through the net's copper graph (track ends
+and T-junctions per layer, tracks, via spans through the stackup, pads touching copper) between the pads of two
+end components. Ends are data (`DiffPair`/`LengthGroup` `from`, `to`; optional, no migration), set with the new
+`diffpair.set NAME --from J1 --to U3` (and on `diffpair.add`, `lengthgroup.set`; `auto` clears), validated
+against the nets' pins, renamed and dropped with their component; by default a pair's ends are the two
+components with pads on both nets farthest apart along the routing (a pull-up has a pad on one net only), a
+net's the two farthest of all its components. The rest of the net is reported as stubs (length, attach point,
+pads reached; `diffpair.list` `path_p`/`path_n`), with DRC warnings `drc.diffpair_stub` / `drc.length_stub`
+above `max_stub` (default 5 mm, the usual high-speed USB guidance for stubs). Skew, coupled and uncoupled length,
+group lengths, `route.tune` (only path tracks are meandered or bumped) and the DRC all use the path; without a
+connected path the length falls back to all copper as before. **Spread placement:** after the constructive
+placement, groups move as rigid blocks: a stretch of the arrangement where it leaves an empty band wider than
+an eighth of the board (relative places kept, so groups stay apart and the ratsnest's topology holds), then a
+relaxation (1–8 mm shifts and mirror images across the central IC) minimizing the ratsnest plus a weight times
+the board's unevenness on two staggered window grids; the largest stretch whose ratsnest grows at most 25 %
+(scaled by `density`) is kept, else none. The central IC and the ends of differential pairs do not move then nor
+in the improvement that follows (`compact` is unchanged; the router benchmarks use it, so their baseline holds).
+**`board.fab_stackup FAB`** without a stackup name lists the fab's stackups (values and the command applying
+each) instead of failing with `board.stackup_choose`.
+*Why:* the pair's length that matters is the one the signal travels between driver and receiver; a stub is a
+different defect (a reflection), so it is reported and limited on its own rather than "compensated" by
+uncoupling the pair. Placement must keep what routes well (the pair's ends where their breakouts were planned,
+groups in the arrangement connectivity chose) while using an outline the designer chose larger than the parts;
+stretching the arrangement keeps its topology, and a ratsnest budget bounds what using the board may cost. A
+question an agent asks ("which stackups?") should get an answer, not an error.
+
 ## Open questions
 
 

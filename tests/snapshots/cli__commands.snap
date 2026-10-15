@@ -46,6 +46,7 @@ expression: names
   "netclass.show",
   "netclass.remove",
   "diffpair.add",
+  "diffpair.set",
   "diffpair.remove",
   "diffpair.list",
   "diffpair.suggest",
