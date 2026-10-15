@@ -329,7 +329,9 @@ fn stm32_usb_device_four_layers_from_a_prompt() {
     let stubs: Vec<&Value> =
         drc["diagnostics"].as_array().unwrap().iter().filter(|x| x["code"] == "drc.diffpair_stub").collect();
     assert!(stubs.iter().any(|x| x["subjects"].as_array().unwrap().contains(&serde_json::json!("R3.2"))), "{drc}");
-    step(p, &["diffpair", "set", "USB_D", "--max-stub", "5mm"]);
+    // The receptacle's row link (A6/B6, A7/B7) is a stub of a few mm whose length depends on how
+    // the router crosses the interleaved rows (7 mm since D57); harmless at full speed (12 Mb/s).
+    step(p, &["diffpair", "set", "USB_D", "--max-stub", "10mm"]);
 
     let drc = step_json(p, &["drc"]);
     assert_eq!(drc["output"]["errors"], 0, "{:?}", codes(&drc));

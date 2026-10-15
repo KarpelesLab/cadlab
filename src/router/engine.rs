@@ -9,8 +9,7 @@
 //! shared or the iteration budget runs out. A final legalization pass reroutes what still
 //! conflicts with sharing forbidden.
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
 
 use super::geo::{BoxF, P, point_seg_d2};
 use super::grid::{Grid, Statics, delta, ok};
@@ -21,6 +20,9 @@ use super::model::RouterBoard;
 pub(crate) const DIRS: [(i32, i32); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
 /// No direction (start, after a via).
 pub(crate) const NONE: u8 = 8;
+
+/// Most nodes `Engine::pocket` visits before deciding the targets are not walled in.
+const POCKET: usize = 50_000;
 
 /// Search costs (grid units: one orthogonal step costs 1).
 #[derive(Clone, Copy, Debug)]
@@ -240,6 +242,8 @@ pub(crate) struct Engine<'a> {
     pub grown: super::rooms::Grown,
     /// Any-angle segments in gridless paths (else 0°/45°/90° where they fit).
     pub any_angle: bool,
+    /// Static reachability per profile (searches that cannot succeed are skipped).
+    pub comps: super::components::Components,
 }
 
 /// Per-search working memory (one per thread).
@@ -256,6 +260,12 @@ pub(crate) struct Scratch {
     pub own_via_pts: Vec<P>,
     /// Gridless search memory.
     pub gl: super::expansion::GScratch,
+    /// Pocket test (`Engine::pocket`): visited and source marks, by stamp.
+    rseen: Vec<u32>,
+    rsrc: Vec<u32>,
+    rstamp: u32,
+    /// The A* queue.
+    heap: Queue,
 }
 
 impl Scratch {
@@ -270,7 +280,70 @@ impl Scratch {
             own_vias: Vec::new(),
             own_via_pts: Vec::new(),
             gl: Default::default(),
+            rseen: vec![0; nodes],
+            rsrc: vec![0; nodes],
+            rstamp: 0,
+            heap: Queue::default(),
         }
+    }
+}
+
+/// A 4-ary min-heap of (cost, node), ordered by cost then node: the same order as a binary
+/// heap of `Reverse((cost bits, node))` (costs are never negative), so the search pops nodes in
+/// exactly the same sequence; one `u64` comparison per step and a shallower tree.
+#[derive(Default)]
+struct Queue {
+    keys: Vec<u64>,
+}
+
+impl Queue {
+    fn clear(&mut self) {
+        self.keys.clear();
+    }
+
+    fn push(&mut self, cost: f32, node: u32) {
+        let key = ((cost.to_bits() as u64) << 32) | node as u64;
+        let k = &mut self.keys;
+        let mut i = k.len();
+        k.push(key);
+        while i > 0 {
+            let p = (i - 1) / 4;
+            if k[p] <= key {
+                break;
+            }
+            k[i] = k[p];
+            i = p;
+        }
+        k[i] = key;
+    }
+
+    fn pop(&mut self) -> Option<(f32, u32)> {
+        let k = &mut self.keys;
+        let top = *k.first()?;
+        let last = k.pop().expect("non-empty");
+        let n = k.len();
+        if n > 0 {
+            let mut i = 0;
+            loop {
+                let c = 4 * i + 1;
+                if c >= n {
+                    break;
+                }
+                let mut m = c;
+                for j in c + 1..(c + 4).min(n) {
+                    if k[j] < k[m] {
+                        m = j;
+                    }
+                }
+                if k[m] >= last {
+                    break;
+                }
+                k[i] = k[m];
+                i = m;
+            }
+            k[i] = last;
+        }
+        Some((f32::from_bits((top >> 32) as u32), top as u32))
     }
 }
 
@@ -327,6 +400,7 @@ impl<'a> Engine<'a> {
             dynamic,
             grown: super::rooms::Grown::new(rb),
             any_angle: false,
+            comps: super::components::Components::new(rb.profiles.len()),
         }
     }
 
@@ -355,7 +429,7 @@ impl<'a> Engine<'a> {
         self.grid.cell(x, y)
     }
 
-    fn key(&self, ai: usize, map: usize, idx: usize) -> u64 {
+    pub(crate) fn key(&self, ai: usize, map: usize, idx: usize) -> u64 {
         (((ai * (self.slots.len() + 1) + map) as u64) << 32) | idx as u64
     }
 
@@ -776,6 +850,14 @@ impl<'a> Engine<'a> {
             sc.stamp = 1;
         }
         let stamp = sc.stamp;
+        // Negotiation passes other nets' routing, so no path exists when the static graph
+        // separates the ends; neither does one for the stricter searches.
+        if mode != Mode::Explain && !self.comps.may_reach(&self.grid, &self.st, prof, net, sources, targets) {
+            return Ok(None);
+        }
+        if mode == Mode::Hard && self.pocket(sc, net, prof, sources, targets) {
+            return Ok(None);
+        }
         let mut tb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for &t in targets {
             sc.tgt[t as usize] = stamp;
@@ -795,7 +877,7 @@ impl<'a> Engine<'a> {
             let (a, b) = if dx > dy { (dx, dy) } else { (dy, dx) };
             (a + (std::f32::consts::SQRT_2 - 1.0) * b) * w
         };
-        let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+        sc.heap.clear();
         for &(n, c0) in sources {
             let (s, x, y) = self.unpack(n);
             let k = self.grid.didx(2 * x, 2 * y);
@@ -812,17 +894,38 @@ impl<'a> Engine<'a> {
             sc.gc[i] = c;
             sc.parent[i] = u32::MAX;
             sc.dir[i] = NONE;
-            heap.push(Reverse(((c + heur(x, y)).to_bits(), n)));
+            sc.heap.push(c + heur(x, y), n);
         }
         let cells = self.cells();
         let ns = self.slots.len();
+        let (gw, gh) = (self.grid.w, self.grid.h);
+        let dw = self.grid.dw() as isize;
+        // Index offsets of each direction's move midpoint and end on the double grid, and of
+        // its end cell.
+        let mid_off: [isize; 8] = DIRS.map(|(dx, dy)| dy as isize * dw + dx as isize);
+        let cell_off: [isize; 8] = DIRS.map(|(dx, dy)| dy as isize * gw as isize + dx as isize);
+        // Step costs per direction on each slot (diagonal, wrong way, along).
+        let base_cost: Vec<[f32; 8]> = (0..ns)
+            .map(|s| {
+                DIRS.map(|(dx, dy)| {
+                    if dx != 0 && dy != 0 {
+                        std::f32::consts::SQRT_2 * self.costs.diag
+                    } else if (self.pref[s] == 0 && dy != 0) || (self.pref[s] == 1 && dx != 0) {
+                        self.costs.wrong_way
+                    } else {
+                        1.0
+                    }
+                })
+            })
+            .collect();
+        let bend_cost = [0.0, self.costs.bend45, self.costs.bend90];
         let mut pops = 0usize;
         let block_pen = 60.0f32;
-        while let Some(Reverse((fb, u))) = heap.pop() {
+        while let Some((f, u)) = sc.heap.pop() {
             let ui = u as usize;
             let (s, x, y) = self.unpack(u);
             let gu = sc.gc[ui];
-            if f32::from_bits(fb) > gu + heur(x, y) + 1e-3 {
+            if f > gu + heur(x, y) + 1e-3 {
                 continue; // stale
             }
             if sc.tgt[ui] == stamp {
@@ -843,18 +946,25 @@ impl<'a> Engine<'a> {
                 return Ok(None);
             }
             let du = sc.dir[ui];
-            let tmap = &self.st.track[prof][s];
+            let tmap = &self.st.track[prof][s][..];
+            let occ_s = &self.occ_t[ai][s][..];
+            let hist_s = &self.hist_t[s][..];
+            let k0 = self.grid.didx(2 * x, 2 * y) as isize;
+            let c0i = (s * cells) as isize + self.grid.cidx(x, y) as isize;
+            let interior = x > 0 && y > 0 && x + 1 < gw && y + 1 < gh;
             for (nd, &(dx, dy)) in DIRS.iter().enumerate() {
                 let t = if du == NONE { 0 } else { turn(du, nd as u8) };
                 if t >= 3 {
                     continue;
                 }
-                let (nx, ny) = (x + dx, y + dy);
-                if nx < 0 || ny < 0 || nx >= self.grid.w || ny >= self.grid.h {
-                    continue;
+                if !interior {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if nx < 0 || ny < 0 || nx >= gw || ny >= gh {
+                        continue;
+                    }
                 }
-                let km = self.grid.didx(2 * x + dx, 2 * y + dy);
-                let kq = self.grid.didx(2 * nx, 2 * ny);
+                let km = (k0 + mid_off[nd]) as usize;
+                let kq = (k0 + 2 * mid_off[nd]) as usize;
                 let mut pen = 0.0;
                 if !ok(tmap[km], net) || !ok(tmap[kq], net) {
                     if mode != Mode::Explain {
@@ -862,7 +972,7 @@ impl<'a> Engine<'a> {
                     }
                     pen += block_pen;
                 }
-                let occ = (self.occ_t[ai][s][km] + self.occ_t[ai][s][kq]) as f32;
+                let occ = (occ_s[km] + occ_s[kq]) as f32;
                 if occ > 0.0 {
                     match mode {
                         Mode::Hard => continue,
@@ -870,23 +980,11 @@ impl<'a> Engine<'a> {
                         Mode::Negotiate(_) => {}
                     }
                 }
-                let diag = dx != 0 && dy != 0;
-                let base = if diag {
-                    std::f32::consts::SQRT_2 * self.costs.diag
-                } else if (self.pref[s] == 0 && dy != 0) || (self.pref[s] == 1 && dx != 0) {
-                    self.costs.wrong_way
-                } else {
-                    1.0
-                };
-                let hist = self.hist_t[s][km] + self.hist_t[s][kq];
-                let bend = match t {
-                    1 => self.costs.bend45,
-                    2 => self.costs.bend90,
-                    _ => 0.0,
-                };
+                let base = base_cost[s][nd];
+                let hist = hist_s[km] + hist_s[kq];
+                let bend = bend_cost[t as usize];
                 let c = gu + (base + hist) * (1.0 + pres * occ) + bend + pen;
-                let v = (s * cells) as u32 + self.grid.cidx(nx, ny) as u32;
-                let vi = v as usize;
+                let vi = (c0i + cell_off[nd]) as usize;
                 if sc.seen[vi] == stamp && sc.gc[vi] <= c {
                     continue;
                 }
@@ -894,7 +992,7 @@ impl<'a> Engine<'a> {
                 sc.gc[vi] = c;
                 sc.parent[vi] = u;
                 sc.dir[vi] = nd as u8;
-                heap.push(Reverse(((c + heur(nx, ny)).to_bits(), v)));
+                sc.heap.push(c + heur(x + dx, y + dy), vi as u32);
             }
             if self.vias_allowed {
                 let cell = self.grid.cidx(x, y);
@@ -924,11 +1022,11 @@ impl<'a> Engine<'a> {
                     }
                 }
                 let c0 = gu + (self.costs.via + self.hist_v[cell]) * (1.0 + pres * occ) + pen;
+                let k = k0 as usize;
                 for s2 in 0..ns {
                     if s2 == s {
                         continue;
                     }
-                    let k = self.grid.didx(2 * x, 2 * y);
                     if !ok(self.st.track[prof][s2][k], net) && mode != Mode::Explain {
                         continue;
                     }
@@ -941,11 +1039,92 @@ impl<'a> Engine<'a> {
                     sc.gc[vi] = c0;
                     sc.parent[vi] = u;
                     sc.dir[vi] = NONE;
-                    heap.push(Reverse(((c0 + heur(x, y)).to_bits(), v)));
+                    sc.heap.push(c0 + heur(x, y), v);
                 }
             }
         }
         Ok(None)
+    }
+
+    /// Whether the targets of a `Mode::Hard` search lie in a small pocket that no source
+    /// reaches: everything from which a target can be entered (static maps and other nets'
+    /// routing as the search sees them, ignoring its bend limit and the spacing of the net's
+    /// own vias, so a superset of what it reaches) is visited backwards from the targets, up to
+    /// `POCKET` nodes. A failing search would otherwise visit every node reachable from the
+    /// sources before giving up, typically the whole board around a walled-in pad.
+    fn pocket(&self, sc: &mut Scratch, net: u32, prof: usize, sources: &[(u32, f32)], targets: &[u32]) -> bool {
+        sc.rstamp = sc.rstamp.wrapping_add(1);
+        if sc.rstamp == 0 {
+            sc.rseen.iter_mut().for_each(|v| *v = 0);
+            sc.rsrc.iter_mut().for_each(|v| *v = 0);
+            sc.rstamp = 1;
+        }
+        let stamp = sc.rstamp;
+        let ai = self.act[prof];
+        let cells = self.cells() as u32;
+        let ns = self.slots.len();
+        // Legal for the net, and also not near other nets' routing. A move along a layer
+        // needs its midpoint and end free; a via needs its cell free and its end legal.
+        let legal = |s: usize, i: i32, j: i32| ok(self.st.track[prof][s][self.grid.didx(i, j)], net);
+        let free = |s: usize, i: i32, j: i32| legal(s, i, j) && self.occ_t[ai][s][self.grid.didx(i, j)] == 0;
+        for &(n, _) in sources {
+            let (s, x, y) = self.unpack(n);
+            if self.occ_t[ai][s][self.grid.didx(2 * x, 2 * y)] == 0 {
+                sc.rsrc[n as usize] = stamp;
+            }
+        }
+        let mut queue: Vec<u32> = Vec::new();
+        for &t in targets {
+            let (s, x, y) = self.unpack(t);
+            if sc.rsrc[t as usize] == stamp {
+                return false;
+            }
+            if legal(s, 2 * x, 2 * y) && sc.rseen[t as usize] != stamp {
+                sc.rseen[t as usize] = stamp;
+                queue.push(t);
+            }
+        }
+        let mut head = 0;
+        while head < queue.len() {
+            if queue.len() > POCKET {
+                return false;
+            }
+            let v = queue[head];
+            head += 1;
+            let (s, x, y) = self.unpack(v);
+            let mut reach = |u: u32, enter: bool, queue: &mut Vec<u32>| -> bool {
+                if sc.rsrc[u as usize] == stamp {
+                    return true;
+                }
+                if enter && sc.rseen[u as usize] != stamp {
+                    sc.rseen[u as usize] = stamp;
+                    queue.push(u);
+                }
+                false
+            };
+            for &(dx, dy) in DIRS.iter().filter(|_| free(s, 2 * x, 2 * y)) {
+                let (ux, uy) = (x - dx, y - dy);
+                if ux < 0 || uy < 0 || ux >= self.grid.w || uy >= self.grid.h || !free(s, 2 * ux + dx, 2 * uy + dy) {
+                    continue;
+                }
+                let u = (s as u32) * cells + self.grid.cidx(ux, uy) as u32;
+                if reach(u, legal(s, 2 * ux, 2 * uy), &mut queue) {
+                    return false;
+                }
+            }
+            if self.vias_allowed {
+                let cell = self.grid.cidx(x, y);
+                if ok(self.st.via[prof][cell], net) && self.occ_v[ai][cell] == 0 {
+                    for s2 in (0..ns).filter(|&s2| s2 != s) {
+                        let u = (s2 as u32) * cells + cell as u32;
+                        if reach(u, legal(s2, 2 * x, 2 * y), &mut queue) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Occupancy keys (as in `NetRoute::keys`) along the cheapest path of connection `ci` of
@@ -1081,4 +1260,35 @@ fn closest_on(a: P, b: P, c: P, d: P) -> P {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_pops_like_a_binary_heap() {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let mut rng = Rng(7);
+        let mut q = Queue::default();
+        let mut h: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+        for round in 0..200 {
+            for _ in 0..(round % 7) {
+                let cost = (rng.next() % 50) as f32 * 0.25;
+                let node = (rng.next() % 1000) as u32;
+                q.push(cost, node);
+                h.push(Reverse((cost.to_bits(), node)));
+            }
+            for _ in 0..(round % 3) {
+                let a = q.pop();
+                let b = h.pop().map(|Reverse((c, n))| (f32::from_bits(c), n));
+                assert_eq!(a, b);
+            }
+        }
+        while let Some(Reverse((c, n))) = h.pop() {
+            assert_eq!(q.pop(), Some((f32::from_bits(c), n)));
+        }
+        assert_eq!(q.pop(), None);
+    }
 }

@@ -1041,6 +1041,44 @@ which the project rules exclude, and no published specification of its metrics e
 where KiCad's choice is also the fab's (sub-micron clearance noise, courtyard drawing slop); the
 copper-to-hole rule follows the fab's specification rather than KiCad's, which happen to agree.
 
+### D57. Router corpus completion: grid snapped to fine pad pitches, USB-C crossover vias, failing searches skipped (2026-10-15)
+Profiling the corpus re-route (`route_bench --corpus`, phase timeline with `CADLAB_BENCH_TRACE`) showed that
+the remaining failures had three causes the router could address without new rules. **Walled-in QFN pads:**
+the grid pitch, (width + clearance) / 2 = 0.195 mm on corne-cherry, drifts against a 0.4 mm pad pitch, so
+somewhere along each row two neighbors map to grid lines one apart and every other pad found no escape (41 of 53
+and 37 of 52). When the pad pitch most fine-pitch rows share (8 pads or more, multi-pin parts) is `2m` times a
+pitch at most 6 % coarser than the computed one, the grid takes that pitch: every pad of such a row sits at the
+same offset, and escapes stay a pad pitch apart. Neck-down widths also keep the grid's sampling margin and the
+router's tolerances, so two necked escapes beside each other are compatible as the grid samples them.
+**Crossovers:** in a row of fine-pitch pads where two nets interleave tightly (`X Y X Y`, USB-C D+/D−), the
+inner pad of one net gets a via straight out of the pad, the shallowest that leaves both neighbors an exit
+(straight, then at 45° away from it), and those exits are reserved; the net's other pad gets its own exit and via
+only when a neighbor's exit leaves the router no grid access to it (always adding it made the small nrfmicro
+board worse, with the D+/D− connections walled in by the extra copper). The router then joins one net around
+the via and the other on another layer, as such receptacles are routed by hand; unused fanout is dropped as
+before. **Budget:** failing searches visited everything reachable first (on glasgow-revD1, 38 of the first
+iteration's 52 million node visits and 44 of legalization's 46 million). Two exact tests skip them: static
+reachability (union-find components per rule profile over the points every net may use, merged per net with
+the points only it may use; negotiation passes other nets' routing, so separated ends have no path) and, for
+searches that may not share, a backward visit from the targets through the static maps and around other nets'
+routing, up to 50 000 nodes, that proves them walled in. Both only ever join more than the search reaches (no
+bend limit, no own-via spacing), so no result changes; the generated-board benchmark is identical. The
+present-congestion factor is capped at 1000 (VPR's `max_pres_fac`): beyond it, the searches of the few nets
+still in conflict at the end of a long negotiation only visit more of the board. The A* queue became a 4-ary
+heap of (cost, node) keys, popping in exactly the order of the binary heap it replaces.
+Tried and dropped: a weighted heuristic in negotiation (1.2–1.5) and a search region around each connection (fewer
+node visits only where the searches flood, no completion gain), stopping negotiation at fewer iterations or on
+stagnation (completion fell on corne-cherry and glasgow-revC3: the iterations help), a slower present-factor
+schedule or a larger history factor (worse on nrfmicro), and windows of nets routed in their sequential order
+with speculative parallel searches validated by the area each search read (exactly sequential results for any
+thread count, but negotiation converged far slower than with today's batches of nets with disjoint regions, 3–8×
+the time on the generated boards). Scoped custom rules (tinytapeout-demo's 0.16 mm clearance inside its QFN-80
+courtyard, which most of its remaining failures need) are not applied by the router yet.
+*Why:* the corpus failures were measured, not guessed: the walled-in pads were a sampling artifact, the USB-C
+crossover a topological constraint that one via resolves, and the budget went to searches whose failure can be
+proven cheaply; each change is exact or checked exactly, so DRC stays clean and the benchmark baseline did not
+move. corne-cherry 91.8 % → 99.1 %, glasgow-revD1 92.5 % → 93.7 %, tinytapeout-demo 81.1 % → 83.2 % (ROUTER.md).
+
 ## Open questions
 
 

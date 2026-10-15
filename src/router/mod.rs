@@ -45,6 +45,7 @@
 //! Deterministic for a given input, options and seed (unless the time budget cuts it short).
 
 mod arcs;
+mod components;
 mod engine;
 mod expansion;
 mod fanout;
@@ -1108,6 +1109,9 @@ fn tracks_length(tracks: &[Track]) -> Nm {
     Nm(tracks.iter().map(|t| geo_board::track_length(t).0 as f64).sum::<f64>().round() as i64)
 }
 
+/// Largest present-congestion factor of negotiation (as VPR's `max_pres_fac`).
+const PRES_MAX: f32 = 1000.0;
+
 /// Default largest arc radius with `RouteOptions::arcs` (nm).
 const ARC_RADIUS: f64 = 1_000_000.0;
 
@@ -1265,6 +1269,7 @@ fn route_once(
         with_fanout = q;
         &with_fanout
     };
+    (hooks.progress)(0, None, "board");
     let items = geo_board::copper_items(p);
     let isl = geo_board::islands(&items);
     let mut rb = RouterBoard::build(p, &items, &isl);
@@ -1277,6 +1282,7 @@ fn route_once(
         return Err(RouteError::Cancelled);
     }
 
+    (hooks.progress)(0, None, "grid");
     // Grid.
     let mut active = vec![false; rb.profiles.len()];
     for r in &routes {
@@ -1297,6 +1303,7 @@ fn route_once(
     let mut sc = eng.scratch();
     let pool: std::sync::Mutex<Vec<Scratch>> = std::sync::Mutex::new(Vec::new());
 
+    (hooks.progress)(0, None, "access");
     // Static index for access stubs and exact checks.
     let reach = reach(&rb);
     let mut index = Index::new(rb.bbox.expand(pitch * 4.0), (pitch * 8.0).max(500_000.0), reach);
@@ -1316,6 +1323,7 @@ fn route_once(
         }
     }
 
+    (hooks.progress)(0, None, "negotiation");
     let mut stats = RouteStats { grid: Nm(pitch as i64), ..Default::default() };
     let max_iter = opts.max_iterations.unwrap_or(match opts.effort {
         Effort::Low => 10,
@@ -1390,7 +1398,9 @@ fn route_once(
         for (c, _) in &points {
             eng.add_history(*c, hist_fac);
         }
-        pres *= 1.6;
+        // Capped: beyond it, sharing is already prohibitive and a higher factor only makes
+        // the searches of the nets still in conflict visit ever more of the board.
+        pres = (pres * 1.6).min(PRES_MAX);
         // Reroute nets with overuse and nets whose routes are near an overused point.
         let mut set: BTreeSet<usize> = BTreeSet::new();
         for (c, ri) in &points {
@@ -1450,6 +1460,7 @@ fn route_once(
         ripped.push(worst);
     }
     ripped.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length).then(a.cmp(b)));
+    (hooks.progress)(0, None, &format!("legalizing {} nets", ripped.len()));
     for ri in ripped {
         if (hooks.cancelled)() {
             return Err(RouteError::Cancelled);
@@ -1469,6 +1480,7 @@ fn route_once(
             }
         }
     }
+    (hooks.progress)(0, None, "rip-up and retry");
     // ---- rip-up and retry: a net that still fails takes the room of the nets in its way,
     // which are routed again around it; kept only when fewer connections fail overall ----
     let mut sideways = SIDEWAYS;
@@ -1529,6 +1541,7 @@ fn route_once(
             break;
         }
     }
+    (hooks.progress)(0, None, "gridless pass");
     // ---- `auto`: what the grid left unrouted, by exact gridless searches ----
     if search == SearchKind::Auto {
         for r in routes.iter_mut() {
@@ -1554,6 +1567,7 @@ fn route_once(
             }
         }
     }
+    (hooks.progress)(0, None, "gridless rip-up and retry");
     // ---- gridless rip-up and retry: a failed connection takes a path that keeps every static
     // rule but may run through the routing of a few other nets (a probe), and those nets are
     // routed again around it; kept only when fewer connections fail ----
@@ -1641,6 +1655,7 @@ fn route_once(
             }
         }
     }
+    (hooks.progress)(0, None, "via minimization");
     // ---- via minimization: nets with vias are routed again with dear vias ----
     if !stop() {
         stats.vias_removed += minimize_vias(&mut eng, &mut sc, &mut routes, &stop, hooks)?;
@@ -2064,9 +2079,15 @@ fn fanout_items(
     for (i, ob) in rb.obstacles.iter().enumerate() {
         index.insert(Item::Static(i as u32), ob.bbox);
     }
-    let bones = fanout::plan(&rb, &routes, slots, &mut index, only);
-    // Escapes end on cells from which the router can move outwards (static maps).
+    let mut bones = fanout::plan(&rb, &routes, slots, &mut index, only);
     let grid = make_grid(&rb, &routes, opts);
+    let cross = if only.is_none() {
+        fanout::crossovers(&rb, &routes, slots, &grid, &mut index)
+    } else {
+        fanout::Crossovers::default()
+    };
+    bones.extend(cross.bones.iter().cloned());
+    // Escapes end on cells from which the router can move outwards (static maps).
     let mut active = vec![false; rb.profiles.len()];
     for r in &routes {
         active[r.prof] = true;
@@ -2079,7 +2100,8 @@ fn fanout_items(
             .into_iter()
             .all(|(i, j)| i >= 0 && j >= 0 && i < grid.dw() && j < grid.dh() && grid::ok(map[grid.didx(i, j)], net))
     };
-    let escapes = fanout::escape(&rb, &routes, slots, &grid, &mut index, only, &open);
+    let mut escapes = fanout::escape(&rb, &routes, slots, &grid, &mut index, only, &open, &cross);
+    escapes.splice(0..0, cross.exits);
     let (first, last) = (rb.layer_names[0].clone(), rb.layer_names[rb.layer_names.len() - 1].clone());
     let track = |net: u32, layer: usize, a: P, b: P| {
         let key = rb.profile(net).key;
@@ -2207,9 +2229,83 @@ fn make_grid(rb: &RouterBoard, routes: &[NetRoute], opts: &RouteOptions) -> grid
             })
             .fold(f64::MAX, f64::min)
     });
-    let pitch = if pitch.is_finite() { pitch.round().max(25_000.0) } else { 225_000.0 };
+    let mut pitch = if pitch.is_finite() { pitch.round().max(25_000.0) } else { 225_000.0 };
+    // A grid commensurate with the dominant fine pad pitch: every pad of such a row then sits
+    // at the same offset from the grid, so their escapes stay a pad pitch apart (with a drifting
+    // offset, two neighbors end up one grid line apart somewhere along each row).
+    if opts.grid.is_none()
+        && let Some(snapped) = snap_pitch(rb, routes, pitch)
+    {
+        pitch = snapped;
+    }
     let (offx, offy) = alignment(rb, routes, pitch);
     grid::Grid::new(rb.bbox, pitch, offx, offy)
+}
+
+/// Largest coarsening of the grid pitch that snaps it to a fine pad pitch (factor).
+const GRID_SNAP: f64 = 1.06;
+
+/// The grid pitch snapped to a fine pad pitch: `p / 2m` for the pad pitch `p` the most pads
+/// share (ties: the smaller) among those for which such a pitch lies in `[g, g × GRID_SNAP]`.
+/// Pad pitches are center distances (rounded to µm) from a routed single-layer pad to its
+/// nearest pad of the same component, counted when no track of the net passes between the two
+/// (fine-pitch rows); at least 8 pads must share one.
+fn snap_pitch(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> Option<f64> {
+    let mut by_comp: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (ti, t) in rb.terminals.iter().enumerate() {
+        if let Some((comp, _)) = t.label.split_once('.')
+            && t.pad
+        {
+            by_comp.entry(comp).or_default().push(ti);
+        }
+    }
+    let mut routed = vec![false; rb.terminals.len()];
+    for r in routes {
+        for isl in &r.islands {
+            for &t in &isl.terms {
+                routed[t] = true;
+            }
+        }
+    }
+    let mut count: BTreeMap<i64, usize> = BTreeMap::new();
+    // Rows of multi-pin parts only (as escapes): two-pad passives are no rows.
+    for terms in by_comp.values().filter(|t| t.len() >= 4) {
+        for &t in terms {
+            let term = &rb.terminals[t];
+            if !routed[t] || term.layers.count_ones() != 1 {
+                continue;
+            }
+            let Some((d, o)) = terms
+                .iter()
+                .filter(|&&o| o != t)
+                .map(|&o| (rb.terminals[o].at.dist(term.at), o))
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+            else {
+                continue;
+            };
+            let (a, b) = (term.shape.bbox(), rb.terminals[o].shape.bbox());
+            let (dx, dy) = ((term.at.x - rb.terminals[o].at.x).abs(), (term.at.y - rb.terminals[o].at.y).abs());
+            // Gap between the two pads along the line joining them (axis-aligned rows).
+            let gap = if dx >= dy {
+                dx - (a.max.x - a.min.x) / 2.0 - (b.max.x - b.min.x) / 2.0
+            } else {
+                dy - (a.max.y - a.min.y) / 2.0 - (b.max.y - b.min.y) / 2.0
+            };
+            let pr = rb.profile(term.net);
+            if gap < 2.0 * pr.hw + 2.0 * pr.c {
+                *count.entry((d / 1_000.0).round() as i64).or_default() += 1;
+            }
+        }
+    }
+    let snap = |p: f64| {
+        let m = (p / (2.0 * g)).floor();
+        (m >= 1.0 && p / (2.0 * m) <= g * GRID_SNAP).then(|| (p / (2.0 * m)).round())
+    };
+    count
+        .into_iter()
+        .filter(|&(um, n)| n >= 8 && snap(um as f64 * 1_000.0).is_some())
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+        .and_then(|(um, _)| snap(um as f64 * 1_000.0))
 }
 
 /// Grid offset aligning cell centers with as many routed pad centers as possible.

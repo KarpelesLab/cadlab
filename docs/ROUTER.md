@@ -62,7 +62,12 @@ other-net pads, tracks and vias with the larger of both nets' clearances, board 
 a *profile* (track width, clearance, via drill and diameter).
 
 **Grid.** Pitch = (track width + clearance) / 2 of the finest routed profile (option `grid` overrides), so two
-parallel tracks fit at two cells; the origin is shifted to put the most pad centers on cell centers. Maps are
+parallel tracks fit at two cells. When the pad pitch most fine-pitch rows share (at least 8 pads of multi-pin
+parts, no track between neighbors) is `2m` times a pitch at most 6 % coarser, the grid takes that pitch instead:
+every pad of such a row then sits at the same offset from the grid, so the escapes of neighbors stay a pad pitch
+apart (with a drifting offset, two neighbors end up one grid line apart somewhere along each row, and one of them
+is walled in: half the pads of corne-cherry's 0.4 mm QFNs had no escape at 0.195 mm). The origin is shifted to put
+the most pad centers on cell centers. Maps are
 sampled on the *double grid* (half pitch): even/even = cells, odd = midpoints of orthogonal and diagonal moves. A
 move is legal when its three samples are legal. Static obstacles are inflated by
 `δ = √(r² + s²/4) − r` (r: required distance, s: sample spacing, at most ~10 µm), which makes the sampling exact:
@@ -88,14 +93,22 @@ the shallowest such cell first so that neighbors stagger. Escapes are planned gr
 without one go first in another attempt (up to four), and the attempt with the most escapes is kept (on the STM32
 boards one LQFP-48 pad otherwise found every exit taken by its neighbors' escapes). Every stub and via is checked exactly against everything
 placed so far, including the router's own sampling margin between escapes, so the fanout is DRC-clean by
-construction. Fanout copper then counts as existing copper of its net for the run. In the output an escape is
+construction. *Crossover vias*: in a row of fine-pitch single-layer pads, two nets whose pads interleave tightly
+(`X Y X Y`, the D+/D− pairs of a USB-C receptacle) cannot both join their pads on that layer: whichever joins
+first walls in the other's inner pad. The inner pad of one of them gets a via straight out of the pad, the
+shallowest from which both its neighbors still leave the row (straight, then at 45° away from it, past it);
+those exits are reserved as escapes, and the net's other pad, beyond one of them, gets an exit of its own that
+keeps clear of it and ends in a via when the router could not reach it from a grid cell otherwise. The other net then joins its pads around the via on the pad layer, and this
+one joins its two vias on another layer (the way such receptacles are routed by hand). Fanout copper then counts
+as existing copper of its net for the run. In the output an escape is
 absorbed into the routed path that uses it (so post-processing smooths the junction); fanouts that end up joining
 their pad to nothing else are dropped.
 
 **Search.** Multi-source / multi-target A* over (layer, cell): 8 directions; costs: 1 per orthogonal step,
 √2·1.05 per diagonal step, 1.8 for orthogonal steps against the layer's preferred direction (horizontal on even,
 vertical on odd routing layers), 0.4 per 45° bend, 1.5 per 90° bend, sharper bends forbidden, 10 per through via;
-octile heuristic to the target's bounding box (weighted 1.3 at low effort). A net is routed as a tree: each
+octile heuristic to the target's bounding box (weighted 1.3 at low effort); the queue is a 4-ary heap of
+(cost, node) keys, popping in the same order as a binary heap would. A net is routed as a tree: each
 connection starts from everything already connected to its source island. A new via keeps `hole_to_hole` from the
 vias of the net's earlier wires.
 
@@ -103,7 +116,8 @@ vias of the net's earlier wires.
 the points where another net's track centerline or via center would violate clearance (exact for grid geometry,
 δ-inflated for off-grid stubs). Move cost = (base + history) × (1 + present × occupancy) + bend. Iteration 1
 routes every net (shortest ratsnest first); then every overused point gets +0.5 history, the present factor
-×1.6 (from 0.6), and the nets with overuse or near an overused point are ripped up and rerouted (order lightly
+×1.6 (from 0.6, capped at 1000 as VPR's `max_pres_fac`: beyond it sharing is prohibitive anyway, and a
+higher factor only makes the searches of the few nets still in conflict visit ever more of the board), and the nets with overuse or near an overused point are ripped up and rerouted (order lightly
 shuffled by the seeded RNG) until nothing is shared, the iteration budget is spent (10 / 40 / 120 by effort) or
 the best iteration is 12 iterations old. The best iteration is kept. **Legalization**: nets still conflicting are
 ripped (worst first) and rerouted with sharing forbidden. **Rip-up and retry**: for each connection still failing,
@@ -117,6 +131,18 @@ ripped and routed again without sharing, with vias four times as dear (40); the 
 fewer vias, no more failed connections, and is at most 10 % plus 8 grid steps per saved via longer. Other nets
 stay where they are, so the result is legal by construction. This saves 4–33 % of the vias for a few percent
 more track.
+
+**Searches that cannot succeed.** A search that fails visits everything it can reach from its sources first,
+often most of the board. Two exact tests skip them without changing any result (D57). *Static reachability*: per
+rule profile, the connected components of the grid graph over the points every net may use (union-find, once,
+on first use), merged per net with the points only it may use (near its own pads and copper); negotiation passes
+other nets' routing, so ends in different components have no path, and neither have the stricter searches. The
+graph ignores the bend limit and the spacing between a net's own vias, so it joins at least what the search
+reaches. *Pocket test* (searches that may not share, as in legalization and retries): everything from which a
+target can be entered is visited backwards from the targets, through the static maps and around other nets'
+routing, up to 50 000 nodes; when that runs out without meeting a source, the targets are walled in. On
+glasgow-revD1 the first iteration's failing searches were 38 of its 52 million node visits and legalization's
+44 of 46 million; both are gone.
 
 **Batches and threads.** Each iteration's nets are split into batches by level scheduling on their *regions*
 (terminal bounding box plus 1.5 mm and a quarter of its size): a net goes into the first batch after every batch
@@ -196,7 +222,9 @@ the free space of each layer instead of the grid:
 pad center out of the pad, in any of the eight directions on any routing layer, is legal against the other nets'
 pads and the static obstacles; typical of 0.4 mm QFNs and fine-pitch connectors with a 0.25 mm class width) is
 routed at the widest width that gets every such pad out, in 5 µm steps, not under the board's `min_track_width`,
-and at most the pad pitch minus the clearance so that two such tracks fit side by side out of neighboring pads.
+and at most the pad pitch minus the clearance so that two such tracks fit side by side out of neighboring pads
+(less the grid's sampling margin and the router's tolerances, so that two escapes ending on cells beside each
+other's tracks still clear them as the grid samples them).
 The net gets a profile of its own (its class profile with that width) for the whole run, so fanout, search and
 negotiation all work at it; at the end every straight segment of its new tracks is widened back to the class width
 wherever that keeps the clearance to everything else (exact checks, in route order). What stays narrower than the
@@ -590,7 +618,9 @@ With `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar` (and `JAVA_HOME` for the 
 `big-4l` is also routed by freerouting (external process on the exported DSN, `-mp 20 -mt 1`; the time includes
 the JVM start and file exchange) and imported through `route.import_ses`, then measured the same way.
 `CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results; `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search.
-`route_bench --corpus [names...]` re-routes the open-source corpus instead (below).
+`route_bench --corpus [names...]` re-routes the open-source corpus instead (below); there `CADLAB_BENCH_TRACE=1`
+prints a timeline of the router's phases and negotiation iterations, and `CADLAB_BENCH_NETS=a,b` routes only
+those nets.
 
 **Results** (release build, 16-core macOS development machine, freerouting 2.4.1 on Java 25). *M5* is the router
 at the start of M6, *phase 1* the first M6 version (fanout, batches, rip-up and retry), *phase 2* the second (escape
@@ -686,10 +716,36 @@ other than unrouted connections: 0 everywhere, before and after.
 | tinytapeout-demo | 4 | 404 → 399 | 57.2% | **78.7%** | neck-down out of the RP2040 and the fine-pitch connector J5; budget-bound |
 
 Connections count pads − 1 per net after fanout, so escapes and dog bones that join two pads of a net lower it
-slightly. What is left, by cause: budget (glasgow-revD1, cynthion and tinytapeout-demo end negotiation with
-overuse left), QFN pads boxed in by their neighbors' escapes and routes (corne, tinytapeout: the escapes are
-planned for the grid and a necked net still needs room beside each pad), pads no allowed width can leave
-(cynthion), and connections that the design does not route on the board (sweep).
+slightly. What was left then, by cause: budget (glasgow-revD1, cynthion and tinytapeout-demo ended negotiation
+with overuse left), QFN pads boxed in by their neighbors' escapes and routes (corne, tinytapeout), pads no
+allowed width can leave (cynthion), the USB-C D+/D− crossover (nrfmicro) and connections that the design does
+not route on the board (sweep).
+
+**Corpus re-route, D57** (same command; *before* is the version before D57 and *after* this one, run back to back
+on a shared 64-core Linux machine, so times are only indicative; DRC errors other than unrouted: 0 everywhere,
+before and after):
+
+| board | layers | connections | before | after | main change |
+|---|---|---|---|---|---|
+| nrfmicro | 2 | 85 | 97.6% | 97.6% | the D+/D− crossover routes (crossover vias); two other connections near the USB-C receptacle fail instead |
+| buspirate-flash-sop | 2 | 47 | 100% | 100% | |
+| buspirate-rs232 | 2 | 43 | 100% | 100% | |
+| buspirate5-rev10 | 4 | 479 | 99.8% | 99.6% | one more congestion failure (negotiation differs from the first iteration) |
+| lumenpnp-ringlight | 2 | 37 | 100% | 100% | |
+| lumenpnp-mobo | 4 | 461 | 99.1% | 99.3% | |
+| sweep-v2.2 | 2 | 43 | 93.0% | 93.0% | |
+| corne-cherry | 2 | 428 → 431 | 91.8% | **99.1%** | grid snapped to the 0.4 mm QFN pitch (0.195 → 0.2 mm): one RP2040 now sits on the grid and needs no escapes, the other gets 18 of its 25 (before: 41 of 53 and 37 of 52, every other pad walled in); crossover vias on both USB-C receptacles; capped present factor |
+| glasgow-revC3 | 4 | 740 | 97.2% | 97.3% | |
+| glasgow-revD1 | 6 | 1619 | 92.5% | **93.7%** | failing searches skipped (first iteration 12 → 6 s, legalization 10 → 2 s), more of the budget left to negotiation and retries |
+| cynthion | 4 | 693 | 96.0% | 96.1% | negotiation converges no further (4–6 nets in conflict for its last 20 iterations); what fails is around the ECP5 BGA and 8 resistor-array pads |
+| tinytapeout-demo | 4 | 359 → 351 | 81.1% | **83.2%** | no longer budget-bound (negotiation done at 16 s instead of 45 s) |
+
+What is left, by cause: the QFN-80 and the carrier connector J5 of tinytapeout-demo (45 of its 59 failures: pads of
+the 0.25 mm-clearance Power/Analog classes are only legal under the board's custom rules scoped to the QFN's
+courtyard, 0.16 mm for tracks, which the router does not apply: it routes with the net class clearance, so it
+finds no way out), budget (glasgow-revD1 still ends negotiation after about 9 iterations with overuse left;
+iterations are bound by the batches, about two nets each, so the threads hardly help), cynthion's BGA and
+resistor arrays, congestion on the small nrfmicro around its USB-C receptacle, and the split keyboard (sweep).
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).

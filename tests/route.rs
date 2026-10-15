@@ -970,3 +970,53 @@ fn neck_down_out_of_a_fine_pitch_qfn() {
     assert!(results[1].0 >= 70.0, "necked down, most pins get out: {results:?}");
     assert!(results[1].1 > 0 && results[1].2 > 0, "necked near the QFN, widened elsewhere: {results:?}");
 }
+
+/// A USB-C-like row of 0.5 mm-pitch pads (a shield pad above it) whose D+ and D− pads interleave
+/// (`D+ D− D+ D−`), both nets also going to a header below: on two layers one net must change
+/// layer under the row. The crossover planning gives the inner pad of one net a via with room
+/// for the other net's pads to get past it, and the net's other pad a via of its own.
+#[test]
+fn usb_c_crossover_routes() {
+    let r = Registry::with_builtins();
+    let mut pins = numbered_pins(8);
+    pins.as_array_mut().unwrap().push(json!({"number": "S1", "name": "SHIELD", "kind": "passive"}));
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    exec(
+        &r,
+        &mut s,
+        "footprint.create",
+        json!({
+            "name": "ROW8",
+            "pads": [{"number": "1", "at": ["-1.75mm", "0mm"], "size": ["0.3mm", "0.8mm"], "shape": "rect",
+                      "count": 8, "pitch": ["0.5mm", "0mm"]},
+                     {"number": "S1", "at": ["0mm", "1.1mm"], "size": ["4.4mm", "0.6mm"], "shape": "rect"}]
+        }),
+    );
+    exec(&r, &mut s, "part.create", json!({"id": "ROW8", "category": "connector", "footprint": "ROW8", "pins": pins}));
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "HDR2", "category": "connector", "package": "PinHeader 1x2", "pins": numbered_pins(2)}),
+    );
+    exec(&r, &mut s, "circuit.add", json!({"part": "ROW8", "refdes": "J1"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "HDR2", "refdes": "J2"}));
+    exec(&r, &mut s, "net.connect", json!({"net": "DP", "pins": ["J1.3", "J1.5", "J2.1"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "DM", "pins": ["J1.4", "J1.6", "J2.2"]}));
+    // The shield and the outer pins on a net of their own, already joined (the shield is part of
+    // the footprint's copper on real receptacles).
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["J1.S1"]}));
+    // USB tracks of 0.2 mm at 0.2 mm clearance, as on small USB-C boards.
+    exec(&r, &mut s, "netclass.set", json!({"name": "usb", "track_width": "0.2mm", "clearance": "0.2mm"}));
+    exec(&r, &mut s, "net.set", json!({"nets": ["DP", "DM"], "class": "usb"}));
+    exec(&r, &mut s, "board.outline", json!({"width": "16mm", "height": "12mm"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J1", "at": ["8mm", "10mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J2", "at": ["8mm", "4mm"], "rotation": 90}));
+    let o = exec(&r, &mut s, "route.all", json!({}));
+    report("usb-c crossover", &o, 0);
+    render(&r, &mut s, "usb_c_crossover");
+    assert_eq!(completion(&o), 100.0, "{o}");
+    assert!(o["output"]["stats"]["fanout_vias"].as_u64().unwrap() >= 1, "{o}");
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+}

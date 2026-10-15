@@ -184,6 +184,340 @@ pub(crate) fn plan(
     out
 }
 
+/// Depth step (nm) of the crossover via search.
+const CROSS_STEP: f64 = 25_000.0;
+/// Deepest crossover via (nm beyond the pad's end).
+const CROSS_DEPTH: f64 = 3_000_000.0;
+
+/// Crossover vias: in a row of fine-pitch single-layer pads (no track passes between
+/// neighbors), two nets whose pads interleave (`X Y X Y`, the D+/D− pairs of a USB-C
+/// receptacle) cannot both join their pads on that layer: whichever joins first walls in the
+/// other's inner pad. This gives the inner pad of one of the two nets a via straight out of
+/// the pad, deep enough that both its neighbors can still leave the row (straight, then at 45°
+/// away from the via, past it), so the other net can loop around the via on the pad layer and
+/// this one joins its pads on another layer. The neighbors' exits are reserved as escapes
+/// (other nets' routing would otherwise take them), and the net's other pad of the crossing,
+/// when a neighbor's exit leaves the router no grid access to it, gets an exit and a via too. The shallowest legal via of the two
+/// candidate pads wins (ties: net, label). Checked exactly like the dog bones; the router
+/// treats the result as existing copper, and drops it again if nothing uses it.
+pub(crate) fn crossovers(
+    rb: &RouterBoard,
+    routes: &[NetRoute],
+    slots: &[usize],
+    grid: &Grid,
+    index: &mut Index,
+) -> Crossovers {
+    if slots.len() < 2 {
+        return Crossovers::default();
+    }
+    let wanted = wanted(rb, routes);
+    let mut by_comp: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (ti, t) in rb.terminals.iter().enumerate() {
+        if let Some((comp, _)) = t.label.split_once('.')
+            && t.pad
+        {
+            by_comp.entry(comp).or_default().push(ti);
+        }
+    }
+    // Candidates: (depth in µm, net, label, terminal, layer, axis, row, index in it, crossing net).
+    #[allow(clippy::type_complexity)]
+    let mut cands: Vec<(i64, u32, String, usize, usize, P, Vec<(f64, usize)>, usize, u32)> = Vec::new();
+    for terms in by_comp.values() {
+        if terms.len() < 4 {
+            continue;
+        }
+        let n = terms.len() as f64;
+        let centroid = P::new(
+            terms.iter().map(|&t| rb.terminals[t].at.x).sum::<f64>() / n,
+            terms.iter().map(|&t| rb.terminals[t].at.y).sum::<f64>() / n,
+        );
+        // Rows: (layer, axis, position along the axis in 10 µm) → (lateral position, terminal).
+        #[allow(clippy::type_complexity)]
+        let mut rows: BTreeMap<(usize, i64, i64, i64), Vec<(f64, usize)>> = BTreeMap::new();
+        for &t in terms {
+            let term = &rb.terminals[t];
+            if term.layers.count_ones() != 1 {
+                continue;
+            }
+            let layer = term.layers.trailing_zeros() as usize;
+            if !slots.contains(&layer) {
+                continue;
+            }
+            let b = term.shape.bbox();
+            let (w, h) = (b.max.x - b.min.x, b.max.y - b.min.y);
+            let axis = if w >= 1.5 * h {
+                P::new(sign(term.at.x - centroid.x), 0.0)
+            } else if h >= 1.5 * w {
+                P::new(0.0, sign(term.at.y - centroid.y))
+            } else {
+                continue;
+            };
+            if axis.x == 0.0 && axis.y == 0.0 {
+                continue;
+            }
+            let along = term.at.x * axis.x + term.at.y * axis.y;
+            let lat = term.at.x * -axis.y + term.at.y * axis.x;
+            let key = (layer, axis.x as i64, axis.y as i64, (along / 10_000.0).round() as i64);
+            rows.entry(key).or_default().push((lat, t));
+        }
+        for ((layer, ax, ay, _), mut row) in rows {
+            if row.len() < 4 {
+                continue;
+            }
+            row.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let axis = P::new(ax as f64, ay as f64);
+            let net_at = |i: usize| rb.terminals[row[i].1].net;
+            let isl_at = |i: usize| rb.terminals[row[i].1].island;
+            // Lateral half size of a pad.
+            let half = |i: usize| {
+                let bb = rb.terminals[row[i].1].shape.bbox();
+                ((bb.max.x - bb.min.x) * axis.y.abs() + (bb.max.y - bb.min.y) * axis.x.abs()) / 2.0
+            };
+            let gap = |i: usize, j: usize| (row[j].0 - row[i].0).abs() - half(i) - half(j);
+            for k in 1..row.len() - 1 {
+                let t = row[k].1;
+                let x = net_at(k);
+                if !wanted[t] || net_at(k - 1) == x || net_at(k + 1) == x {
+                    continue;
+                }
+                // Boxed: no track passes between the pad and either neighbor.
+                let pr = rb.profile(x);
+                if gap(k - 1, k) >= 2.0 * pr.hw + 2.0 * pr.c || gap(k, k + 1) >= 2.0 * pr.hw + 2.0 * pr.c {
+                    continue;
+                }
+                // Tightly interleaved (X Y X Y): the next pad but one is X's (another island),
+                // and the pads on both sides of this one are a net Y's (two islands), so whichever
+                // net joins first on this layer walls the other in.
+                let mut crossing: Option<u32> = None;
+                for (i, j, l) in [(k.wrapping_sub(2), k - 1, k + 1), (k + 2, k + 1, k - 1)] {
+                    if i >= row.len() || net_at(i) != x || isl_at(i) == isl_at(k) {
+                        continue;
+                    }
+                    let y = net_at(j);
+                    if y != x && net_at(l) == y && isl_at(l) != isl_at(j) && wanted[row[j].1] {
+                        crossing = Some(crossing.map_or(y, |c: u32| c.min(y)));
+                    }
+                }
+                let Some(y) = crossing else { continue };
+                if let Some((d, _, _)) = crossover_via(rb, index, &row, k, layer, axis) {
+                    cands.push((d, x, rb.terminals[t].label.clone(), t, layer, axis, row.clone(), k, y));
+                }
+            }
+        }
+    }
+    cands.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
+    let mut done: Vec<(u32, u32)> = Vec::new();
+    let mut out = Crossovers::default();
+    for (_, x, label, t, layer, axis, row, k, y) in cands {
+        let pair = (x.min(y), x.max(y));
+        let taken = [t, row[k - 1].1, row[k + 1].1].iter().any(|n| out.pads.contains(n));
+        if done.contains(&pair) || taken {
+            continue;
+        }
+        // Planned again with the crossovers placed so far.
+        let Some((_, v, exits)) = crossover_via(rb, index, &row, k, layer, axis) else { continue };
+        let at = rb.terminals[t].at;
+        let pr = rb.profile(x);
+        index.insert(Item::Seg { net: x, layer: layer as u8, a: at, b: v }, BoxF::of2(at, v).expand(pr.hw));
+        index.insert(Item::Via { net: x, at: v }, BoxF::of2(v, v).expand(pr.rv));
+        done.push(pair);
+        out.pads.push(t);
+        out.bones.push(DogBone { net: x, layer, pad: at, via: v, label, small: None });
+        for (n, pts) in exits {
+            let term = &rb.terminals[n];
+            insert_escape(rb, index, term.net, layer, &pts);
+            out.pads.push(n);
+            out.exits.push(Escape { net: term.net, layer, pts, label: term.label.clone() });
+        }
+        // The net's other pad of the crossing, beyond a neighbor's exit: its own via, so the
+        // two join on another layer under the other net's loop.
+        let partner = [k.wrapping_sub(2), k + 2].into_iter().find(|&i| {
+            i < row.len() && rb.terminals[row[i].1].net == x && rb.terminals[row[i].1].island != rb.terminals[t].island
+        });
+        // Its exit keeps clear of the exit of the neighbor between them, which goes on past the
+        // crossover via.
+        let between = partner.and_then(|i| {
+            let n = rb.terminals[row[(i + k) / 2].1].label.as_str();
+            out.exits.iter().rev().find(|e| e.label == n).map(|e| (e.net, *e.pts.last().expect("exit")))
+        });
+        // Only when the router could not reach it from a grid cell otherwise.
+        let partner = partner.filter(|&i| !grid_access(rb, index, grid, row[i].1, layer));
+        if let (Some(i), Some((nn, end))) = (partner, between)
+            && let Some((pts, pv)) = partner_exit(rb, index, row[i].1, layer, axis, nn, end)
+        {
+            let pt = &rb.terminals[row[i].1];
+            let bend = *pts.last().expect("exit");
+            insert_escape(rb, index, x, layer, &pts);
+            index.insert(Item::Seg { net: x, layer: layer as u8, a: bend, b: pv }, BoxF::of2(bend, pv).expand(pr.hw));
+            index.insert(Item::Via { net: x, at: pv }, BoxF::of2(pv, pv).expand(pr.rv));
+            out.pads.push(row[i].1);
+            if pts.len() > 1 {
+                out.exits.push(Escape { net: x, layer, pts, label: pt.label.clone() });
+            }
+            out.bones.push(DogBone { net: x, layer, pad: bend, via: pv, label: pt.label.clone(), small: None });
+        }
+    }
+    out
+}
+
+/// Whether pad `t` has a grid cell within the router's access reach (1.6 pitches) joined to its
+/// center by a legal straight stub on `layer`, as the router's pad access looks for (the cell
+/// legal with the grid's sampling margin).
+fn grid_access(rb: &RouterBoard, index: &Index, grid: &Grid, t: usize, layer: usize) -> bool {
+    let term = &rb.terminals[t];
+    let ck = Checker { rb, index };
+    let Some((x0, y0, x1, y1)) = grid.crange(&term.shape.bbox().expand(1.6 * grid.g)) else { return false };
+    // The cell itself as the grid samples it: with the sampling margin of its static maps.
+    let pr = rb.profile(term.net);
+    let margin = delta(pr.hw + pr.c, grid.g * std::f64::consts::SQRT_2 / 2.0);
+    (y0..=y1).any(|y| {
+        (x0..=x1).any(|x| {
+            let c = grid.cell(x, y);
+            ck.seg_margin(layer, c, c, term.net, margin).is_none() && ck.seg(layer, term.at, c, term.net).is_none()
+        })
+    })
+}
+
+/// The exit and via of pad `t`, the other pad of the crossover via's net: straight out along
+/// `axis`, then at 45° away from the exit (of net `nn`, ending at `end`) between them until
+/// a track or via of the net keeps clear of that exit's line, then straight on to the first
+/// legal via. Returns the exit's points (from the pad center) and the via; exact checks.
+fn partner_exit(
+    rb: &RouterBoard,
+    index: &Index,
+    t: usize,
+    layer: usize,
+    axis: P,
+    nn: u32,
+    end: P,
+) -> Option<(Vec<P>, P)> {
+    let term = &rb.terminals[t];
+    let (pr, pn) = (rb.profile(term.net), rb.profile(nn));
+    let ck = Checker { rb, index };
+    let lat = P::new(-axis.y, axis.x);
+    let off = (term.at.x - end.x) * lat.x + (term.at.y - end.y) * lat.y;
+    let u = if off >= 0.0 { lat } else { P::new(-lat.x, -lat.y) };
+    let need = (pn.hw + pr.hw.max(pr.rv) + pr.c.max(pn.c) + 2.0 * TOL - off.abs()).max(0.0);
+    let steps = (CROSS_DEPTH / CROSS_STEP).round() as i64;
+    for i in 0..=steps {
+        let t0 = i as f64 * CROSS_STEP;
+        let p1 = P::new(term.at.x + axis.x * t0, term.at.y + axis.y * t0);
+        let p2 = P::new(p1.x + (axis.x + u.x) * need, p1.y + (axis.y + u.y) * need);
+        let mut pts = vec![term.at, p1, p2];
+        pts.dedup_by(|a, b| a.dist(*b) < 1.0);
+        if !pts.windows(2).all(|s| ck.seg(layer, s[0], s[1], term.net).is_none()) {
+            continue;
+        }
+        for j in 0..=steps {
+            let d = j as f64 * CROSS_STEP;
+            let v = P::new(p2.x + axis.x * d, p2.y + axis.y * d);
+            if ck.via(v, term.net, None).is_none() && ck.seg(layer, p2, v, term.net).is_none() {
+                return Some((pts, v));
+            }
+        }
+    }
+    None
+}
+
+/// Result of [`crossovers`].
+#[derive(Default)]
+pub(crate) struct Crossovers {
+    /// The vias, as dog bones.
+    pub bones: Vec<DogBone>,
+    /// The reserved exits of the vias' row neighbors.
+    pub exits: Vec<Escape>,
+    /// Terminals with a via or an exit (no escape is planned for them).
+    pub pads: Vec<usize>,
+}
+
+/// An exit of a crossover via's neighbor: (terminal, points from the pad center).
+type Exit = (usize, Vec<P>);
+
+/// The shallowest via straight out of pad `row[k]` (along `axis`) that is legal and leaves
+/// both row neighbors an exit: (depth in µm, via center, the exits).
+fn crossover_via(
+    rb: &RouterBoard,
+    index: &mut Index,
+    row: &[(f64, usize)],
+    k: usize,
+    layer: usize,
+    axis: P,
+) -> Option<(i64, P, Vec<Exit>)> {
+    let term = &rb.terminals[row[k].1];
+    let (net, at) = (term.net, term.at);
+    let pr = rb.profile(net);
+    let b = term.shape.bbox();
+    let half = ((b.max.x - b.min.x) * axis.x.abs() + (b.max.y - b.min.y) * axis.y.abs()) / 2.0;
+    let mut d = half;
+    while d <= half + CROSS_DEPTH {
+        let v = P::new(at.x + axis.x * d, at.y + axis.y * d);
+        let legal = {
+            let ck = Checker { rb, index };
+            ck.via(v, net, None).is_none() && ck.seg(layer, at, v, net).is_none()
+        };
+        if legal {
+            let mut ids = vec![
+                index.insert(Item::Seg { net, layer: layer as u8, a: at, b: v }, BoxF::of2(at, v).expand(pr.hw)),
+                index.insert(Item::Via { net, at: v }, BoxF::of2(v, v).expand(pr.rv)),
+            ];
+            let mut exits = Vec::new();
+            for j in [k - 1, k + 1] {
+                let n = row[j].1;
+                let Some(pts) = neighbor_exit(rb, index, n, layer, axis, at, d, pr.rv) else { break };
+                ids.extend(insert_escape(rb, index, rb.terminals[n].net, layer, &pts));
+                exits.push((n, pts));
+            }
+            for id in ids {
+                index.remove(id);
+            }
+            if exits.len() == 2 {
+                return Some(((d / 1_000.0).round() as i64, v, exits));
+            }
+        }
+        d += CROSS_STEP;
+    }
+    None
+}
+
+/// An exit for pad `t` out of its row past a via of radius `rv` at `depth` along `axis` from
+/// `from`: straight out, then at 45° away from the via until it clears it, then straight on to
+/// the via's depth (beyond it a track can keep turning away); exact checks against `index`.
+#[allow(clippy::too_many_arguments)]
+fn neighbor_exit(
+    rb: &RouterBoard,
+    index: &Index,
+    t: usize,
+    layer: usize,
+    axis: P,
+    from: P,
+    depth: f64,
+    rv: f64,
+) -> Option<Vec<P>> {
+    let term = &rb.terminals[t];
+    let pr = rb.profile(term.net);
+    let ck = Checker { rb, index };
+    let lat = P::new(-axis.y, axis.x);
+    let off = (term.at.x - from.x) * lat.x + (term.at.y - from.y) * lat.y;
+    let u = if off >= 0.0 { lat } else { P::new(-lat.x, -lat.y) };
+    let need = (rv + pr.hw + pr.c + 2.0 * TOL - off.abs()).max(0.0);
+    let base = (term.at.x - from.x) * axis.x + (term.at.y - from.y) * axis.y;
+    let end = depth - base;
+    let mut t0 = 0.0;
+    while t0 + need <= end {
+        let p1 = P::new(term.at.x + axis.x * t0, term.at.y + axis.y * t0);
+        let p2 = P::new(p1.x + (axis.x + u.x) * need, p1.y + (axis.y + u.y) * need);
+        let rest = end - t0 - need;
+        let p3 = P::new(p2.x + axis.x * rest, p2.y + axis.y * rest);
+        let mut pts = vec![term.at, p1, p2, p3];
+        pts.dedup_by(|a, b| a.dist(*b) < 1.0);
+        if pts.len() > 1 && pts.windows(2).all(|s| ck.seg(layer, s[0], s[1], term.net).is_none()) {
+            return Some(pts);
+        }
+        t0 += CROSS_STEP;
+    }
+    None
+}
+
 /// A planned escape: a track from a fine-pitch pad center straight out along the pad, then at
 /// 45° onto a grid cell.
 #[derive(Clone, Debug)]
@@ -204,7 +538,9 @@ pub(crate) struct Escape {
 /// reach such pads with slanted stubs that clip the neighbors. Each pad gets the shallowest end
 /// cell beyond the pad that is legal (checked exactly against everything placed so far, and
 /// clear of the other escapes' halos as the router rasterizes them) and from which the router
-/// can move outwards (`open(net, layer, cell, step)`).
+/// can move outwards (`open(net, layer, cell, step)`). The pads of the crossovers already
+/// planned (`prior`) are left out, and the new escapes keep apart from their exits.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn escape(
     rb: &RouterBoard,
     routes: &[NetRoute],
@@ -213,6 +549,7 @@ pub(crate) fn escape(
     index: &mut Index,
     only: Option<&[String]>,
     open: &dyn Fn(u32, usize, (i32, i32), (i32, i32)) -> bool,
+    prior: &Crossovers,
 ) -> Vec<Escape> {
     let wanted = wanted(rb, routes);
     let mut by_comp: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
@@ -225,7 +562,8 @@ pub(crate) fn escape(
         }
     }
     let g = grid.g;
-    let mut out = Vec::new();
+    // The crossover exits first: new escapes keep apart from them too.
+    let mut out: Vec<Escape> = prior.exits.clone();
     for terms in by_comp.into_values() {
         if terms.len() < 4 {
             continue;
@@ -242,7 +580,7 @@ pub(crate) fn escape(
         let mut needed = false;
         for &t in &terms {
             let term = &rb.terminals[t];
-            if !wanted[t] || term.layers.count_ones() != 1 {
+            if !wanted[t] || term.layers.count_ones() != 1 || prior.pads.contains(&t) {
                 continue;
             }
             let layer = term.layers.trailing_zeros() as usize;
@@ -318,7 +656,7 @@ pub(crate) fn escape(
         }
         out.extend(best);
     }
-    out
+    out.split_off(prior.exits.len())
 }
 
 /// Adds an escape's segments to the index; returns their ids.
@@ -500,7 +838,12 @@ pub(crate) fn necks(rb: &RouterBoard, index: &Index, slots: &[usize], nets: &[u3
                 .filter(|&&o| o != t && rb.terminals[o].net != term.net)
                 .map(|&o| rb.terminals[o].at.dist(at))
                 .fold(f64::MAX, f64::min);
-            let cap = (pitch - pr.c - 2.0 * TOL).min(2.0 * pr.hw).max(min_w);
+            // Two necked tracks at the pad pitch must also clear each other as the grid samples
+            // them (escapes end on cells beside their neighbors'): keep the sampling margin of
+            // the finest grid such a width can give (pitch (w + c) / 2 ≤ half the pad pitch)
+            // and the router's tolerances.
+            let margin = delta(pitch, pitch * std::f64::consts::SQRT_2 / 4.0) + 3.0 * TOL;
+            let cap = (pitch - pr.c - 2.0 * TOL - margin).min(2.0 * pr.hw).max(min_w);
             let mut w = (cap / NECK_STEP).floor() * NECK_STEP;
             if w >= 2.0 * pr.hw {
                 w -= NECK_STEP;

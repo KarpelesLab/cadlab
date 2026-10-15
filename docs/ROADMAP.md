@@ -160,6 +160,8 @@ Details in [ROUTER.md](ROUTER.md).
       with disjoint regions, identical for any thread count
 - [x] Benchmark suite: completion rate, vias, wirelength, runtime vs freerouting
       (`cargo run --release --example route_bench`, results in ROUTER.md)
+- [x] Corpus completion pass: grid snapped to fine pad pitches, USB-C D+/D− crossover vias, failing searches
+      skipped by exact reachability tests, capped present factor (corne-cherry 91.8 % → 99.1 %, DECISIONS D57)
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 

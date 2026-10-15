@@ -13,6 +13,8 @@
 //! rips every track and via (zones stay), routes again and prints completion, vias, length, time
 //! and DRC errors per board, with the failed connections grouped by reason
 //! (`CADLAB_BENCH_VERBOSE=1` lists each one). The budget defaults to 60 s here.
+//! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
+//! `CADLAB_BENCH_NETS=a,b` routes only those nets.
 
 #[path = "../tests/common/routebench.rs"]
 mod routebench;
@@ -112,7 +114,20 @@ fn corpus(filters: &[String]) {
             ..Default::default()
         };
         let t = Instant::now();
-        let r = match router::route(&p, &Scope::All, &ropts, &Hooks::none()) {
+        // `CADLAB_BENCH_TRACE=1`: a timeline of the router's phases and iteration summaries.
+        let trace = std::env::var_os("CADLAB_BENCH_TRACE").is_some();
+        let progress = |_: u64, _: Option<u64>, msg: &str| {
+            if trace && !msg.contains(": routing ") && !msg.starts_with("gridless: ") {
+                eprintln!("  [{:7.2} s] {msg}", t.elapsed().as_secs_f64());
+            }
+        };
+        let hooks = Hooks { progress: &progress, cancelled: &|| false };
+        // `CADLAB_BENCH_NETS=a,b`: route only these nets.
+        let scope = match std::env::var("CADLAB_BENCH_NETS") {
+            Ok(v) => Scope::Nets(v.split(',').map(str::to_string).collect()),
+            Err(_) => Scope::All,
+        };
+        let r = match router::route(&p, &scope, &ropts, &hooks) {
             Ok(r) => r,
             Err(err) => {
                 eprintln!("{}: {err}", e.name);
