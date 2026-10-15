@@ -322,7 +322,7 @@ rectangle (air beyond an edge), so edge launches are modeled.
 
 | Item | Written as |
 |---|---|
-| Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. One `Material` per dielectric (`Epsilon` = εr; `Kappa` = 2π f₀ ε₀ εr tan δ when the dielectric has a `loss_tangent`, f₀ the excitation's center: losses are exact at f₀ and scale with frequency only approximately). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air (solder mask is not modeled) |
+| Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. One `Material` per dielectric (`Epsilon` = εr; `Kappa` = 2π f₀ ε₀ εr tan δ, f₀ the excitation's center; an unset tan δ is taken as 0.02, as in the loss calculations, and marked "assumed" in the XML comment: losses are exact at f₀ and scale with frequency only approximately). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air (solder mask is not modeled) |
 | Copper | One `Metal` (perfect conductor) per net: the union of its pads, tracks, vias, drawings and zone fills on each layer, clipped to the region. `copper: solid` (default): extruded through the copper thickness (`LinPoly`, or `Box` for rectangles); `sheet`: zero-thickness `Polygon`s with the copper left out of the stack. Polygons with holes (planes around antipads) are cut into hole-free pieces by vertical lines through each hole |
 | Vias, plated holes | Metal `Cylinder`s of the drill diameter between the outer surfaces of their first and last layers (slots: the slot outline extruded) |
 | Non-plated holes | Air (εr 1) cylinders through the board, above everything else |

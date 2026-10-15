@@ -916,7 +916,7 @@ rule written for the simpler case.
 First step of the full-wave stretch goal. `export.openems` writes a board region (from `nets`, `around` items
 or a `window`, plus a margin) as two files: `<name>.xml`, an `<openEMS>` document holding only the CSXCAD
 `<ContinuousStructure>` (one `Material` per dielectric with εr and, from the new optional
-`Dielectric::loss_tangent`, a conductivity κ = 2π f₀ ε₀ εr tan δ at the excitation's center; one perfect-
+`Dielectric::loss_tangent` (shared with the loss calculations of D52, 0.02 when unset), a conductivity κ = 2π f₀ ε₀ εr tan δ at the excitation's center; one perfect-
 conductor `Metal` per net with each layer's copper union clipped to the region, extruded through the copper
 thickness or as zero-thickness sheets; vias and plated holes as metal cylinders; non-plated holes as air) and
 its `<RectilinearGrid>`; and `<name>.py`, a driver that reads that geometry and adds what belongs to a run:
