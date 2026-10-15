@@ -121,6 +121,22 @@ pub struct PortSpec {
     pub length: Option<Nm>,
 }
 
+/// Solder mask over the outer copper layers, as the field solver's `mask` options: a layer of
+/// `thickness` over the laminate and `over_copper` over the copper (conformal, flat on top), open
+/// at pads with a mask opening.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskOptions {
+    /// Thickness over the laminate.
+    pub thickness: Nm,
+    /// Thickness over the copper (default: `thickness`).
+    pub over_copper: Option<Nm>,
+    /// Relative permittivity.
+    pub er: f64,
+    /// Loss tangent (frequency-independent: a Djordjevic–Sarkar model anchored at the
+    /// excitation's center in the solver, a conductivity there in the export).
+    pub loss_tangent: f64,
+}
+
 /// Export options (see `export.openems` for their meaning and defaults).
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -175,6 +191,8 @@ pub struct Options {
     /// Mesh lines at the microstrip ports' feed and reference planes (where the built-in solver
     /// feeds and measures).
     pub port_planes: bool,
+    /// Solder mask on both outer layers (none by default).
+    pub mask: Option<MaskOptions>,
 }
 
 impl Default for Options {
@@ -204,6 +222,7 @@ impl Default for Options {
             timesteps: 200_000,
             thirds: false,
             port_planes: false,
+            mask: None,
         }
     }
 }
@@ -330,8 +349,13 @@ fn stack(s: &Stackup, copper: CopperModel) -> (Vec<Layer>, Vec<Diel>, bool) {
     let (mut diel, mut assumed) = s.effective_dielectrics();
     if n == 1 {
         let t = Nm((s.thickness.0 - s.outer_copper.0).max(1));
-        diel =
-            vec![Dielectric { thickness: t, er: crate::model::board::DEFAULT_ER, loss_tangent: None, material: None }];
+        diel = vec![Dielectric {
+            thickness: t,
+            er: crate::model::board::DEFAULT_ER,
+            loss_tangent: None,
+            material: None,
+            ref_freq: None,
+        }];
         assumed = true;
     }
     let mut layers: Vec<Option<Layer>> = vec![None; n];
@@ -476,6 +500,20 @@ fn split(p: &Polygon, out: &mut Vec<Ring>, depth: u32) {
     }
 }
 
+/// Solder mask on one outer side (nm).
+pub(crate) struct MaskLayer {
+    /// Copper layer index (0: top, the last: bottom).
+    pub(crate) layer: usize,
+    /// Laminate surface and the mask's surface over it.
+    pub(crate) laminate: (i64, i64),
+    /// Copper outer surface and the mask's surface over the copper.
+    pub(crate) copper: (i64, i64),
+    /// The mask's outermost extent (z) and its innermost (the laminate or copper surface).
+    pub(crate) span: (i64, i64),
+    /// Pad openings (pad copper with a mask opening), clipped to the window.
+    pub(crate) openings: Vec<Polygon>,
+}
+
 /// A copper group: one net on one layer, clipped to the window.
 pub(crate) struct Copper {
     pub(crate) layer: usize,
@@ -541,6 +579,9 @@ pub(crate) struct Region {
     /// Gaussian pulse center and 20 dB half-bandwidth (Hz).
     pub(crate) f0: u64,
     pub(crate) fc: u64,
+    /// Solder mask per outer side, and its εr and tan δ.
+    pub(crate) masks: Vec<MaskLayer>,
+    pub(crate) mask_material: (f64, f64),
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
@@ -554,6 +595,8 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
         copper: &r.copper,
         holes: &r.holes,
         board: &r.board,
+        masks: &r.masks,
+        mask_material: r.mask_material,
         kappa_hz: r.f0,
         lines: [&r.lines[0], &r.lines[1], &r.lines[2]],
         window: r.window,
@@ -725,8 +768,12 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
     let min_xy = o.min_cell.map(|c| c.0).unwrap_or(res_sub / 20).max(1);
     let air = o.air.map(|a| a.0).unwrap_or((lambda0 / 4.0).round() as i64).max(0);
     let ratio = (o.grading_permille.max(1001) as f64) / 1000.0;
-    let z_lo = 0i64;
-    let z_hi = layers[0].top;
+    let masks = match &o.mask {
+        Some(m) => mask_layers(m, &layers, &pads, &wring)?,
+        None => Vec::new(),
+    };
+    let z_lo = masks.iter().map(|m| m.span.0.min(m.span.1)).fold(0i64, i64::min);
+    let z_hi = masks.iter().map(|m| m.span.0.max(m.span.1)).fold(layers[0].top, i64::max);
 
     // Mesh.
     let mut fx: Vec<Fixed> = Vec::new();
@@ -778,6 +825,9 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
     for d in &diels {
         fz.extend([Fixed::hard(d.bottom), Fixed::hard(d.top)]);
     }
+    for m in &masks {
+        fz.extend([Fixed::hard(m.laminate.1), Fixed::hard(m.copper.1)]);
+    }
     for port in &ports {
         for a in 0..2 {
             // With the thirds rule, the port's sides across the line are the copper's edges:
@@ -807,7 +857,8 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
     let ys = mesh::smooth(&mesh::merge(fy, window.min.y, window.max.y, min_xy), &|_, _| res_sub, ratio);
     let zmax = |a: i64, b: i64| -> i64 {
         if a >= z_lo && b <= z_hi {
-            // Inside the board: λ/N in the substrate, and at least four cells per dielectric.
+            // Inside the board (and its mask): λ/N in the substrate, and at least four cells
+            // per dielectric.
             let mid = a + (b - a) / 2;
             let t = diels.iter().find(|d| d.bottom <= mid && mid <= d.top).map_or(i64::MAX, |d| (d.top - d.bottom) / 4);
             res_sub.min(t.max(1))
@@ -875,8 +926,61 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
         nets,
         f0,
         fc,
+        masks,
+        mask_material: o.mask.as_ref().map_or((1.0, 0.0), |m| (m.er, m.loss_tangent)),
         diagnostics: diags,
     })
+}
+
+/// The solder mask on each outer side: over the laminate from its surface, over the copper from
+/// the copper's outer surface, open at pads with a mask opening on that side.
+fn mask_layers(m: &MaskOptions, layers: &[Layer], pads: &[PlacedPad], wring: &Ring) -> Result<Vec<MaskLayer>, Error> {
+    let (t, tc) = (m.thickness.0, m.over_copper.unwrap_or(m.thickness).0);
+    if t <= 0 || tc <= 0 {
+        return Err(Error::new(
+            "openems.bad_mask",
+            "the solder mask thicknesses must be positive",
+            "give `mask` (over the laminate) and `mask_copper` (over the copper) such as 20um",
+        ));
+    }
+    if m.er < 1.0 || !(0.0..1.0).contains(&m.loss_tangent) {
+        return Err(Error::new(
+            "openems.bad_mask",
+            "the solder mask needs εr ≥ 1 and 0 ≤ tan δ < 1",
+            "give `mask_er` (e.g. 3.8) and `mask_loss_tangent` (e.g. 0.025)",
+        ));
+    }
+    if layers.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let last = layers.len() - 1;
+    let mut out = Vec::new();
+    for (li, top) in [(0, true), (last, false)] {
+        let l = &layers[li];
+        let side = if top { crate::model::board::BoardSide::Top } else { crate::model::board::BoardSide::Bottom };
+        let dir = if top { 1 } else { -1 };
+        let (lam, cu) = if top { (l.bottom, l.top) } else { (l.top, l.bottom) };
+        let laminate = (lam, lam + dir * t);
+        let over = (cu, cu + dir * tc);
+        let outer = if top { laminate.1.max(over.1) } else { laminate.1.min(over.1) };
+        let polys: Vec<Polygon> = pads
+            .iter()
+            .filter(|p| p.layers.contains(&l.name) && p.mask_on(side))
+            .map(|p| p.shape_on(&l.name).clone())
+            .collect();
+        let openings = if polys.is_empty() {
+            Vec::new()
+        } else {
+            Boolean::new()
+                .subject(&polys, FillRule::NonZero)
+                .clip(wring, FillRule::NonZero)
+                .op(Op::Intersection)
+                .execute()
+                .unwrap_or_default()
+        };
+        out.push(MaskLayer { layer: li, laminate, copper: over, span: (lam, outer), openings });
+    }
+    Ok(out)
 }
 
 fn round_sig(v: f64, digits: i32) -> f64 {
@@ -1237,18 +1341,21 @@ mod tests {
                 er: Quantity::parse("4.1").unwrap(),
                 loss_tangent: None,
                 material: None,
+                ref_freq: None,
             },
             Dielectric {
                 thickness: Nm::from_um(1000),
                 er: Quantity::parse("4.5").unwrap(),
                 loss_tangent: None,
                 material: None,
+                ref_freq: None,
             },
             Dielectric {
                 thickness: Nm::from_um(200),
                 er: Quantity::parse("4.1").unwrap(),
                 loss_tangent: None,
                 material: None,
+                ref_freq: None,
             },
         ];
         let (l, d, assumed) = stack(&s, CopperModel::Solid);

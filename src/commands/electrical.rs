@@ -39,6 +39,18 @@ pub(crate) fn expect_unit(q: Quantity, unit: Unit, field: &str) -> Result<Quanti
     }
 }
 
+/// A reference frequency in Hz: `None` for 0 (no dispersion).
+pub(crate) fn frequency_or_zero(q: Quantity, field: &str) -> Result<Option<f64>, CommandError> {
+    let v = expect_unit(q, Unit::Hertz, field)?.to_f64();
+    if !(0.0..1e15).contains(&v) {
+        return Err(CommandError::invalid_args(
+            "value.out_of_range",
+            format!("`{field}` must be a frequency between 0 and 1 PHz"),
+        ));
+    }
+    Ok((v > 0.0).then_some(v))
+}
+
 /// A loss tangent: dimensionless, 0 ≤ tan δ < 1.
 fn loss_tangent_arg(q: Quantity, field: &str) -> Result<Quantity, CommandError> {
     let q = expect_unit(q, Unit::None, field)?;
@@ -115,6 +127,10 @@ pub struct DielectricInfo {
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::value::plain")]
     #[schemars(with = "Option<Quantity>")]
     pub loss_tangent: Option<Quantity>,
+    /// Frequency at which εr and tan δ are given, when set: the dielectric is dispersive
+    /// (Djordjevic–Sarkar).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_freq: Option<Quantity>,
 }
 
 /// The stackup, top to bottom.
@@ -154,6 +170,7 @@ fn stackup_info(p: &Project) -> StackupInfo {
             er: d.er,
             material: d.material.clone(),
             loss_tangent: d.loss_tangent,
+            ref_freq: d.ref_freq,
         })
         .collect();
     let layers_thickness =
@@ -198,11 +215,12 @@ fn stackup_text(o: &StackupInfo) -> String {
         lines.push(format!("{:<8} copper {}{}", c.name, c.thickness, model.unwrap_or_default()));
         if let Some(d) = o.dielectrics.get(i) {
             lines.push(format!(
-                "  gap {}  {} εr {}{}{}",
+                "  gap {}  {} εr {}{}{}{}",
                 d.gap,
                 d.thickness,
                 d.er,
                 d.loss_tangent.map(|t| format!(" tan δ {}", t.plain())).unwrap_or_default(),
+                d.ref_freq.map(|f| format!(" at {f} (Djordjevic–Sarkar)")).unwrap_or_default(),
                 d.material.as_ref().map(|m| format!("  {m}")).unwrap_or_default()
             ));
         }
@@ -350,6 +368,7 @@ impl Command for FabStackup {
                 er: d.er,
                 material: Some(d.material.clone()),
                 loss_tangent: None,
+                ref_freq: None,
             })
             .collect();
         let s = &mut ctx.project_mut()?.board_mut().stackup;
@@ -409,6 +428,12 @@ pub struct SetDielectric {
     /// Loss tangent (dissipation factor, tan δ) from the laminate datasheet ("0.02").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loss_tangent: Option<Quantity>,
+    /// Frequency at which `er` and `loss_tangent` are given ("1GHz", the datasheet's test
+    /// frequency): makes the dielectric dispersive (Djordjevic–Sarkar wideband Debye model:
+    /// εr falls slowly with frequency, tan δ stays nearly flat) in the loss calculations and the
+    /// full-wave solver. "0" clears it (constant εr and tan δ).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_freq: Option<Quantity>,
     /// Material, for information ("FR-4 7628"); empty clears.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
@@ -419,8 +444,7 @@ pub struct SetDielectric {
 
 impl Command for SetDielectric {
     const NAME: &'static str = "board.dielectric";
-    const SUMMARY: &'static str =
-        "Set a stackup dielectric (thickness, εr, loss tangent, material) for impedance and loss calculations";
+    const SUMMARY: &'static str = "Set a stackup dielectric (thickness, εr, loss tangent and its frequency, material) for impedance and loss calculations";
     const KIND: CommandKind = CommandKind::Mutation;
     type Output = StackupInfo;
 
@@ -464,6 +488,19 @@ impl Command for SetDielectric {
                 None => None,
             };
             let tan = self.loss_tangent.map(|t| loss_tangent_arg(t, "loss_tangent")).transpose()?;
+            let ref_freq = match self.ref_freq {
+                Some(f) => {
+                    let f = expect_unit(f, Unit::Hertz, "ref_freq")?;
+                    if f.to_f64() < 0.0 || f.to_f64() >= 1e15 {
+                        return Err(CommandError::invalid_args(
+                            "value.out_of_range",
+                            "`ref_freq` must be a frequency between 0 (clears it) and 1 PHz",
+                        ));
+                    }
+                    Some((f.to_f64() > 0.0).then_some(f))
+                }
+                None => None,
+            };
             let (mut diel, _) = s.effective_dielectrics();
             for (i, d) in diel.iter_mut().enumerate() {
                 if self.gap.is_some_and(|g| g != i + 1) {
@@ -477,6 +514,9 @@ impl Command for SetDielectric {
                 }
                 if let Some(t) = tan {
                     d.loss_tangent = Some(t);
+                }
+                if let Some(f) = ref_freq {
+                    d.ref_freq = f;
                 }
                 if let Some(m) = &self.material {
                     d.material = (!m.is_empty()).then(|| m.clone());
@@ -583,6 +623,7 @@ struct GeoArgs<'a> {
     broadside_gap: Option<Nm>,
     loss_tangent: Option<Quantity>,
     mask_loss_tangent: Option<Quantity>,
+    ref_freq: Option<Quantity>,
 }
 
 impl GeoArgs<'_> {
@@ -732,6 +773,8 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
         tan_d: crate::model::board::DEFAULT_LOSS_TANGENT.to_f64(),
         tan_d_split: None,
         tan_d_assumed: true,
+        ref_freq: None,
+        ref_freq2: None,
     });
     if let Some(m) = a.model {
         if m != g.model {
@@ -767,7 +810,7 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
                 "a broadside pair needs `broadside_gap` (or a `layer` whose next copper layer holds the second trace)",
             ));
         };
-        g.broadside = Some(Broadside { gap, er: g.er, layer: None, tan_d: g.tan_d });
+        g.broadside = Some(Broadside { gap, er: g.er, layer: None, tan_d: g.tan_d, ref_freq: g.ref_freq });
     }
     if let Some(e) = a.er2 {
         let e = permittivity(e, "er2")?;
@@ -787,6 +830,14 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
         g.tan_d_assumed = false;
         if let Some(b) = &mut g.broadside {
             b.tan_d = t;
+        }
+    }
+    if let Some(f) = a.ref_freq {
+        let f = frequency_or_zero(f, "ref_freq")?;
+        g.ref_freq = f;
+        g.ref_freq2 = f;
+        if let Some(b) = &mut g.broadside {
+            b.ref_freq = f;
         }
     }
     if g.h <= Nm::ZERO || g.t < Nm::ZERO || g.er < 1.0 {
@@ -1117,7 +1168,19 @@ fn loss_params(a: &LossArgs) -> Result<Option<LossParams>, CommandError> {
             format!("at most {MAX_FREQS} frequencies per calculation"),
         ));
     }
-    let sigma = match a.conductivity {
+    let (sigma, roughness) = conductor_args(a.conductivity, a.roughness, a.huray_radius, a.huray_ratio)?;
+    Ok(Some(LossParams { freqs, sigma, roughness, rough_in: (a.roughness, a.huray_radius, a.huray_ratio) }))
+}
+
+/// The copper's conductivity (default 58 MS/m) and roughness model from the shared arguments
+/// (`conductivity`, `roughness`, `huray_radius`, `huray_ratio`).
+pub(crate) fn conductor_args(
+    conductivity: Option<Quantity>,
+    roughness: Option<Nm>,
+    huray_radius: Option<Nm>,
+    huray_ratio: Option<Quantity>,
+) -> Result<(Quantity, loss::Roughness), CommandError> {
+    let sigma = match conductivity {
         Some(q) => {
             let q = match q.unit {
                 Unit::None | Unit::Siemens => q.with_unit(Unit::Siemens),
@@ -1133,7 +1196,7 @@ fn loss_params(a: &LossArgs) -> Result<Option<LossParams>, CommandError> {
         }
         None => sig(loss::COPPER_CONDUCTIVITY, 3, Unit::Siemens),
     };
-    let roughness = match (a.roughness, a.huray_radius, a.huray_ratio) {
+    let roughness = match (roughness, huray_radius, huray_ratio) {
         (None, None, None) => loss::Roughness::Smooth,
         (Some(r), None, None) => {
             if r < Nm::ZERO {
@@ -1165,7 +1228,7 @@ fn loss_params(a: &LossArgs) -> Result<Option<LossParams>, CommandError> {
             ));
         }
     };
-    Ok(Some(LossParams { freqs, sigma, roughness, rough_in: (a.roughness, a.huray_radius, a.huray_ratio) }))
+    Ok((sigma, roughness))
 }
 
 /// Losses at one frequency.
@@ -1229,6 +1292,10 @@ pub struct LossResult {
     /// Huray surface ratio.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub huray_ratio: Option<Quantity>,
+    /// Frequency at which εr and tan δ are given (Djordjevic–Sarkar dispersive dielectric),
+    /// when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_freq: Option<Quantity>,
     /// How the conductor loss was computed.
     pub conductor_method: String,
     /// How the dielectric loss was computed.
@@ -1249,7 +1316,8 @@ fn loss_matrices(r: &Resolved, w: Nm, gap: Option<Nm>) -> Result<(LineMatrices, 
     }
     match r.method {
         Solver::ClosedForm => {
-            let m = loss::closed_form(&r.g.geometry(), mm(w), r.g.tan_d).expect("thickness checked");
+            let m = loss::closed_form_dispersive(&r.g.geometry(), mm(w), r.g.tan_d, r.g.ref_freq.or(r.g.ref_freq2))
+                .expect("thickness checked");
             Ok((m, None))
         }
         Solver::FieldSolver => {
@@ -1332,7 +1400,14 @@ fn losses(
         _ => (r.g.tan_d, None),
     };
     let tanq = |v: f64| sig(v, 4, Unit::None).plain();
+    let rf = r.g.ref_freq.or(r.g.ref_freq2).or(r.g.broadside.as_ref().and_then(|b| b.ref_freq));
+    let dispersive = if rf.is_some() {
+        "; Djordjevic–Sarkar wideband Debye εr(f), tan δ(f) through the stackup's values at their reference frequency"
+    } else {
+        ""
+    };
     Ok(LossResult {
+        ref_freq: rf.map(|f| sig(f, 6, Unit::Hertz)),
         conductivity: lp.sigma,
         loss_tangent: tanq(tan),
         loss_tangent2: tan2.map(tanq),
@@ -1346,9 +1421,9 @@ fn losses(
             "Wheeler's incremental inductance rule on the closed-form model".into()
         },
         dielectric_method: if field {
-            "partial capacitances: G = ω Σ tan δ · ε ∂C/∂ε (field solver)".into()
+            format!("partial capacitances: G = ω Σ tan δ · ε ∂C/∂ε (field solver){dispersive}")
         } else {
-            "G = ω C tan δ · (εr/εeff) ∂εeff/∂εr (closed-form εeff)".into()
+            format!("G = ω C tan δ · (εr/εeff) ∂εeff/∂εr (closed-form εeff){dispersive}")
         },
         points,
     })
@@ -1541,6 +1616,10 @@ pub struct Calc {
     /// Loss tangent of the dielectric(s), overriding the stackup ("0.02").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loss_tangent: Option<Quantity>,
+    /// Frequency at which εr and tan δ are given, overriding the stackup's ("1GHz": the
+    /// Djordjevic–Sarkar dispersive model; "0": constant εr and tan δ).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_freq: Option<Quantity>,
     /// Field solver: solder mask loss tangent (default 0.025).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_loss_tangent: Option<Quantity>,
@@ -1588,6 +1667,7 @@ impl Command for Calc {
             broadside_gap: self.broadside_gap,
             loss_tangent: self.loss_tangent,
             mask_loss_tangent: self.mask_loss_tangent,
+            ref_freq: self.ref_freq,
         };
         if self.gap.is_some() && args.is_broadside() {
             return Err(CommandError::invalid_args(
@@ -1739,6 +1819,7 @@ impl Command for Solve {
             broadside_gap: self.broadside_gap,
             loss_tangent: None,
             mask_loss_tangent: None,
+            ref_freq: None,
         };
         let broadside = args.is_broadside();
         let p = ctx.project()?;
@@ -1856,6 +1937,10 @@ pub struct NetLoss {
     /// Loss tangent, overriding the stackup's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loss_tangent: Option<Quantity>,
+    /// Frequency at which εr and tan δ are given, overriding the stackup's ("1GHz":
+    /// Djordjevic–Sarkar; "0": constant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_freq: Option<Quantity>,
     /// Copper conductivity in S/m (default 58M).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conductivity: Option<Quantity>,
@@ -1971,6 +2056,7 @@ impl Command for NetLoss {
                 broadside_gap: None,
                 loss_tangent: self.loss_tangent,
                 mask_loss_tangent: None,
+                ref_freq: self.ref_freq,
             };
             let r = resolve(ctx.project()?, &args)?;
             let (line, _) = loss_matrices(&r, width, None)?;

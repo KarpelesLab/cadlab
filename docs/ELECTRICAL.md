@@ -161,7 +161,8 @@ and for a pair with the field solver the differential attenuation `alpha_diff_db
 
 | Input | Default | Notes |
 |---|---|---|
-| dielectric `loss_tangent` | the stackup's (`board.dielectric --loss-tangent`), else 0.02 with an `impedance.loss_tangent_assumed` warning | `loss_tangent` overrides every laminate dielectric; tan δ is taken constant over frequency |
+| dielectric `loss_tangent` | the stackup's (`board.dielectric --loss-tangent`), else 0.02 with an `impedance.loss_tangent_assumed` warning | `loss_tangent` overrides every laminate dielectric; constant over frequency unless a reference frequency is set |
+| dielectric `ref_freq` | the stackup's (`board.dielectric --ref-freq 1GHz`), else none | the frequency at which εr and tan δ are given: the dielectric becomes dispersive (Djordjevic–Sarkar, below); `ref_freq` overrides every laminate dielectric, `"0"` makes them constant |
 | `mask_loss_tangent` | 0.025 (typical LPI; `impedance.mask_loss_tangent_assumed` note) | field solver with `mask` |
 | `conductivity` | 58 MS/m (annealed copper, IEC 60028) | S/m (`"58M"` or `"58MS"`) |
 | `roughness` | smooth | RMS roughness, Hammerstad–Jensen factor |
@@ -200,6 +201,22 @@ two dielectrics the closed forms use tan δ averaged with weights εr × thickne
 Engineering*, gives αd = k₀ εr (εeff − 1) tan δ / (2√εeff (εr − 1)), the same with εeff taken linear in εr;
 it is about 1 % higher for FR-4 microstrip.
 
+**Dispersion (Djordjevic–Sarkar).** With a reference frequency, a dielectric follows the wideband Debye
+model of A. R. Djordjevic, R. M. Biljić, V. D. Likar-Smiljanić, T. K. Sarkar, "Wideband Frequency-Domain
+Characterization of FR-4 and Time-Domain Causality", IEEE Trans. EMC 43 (2001): a continuum of Debye
+relaxations uniform in log frequency between ω₁ and ω₂,
+ε(ω) = ε∞ + Δε / ln(ω₂/ω₁) · ln((ω₂ + jω)/(ω₁ + jω)) (`src/electrical/dispersion.rs`). It is causal, its
+tan δ is nearly flat between the corners and εr falls by about (2/π) εr tan δ ln 10 per decade (≈ 2.3 % per
+decade for FR-4), the Kramers–Kronig partner of a flat loss tangent. ε∞ and Δε follow in closed form from εr
+and tan δ at the reference frequency; the corners are fixed at 10 kHz and 1 THz, outside every PCB band
+(εr(f)/εr and tan δ(f) then depend only on tan δ and the reference frequency). The line's C and G follow to
+first order in the permittivity change, from the partial capacitance P of each group of regions sharing a
+loss tangent and reference frequency: C(f) = C + Σ P (εr(f)/εr − 1), G(f) = ω Σ tan δ(f) P εr(f)/εr
+(the field solver keeps P per group; the closed forms use P = C · (εr/εeff) ∂εeff/∂εr). A stripline between a
+dispersive and a constant dielectric keeps each its own model in the field solver. Without a reference
+frequency εr and tan δ stay constant (D52); the full-wave solver needs a causal model and anchors one at its
+pulse's center (see "Full-wave solver").
+
 **Pairs.** The differential attenuation is the power-loss formula α = (iᵀRi + vᵀGv) / (2 vᵀi) for v = (1, −1)
 and i = Z⁻¹v, Z the lossless characteristic impedance matrix (exactly the odd mode of a symmetric pair:
 (R₁₁ − R₁₂)/(2 Z_odd) + (G₁₁ − G₁₂) Z_odd / 2). The closed forms give only the single line
@@ -217,11 +234,14 @@ and i = Z⁻¹v, Z the lossless characteristic impedance matrix (exactly the odd
 | plane currents | Gauss's law: induced plane charge = −Q (with the truncated 1/x² tail added) | < 0.1 % |
 | skin depth, copper at 1 GHz | 2.09 µm | 0.1 % |
 | field-solver R and G against a 2.5× finer discretization (thick lines, mask, CPWG, etch, split dielectrics, pairs) | | < 1 % (R), < 0.2 % (G) |
+| Djordjevic–Sarkar: εr and tan δ at the reference frequency; a midpoint sum of its Debye distribution | exact | 1e-12; 1e-6 |
+| dispersive microstrip (εr 4.3, tan δ 0.02 at 1 GHz), 10 MHz to 50 GHz: first-order C(f), G(f) | field solver and closed forms solved again at εr(f), tan δ(f) | < 0.03 % (C), < 0.2 % (G) |
 
 Expect the conductor loss of real boards to be dominated by roughness and the copper's actual conductivity;
-the smooth-copper numbers are a lower bound. Not modeled: dispersion of εr and tan δ (a constant tan δ is not
-causal; use the datasheet values at the frequency of interest), conductor loss of a plane's far side,
-radiation, and the frequency dependence of the current distribution between DC and the skin-effect regime.
+the smooth-copper numbers are a lower bound. Not modeled: conductor loss of a plane's far side, radiation,
+and the frequency dependence of the current distribution between DC and the skin-effect regime. Without
+`ref_freq` the dielectric is constant over frequency (not causal: give the datasheet values at the frequency
+of interest, or the reference frequency).
 
 **`net.loss`** gives the insertion loss of a routed net: its tracks grouped by layer and width (lengths along
 arcs, as in `diffpair`/length matching), each group's single-ended attenuation at its layer's stackup geometry
@@ -324,7 +344,8 @@ rectangle (air beyond an edge), so edge launches are modeled.
 
 | Item | Written as |
 |---|---|
-| Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. One `Material` per dielectric (`Epsilon` = εr; `Kappa` = 2π f₀ ε₀ εr tan δ, f₀ the excitation's center; an unset tan δ is taken as 0.02, as in the loss calculations, and marked "assumed" in the XML comment: losses are exact at f₀ and scale with frequency only approximately). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air (solder mask is not modeled) |
+| Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. One `Material` per dielectric (`Epsilon` = εr; `Kappa` = 2π f₀ ε₀ εr tan δ, f₀ the excitation's center; an unset tan δ is taken as 0.02, as in the loss calculations, and marked "assumed" in the XML comment: losses are exact at f₀ and scale with frequency only approximately). A dispersive dielectric (`ref_freq`) is written with its Djordjevic–Sarkar εr and tan δ at f₀ (noted in a comment). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air, or under the solder mask |
+| Solder mask (`mask`) | A `solder_mask` `Material` (`mask_er`, default 3.8, and a `Kappa` from `mask_loss_tangent`, default 0.025, at f₀) on both outer layers: the board outline from the laminate surface to `mask` beyond it (priority 5) and each outer layer's copper from its outer surface to `mask_copper` (default `mask`) beyond it (priority 7); a `mask_openings` air material (εr 1) clears what lies above the copper outside its own mask (priority 6) and the pads with a mask opening on that side (their copper, priority 8). Metal (10) stays above all of it. Mesh lines at both mask surfaces |
 | Copper | One `Metal` (perfect conductor) per net: the union of its pads, tracks, vias, drawings and zone fills on each layer, clipped to the region. `copper: solid` (default): extruded through the copper thickness (`LinPoly`, or `Box` for rectangles); `sheet`: zero-thickness `Polygon`s with the copper left out of the stack. Polygons with holes (planes around antipads) are cut into hole-free pieces by vertical lines through each hole |
 | Vias, plated holes | Metal `Cylinder`s of the drill diameter between the outer surfaces of their first and last layers (slots: the slot outline extruded) |
 | Non-plated holes | Air (εr 1) cylinders through the board, above everything else |
@@ -358,9 +379,11 @@ another net under the port's position; none is `openems.no_reference`. Ports mus
 (`openems.port_outside`); one whose feed falls inside the PML cells is warned (`openems.port_in_pml`: grow the
 margin).
 
-**Not modeled:** solder mask and silkscreen, surface roughness and finite copper conductivity (copper is a
-perfect conductor), frequency-dependent εr / tan δ, components (pads are bare copper: add lumped elements in
-the driver if needed). openEMS is not installed on the development machines yet, so the files follow the
+**Not modeled in the export:** silkscreen, the mask's own margin around pads (openings are the pad copper),
+surface roughness and finite copper conductivity (copper is a perfect `Metal`; `sim.sparams` models both),
+the dispersion of εr and tan δ beyond f₀ (openEMS's Debye/Lorentz materials are not used: their XML is not
+documented precisely enough to write without its code), components (pads are bare copper: add lumped elements
+in the driver if needed). openEMS is not installed on the development machines yet, so the files follow the
 documentation and the golden file `tests/golden/openems/via.{xml,py}` (a 4-layer via transition) pins them;
 the optional oracle (`CADLAB_ORACLES=1`, `openEMS` on the PATH or `CADLAB_ORACLE_OPENEMS`, the driver run by
 `python3` or `CADLAB_ORACLE_PYTHON`) runs the driver on that board and checks |S21| > −3 dB and |S11| < −6 dB
@@ -384,15 +407,43 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
 - Yee's staggered grid (K. S. Yee, IEEE Trans. AP-14, 1966) on the graded rectilinear mesh, in integral form
   (curls as circulations over primal and dual cell faces; A. Taflove and S. C. Hagness, *Computational
   Electrodynamics*, 3rd ed., ch. 3). Fields in single precision, coefficients from double precision.
-- Materials: each E edge takes the area-weighted average of εr and σ of the four cells around it, with the
-  semi-implicit conductivity update. Dielectrics are the stackup's, inside the board outline (air outside),
-  with σ = 2π f₀ ε₀ εr tan δ at the pulse's center f₀ (tan δ 0.02 when unset), as in the openEMS export: the
-  dielectric loss is exact at f₀ and the conductance G stays constant over frequency (a constant tan δ would
-  have it grow with f). Non-plated holes are air.
-- Copper is a perfect conductor: the E edges lying in the copper volume (`copper: solid`, between the mesh
-  lines of both copper surfaces) or on the sheet (`sheet`), x and y edges by their midpoint, z edges by their
-  node; plated holes and vias are metal cylinders (plus the node column nearest their center, so a barrel
-  thinner than the cells still connects its layers). Copper conductivity and roughness are not modeled.
+- Materials: dielectrics are the stackup's, inside the board outline (air outside); non-plated holes are air.
+  Each is causal and dispersive: the Djordjevic–Sarkar model (see "Losses") through its εr and tan δ at the
+  stackup's `ref_freq`, or, for a dielectric without one, at the pulse's center f₀ (tan δ 0.02 when unset),
+  so a constant-tan-δ laminate is exact at f₀ and causal around it. It is fitted over the band of the result
+  (`f_min`, or 1 % of `f_max`, to `f_max`) as ε∞ + σ/(jωε₀) + Σₚ Δεₚ/(1 + jωτₚ) on relaxation times shared by
+  every material (three per two decades from a third of the band's bottom to three times its top, at least
+  six), the weights by non-negative least squares on ε′ and ε″ in relative terms (C. L. Lawson, R. J. Hanson,
+  *Solving Least Squares Problems*, 1974) with ε∞ ≥ 1: non-negative Debye terms are passive, so the update
+  stays stable (εr within 0.1 %, ε″ within 0.6 % of the model over the band). The time stepping is the
+  auxiliary differential equation of each pole (Taflove ch. 9), τ dJ/dt + J = ε₀Δε dE/dt, discretized at the
+  half step (J⁺ = k J + β (E⁺ − E), k = (2τ − Δt)/(2τ + Δt), β = 2ε₀Δε/(2τ + Δt)) and folded into the edge's
+  coefficients. Each E edge averages ε∞, σ and every Δεₚ of the four cells around it (area-weighted), which
+  the shared relaxation times make exact for a mix of materials. Lossless dielectrics stay plain.
+- Copper: the E edges lying in the copper volume (`copper: solid`, between the mesh lines of both copper
+  surfaces) or on the sheet (`sheet`), x and y edges by their midpoint, z edges by their node, are conductor
+  edges; plated holes and vias are metal cylinders (plus the node column nearest their center, so a barrel
+  thinner than the cells still connects its layers). With a conductivity (`conductivity`, default 58 MS/m;
+  `perfect_copper` for lossless copper) every conductor surface gets a surface impedance boundary condition
+  (J. G. Maloney, G. S. Smith, IEEE Trans. AP-40, 1992; J. H. Beggs, R. J. Luebbers, K. S. Yee, K. S. Kunz,
+  IEEE Trans. AP-40, 1992; Taflove ch. 10): the tangential E on a surface edge is Zs ∗ K instead of zero, K the
+  surface current density: the current through the edge's dual loop (the circulation of H over its faces
+  outside the conductor) spread over the copper surface that loop encloses (the half cells on either side
+  along the face where the conductor continues). E enters the H update of those faces, so the power
+  dissipated is Re Zs · I² / w: the current crowding at a trace's edges and corners is carried on the copper
+  there (a sidewall 35 µm high and the corners held about 40 % of a 1 mm microstrip's conductor loss in the
+  field solver; spreading the edge current over the whole dual cell lost it, 40 % too little loss, converging
+  only as the cell size^(1/3)). Inside a sheet (open on both sides) each side is its own loop; at a sheet's
+  edge the current wraps around and one loop takes it. Zs(ω) = Rs K + j Rs (D52's skin effect, the roughness
+  factor K of `roughness` or `huray_radius`/`huray_ratio` on the resistance) is fitted over the band as
+  r₀ + Σₚ rₚ s/(s + aₚ) (non-negative sections, two per decade from a decade below to a decade above the band:
+  passive) and convolved recursively (bilinear: Vₚ⁺ = kₚ Vₚ + βₚ (I⁺ − I)). Smooth copper is within 1 % in R
+  and X; with roughness R stays within 2.5 % while X takes the causal value of a resistance rising faster
+  than √f (up to twice the smooth reactance D52 adds, a fraction of a percent of the line's inductance).
+- Solder mask (`mask`, `mask_copper`, `mask_er`, `mask_loss_tangent`, as in the export): a dielectric layer
+  on both outer layers, over the laminate and over the copper, open at the pads; Djordjevic–Sarkar at f₀ like
+  an unreferenced laminate; its surfaces are mesh lines (a 25 µm mask makes 25 µm cells, so a smaller
+  timestep).
 - Boundaries: a convolutional PML (J. A. Roden and S. D. Gedney, Microwave Opt. Technol. Lett. 27, 2000;
   Taflove ch. 7) in the outer `pml_cells` cells (default 8) of every side, inside the region like openEMS's:
   polynomial grading m = 3, σ_max = 0.8 (m + 1) / (η₀ Δ), κ = 1, a CFS α falling from 2π ε₀ f₀ / 10 to 0
@@ -412,9 +463,11 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   a = (V + z0 I) / 2√z0, b = (V − z0 I) / 2√z0 of each port in each run; S = B A⁻¹ over the runs, so a
   termination that is not matched (a microstrip port's source on a line of another impedance) does not
   bias the result. Written as Touchstone 1.1 (RI, the ports' z0, 2.0 when they differ), 7 significant digits.
-- Timestep: 0.95 of the Courant limit of the smallest cells, 1 / (c √(Σ 1/Δ²)); each run stops when the field
-  energy has decayed by `end_criteria` (40 dB) below its peak after the pulse, or at `timesteps` (100000,
-  `sim.not_converged` warning). Progress is reported every 32 steps (timestep, energy in dB) and the run can
+- Timestep: 0.95 of the Courant limit of the smallest cells, 1 / (c √(Σ 1/Δ²)); each run stops when the
+  energy (fields, and the Debye polarizations' P²/(2ε₀Δε), P = ε₀Δε E − τJ) has decayed by `end_criteria`
+  (60 dB) below its peak after the pulse, or at `timesteps` (100000, `sim.not_converged` warning). 40 dB (the
+  default before D63) leaves a tail of about 1 % in amplitude, whose truncation biased |S| by a few hundredths
+  of a dB below f_max / 10 (|S₂₁| above 0 dB on short lossy lines); 60 dB costs about a quarter more steps. Progress is reported every 32 steps (timestep, energy in dB) and the run can
   be cancelled.
 - Mesh: the export's, with the thirds rule on by default (`thirds`): at each axis-aligned copper edge, a mesh
   line a third of a fine cell inside the copper and one two thirds outside instead of one on the edge (a
@@ -424,7 +477,9 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   same mesh.
 - Determinism and threads: with the `parallel` feature the planes of the grid are split between threads (one
   per 131072 nodes, a pool of the solver's own); every update reads only the other field, reductions are
-  summed per plane in order, so results are bit-identical for any thread count.
+  summed per plane in order, so results are bit-identical for any thread count. The Debye edges and the
+  surface faces are lists in index order split per plane (each entry written once); the surface loops first
+  compute their fields from H in chunks, then each face sums its loops' corrections in a fixed order.
 
 **Guards.** `max_cells` (default 4 million cells, `sim.too_many_cells` with what to shrink); `timesteps` per
 run. The cost is cells × timesteps × ports; a release build updates about 80 million cells per second per
@@ -441,21 +496,35 @@ line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
 | zero-thickness microstrip W = 1 mm on 0.5 mm of εr 4, probes on the line, thirds rule, 4 cells across and in the substrate | 2D field solver (D49): Z₀ 50.81 Ω, εeff 3.071 | Z₀ +0.5–0.7 %, εeff +0.1–0.7 % (1–3 GHz) |
 | the same, 8 cells across and in the substrate | field solver | Z₀ +0.1–0.4 %, εeff +0.2–0.3 % |
 | the same without the thirds rule, 8 / 16 cells across | field solver | Z₀ −5.4 % / −3.4 %, εeff +1.0 % / +0.6 % |
-| the same with tan δ 0.02: attenuation at f₀ = 5 GHz | perturbation model (D52), αd = 1.636 Np/m | +0.5 % |
-| `sim.sparams` on a routed 24 mm line (the same section, microstrip ports 4 mm), Z₀ and εeff from the S-parameters (ABCD of the 20 mm between the reference planes), 1–3.5 GHz | field solver | Z₀ −0.4 to −0.8 %, εeff +0.3–1.4 % |
-| the same: matched line | |S₁₁| < −28 dB from 0.5 to 9.5 GHz |
-| the same: attenuation and |S₂₁|, mean over 1–9 GHz | D52: 1.636 Np/m, −0.284 dB | α +6 %, |S₂₁| −0.299 dB |
+| the same with a constant σ for tan δ 0.02 (engine level): attenuation at f₀ = 5 GHz | perturbation model (D52), αd = 1.636 Np/m | +0.5 % |
+| microstrip W = 1 mm, H = 0.5 mm, 35 µm copper (strip and plane), conductivity 580 kS/m (a loss large enough to measure on 6 mm), 3–8 GHz: the attenuation the surface impedance adds (perfect-conductor run subtracted) | D52 field solver R (current method, corners refined) | 8 cells across: −5.7 to +0.7 %; 4 cells: −3.2 to +3.3 % |
+| parallel-plate cavity, copper plates (0.5 mm of εr 4.4), TM₁₁₀ at 1.4, 6.9 and 14 GHz | Q = h/δ (the plates' loss only) | +0.0 %, −0.9 %, −1.0 % |
+| the same at 6.9 GHz, Hammerstad–Jensen 1 µm RMS / Huray a = 0.5 µm, SR 2 | Q = h/(δ K) | −0.7 % / −1.0 % |
+| cavity filled with Djordjevic–Sarkar εr 4, tan δ 0.02 at 1 GHz (Debye fit over 0.1–10 GHz or 0.5–20 GHz), TM₁₁₀ at 2.4, 9.0 and 14.8 GHz | resonance f √εr(f) = f_vacuum; Q = 1/tan δ(f) | resonance within 0.1 %; Q −0.3 to −0.7 % |
+| microstrip on that laminate (35 µm perfect conductors), 1–5 GHz | field solver with the same model (D52 dispersion): εeff 3.021 → 2.966 | εeff +0.6 to +1.1 % (the line's own +0.5 % bias, above); α within −4 to +6 %, mean −1 % (3–6 GHz) |
+| `sim.sparams`, the full model: a routed 64 mm line (the same section on that laminate, 35 µm solid copper at 58 MS/m, microstrip ports 4 mm), Z₀ and εeff from the S-parameters (ABCD of the 60 mm between the reference planes), 1–3 GHz | field solver | Z₀ +1.1 to +3.0 %, εeff +0.6 to +1.1 % |
+| the same: matched line | | |S₁₁| < −28 dB from 0.5 to 9.5 GHz |
+| the same: |S₂₁| (total loss: conductor with skin effect, dispersive dielectric) | D52, 0.136 dB at 0.6 GHz to 1.657 dB at 9 GHz | −9.5 % (1.6 GHz) to +4.9 % (9 GHz); −0.8 to +4.9 % from 3 GHz |
+| the same line, sheet copper, 25 µm solder mask of εr 3.8 | field solver with the conformal mask: εeff 3.162 (bare line 3.071) | εeff −0.3 %, Z₀ +1.1 %; the mask's change of εeff −23 % (the bare line's +0.4 % bias) |
 | 20 × 12 mm PEC cavity, εr 4.4, 0.5 mm cells: TM₁₁₀ and TM₂₁₀ | analytic c/(2√εr) √((m/a)² + (n/b)²) | −0.05 %, −0.08 % (numerical dispersion) |
 | the same with σ for tan δ 0.01 at TM₁₁₀: energy decay | Q = 1 / tan δ = 100 | 99.99 |
 | lossless graded mesh (ratio 1.4) with a dielectric and a strip, 6000 steps after the pulse | energy conservation | within −0.7 % / +0.05 % (the staggered E/H sampling) |
 | uniform cubic grid at 0.99 and 1.03 of the Courant limit | stability | stable / diverges |
-| one thread against three | | bit-identical spectra |
+| one thread against three, without and with the surface impedance, Debye terms and roughness | | bit-identical spectra |
 
-**Limits.** Perfect conductors (no skin-effect loss: add D52's conductor attenuation per length for a budget),
-frequency-independent εr and the single-frequency σ above, no solder mask, no components (pads are bare
-copper; terminate them with ports), staircased curves (arcs and round pads follow the mesh; vias are
-cylinders of whole edges), quasi-uniform lines need the mesh lines that the export puts at copper edges
-(diagonal tracks staircase). Accuracy depends on the mesh as for any FDTD: keep `cells_per_wavelength` ≥ 20
+The line-level figures carry the measurement's own error in this open region (feed transients, surface waves
+reaching the measurement planes): the same 64 mm line with a frequency-independent conductivity, whose loss
+should be flat, measures 0.30 to 0.39 Np/m over 0.6–4 GHz, so the cavities (closed, single mode) are the precise checks of
+the loss models and the line runs check that they combine into D52's total.
+
+**Limits.** No components (pads are bare copper; terminate them with ports); staircased curves (arcs and
+round pads follow the mesh; vias are cylinders of whole edges); quasi-uniform lines need the mesh lines that
+the export puts at copper edges (diagonal tracks staircase). The surface impedance assumes a skin depth well
+below the copper's thickness and its features (as D52; no DC floor below the skin-effect range), and its
+reactance with roughness is the causal one rather than D52's smooth internal inductance. `sheet` copper has
+no thickness: its edge current is bounded only by the mesh, so its conductor loss depends on the cells at the
+strip edges (+3 % at 8 and +10 % at 16 cells across a 1 mm strip against a 35 µm one); use `solid` copper for
+loss. A thin mask makes thin cells, hence a smaller timestep. Accuracy depends on the mesh as for any FDTD: keep `cells_per_wavelength` ≥ 20
 and several cells across the narrowest copper and dielectric (`max_cell` refines everything; the thirds rule
 the edges). Runs are long on large regions: cut the region to the structure (`around` a via or connector,
 `margin`), use `sheet` copper, and keep `f_max` to what is needed.

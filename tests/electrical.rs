@@ -518,6 +518,24 @@ fn losses_and_net_loss() {
     }
     assert_eq!(p["skin_depth"], "0.00209mm");
 
+    // A dispersive laminate (Djordjevic–Sarkar through the values at 1 GHz): the same loss at
+    // 1 GHz, εr falling (C lower) at 10 GHz; "0" clears it.
+    let o = exec(&r, &mut s, "board.dielectric", json!({"gap": 1, "ref_freq": "1GHz"}));
+    assert_eq!(o["output"]["dielectrics"][0]["ref_freq"], "1GHz");
+    let d = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "freq": ["1GHz", "10GHz"]}));
+    let dl = &d["output"]["loss"];
+    assert_eq!(dl["ref_freq"], "1GHz");
+    assert!(dl["dielectric_method"].as_str().unwrap().contains("Djordjevic–Sarkar"), "{dl}");
+    assert_eq!(dl["points"][0]["alpha_db_per_m"], p["alpha_db_per_m"]);
+    let flat = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "freq": ["10GHz"], "ref_freq": "0"}));
+    let farads = |v: &Value| cadlab::value::Quantity::parse(v.as_str().unwrap()).unwrap().to_f64();
+    let (c_ds, c_flat) = (farads(&dl["points"][1]["c_per_m"]), farads(&flat["output"]["loss"]["points"][0]["c_per_m"]));
+    assert!(c_ds < 0.995 * c_flat, "{c_ds} vs {c_flat}");
+    assert!(flat["output"]["loss"].get("ref_freq").is_none());
+    exec(&r, &mut s, "board.dielectric", json!({"gap": 1, "ref_freq": "0"}));
+    let o = exec(&r, &mut s, "board.stackup", json!({}));
+    assert!(o["output"]["dielectrics"][0].get("ref_freq").is_none());
+
     // A sweep (logarithmic), with a note where the skin depth exceeds half the copper.
     let o = exec(
         &r,

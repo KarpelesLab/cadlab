@@ -1135,6 +1135,19 @@ pub struct OpenEms {
     /// default of `sim.sparams`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub thirds: bool,
+    /// Solder mask thickness over the laminate ("20um"): a dielectric layer on both outer
+    /// layers, open at pads with a mask opening (none by default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Nm>,
+    /// Solder mask thickness over the copper (default: `mask`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_copper: Option<Nm>,
+    /// Solder mask relative permittivity (default 3.8, typical LPI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_er: Option<Quantity>,
+    /// Solder mask loss tangent (default 0.025, typical LPI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_loss_tangent: Option<Quantity>,
 }
 
 /// Gaussian excitation.
@@ -1169,6 +1182,74 @@ pub struct OpenEmsExported {
     pub nets: Vec<String>,
 }
 
+/// The solder mask options (`mask`, `mask_copper`, `mask_er`, `mask_loss_tangent`) shared by
+/// `export.openems` and `sim.sparams`, with notes for assumed values.
+pub(crate) fn mask_options(
+    mask: Option<Nm>,
+    mask_copper: Option<Nm>,
+    mask_er: Option<Quantity>,
+    mask_loss_tangent: Option<Quantity>,
+) -> Result<(Option<openems::MaskOptions>, Vec<Diagnostic>), CommandError> {
+    let mut notes = Vec::new();
+    let Some(t) = mask else {
+        if mask_copper.is_some() || mask_er.is_some() || mask_loss_tangent.is_some() {
+            return Err(CommandError::invalid_args(
+                "openems.bad_mask",
+                "`mask_copper`, `mask_er` and `mask_loss_tangent` need `mask` (the mask thickness)",
+            ));
+        }
+        return Ok((None, notes));
+    };
+    if t <= Nm::ZERO || mask_copper.is_some_and(|c| c <= Nm::ZERO) {
+        return Err(CommandError::invalid_args("openems.bad_mask", "solder mask thicknesses must be positive"));
+    }
+    let er = match mask_er {
+        Some(e) => {
+            let e = crate::commands::electrical::expect_unit(e, Unit::None, "mask_er")?.to_f64();
+            if e < 1.0 {
+                return Err(CommandError::invalid_args("openems.bad_mask", "`mask_er` must be at least 1"));
+            }
+            e
+        }
+        None => {
+            notes.push(
+                Diagnostic::info(
+                    "openems.mask_er_assumed",
+                    format!("solder mask εr not given: assuming {}", crate::electrical::DEFAULT_MASK_ER),
+                )
+                .with_hint("give `mask_er` from the mask's datasheet (or your fab's stackup)"),
+            );
+            crate::electrical::DEFAULT_MASK_ER
+        }
+    };
+    let loss_tangent = match mask_loss_tangent {
+        Some(q) => {
+            let v = crate::commands::electrical::expect_unit(q, Unit::None, "mask_loss_tangent")?.to_f64();
+            if !(0.0..1.0).contains(&v) {
+                return Err(CommandError::invalid_args(
+                    "value.out_of_range",
+                    "`mask_loss_tangent` must be at least 0 and below 1, e.g. 0.025",
+                ));
+            }
+            v
+        }
+        None => {
+            notes.push(
+                Diagnostic::info(
+                    "openems.mask_loss_tangent_assumed",
+                    format!(
+                        "solder mask loss tangent not given: assuming {}",
+                        crate::electrical::DEFAULT_MASK_LOSS_TANGENT
+                    ),
+                )
+                .with_hint("give `mask_loss_tangent` from the mask's datasheet"),
+            );
+            crate::electrical::DEFAULT_MASK_LOSS_TANGENT
+        }
+    };
+    Ok((Some(openems::MaskOptions { thickness: t, over_copper: mask_copper, er, loss_tangent }), notes))
+}
+
 pub(crate) fn hertz(q: Quantity, field: &str) -> Result<u64, CommandError> {
     let q = crate::commands::electrical::expect_unit(q, Unit::Hertz, field)?;
     let v = q.to_f64();
@@ -1187,6 +1268,7 @@ impl Command for OpenEms {
     type Output = OpenEmsExported;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<OpenEmsExported, CommandError> {
+        let (mask, mask_notes) = mask_options(self.mask, self.mask_copper, self.mask_er, self.mask_loss_tangent)?;
         let p = ctx.project()?;
         let name = self.name.clone().unwrap_or_else(|| crate::model::part::slugify(&p.manifest().name));
         if name.is_empty() || name.contains(['/', '\\']) {
@@ -1242,6 +1324,7 @@ impl Command for OpenEms {
             timesteps: self.timesteps.unwrap_or(200_000),
             thirds: self.thirds,
             port_planes: false,
+            mask,
         };
         let x = openems::export(p, &opts).map_err(|e| {
             let base = if e.code.starts_with("openems.unknown") {
@@ -1264,7 +1347,7 @@ impl Command for OpenEms {
             file("xml", "openEMS geometry (CSXCAD XML) and mesh", x.xml),
             file("py", "openEMS driver (Python)", x.script),
         ])?;
-        for d in x.diagnostics {
+        for d in mask_notes.into_iter().chain(x.diagnostics) {
             ctx.report(d);
         }
         let hz = |v: u64| Quantity::int(v as i64, Unit::Hertz);

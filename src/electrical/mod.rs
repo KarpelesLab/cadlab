@@ -4,6 +4,7 @@
 
 pub mod complex;
 pub mod current;
+pub mod dispersion;
 pub mod fieldsolver;
 pub mod impedance;
 pub mod loss;
@@ -60,6 +61,11 @@ pub struct LayerGeometry {
     pub tan_d_split: Option<(f64, f64)>,
     /// Whether a loss tangent was assumed ([`DEFAULT_LOSS_TANGENT`]: the stackup gives none).
     pub tan_d_assumed: bool,
+    /// Djordjevic–Sarkar reference frequency (Hz) of the dielectric below the trace (the
+    /// stackup's `ref_freq`); `None`: εr and tan δ constant.
+    pub ref_freq: Option<f64>,
+    /// The same for the dielectric above the trace (stripline, embedded microstrip).
+    pub ref_freq2: Option<f64>,
 }
 
 /// The second trace of a broadside-coupled pair, above the first.
@@ -73,6 +79,8 @@ pub struct Broadside {
     pub layer: Option<String>,
     /// Loss tangent of the dielectric between the traces.
     pub tan_d: f64,
+    /// Djordjevic–Sarkar reference frequency (Hz) of that dielectric.
+    pub ref_freq: Option<f64>,
 }
 
 impl LayerGeometry {
@@ -89,6 +97,7 @@ impl LayerGeometry {
             above,
             broadside: self.broadside.as_ref().map_or(0.0, |b| b.tan_d),
             mask: o.mask.map_or(0.0, |m| m.tan_d),
+            ref_freq: [self.ref_freq, self.ref_freq2, self.broadside.as_ref().and_then(|b| b.ref_freq)],
         }
     }
 
@@ -187,6 +196,7 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
     let (diel, assumed) = stackup.effective_dielectrics();
     let er = |i: usize| diel[i].er.to_f64();
     let tan = |i: usize| loss_tangent(&diel[i]);
+    let rf = |i: usize| ref_freq(&diel[i]);
     if k == 0 || k == n - 1 {
         let (gap, refl) = if k == 0 { (0, 1) } else { (n - 2, n - 2) };
         return Ok(LayerGeometry {
@@ -202,6 +212,8 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
             tan_d: tan(gap),
             tan_d_split: None,
             tan_d_assumed: diel[gap].loss_tangent.is_none(),
+            ref_freq: rf(gap),
+            ref_freq2: None,
         });
     }
     let (h1, h2) = (diel[k - 1].thickness, diel[k].thickness);
@@ -222,6 +234,8 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
         tan_d: tan_mean,
         tan_d_split: (tan(k - 1) != tan(k)).then(|| (tan(k - 1), tan(k))),
         tan_d_assumed: diel[k - 1].loss_tangent.is_none() || diel[k].loss_tangent.is_none(),
+        ref_freq: rf(k - 1),
+        ref_freq2: rf(k),
     })
 }
 
@@ -239,6 +253,7 @@ pub fn broadside_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometr
     let (diel, assumed) = stackup.effective_dielectrics();
     let er = |i: usize| diel[i].er.to_f64();
     let tan = |i: usize| loss_tangent(&diel[i]);
+    let rf = |i: usize| ref_freq(&diel[i]);
     let t = copper_thickness(stackup, layer).max(copper_thickness(stackup, &names[k + 1]));
     let above = k >= 1;
     let below = k + 2 < n;
@@ -268,16 +283,24 @@ pub fn broadside_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometr
             er: er(k),
             layer: Some(names[k + 1].clone()),
             tan_d: tan(k),
+            ref_freq: rf(k),
         }),
         tan_d: tan_h,
         tan_d_split: (model == Model::Stripline).then_some((tan_h, tan_h2)),
         tan_d_assumed: used.iter().flatten().any(|&i| diel[i].loss_tangent.is_none()),
+        ref_freq: rf(lo),
+        ref_freq2: hi.and_then(rf),
     })
 }
 
 /// Loss tangent of a dielectric, [`DEFAULT_LOSS_TANGENT`] when unset.
 pub fn loss_tangent(d: &Dielectric) -> f64 {
     d.loss_tangent.unwrap_or(DEFAULT_LOSS_TANGENT).to_f64()
+}
+
+/// Djordjevic–Sarkar reference frequency of a dielectric (Hz), when set.
+pub fn ref_freq(d: &Dielectric) -> Option<f64> {
+    d.ref_freq.map(|q| q.to_f64()).filter(|f| *f > 0.0)
 }
 
 /// Copper thickness of a layer.
@@ -417,6 +440,7 @@ mod tests {
             er: Quantity::parse(er).unwrap(),
             material: None,
             loss_tangent: None,
+            ref_freq: None,
         };
         let s = Stackup {
             copper_layers: 4,

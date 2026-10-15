@@ -27,7 +27,7 @@
 use std::f64::consts::PI;
 
 use super::complex::C64;
-use super::fieldsolver::{LineMatrices, inv2, mul2, sqrt2};
+use super::fieldsolver::{DielectricGroup, LineMatrices, inv2, mul2, sqrt2};
 use super::impedance::{Geometry, Model};
 
 /// Conductivity of annealed copper, S/m: 5.8 × 10⁷ (IEC 60028, the International Annealed
@@ -152,7 +152,8 @@ pub fn at(m: &LineMatrices, f: f64, k: &Conductor) -> LossPoint {
     let rr = m.r_over_rs[0][0];
     let r = (rs * rough * rr).max(k.r_dc);
     let l = m.l[0][0] + xi * rr;
-    let (g, c) = (w * m.g_over_omega[0][0], m.c[0][0]);
+    let (cf, gf) = m.at_freq(f);
+    let (g, c) = (w * gf[0][0], cf[0][0]);
     let zs = C64::new(r, w * l);
     let ys = C64::new(g, w * c);
     let z0 = (zs / ys).sqrt();
@@ -182,7 +183,8 @@ pub fn pair_at(m: &LineMatrices, f: f64, k: &Conductor) -> PairLossPoint {
     let w = 2.0 * PI * f;
     let (rs, _, _, rough) = surface(f, k);
     let to2 = |x: &Vec<Vec<f64>>| [[x[0][0], x[0][1]], [x[1][0], x[1][1]]];
-    let (c, l) = (to2(&m.c), to2(&m.l));
+    let (cf, gf) = m.at_freq(f);
+    let (c, l) = (to2(&cf), to2(&m.l));
     let mut r = to2(&m.r_over_rs);
     for row in &mut r {
         for x in row {
@@ -193,7 +195,7 @@ pub fn pair_at(m: &LineMatrices, f: f64, k: &Conductor) -> PairLossPoint {
         // Below the skin-effect range: each trace's DC resistance, return through the planes.
         r = [[k.r_dc, 0.0], [0.0, k.r_dc]];
     }
-    let g = to2(&m.g_over_omega);
+    let g = to2(&gf);
     // Y = Z⁻¹ = (C L)^(−½) C.
     let y = mul2(inv2(sqrt2(mul2(c, l))), c);
     let v = [1.0, -1.0];
@@ -241,6 +243,12 @@ pub fn wheeler_r_over_rs(g: &Geometry, w: f64) -> Option<f64> {
 /// between two dielectrics, their mean weighted by εr × thickness). `None` without copper
 /// thickness (no conductor loss model).
 pub fn closed_form(g: &Geometry, w: f64, tan_d: f64) -> Option<LineMatrices> {
+    closed_form_dispersive(g, w, tan_d, None)
+}
+
+/// [`closed_form`] with a Djordjevic–Sarkar reference frequency (Hz) for the dielectric (`εr`
+/// and `tan_d` given there): C and G then follow εr(f) and tan δ(f) through the filling factor.
+pub fn closed_form_dispersive(g: &Geometry, w: f64, tan_d: f64, ref_freq: Option<f64>) -> Option<LineMatrices> {
     let line = g.line(w);
     let c = line.er_eff.sqrt() / (line.z0 * C0);
     let l = line.z0 * line.er_eff.sqrt() / C0;
@@ -261,6 +269,7 @@ pub fn closed_form(g: &Geometry, w: f64, tan_d: f64) -> Option<LineMatrices> {
         l: vec![vec![l]],
         g_over_omega: vec![vec![c * tan_d * fill]],
         r_over_rs: vec![vec![r]],
+        groups: vec![DielectricGroup { tan_d, ref_freq, partial: vec![vec![c * fill]] }],
     })
 }
 
@@ -496,5 +505,52 @@ mod tests {
         // Coupling crowds the current towards the gap: more conductor loss than one line alone.
         let single = st.line_matrices(0.12, None, false, &tans, Accuracy::default()).unwrap();
         assert!(p.alpha_diff_c > at(&single, 5e9, &copper(0.0)).alpha_c);
+    }
+
+    #[test]
+    fn dispersive_dielectric_first_order() {
+        // Djordjevic–Sarkar laminate (εr 4.3, tan δ 0.02 at 1 GHz): C(f) and G(f)/ω from the
+        // partial capacitances against a full solve at εr(f) and tan δ(f), for the field solver
+        // (a microstrip: two regions, laminate and air) and the closed forms.
+        let d = crate::electrical::dispersion::Dielectric { er: 4.3, tan_d: 0.02, ref_freq: Some(1e9) };
+        let base = Structure {
+            model: Model::Microstrip,
+            h: 0.5,
+            er: 4.3,
+            h2: 0.0,
+            er2: 4.3,
+            t: 0.035,
+            etch: 0.0,
+            broadside: None,
+            coplanar_gap: None,
+            mask: None,
+        };
+        let acc = Accuracy::default();
+        let tans = LossTangents { below: 0.02, ref_freq: [Some(1e9), None, None], ..LossTangents::default() };
+        let m = base.line_matrices(1.0, None, false, &tans, acc).unwrap();
+        let geo = Geometry { model: Model::Microstrip, h: 0.5, h2: 0.0, t: 0.035, er: 4.3 };
+        let cf = closed_form_dispersive(&geo, 1.0, 0.02, Some(1e9)).unwrap();
+        for f in [1e7, 1e8, 1e9, 1e10, 5e10] {
+            let (er, tan) = d.at(f);
+            let r = Structure { er, er2: er, ..base }
+                .line_matrices(1.0, None, false, &LossTangents { below: tan, ..LossTangents::default() }, acc)
+                .unwrap();
+            let (c, g) = m.at_freq(f);
+            assert!(close(c[0][0], r.c[0][0], 3e-4), "{f}: C {} vs {}", c[0][0], r.c[0][0]);
+            assert!(close(g[0][0], r.g_over_omega[0][0], 2e-3), "{f}: G/ω {} vs {}", g[0][0], r.g_over_omega[0][0]);
+            let rc = closed_form(&Geometry { er, ..geo }, 1.0, tan).unwrap();
+            let (c, g) = cf.at_freq(f);
+            assert!(close(c[0][0], rc.c[0][0], 3e-4), "{f}: closed-form C {} vs {}", c[0][0], rc.c[0][0]);
+            assert!(close(g[0][0], rc.g_over_omega[0][0], 2e-3), "{f}: closed-form G/ω");
+        }
+        // At the reference frequency, and without dispersion, the stored matrices.
+        let (c, g) = m.at_freq(1e9);
+        assert!(close(c[0][0], m.c[0][0], 1e-9) && close(g[0][0], m.g_over_omega[0][0], 1e-9));
+        let flat = base.line_matrices(1.0, None, false, &LossTangents { below: 0.02, ..LossTangents::default() }, acc);
+        let flat = flat.unwrap();
+        assert_eq!(flat.at_freq(7e9), (flat.c.clone(), flat.g_over_omega.clone()));
+        // Higher frequency: lower εr, so less C; tan δ nearly flat, so G/ω about C tan δ.
+        let (lo, hi) = (at(&m, 1e8, &copper(0.0)), at(&m, 1e10, &copper(0.0)));
+        assert!(hi.c < lo.c && hi.alpha_d > 50.0 * lo.alpha_d);
     }
 }

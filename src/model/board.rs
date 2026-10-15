@@ -75,6 +75,12 @@ pub struct Dielectric {
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::value::plain")]
     #[schemars(with = "Option<Quantity>")]
     pub loss_tangent: Option<Quantity>,
+    /// Frequency at which `er` and `loss_tangent` are given (the datasheet's test frequency,
+    /// an exact decimal in Hz, `"1GHz"`). Set: the dielectric is dispersive, the
+    /// Djordjevic–Sarkar wideband Debye model through those values (εr falls slowly with
+    /// frequency, tan δ stays nearly flat); unset: εr and tan δ are taken as constant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_freq: Option<Quantity>,
 }
 
 /// Relative permittivity assumed when the stackup gives none: 4.5, a common nominal value for
@@ -115,7 +121,7 @@ impl Stackup {
         }
         let copper = self.outer_copper.0 * 2.min(n) + self.inner_copper.0 * (n - 2).max(0);
         let each = Nm(((self.thickness.0 - copper).max(0)) / gaps as i64);
-        let d = Dielectric { thickness: each, er: DEFAULT_ER, material: None, loss_tangent: None };
+        let d = Dielectric { thickness: each, er: DEFAULT_ER, material: None, loss_tangent: None, ref_freq: None };
         (vec![d; gaps], true)
     }
 

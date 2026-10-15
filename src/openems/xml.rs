@@ -4,11 +4,17 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use super::{Copper, Diel, EPS0, Hole, Layer, hole_free, mm};
+use super::{Copper, Diel, EPS0, Hole, Layer, MaskLayer, hole_free, mm};
 use crate::geom::poly::{Polygon, Rect, Ring, ring_area2};
 
-/// Priorities: dielectrics below metal, non-plated holes above everything.
+/// Priorities: dielectrics below the solder mask (over the laminate, air above the copper where
+/// the mask over it is thinner, the mask over the copper, air in the pad openings), all below
+/// metal; non-plated holes above everything.
 const PRIO_DIELECTRIC: u32 = 0;
+const PRIO_MASK: u32 = 5;
+const PRIO_MASK_CLEAR: u32 = 6;
+const PRIO_MASK_COPPER: u32 = 7;
+const PRIO_MASK_OPENING: u32 = 8;
 const PRIO_METAL: u32 = 10;
 const PRIO_NPTH: u32 = 20;
 
@@ -19,6 +25,9 @@ pub(super) struct Geometry<'a> {
     pub copper: &'a [Copper],
     pub holes: &'a [Hole],
     pub board: &'a [Polygon],
+    pub masks: &'a [MaskLayer],
+    /// Solder mask εr and tan δ.
+    pub mask_material: (f64, f64),
     /// Frequency at which the loss tangent becomes a conductivity (Hz).
     pub kappa_hz: u64,
     pub lines: [&'a [i64]; 3],
@@ -123,8 +132,18 @@ pub(super) fn write(g: &Geometry<'_>) -> String {
         let er = d.d.er;
         // Unset: FR-4's typical value, as the loss calculations assume (DECISIONS D52).
         let tan = d.d.loss_tangent.unwrap_or(crate::model::board::DEFAULT_LOSS_TANGENT);
-        let kappa = Some(tan).filter(|t| t.to_f64() > 0.0).map(|t| {
-            let k = 2.0 * std::f64::consts::PI * g.kappa_hz as f64 * EPS0 * er.to_f64() * t.to_f64();
+        // A dispersive dielectric (Djordjevic–Sarkar through its values at `ref_freq`): εr and
+        // tan δ at the excitation's center.
+        let ds = crate::electrical::ref_freq(&d.d).map(|f| {
+            crate::electrical::dispersion::Dielectric { er: er.to_f64(), tan_d: tan.to_f64(), ref_freq: Some(f) }
+                .at(g.kappa_hz as f64)
+        });
+        let (er_text, er_f, tan_f) = match ds {
+            Some((e, t)) => (format!("{e:.6}"), e, t),
+            None => (er.to_string(), er.to_f64(), tan.to_f64()),
+        };
+        let kappa = Some(tan_f).filter(|t| *t > 0.0).map(|t| {
+            let k = 2.0 * std::f64::consts::PI * g.kappa_hz as f64 * EPS0 * er_f * t;
             format!(" Kappa=\"{k:.6e}\"")
         });
         let _ = writeln!(
@@ -141,12 +160,73 @@ pub(super) fn write(g: &Geometry<'_>) -> String {
             ),
             d.d.material.as_deref().map(|m| format!(", {}", xml_text(m))).unwrap_or_default()
         );
+        if let (Some((e, t)), Some(f)) = (ds, d.d.ref_freq) {
+            let _ = writeln!(
+                out,
+                "      <!-- dispersive: εr and tan δ given at {f}; at {} Hz (Djordjevic–Sarkar): εr {e:.6}, tan δ {t:.6} -->",
+                g.kappa_hz
+            );
+        }
         let _ = writeln!(out, "      <Material ID=\"{id}\" Name=\"dielectric_{}\">", d.gap);
         id += 1;
-        let _ = writeln!(out, "        <Property Epsilon=\"{er}\"{}/>", kappa.unwrap_or_default());
+        let _ = writeln!(out, "        <Property Epsilon=\"{er_text}\"{}/>", kappa.unwrap_or_default());
         let _ = writeln!(out, "        <Primitives>");
         for r in &board_rings {
             primitive(&mut out, r, d.bottom, d.top, PRIO_DIELECTRIC);
+        }
+        let _ = writeln!(out, "        </Primitives>");
+        let _ = writeln!(out, "      </Material>");
+    }
+    if !g.masks.is_empty() {
+        let (er, tan) = g.mask_material;
+        let k = 2.0 * std::f64::consts::PI * g.kappa_hz as f64 * EPS0 * er * tan;
+        let _ =
+            writeln!(out, "      <!-- solder mask: εr {er}, tan δ {tan} (as a conductivity at {} Hz) -->", g.kappa_hz);
+        let _ = writeln!(out, "      <Material ID=\"{id}\" Name=\"solder_mask\">");
+        id += 1;
+        let kappa = if k > 0.0 { format!(" Kappa=\"{k:.6e}\"") } else { String::new() };
+        let _ = writeln!(out, "        <Property Epsilon=\"{er}\"{kappa}/>");
+        let _ = writeln!(out, "        <Primitives>");
+        for m in g.masks {
+            let (a, b) = (m.laminate.0.min(m.laminate.1), m.laminate.0.max(m.laminate.1));
+            for r in &board_rings {
+                primitive(&mut out, r, a, b, PRIO_MASK);
+            }
+            let (a, b) = (m.copper.0.min(m.copper.1), m.copper.0.max(m.copper.1));
+            for c in g.copper.iter().filter(|c| c.layer == m.layer) {
+                let mut rings = Vec::new();
+                hole_free(&c.shape, &mut rings);
+                for r in &rings {
+                    primitive(&mut out, r, a, b, PRIO_MASK_COPPER);
+                }
+            }
+        }
+        let _ = writeln!(out, "        </Primitives>");
+        let _ = writeln!(out, "      </Material>");
+        let _ = writeln!(out, "      <!-- air over the copper beyond its mask, and in the pad openings -->");
+        let _ = writeln!(out, "      <Material ID=\"{id}\" Name=\"mask_openings\">");
+        id += 1;
+        let _ = writeln!(out, "        <Property Epsilon=\"1\"/>");
+        let _ = writeln!(out, "        <Primitives>");
+        for m in g.masks {
+            let (lo, hi) = (m.span.0.min(m.span.1), m.span.0.max(m.span.1));
+            // Above the copper, between its mask and the mask over the laminate.
+            let (cu, over) = m.copper;
+            let (c0, c1) = if over > cu { (over, hi) } else { (lo, over) };
+            if c1 > c0 {
+                for c in g.copper.iter().filter(|c| c.layer == m.layer) {
+                    let mut rings = Vec::new();
+                    hole_free(&c.shape, &mut rings);
+                    for r in &rings {
+                        primitive(&mut out, r, c0, c1, PRIO_MASK_CLEAR);
+                    }
+                }
+            }
+            let mut rings = Vec::new();
+            hole_free(&m.openings, &mut rings);
+            for r in &rings {
+                primitive(&mut out, r, lo, hi, PRIO_MASK_OPENING);
+            }
         }
         let _ = writeln!(out, "        </Primitives>");
         let _ = writeln!(out, "      </Material>");

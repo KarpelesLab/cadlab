@@ -7,10 +7,15 @@
 //! of any other solver used); this module turns the region into voxels, places the ports and
 //! probes, runs once per port and assembles the S-parameters into a Touchstone file.
 //!
-//! - Copper is a perfect conductor: edges inside the copper volume (`solid`) or on the sheet
-//!   (`sheet`); plated holes and vias are metal cylinders.
-//! - Dielectrics have εr and the conductivity σ = 2π f₀ ε₀ εr tan δ (exact loss at the pulse's
-//!   center f₀, as in the export); edges average the permittivity of the cells around them.
+//! - Copper: perfect-conductor edges inside the copper volume (`solid`) or on the sheet
+//!   (`sheet`); plated holes and vias are metal cylinders. With a conductivity, a surface
+//!   impedance boundary condition on every copper surface gives the skin-effect loss (and
+//!   roughness), fitted over the band ([`fit::surface_fit`]).
+//! - Dielectrics: the Djordjevic–Sarkar model through the stackup's εr and tan δ at their
+//!   reference frequency (at the pulse's center f₀ when the stackup gives none), as Debye terms
+//!   on shared relaxation times ([`fit::debye_fit`]) updated by auxiliary differential
+//!   equations; edges average the permittivity of the cells around them. Solder mask (an
+//!   option) is a dielectric layer over the outer layers.
 //! - Lumped ports are resistive voltage sources of the reference impedance, from the reference
 //!   copper to the signal copper; microstrip ports feed the same source on the line and measure
 //!   voltage and current on it at their reference plane.
@@ -19,6 +24,7 @@
 //!   terminations that are not exactly matched do not bias the result.
 
 pub mod engine;
+pub mod fit;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,7 +39,12 @@ use crate::refs::ObjectRef;
 use crate::touchstone::{self, Touchstone};
 use crate::units::Nm;
 
-pub use engine::{Cancelled, Gaussian, Hooks, LumpedPort, Material, Probe, Run, Settings, Simulation, Structure};
+pub use engine::{
+    Cancelled, Gaussian, Hooks, LumpedPort, Material, Probe, Run, Settings, Simulation, Structure, SurfaceImpedance,
+};
+
+use crate::electrical::dispersion::Dielectric as Dispersive;
+use crate::electrical::loss::Roughness;
 
 /// Simulation options: the region and mesh as for the openEMS export, plus the solver's limits.
 #[derive(Clone, Debug)]
@@ -44,11 +55,21 @@ pub struct Options {
     pub max_cells: u64,
     /// Timestep as a fraction of the Courant limit.
     pub courant: f64,
+    /// Copper conductivity (S/m) for the surface impedance; `None`: perfect conductors.
+    pub conductivity: Option<f64>,
+    /// Copper surface roughness (on the surface impedance's resistance).
+    pub roughness: Roughness,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { region: openems::Options::default(), max_cells: 4_000_000, courant: 0.95 }
+        Options {
+            region: openems::Options::default(),
+            max_cells: 4_000_000,
+            courant: 0.95,
+            conductivity: Some(crate::electrical::loss::COPPER_CONDUCTIVITY),
+            roughness: Roughness::Smooth,
+        }
     }
 }
 
@@ -146,24 +167,68 @@ fn port_error(code: &'static str, p: &openems::Port, message: String, hint: &str
     e
 }
 
-/// Voxelizes the region: dielectrics inside the board outline, non-plated holes as air, copper
-/// and plated holes as perfect conductors; ports and their probes.
-fn build(r: &Region) -> Result<Built, Error> {
+/// A dielectric as Debye terms on the structure's relaxation times: the Djordjevic–Sarkar
+/// model through its values (at `anchor` Hz when it has no reference frequency) fitted over
+/// `band`; lossless dielectrics stay plain.
+fn dielectric(s: &mut Structure, d: &Dispersive, anchor: f64, band: (f64, f64), taus: &[f64]) -> u16 {
+    if d.tan_d <= 0.0 {
+        return s.material(Material { eps_r: d.er, sigma: 0.0 });
+    }
+    let f = fit::debye_fit(&d.model(anchor), taus, band.0, band.1);
+    s.debye_material(Material { eps_r: f.eps_inf, sigma: f.sigma }, f.delta)
+}
+
+/// Voxelizes the region: dielectrics (dispersive) inside the board outline, the solder mask,
+/// non-plated holes as air, copper and plated holes as perfect conductors; ports and their
+/// probes. `band`: the frequencies of the result (Hz).
+fn build(r: &Region, band: (f64, f64)) -> Result<Built, Error> {
     let mut s = Structure::new(r.lines.clone())
         .map_err(|m| Error::new("sim.bad_mesh", m, "check `max_cell`, `min_cell` and the region"))?;
     let w = r.window;
     let on_board = |x: i64, y: i64| poly::locate(&r.board, pt(x, y)) != Location::Outside;
+    let taus = fit::relaxation_times(band.0, band.1);
+    s.set_relaxation(taus.clone());
+    let f0 = r.f0 as f64;
     for d in &r.diels {
-        let er = d.d.er.to_f64();
-        let tan = d.d.loss_tangent.unwrap_or(crate::model::board::DEFAULT_LOSS_TANGENT).to_f64();
-        let sigma = 2.0 * std::f64::consts::PI * r.f0 as f64 * engine::EPS0 * er * tan;
-        let m = s.material(Material { eps_r: er, sigma });
+        let model = Dispersive {
+            er: d.d.er.to_f64(),
+            tan_d: d.d.loss_tangent.unwrap_or(crate::model::board::DEFAULT_LOSS_TANGENT).to_f64(),
+            ref_freq: crate::electrical::ref_freq(&d.d),
+        };
+        let m = dielectric(&mut s, &model, f0, band, &taus);
         s.fill(m, [w.min.x, w.min.y, d.bottom], [w.max.x, w.max.y, d.top], &on_board);
+    }
+    if !r.masks.is_empty() {
+        let (er, tan) = r.mask_material;
+        let mask = dielectric(&mut s, &Dispersive::constant(er, tan), f0, band, &taus);
+        for m in &r.masks {
+            let span = |a: (i64, i64)| (a.0.min(a.1), a.0.max(a.1));
+            let (a, b) = span(m.laminate);
+            s.fill(mask, [w.min.x, w.min.y, a], [w.max.x, w.max.y, b], &on_board);
+            let (lo, hi) = span(m.span);
+            let (cu, over) = m.copper;
+            let clear = if over > cu { (over, hi) } else { (lo, over) };
+            for c in r.copper.iter().filter(|c| c.layer == m.layer) {
+                let Some(bb) = c.shape.iter().filter_map(|q| q.bbox()).reduce(|a, b| a.union(&b)) else { continue };
+                let inside = |x: i64, y: i64| poly::locate(&c.shape, pt(x, y)) != Location::Outside;
+                if clear.1 > clear.0 {
+                    s.fill(0, [bb.min.x, bb.min.y, clear.0], [bb.max.x, bb.max.y, clear.1], &inside);
+                }
+                let (a, b) = span(m.copper);
+                s.fill(mask, [bb.min.x, bb.min.y, a], [bb.max.x, bb.max.y, b], &inside);
+            }
+            if let Some(bb) = m.openings.iter().filter_map(|q| q.bbox()).reduce(|a, b| a.union(&b)) {
+                let inside = |x: i64, y: i64| poly::locate(&m.openings, pt(x, y)) != Location::Outside;
+                s.fill(0, [bb.min.x, bb.min.y, lo], [bb.max.x, bb.max.y, hi], &inside);
+            }
+        }
     }
     let z_board = (
         r.layers.last().map_or(0, |l| l.bottom).min(r.diels.iter().map(|d| d.bottom).min().unwrap_or(0)),
         r.layers.first().map_or(0, |l| l.top),
     );
+    let z_board =
+        r.masks.iter().fold(z_board, |z, m| (z.0.min(m.span.0.min(m.span.1)), z.1.max(m.span.0.max(m.span.1))));
     let in_hole = |h: &openems::Hole, x: i64, y: i64| match &h.slot {
         Some(q) => poly::locate(std::slice::from_ref(q), pt(x, y)) != Location::Outside,
         None => {
@@ -363,8 +428,9 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
              `cells_per_wavelength`, `min_cell`), or raise `max_cells`",
         ));
     }
-    let b = build(&r)?;
     let freqs = frequencies(&o.region);
+    let band = (freqs[0], *freqs.last().unwrap_or(&freqs[0]));
+    let b = build(&r, band)?;
     let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
     let pml = o.region.pml_cells as usize;
     let settings = Settings {
@@ -375,6 +441,7 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
         excitation,
         freqs: freqs.clone(),
         threads: 0,
+        surface: o.conductivity.map(|sigma| fit::surface_fit(sigma, &o.roughness, band.0, band.1)),
     };
     let mut sim = Simulation::new(&b.structure, &b.ports, b.probes.clone(), settings)
         .map_err(|m| Error::new("sim.bad_setup", m, "grow the region or lower `pml_cells`"))?;

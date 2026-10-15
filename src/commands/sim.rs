@@ -21,9 +21,10 @@ pub(crate) fn register(r: &mut Registry) {
 
 /// Simulate a board region with the built-in 3D full-wave solver (FDTD) and write its
 /// S-parameters as a Touchstone file. The region, ports and mesh are those of
-/// `export.openems`: stackup dielectrics (εr, loss tangent), copper as perfect conductors,
-/// vias, lumped or microstrip ports, CPML absorbing boundaries; one run per port. Long:
-/// reports progress and can be cancelled; `max_cells` guards the mesh size.
+/// `export.openems`: stackup dielectrics (εr, loss tangent, dispersive with a reference
+/// frequency), copper with skin-effect loss and roughness (a surface impedance), optional
+/// solder mask, vias, lumped or microstrip ports, CPML absorbing boundaries; one run per port.
+/// Long: reports progress and can be cancelled; `max_cells` guards the mesh size.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SParams {
@@ -91,7 +92,8 @@ pub struct SParams {
     /// outside each edge; false: one line on the edge, as `export.openems` by default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thirds: Option<bool>,
-    /// End criterion: stop a run when the field energy has decayed by this much (default 40dB).
+    /// End criterion: stop a run when the energy (fields and dielectric polarization) has decayed
+    /// by this much (default 60dB: a 40 dB stop leaves tails that bias |S| below f_max / 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_criteria: Option<Quantity>,
     /// Most timesteps per run (default 100000).
@@ -100,6 +102,34 @@ pub struct SParams {
     /// Largest mesh accepted, in cells (default 4000000): a guard against runs of hours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cells: Option<u64>,
+    /// Solder mask thickness over the laminate ("20um"): a dielectric layer on both outer
+    /// layers, open at pads with a mask opening (none by default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Nm>,
+    /// Solder mask thickness over the copper (default: `mask`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_copper: Option<Nm>,
+    /// Solder mask relative permittivity (default 3.8, typical LPI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_er: Option<Quantity>,
+    /// Solder mask loss tangent (default 0.025, typical LPI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_loss_tangent: Option<Quantity>,
+    /// Copper conductivity for the skin-effect loss (default 58 MS/m, annealed copper: "58M").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductivity: Option<Quantity>,
+    /// Lossless copper: perfect conductors, no surface impedance (as `export.openems`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub perfect_copper: bool,
+    /// Copper RMS surface roughness (Hammerstad–Jensen factor on the surface resistance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<Nm>,
+    /// Huray snowball radius (with `huray_ratio`: Huray's roughness model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_radius: Option<Nm>,
+    /// Huray surface ratio: snowball surface per flat area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_ratio: Option<Quantity>,
 }
 
 /// Result of `sim.sparams`.
@@ -152,6 +182,8 @@ impl Command for SParams {
     type Output = Simulated;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Simulated, CommandError> {
+        let (mask, mask_notes) =
+            export::mask_options(self.mask, self.mask_copper, self.mask_er, self.mask_loss_tangent)?;
         let p = ctx.project()?;
         let name = self.name.clone().unwrap_or_else(|| crate::model::part::slugify(&p.manifest().name));
         if name.is_empty() || name.contains(['/', '\\']) {
@@ -191,12 +223,33 @@ impl Command for SParams {
             max_cell: self.max_cell,
             min_cell: self.min_cell,
             grading_permille: grading,
-            end_criteria_db: decibels(self.end_criteria, "end_criteria", 40)?,
+            end_criteria_db: decibels(self.end_criteria, "end_criteria", 60)?,
             timesteps: self.timesteps.unwrap_or(100_000).max(1),
             thirds: self.thirds.unwrap_or(true),
             port_planes: true,
+            mask,
         };
-        let opts = fdtd::Options { region, max_cells: self.max_cells.unwrap_or(4_000_000), ..fdtd::Options::default() };
+        let (sigma, roughness) = crate::commands::electrical::conductor_args(
+            self.conductivity,
+            self.roughness,
+            self.huray_radius,
+            self.huray_ratio,
+        )?;
+        if self.perfect_copper
+            && (self.conductivity.is_some() || self.roughness.is_some() || self.huray_radius.is_some())
+        {
+            return Err(CommandError::invalid_args(
+                "sim.perfect_copper",
+                "`perfect_copper` has no conductivity or roughness: drop one or the other",
+            ));
+        }
+        let opts = fdtd::Options {
+            region,
+            max_cells: self.max_cells.unwrap_or(4_000_000),
+            conductivity: (!self.perfect_copper).then(|| sigma.to_f64()),
+            roughness,
+            ..fdtd::Options::default()
+        };
         let result = {
             let progress = |done: u64, total: Option<u64>, msg: &str| ctx.progress(done, total, msg);
             let cancelled = || ctx.check_cancelled().is_err();
@@ -224,7 +277,7 @@ impl Command for SParams {
             dir.join(&file),
             OutFile { name: file.clone(), function: "S-parameters (Touchstone)".into(), content: ts.write() },
         )])?;
-        for d in result.diagnostics {
+        for d in mask_notes.into_iter().chain(result.diagnostics) {
             ctx.report(d);
         }
         let s = ts.s_params().unwrap_or_default();

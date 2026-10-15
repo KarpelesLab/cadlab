@@ -266,21 +266,24 @@ Research-sized items beyond the milestones above; none blocks a release.
       the field solver, Wheeler's rule on the closed forms), Hammerstad–Jensen and Huray roughness, RLGC,
       complex Z₀ and dB/m (differential for pairs) at frequencies or a sweep in `impedance.calc`, and `net.loss`
       for a routed net
-- [ ] 3D full-wave EM solver (e.g. FDTD or FEM) for S-parameters of vias, transitions, connectors and short
+- [x] 3D full-wave EM solver (e.g. FDTD or FEM) for S-parameters of vias, transitions, connectors and short
       interconnects, and an export of the board geometry to an external solver (openEMS) as a first step.
       First step done (D54; ELECTRICAL.md "Full-wave export"): `export.openems` writes a board region (nets,
       items such as a via or connector, or a window) as CSXCAD geometry (stackup dielectrics with εr and loss
-      tangent, copper per layer and net, vias and holes), a graded λ/N mesh, and a Python driver with lumped or
-      microstrip ports, Gaussian excitation and PML/MUR boundaries that writes a Touchstone file; the Touchstone
-      1.1/2.0 reader and `touchstone.summary` read results back. Built-in solver done as FDTD (D59;
-      ELECTRICAL.md "Full-wave solver"): `sim.sparams` simulates the same region (Yee grid on the graded mesh,
-      perfect-conductor copper and vias, lossy dielectrics, CPML, lumped and microstrip ports, Gaussian
-      excitation, S = B A⁻¹ from DFT power waves, Touchstone out), with a cell guard, progress and
-      cancellation, thread-count-independent results; validated against the 2D field solver (Z₀, εeff within
-      1.5 %), the loss model (D52), cavity resonances and Q, energy conservation and the Courant limit. Open:
-      finite copper conductivity (surface impedance), dispersive dielectrics (Debye/Djordjevic–Sarkar), solder
-      mask, lumped components on pads, subgridding or conformal (Dey–Mittra) edges for curved copper, FEM
-
+      tangent, copper per layer and net, vias and holes, solder mask), a graded λ/N mesh, and a Python driver
+      with lumped or microstrip ports, Gaussian excitation and PML/MUR boundaries that writes a Touchstone file;
+      the Touchstone 1.1/2.0 reader and `touchstone.summary` read results back. Built-in solver done as FDTD
+      (D59, D63; ELECTRICAL.md "Full-wave solver"): `sim.sparams` simulates the same region (Yee grid on the
+      graded mesh, copper with a surface impedance (skin effect, Hammerstad–Jensen or Huray roughness),
+      Djordjevic–Sarkar dielectrics as fitted Debye terms (stackup `ref_freq`), solder mask, vias, CPML, lumped
+      and microstrip ports, Gaussian excitation, S = B A⁻¹ from DFT power waves, Touchstone out), with a cell
+      guard, progress and cancellation, thread-count-independent results; validated against the 2D field solver
+      (Z₀, εeff within 1.5 %), D52's conductor, dielectric and total loss, cavity resonances and Q (copper:
+      h/δ within 1 %; dispersive: 1/tan δ(f) within 1 %), energy conservation and the Courant limit.
+      Not covered (refinements, not part of this goal): lumped components on pads (R/L/C elements in the
+      region), conformal (Dey–Mittra) or subgridded edges for curved copper (arcs and round pads staircase),
+      openEMS's own dispersive materials and conducting sheets in the export (written at f₀ and as perfect
+      conductors), and a FEM alternative
 ---
 
 ## Cross-cutting, always on

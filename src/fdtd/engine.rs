@@ -1,10 +1,13 @@
 //! The Yee/FDTD time stepping on a graded rectilinear grid: field arrays, material
-//! coefficients, CPML, lumped elements, probes and the running DFT.
+//! coefficients, Debye media, surface impedance, CPML, lumped elements, probes and the running
+//! DFT.
 //!
 //! Written from the textbook formulations: K. S. Yee, IEEE Trans. AP-14 (1966); A. Taflove and
 //! S. C. Hagness, *Computational Electrodynamics*, 3rd ed. (2005), chapters 3 (Yee algorithm), 7
-//! (CPML, after J. A. Roden and S. D. Gedney, Microwave Opt. Technol. Lett. 27, 2000) and 15
-//! (lumped elements, after M. Piket-May, A. Taflove and J. Baron, IEEE Trans. MTT-42, 1994).
+//! (CPML, after J. A. Roden and S. D. Gedney, Microwave Opt. Technol. Lett. 27, 2000), 9 (Debye
+//! media by auxiliary differential equations), 10 (surface impedance, after J. G. Maloney and
+//! G. S. Smith, and J. H. Beggs et al., IEEE Trans. AP-40, 1992) and 15 (lumped elements, after
+//! M. Piket-May, A. Taflove and J. Baron, IEEE Trans. MTT-42, 1994).
 //! The graded grid uses the integral (finite integration) form: curls are circulations divided by
 //! the face areas of the primal or dual grid.
 //!
@@ -54,6 +57,10 @@ pub struct Structure {
     nm: [Vec<i64>; 3],
     pos: [Vec<f64>; 3],
     materials: Vec<Material>,
+    /// Debye terms of each material (Δε per relaxation time; empty: none).
+    debye: Vec<Vec<f64>>,
+    /// Relaxation times (s) shared by the Debye terms of every material.
+    taus: Vec<f64>,
     cell: Vec<u16>,
     pec: [Vec<bool>; 3],
 }
@@ -82,6 +89,8 @@ impl Structure {
             pos,
             nm: lines,
             materials: vec![Material::VACUUM],
+            debye: vec![Vec::new()],
+            taus: Vec::new(),
             cell: vec![0; cells],
             pec: [vec![false; nodes(n)], vec![false; nodes(n)], vec![false; nodes(n)]],
         })
@@ -105,10 +114,25 @@ impl Structure {
 
     /// Registers a material, returning its index (0 is vacuum).
     pub fn material(&mut self, m: Material) -> u16 {
-        if let Some(i) = self.materials.iter().position(|x| *x == m) {
+        self.debye_material(m, Vec::new())
+    }
+
+    /// Sets the relaxation times (s) of the Debye terms, shared by every material (so the
+    /// permittivities of the cells around an edge average term by term).
+    pub fn set_relaxation(&mut self, taus: Vec<f64>) {
+        self.taus = taus;
+    }
+
+    /// Registers a dispersive material: ε(ω) = εr + σ/(jωε₀) + Σₚ Δεₚ / (1 + jωτₚ), `eps_r`
+    /// being ε∞ and `delta` the Δεₚ on the relaxation times of [`Structure::set_relaxation`].
+    /// Returns its index.
+    pub fn debye_material(&mut self, m: Material, delta: Vec<f64>) -> u16 {
+        let delta = if delta.iter().all(|d| *d == 0.0) { Vec::new() } else { delta };
+        if let Some(i) = self.materials.iter().zip(&self.debye).position(|(x, d)| *x == m && *d == delta) {
             return i as u16;
         }
         self.materials.push(m);
+        self.debye.push(delta);
         (self.materials.len() - 1) as u16
     }
 
@@ -311,6 +335,32 @@ pub struct Settings {
     /// Worker threads (0: from the grid size, one per 131072 nodes up to the global pool's
     /// size; 1: none). Results are identical for any count.
     pub threads: usize,
+    /// Surface impedance of the perfect-conductor edges (finite conductivity: skin-effect
+    /// loss); `None`: lossless perfect conductors.
+    pub surface: Option<SurfaceImpedance>,
+}
+
+/// A conductor's surface impedance Zs(s) = r₀ + Σₚ rₚ s / (s + aₚ) (Ω; aₚ in 1/s): a series
+/// resistance and parallel R–L sections, passive for non-negative terms. Applied on every
+/// perfect-conductor surface as E_tan = Zs (n × H) (see [`Simulation`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceImpedance {
+    /// Series resistance r₀ (Ω).
+    pub r0: f64,
+    /// Sections (rₚ in Ω, aₚ in 1/s).
+    pub terms: Vec<(f64, f64)>,
+}
+
+impl SurfaceImpedance {
+    /// The impedance at `f` (Hz).
+    pub fn z(&self, f: f64) -> C64 {
+        let s = C64::new(0.0, 2.0 * std::f64::consts::PI * f);
+        let mut z = C64::new(self.r0, 0.0);
+        for &(r, a) in &self.terms {
+            z = z + C64::new(r, 0.0) * s / (s + C64::new(a, 0.0));
+        }
+        z
+    }
 }
 
 impl Default for Settings {
@@ -323,6 +373,7 @@ impl Default for Settings {
             excitation: Gaussian { f0: 5e9, fc: 5e9 },
             freqs: Vec::new(),
             threads: 0,
+            surface: None,
         }
     }
 }
@@ -417,6 +468,88 @@ pub struct Simulation {
     ports: Vec<PortEdges>,
     probes: Vec<Probe>,
     pool: Option<Pool>,
+    /// Dispersive (Debye) edges.
+    disp: Option<Dispersion>,
+    /// Surface-impedance faces.
+    sibc: Option<Sibc>,
+}
+
+/// Edges or faces of one field component in index order, split per z plane, with their state
+/// (`stride` values each).
+struct Entries<T> {
+    /// (field index, payload).
+    items: Vec<(u32, T)>,
+    /// First item of each z plane (`planes + 1` offsets).
+    starts: Vec<usize>,
+    state: Vec<f32>,
+}
+
+impl<T> Entries<T> {
+    fn new(items: Vec<(u32, T)>, plane: usize, planes: usize, stride: usize) -> Entries<T> {
+        let mut starts = Vec::with_capacity(planes + 1);
+        let mut at = 0;
+        for k in 0..=planes {
+            while at < items.len() && (items[at].0 as usize) < k * plane {
+                at += 1;
+            }
+            starts.push(at);
+        }
+        let state = vec![0.0; items.len() * stride];
+        Entries { items, starts, state }
+    }
+}
+
+/// Debye polarization currents (auxiliary differential equation, Taflove ch. 9): per pole
+/// τ dJ/dt + J = ε₀ Δε dE/dt, discretized at the half step (bilinear):
+/// J⁺ = k J + β (E⁺ − E), k = (2τ − Δt)/(2τ + Δt), β = 2ε₀Δε/(2τ + Δt); Ampère's law takes
+/// (J⁺ + J)/2, folded into the edge's coefficients (ca, cb) and a correction
+/// −cb Σ (1 + k)/2 J after the curl update.
+struct Dispersion {
+    /// k per pole.
+    k: Vec<f32>,
+    /// (1 + k)/2 per pole.
+    half: Vec<f32>,
+    /// β per pole for each coefficient-table entry (empty: not dispersive).
+    beta: Vec<Vec<f32>>,
+    /// Relaxation time per pole (s).
+    tau: Vec<f64>,
+    /// ε₀Δε per pole for each coefficient-table entry (the polarization's stored energy).
+    eps_delta: Vec<Vec<f64>>,
+    /// Per E component: (edge, coefficient index); state: E before the update, then J per pole.
+    edges: [Entries<u32>; 3],
+}
+
+/// Surface impedance boundary condition on the conductors (after J. G. Maloney, G. S. Smith,
+/// IEEE Trans. AP-40, 1992, and J. H. Beggs, R. J. Luebbers, K. S. Yee, K. S. Kunz, IEEE Trans.
+/// AP-40, 1992; Taflove ch. 10): a conductor edge on the surface gets the tangential field
+/// E = Zs ∗ K instead of zero, K the surface current density: the current I through the edge's
+/// dual loop (the circulation of H over its faces outside the conductor) spread over the
+/// conductor surface that the loop encloses (width w). E enters the H update of those faces
+/// (H −= (Δt/μ₀) σ E / Δ⊥), so the dissipated power is Re(Zs) I² / w per unit length: the
+/// current around an edge or corner is carried on the copper there, not over the whole dual
+/// cell. Inside sheets (open on both sides) each side is its own loop. The time convolution is the
+/// impedance's sections updated recursively (bilinear): V⁺ = k V + β (I⁺ − I),
+/// k = (2 − aΔt)/(2 + aΔt), β = 2r/(2 + aΔt).
+struct Sibc {
+    r0: f32,
+    k: Vec<f32>,
+    beta: Vec<f32>,
+    /// Per loop: its faces (H component, index, σ × dual length) and 1/w.
+    loops: Vec<SurfaceLoop>,
+    /// Per loop: the previous current, then V per section.
+    state: Vec<f32>,
+    /// Per loop: the surface field E of this step.
+    e: Vec<f32>,
+    /// Per H component: the faces receiving corrections, each a range of `terms`.
+    faces: [Entries<(u32, u32)>; 3],
+    /// (loop, Δt σ / (μ₀ Δ⊥)).
+    terms: Vec<(u32, f32)>,
+}
+
+/// One conductor surface loop.
+struct SurfaceLoop {
+    faces: Vec<(u8, u32, f32)>,
+    inv_w: f32,
 }
 
 fn dual(d: &[f64]) -> Vec<f64> {
@@ -485,6 +618,42 @@ fn planes<T: Send>(data: &mut [T], plane: usize, pool: Option<&Pool>, f: impl Fn
     }
 }
 
+/// Runs `f(plane slice, its first index, items, their state)` on every z plane holding entries
+/// (in parallel with the `parallel` feature; the entries are independent, so results do not
+/// depend on it).
+fn entry_jobs<T: Sync>(
+    field: &mut [f32],
+    plane: usize,
+    e: &mut Entries<T>,
+    stride: usize,
+    pool: Option<&Pool>,
+    f: impl Fn(&mut [f32], usize, &[(u32, T)], &mut [f32]) + Sync + Send,
+) {
+    let Entries { items, starts, state } = e;
+    let mut jobs = Vec::new();
+    let (mut rest_f, mut rest_s) = (field, &mut state[..]);
+    for k in 0..starts.len() - 1 {
+        let (fk, rf) = rest_f.split_at_mut(plane.min(rest_f.len()));
+        rest_f = rf;
+        let (a, b) = (starts[k], starts[k + 1]);
+        let (sk, rs) = rest_s.split_at_mut((b - a) * stride);
+        rest_s = rs;
+        if b > a {
+            jobs.push((k * plane, fk, &items[a..b], sk));
+        }
+    }
+    #[cfg(feature = "parallel")]
+    if let Some(pool) = pool {
+        use rayon::prelude::*;
+        pool.install(|| jobs.into_par_iter().for_each(|(o, fk, it, sk)| f(fk, o, it, sk)));
+        return;
+    }
+    let _ = pool;
+    for (o, fk, it, sk) in jobs {
+        f(fk, o, it, sk);
+    }
+}
+
 impl Simulation {
     /// Prepares a simulation of the structure. Errors: ports or probes outside the grid or
     /// degenerate, absorbing layers thicker than the grid.
@@ -522,6 +691,8 @@ impl Simulation {
             slabs: Vec::new(),
             ports: Vec::new(),
             probes: Vec::new(),
+            disp: None,
+            sibc: None,
             settings,
         };
         sim.coefficients(s, ports)?;
@@ -603,10 +774,14 @@ impl Simulation {
             let sign = if p.positive_high { -1.0 } else { 1.0 };
             port_edges.push((a, edges, sign, columns, per_edge, r_e, p.r));
         }
-        let mut table: std::collections::BTreeMap<(u32, u32, u32), u32> = std::collections::BTreeMap::new();
+        let mut table: std::collections::BTreeMap<Vec<u32>, u32> = std::collections::BTreeMap::new();
         let mut coef = vec![(0.0f32, 0.0f32, 1.0f32)];
-        table.insert((0, 0, 1.0f32.to_bits()), 0);
+        table.insert(vec![0, 0, 1.0f32.to_bits()], 0);
         let dt = self.dt;
+        let poles = s.taus.len();
+        let mut betas: Vec<Vec<f32>> = vec![Vec::new()];
+        let mut disp_edges: [Vec<(u32, u32)>; 3] = Default::default();
+        let mut conductor: [Vec<bool>; 3] = std::array::from_fn(|_| vec![false; nodes(n)]);
         for a in 0..3 {
             let (b, c) = ((a + 1) % 3, (a + 2) % 3);
             for k in 0..n[2] {
@@ -619,32 +794,78 @@ impl Simulation {
                         let e = self.id(p);
                         // Tangential edges on the walls stay zero.
                         let wall = p[b] == 0 || p[b] + 1 == n[b] || p[c] == 0 || p[c] + 1 == n[c];
-                        if wall || s.pec[a][e] && !extra[a].contains_key(&e) {
+                        if wall {
                             self.tab[a][e] = 0;
                             continue;
                         }
+                        if s.pec[a][e] && !extra[a].contains_key(&e) {
+                            self.tab[a][e] = 0;
+                            conductor[a][e] = true;
+                            continue;
+                        }
                         let (mut eps, mut sig, mut w) = (0.0, 0.0, 0.0);
+                        let mut delta = vec![0.0; poles];
                         for (q, area) in self.around(a, p) {
-                            let m = s.materials[s.cell[cell_id(q)] as usize];
+                            let mi = s.cell[cell_id(q)] as usize;
+                            let m = s.materials[mi];
                             eps += m.eps_r * area;
                             sig += m.sigma * area;
+                            for (d, x) in delta.iter_mut().zip(&s.debye[mi]) {
+                                *d += x * area;
+                            }
                             w += area;
                         }
                         let (eps, mut sig) = (EPS0 * eps / w, sig / w);
                         sig += extra[a].get(&e).copied().unwrap_or(0.0);
-                        let h = sig * dt / (2.0 * eps);
-                        let ca = ((1.0 - h) / (1.0 + h)) as f32;
-                        let cb = (dt / eps / (1.0 + h)) as f32;
-                        let key = (ca.to_bits(), cb.to_bits(), (eps as f32).to_bits());
+                        // Debye terms: β = 2ε₀Δε/(2τ + Δt) (zero when the edge has none).
+                        let beta: Vec<f64> =
+                            delta.iter().zip(&s.taus).map(|(d, t)| 2.0 * EPS0 * (d / w) / (2.0 * t + dt)).collect();
+                        let bsum: f64 = beta.iter().sum();
+                        let (ca, cb) = if bsum > 0.0 {
+                            let den = eps / dt + sig / 2.0 + bsum / 2.0;
+                            (((eps / dt - sig / 2.0 + bsum / 2.0) / den) as f32, (1.0 / den) as f32)
+                        } else {
+                            let h = sig * dt / (2.0 * eps);
+                            (((1.0 - h) / (1.0 + h)) as f32, (dt / eps / (1.0 + h)) as f32)
+                        };
+                        let beta: Vec<f32> =
+                            if bsum > 0.0 { beta.iter().map(|&x| x as f32).collect() } else { Vec::new() };
+                        let mut key = vec![ca.to_bits(), cb.to_bits(), (eps as f32).to_bits()];
+                        key.extend(beta.iter().map(|x| x.to_bits()));
                         let next = coef.len() as u32;
                         let t = *table.entry(key).or_insert(next);
                         if t == next {
                             coef.push((ca, cb, eps as f32));
+                            betas.push(beta);
                         }
                         self.tab[a][e] = t;
+                        if !betas[t as usize].is_empty() {
+                            disp_edges[a].push((e as u32, t));
+                        }
                     }
                 }
             }
+        }
+        let plane = n[0] * n[1];
+        if disp_edges.iter().any(|v| !v.is_empty()) {
+            let k: Vec<f32> = s.taus.iter().map(|t| ((2.0 * t - dt) / (2.0 * t + dt)) as f32).collect();
+            let half = k.iter().map(|k| (1.0 + k) / 2.0).collect();
+            // ε₀Δε = β (2τ + Δt) / 2.
+            let eps_delta = betas
+                .iter()
+                .map(|b| b.iter().zip(&s.taus).map(|(b, t)| *b as f64 * (2.0 * t + dt) / 2.0).collect())
+                .collect();
+            self.disp = Some(Dispersion {
+                k,
+                half,
+                tau: s.taus.clone(),
+                eps_delta,
+                beta: betas,
+                edges: disp_edges.map(|v| Entries::new(v, plane, n[2], poles + 1)),
+            });
+        }
+        if let Some(z) = &self.settings.surface {
+            self.sibc = self.surface_faces(z, &conductor);
         }
         self.coef = coef;
         for (a, edges, sign, columns, per_edge, r_e, r) in port_edges {
@@ -659,6 +880,158 @@ impl Simulation {
             self.ports.push(PortEdges { axis: a, edges, sign, columns, r });
         }
         Ok(())
+    }
+
+    /// The surface loops of the conductor edges. For each face that is not inside the conductor
+    /// (not all four edges conductor or domain wall) and each conductor edge on it, the face is
+    /// part of that
+    /// edge's dual loop, on the side the face extends to; the conductor surface it covers is the
+    /// part of the edge's dual length along the face's normal axis where the conductor continues
+    /// (half of each neighbouring cell along that axis whose parallel edge is conductor or wall too). An
+    /// edge open on two opposite sides only (inside a sheet) gets one loop per side; any other
+    /// edge (on a solid conductor's surface, at its corners, at a sheet's edge where the current
+    /// wraps around) one loop over all its faces.
+    fn surface_faces(&self, z: &SurfaceImpedance, conductor: &[Vec<bool>; 3]) -> Option<Sibc> {
+        let n = self.n;
+        let dt = self.dt;
+        let ch = dt / MU0;
+        let cond = |ax: usize, q: [usize; 3]| q[ax] + 1 < n[ax] && conductor[ax][self.id(q)];
+        // Conductor or a tangential edge of the domain's walls (zero E as well).
+        let zero = |ax: usize, q: [usize; 3]| {
+            let (b, c) = ((ax + 1) % 3, (ax + 2) % 3);
+            q[ax] + 1 < n[ax] && (cond(ax, q) || q[b] == 0 || q[b] + 1 == n[b] || q[c] == 0 || q[c] + 1 == n[c])
+        };
+        let plane = n[0] * n[1];
+        // Per conductor edge (axis, index): (side axis, side sign, H component, face index,
+        // σ, dual length, Δ⊥, surface share).
+        type Rec = (usize, i8, u8, u32, f64, f64, f64, f64);
+        let mut by_edge: std::collections::BTreeMap<(u8, u32), Vec<Rec>> = std::collections::BTreeMap::new();
+        for c in 0..3 {
+            let (b, d) = ((c + 1) % 3, (c + 2) % 3);
+            for k in 0..n[2] {
+                for j in 0..n[1] {
+                    for i in 0..n[0] {
+                        let p = [i, j, k];
+                        if p[b] + 1 >= n[b] || p[d] + 1 >= n[d] {
+                            continue;
+                        }
+                        let mut pd = p;
+                        pd[d] += 1;
+                        let mut pb = p;
+                        pb[b] += 1;
+                        // (edge axis, node, the in-face axis across it, side sign, σ in the curl).
+                        let edges =
+                            [(b, p, d, 1i8, 1.0), (b, pd, d, -1, -1.0), (d, p, b, 1, -1.0), (d, pb, b, -1, 1.0)];
+                        // A face bounded by zero-E edges only is inside the conductor.
+                        if edges.iter().all(|&(ax, q, ..)| zero(ax, q)) {
+                            continue;
+                        }
+                        let on: Vec<bool> = edges.iter().map(|&(ax, q, ..)| cond(ax, q)).collect();
+                        let fi = self.id(p) as u32;
+                        for (&(ax, q, perp, side, sigma), _) in edges.iter().zip(&on).filter(|x| *x.1) {
+                            let mut share = 0.0;
+                            if q[c] >= 1 {
+                                let mut lo = q;
+                                lo[c] -= 1;
+                                if zero(ax, lo) {
+                                    share += self.d[c][q[c] - 1] / 2.0;
+                                }
+                            }
+                            if q[c] + 1 < n[c] {
+                                let mut hi = q;
+                                hi[c] += 1;
+                                if zero(ax, hi) {
+                                    share += self.d[c][q[c]] / 2.0;
+                                }
+                            }
+                            let rec = (perp, side, c as u8, fi, sigma, self.dd[c][p[c]], self.d[perp][p[perp]], share);
+                            by_edge.entry((ax as u8, self.id(q) as u32)).or_default().push(rec);
+                        }
+                    }
+                }
+            }
+        }
+        let mut loops: Vec<SurfaceLoop> = Vec::new();
+        let mut contrib: [Vec<(u32, u32, f32)>; 3] = Default::default();
+        let mut add_loop = |recs: &[&Rec], w: f64, loops: &mut Vec<SurfaceLoop>| {
+            if w <= 0.0 {
+                return;
+            }
+            let id = loops.len() as u32;
+            for r in recs {
+                contrib[r.2 as usize].push((r.3, id, (ch * r.4 / r.6) as f32));
+            }
+            loops.push(SurfaceLoop {
+                faces: recs.iter().map(|r| (r.2, r.3, (r.4 * r.5) as f32)).collect(),
+                inv_w: (1.0 / w) as f32,
+            });
+        };
+        for recs in by_edge.values() {
+            // Open on both sides along an axis: a sheet (the axis with the most surface).
+            let sheet = (0..3)
+                .filter(|&a| recs.iter().any(|r| r.0 == a && r.1 > 0) && recs.iter().any(|r| r.0 == a && r.1 < 0))
+                .map(|a| (a, recs.iter().filter(|r| r.0 == a).map(|r| r.7).sum::<f64>()))
+                .filter(|x| x.1 > 0.0)
+                .max_by(|x, y| x.1.total_cmp(&y.1).then(y.0.cmp(&x.0)))
+                .map(|x| x.0);
+            // A sheet's edge (a face open beside it): the current wraps around it, one loop.
+            let sheet = sheet.filter(|&a| recs.iter().all(|r| r.0 == a));
+            match sheet {
+                Some(a) => {
+                    for side in [-1i8, 1] {
+                        let part: Vec<&Rec> = recs.iter().filter(|r| r.0 == a && r.1 == side).collect();
+                        let w = part.iter().map(|r| r.7).sum();
+                        add_loop(&part, w, &mut loops);
+                    }
+                }
+                None => {
+                    let all: Vec<&Rec> = recs.iter().collect();
+                    let w = recs.iter().map(|r| r.7).sum();
+                    add_loop(&all, w, &mut loops);
+                }
+            }
+        }
+        if loops.is_empty() {
+            return None;
+        }
+        let mut terms = Vec::new();
+        let faces = contrib.map(|mut v| {
+            v.sort_by_key(|x| (x.0, x.1));
+            let mut items: Vec<(u32, (u32, u32))> = Vec::new();
+            for (f, l, coef) in v {
+                match items.last_mut() {
+                    Some(last) if last.0 == f => last.1.1 += 1,
+                    _ => items.push((f, (terms.len() as u32, terms.len() as u32 + 1))),
+                }
+                terms.push((l, coef));
+            }
+            Entries::new(items, plane, n[2], 0)
+        });
+        let k = z.terms.iter().map(|&(_, a)| ((2.0 - a * dt) / (2.0 + a * dt)) as f32).collect();
+        let beta = z.terms.iter().map(|&(r, a)| (2.0 * r / (2.0 + a * dt)) as f32).collect();
+        let stride = z.terms.len() + 1;
+        let count = loops.len();
+        Some(Sibc {
+            r0: z.r0 as f32,
+            k,
+            beta,
+            loops,
+            state: vec![0.0; count * stride],
+            e: vec![0.0; count],
+            faces,
+            terms,
+        })
+    }
+
+    /// Number of conductor surface loops with a surface impedance, and of the faces they
+    /// correct per H component.
+    pub fn surface_loops(&self) -> (usize, [usize; 3]) {
+        self.sibc.as_ref().map_or((0, [0; 3]), |z| (z.loops.len(), z.faces.each_ref().map(|f| f.items.len())))
+    }
+
+    /// Number of dispersive edges, per E component.
+    pub fn dispersive_edges(&self) -> [usize; 3] {
+        self.disp.as_ref().map_or([0; 3], |d| d.edges.each_ref().map(|f| f.items.len()))
     }
 
     /// CPML slabs on every face with absorbing cells.
@@ -781,6 +1154,116 @@ impl Simulation {
         }
         for s in &mut self.slabs {
             s.psi.fill(0.0);
+        }
+        if let Some(d) = &mut self.disp {
+            for e in &mut d.edges {
+                e.state.fill(0.0);
+            }
+        }
+        if let Some(z) = &mut self.sibc {
+            z.state.fill(0.0);
+            z.e.fill(0.0);
+        }
+    }
+
+    /// Surface impedance on the conductors: the loops' surface fields from their currents, then
+    /// the faces' corrections (before the curl update, which only adds to H).
+    fn update_sibc(&mut self) {
+        let plane = self.n[0] * self.n[1];
+        let Simulation { f, sibc, pool, .. } = self;
+        let Some(z) = sibc else { return };
+        let pool = pool.as_ref();
+        let (r0, k, beta) = (z.r0, &z.k, &z.beta);
+        let stride = k.len() + 1;
+        {
+            let h: [&[f32]; 3] = [&f[3], &f[4], &f[5]];
+            let loops = &z.loops;
+            let work = |first: usize, st: &mut [f32], e: &mut [f32]| {
+                for (n, (s, ev)) in st.chunks_mut(stride).zip(e.iter_mut()).enumerate() {
+                    let l = &loops[first + n];
+                    let i: f32 = l.faces.iter().map(|&(c, g, w)| w * h[c as usize][g as usize]).sum();
+                    let di = i - s[0];
+                    let mut es = r0 * i;
+                    for ((v, kk), bb) in s[1..].iter_mut().zip(k).zip(beta) {
+                        *v = kk * *v + bb * di;
+                        es += *v;
+                    }
+                    s[0] = i;
+                    *ev = es * l.inv_w;
+                }
+            };
+            const CHUNK: usize = 4096;
+            #[cfg(feature = "parallel")]
+            if let Some(pool) = pool {
+                use rayon::prelude::*;
+                pool.install(|| {
+                    z.state
+                        .par_chunks_mut(CHUNK * stride)
+                        .zip(z.e.par_chunks_mut(CHUNK))
+                        .enumerate()
+                        .for_each(|(t, (st, e))| work(t * CHUNK, st, e))
+                });
+            } else {
+                for (t, (st, e)) in z.state.chunks_mut(CHUNK * stride).zip(z.e.chunks_mut(CHUNK)).enumerate() {
+                    work(t * CHUNK, st, e);
+                }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (t, (st, e)) in z.state.chunks_mut(CHUNK * stride).zip(z.e.chunks_mut(CHUNK)).enumerate() {
+                work(t * CHUNK, st, e);
+            }
+        }
+        let (e, terms) = (&z.e, &z.terms);
+        for (c, faces) in z.faces.iter_mut().enumerate() {
+            entry_jobs(&mut f[3 + c], plane, faces, 0, pool, |fk, o, items, _| {
+                for (g, (a, b)) in items {
+                    let corr: f32 = terms[*a as usize..*b as usize].iter().map(|&(l, w)| w * e[l as usize]).sum();
+                    fk[*g as usize - o] -= corr;
+                }
+            });
+        }
+    }
+
+    /// Saves E on the dispersive edges before the curl update.
+    fn disp_before(&mut self) {
+        let plane = self.n[0] * self.n[1];
+        let Simulation { f, disp, pool, .. } = self;
+        let Some(d) = disp else { return };
+        let pool = pool.as_ref();
+        let stride = d.k.len() + 1;
+        for (a, edges) in d.edges.iter_mut().enumerate() {
+            entry_jobs(&mut f[a], plane, edges, stride, pool, |fk, o, items, st| {
+                for ((g, _), s) in items.iter().zip(st.chunks_mut(stride)) {
+                    s[0] = fk[*g as usize - o];
+                }
+            });
+        }
+    }
+
+    /// The polarization currents' part of Ampère's law on the dispersive edges, then their own
+    /// update from the new E.
+    fn disp_after(&mut self) {
+        let plane = self.n[0] * self.n[1];
+        let Simulation { f, disp, pool, coef, .. } = self;
+        let Some(d) = disp else { return };
+        let pool = pool.as_ref();
+        let (k, half, beta) = (&d.k, &d.half, &d.beta);
+        let coef: &[(f32, f32, f32)] = coef;
+        let stride = k.len() + 1;
+        for (a, edges) in d.edges.iter_mut().enumerate() {
+            entry_jobs(&mut f[a], plane, edges, stride, pool, |fk, o, items, st| {
+                for ((g, t), s) in items.iter().zip(st.chunks_mut(stride)) {
+                    let cb = coef[*t as usize].1;
+                    let e = &mut fk[*g as usize - o];
+                    let corr: f32 = s[1..].iter().zip(half).map(|(j, h)| j * h).sum();
+                    let new = *e - cb * corr;
+                    let de = new - s[0];
+                    for ((j, kk), bb) in s[1..].iter_mut().zip(k).zip(&beta[*t as usize]) {
+                        *j = kk * *j + bb * de;
+                    }
+                    *e = new;
+                }
+            });
         }
     }
 
@@ -1034,7 +1517,7 @@ impl Simulation {
         }
     }
 
-    /// Total electromagnetic energy (J).
+    /// Total electromagnetic energy (J): the fields' and the Debye polarizations'.
     pub fn energy(&self) -> f64 {
         let n = self.n;
         let plane = n[0] * n[1];
@@ -1067,6 +1550,27 @@ impl Simulation {
                     }
                 }
             }
+            // Debye polarizations: P²/(2ε₀Δε) per pole, P = ε₀Δε E − τ J.
+            if let Some(d) = &self.disp {
+                for (a, edges) in d.edges.iter().enumerate() {
+                    let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+                    let stride = d.k.len() + 1;
+                    let (lo, hi) = (edges.starts[k], edges.starts[k + 1]);
+                    for (idx, &(g, t)) in edges.items[lo..hi].iter().enumerate() {
+                        let g = g as usize;
+                        let p = [g % n[0], (g / n[0]) % n[1], k];
+                        let vol = self.d[a][p[a]] * self.dd[b][p[b]] * self.dd[c][p[c]];
+                        let e = self.f[a][g] as f64;
+                        let st = &edges.state[(lo + idx) * stride + 1..(lo + idx + 1) * stride];
+                        for ((j, ed), tau) in st.iter().zip(&d.eps_delta[t as usize]).zip(&d.tau) {
+                            if *ed > 0.0 {
+                                let pol = ed * e - tau * *j as f64;
+                                w += 0.5 * pol * pol / ed * vol;
+                            }
+                        }
+                    }
+                }
+            }
             w
         };
         #[cfg(feature = "parallel")]
@@ -1082,9 +1586,11 @@ impl Simulation {
     /// One timestep: H from E, then E from H with the port sources at `t + dt/2`. `drive` gives
     /// the driven port and its source voltage. Returns the ports' (V, I) at the half step.
     pub fn step(&mut self, drive: Option<(usize, f64)>) -> Vec<(f64, f64)> {
+        self.update_sibc();
         self.update_h();
         self.update_cpml(false);
         let before: Vec<f64> = self.ports.iter().map(|p| self.port_voltage(p)).collect();
+        self.disp_before();
         self.update_e();
         self.update_cpml(true);
         if let Some((k, vs)) = drive
@@ -1095,6 +1601,7 @@ impl Simulation {
                 e[g] -= kc * vs as f32;
             }
         }
+        self.disp_after();
         self.ports
             .iter()
             .enumerate()

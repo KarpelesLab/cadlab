@@ -280,3 +280,58 @@ fn touchstone_summary() {
     let o = exec(&r, &mut s, "touchstone.summary", json!({"path": bad, "ports": 1}));
     assert_eq!(o["output"]["params"][0]["name"], "S11");
 }
+
+/// Solder mask (both outer layers, open at the pads) and a dispersive dielectric in the export:
+/// a mask material with its primitives over the laminate and the copper, air in the pad openings,
+/// mesh lines at the mask surfaces, and εr / κ of the Djordjevic–Sarkar model at f₀.
+#[test]
+fn mask_and_dispersion_export() {
+    let r = Registry::with_builtins();
+    let (dir, mut s) = new_project(&r, "rf");
+    let (bottom, _) = via_transition(&r, &mut s);
+    exec(&r, &mut s, "board.dielectric", json!({"gap": 1, "ref_freq": "1GHz"}));
+    let out = dir.path().join("sim");
+    let args = json!({
+        "dir": out, "name": "mask", "f_max": "10GHz", "nets": ["RF"], "margin": "4mm",
+        "mask": "20um", "mask_copper": "15um", "mask_er": "3.5", "mask_loss_tangent": "0.02",
+        "ports": [{"at": "J1.1"}, {"at": format!("track#{bottom}"), "end": "end", "kind": "msl", "length": "3mm"}]
+    });
+    let o = exec(&r, &mut s, "export.openems", args);
+    assert_eq!(codes(&o), Vec::<String>::new());
+    // The mask's outer surfaces bound the board before the air: 1.585 mm above, −0.015 below.
+    let z = &o["output"]["z_range"];
+    let air = 29.979_245_8 / 4.0;
+    let mm = |v: &Value| v.as_str().unwrap().trim_end_matches("mm").parse::<f64>().unwrap();
+    assert!((mm(&z[1]) - (1.585 + air)).abs() < 1e-3 && (mm(&z[0]) + 0.015 + air).abs() < 1e-3, "{z}");
+    let xml = std::fs::read_to_string(out.join("mask.xml")).unwrap();
+    assert!(xml.contains("Name=\"solder_mask\">\n        <Property Epsilon=\"3.5\" Kappa=\""), "{xml}");
+    assert!(xml.contains("Name=\"mask_openings\">\n        <Property Epsilon=\"1\"/>"));
+    // Over the laminate (top 1.535 + 0.02) and over the copper (top 1.57 + 0.015, bottom 0 − 0.015).
+    assert!(xml.contains("Z=\"1.535\"/>") && xml.contains("Z=\"1.555\"/>"));
+    assert!(xml.contains("Priority=\"7\" Elevation=\"1.57\" Length=\"0.015\""), "mask over the F.Cu track");
+    assert!(xml.contains("Priority=\"7\" Elevation=\"-0.015\" Length=\"0.015\""), "mask under the B.Cu track");
+    let zl = xml.split("<ZLines>").nth(1).unwrap().split("</ZLines>").next().unwrap();
+    for z in ["-0.015", "0.015", "1.555", "1.585"] {
+        assert!(zl.split(',').any(|v| v == z), "z line {z} in {zl}");
+    }
+    // The pads are open: air primitives over J1.1 (top) and J2.1 (bottom side).
+    let openings = xml.split("Name=\"mask_openings\"").nth(1).unwrap().split("</Material>").next().unwrap();
+    assert!(openings.contains("Priority=\"8\""), "{openings}");
+    // The prepreg is dispersive: εr at f₀ = 5 GHz below its 1 GHz value.
+    assert!(xml.contains("dispersive: εr and tan δ given at 1GHz; at 5000000000 Hz (Djordjevic–Sarkar)"), "{xml}");
+    let eps: f64 = xml
+        .split("Name=\"dielectric_1\">\n        <Property Epsilon=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(eps < 4.1 && eps > 4.0, "{eps}");
+    // Errors: options without the thickness, a non-positive thickness.
+    let bad = json!({"dir": out, "f_max": "10GHz", "nets": ["RF"], "mask_er": "3.5"});
+    assert_eq!(fail(&r, &mut s, "export.openems", bad), "openems.bad_mask");
+    let bad = json!({"dir": out, "f_max": "10GHz", "nets": ["RF"], "mask": "0mm"});
+    assert_eq!(fail(&r, &mut s, "export.openems", bad), "openems.bad_mask");
+}

@@ -1408,6 +1408,29 @@ pub struct LossTangents {
     pub broadside: f64,
     /// Solder mask.
     pub mask: f64,
+    /// Djordjevic–Sarkar reference frequencies (Hz) of the dielectrics below, above and
+    /// between the traces (`None`: εr and tan δ constant); the mask is frequency-independent.
+    pub ref_freq: [Option<f64>; 3],
+}
+
+/// A group of dielectric regions sharing a loss tangent and dispersion, and their partial
+/// capacitance: the share of C stored in them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DielectricGroup {
+    /// Loss tangent (at `ref_freq` when set).
+    pub tan_d: f64,
+    /// Djordjevic–Sarkar reference frequency (Hz); `None`: frequency-independent.
+    pub ref_freq: Option<f64>,
+    /// Partial capacitance Σ ε ∂C/∂ε over the group's regions, F/m (`[signal][signal]`).
+    pub partial: Vec<Vec<f64>>,
+}
+
+impl DielectricGroup {
+    /// εr(f)/εr and tan δ(f) of the group (both depend only on tan δ and the reference
+    /// frequency).
+    pub fn ratio(&self, f: f64) -> (f64, f64) {
+        super::dispersion::Dielectric { er: 1.0, tan_d: self.tan_d, ref_freq: self.ref_freq }.ratio(f)
+    }
 }
 
 /// Per-unit-length matrices of a line or a pair, in SI units, for the loss calculation
@@ -1423,6 +1446,33 @@ pub struct LineMatrices {
     /// Skin-effect resistance divided by the surface resistance Rs, 1/m: ∮ ĵᵢ ĵⱼ dl over all
     /// conductor surfaces, the planes included, ĵ the surface current per unit current.
     pub r_over_rs: Vec<Vec<f64>>,
+    /// The lossy dielectric groups behind `g_over_omega` (Σ tan δ · partial), for dispersive
+    /// dielectrics.
+    pub groups: Vec<DielectricGroup>,
+}
+
+impl LineMatrices {
+    /// C and G/ω at `f` (Hz): the stored ones unless a group is dispersive; then, to first order
+    /// in the permittivity change, C(f) = C + Σ partial (εr(f)/εr − 1) and
+    /// G(f)/ω = Σ tan δ(f) · partial · εr(f)/εr.
+    pub fn at_freq(&self, f: f64) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        if self.groups.iter().all(|g| g.ref_freq.is_none()) {
+            return (self.c.clone(), self.g_over_omega.clone());
+        }
+        let mut c = self.c.clone();
+        let n = c.len();
+        let mut g = vec![vec![0.0; n]; n];
+        for grp in &self.groups {
+            let (r, tan) = grp.ratio(f);
+            for i in 0..n {
+                for j in 0..n {
+                    c[i][j] += grp.partial[i][j] * (r - 1.0);
+                    g[i][j] += tan * r * grp.partial[i][j];
+                }
+            }
+        }
+        (c, g)
+    }
 }
 
 fn invert(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, SolveError> {
@@ -1442,13 +1492,13 @@ fn scale(m: &[Vec<f64>], f: f64) -> Vec<Vec<f64>> {
 
 impl Structure {
     /// Loss tangents in the order of [`Structure::cross_section`]'s layers.
-    fn layer_loss_tangents(&self, t: &LossTangents) -> Vec<f64> {
-        let mut v = vec![t.below];
+    fn layer_loss_tangents(&self, t: &LossTangents) -> Vec<(f64, Option<f64>)> {
+        let mut v = vec![(t.below, t.ref_freq[0])];
         if self.broadside.is_some() {
-            v.push(t.broadside);
+            v.push((t.broadside, t.ref_freq[2]));
         }
         if self.model != Model::Microstrip {
-            v.push(t.above);
+            v.push((t.above, t.ref_freq[1]));
         }
         v
     }
@@ -1473,15 +1523,20 @@ impl Structure {
         }
         let tl = self.layer_loss_tangents(tans);
         let cap = solve(&cs, acc)?;
-        let g = dielectric_loss(&cs, &cap, &tl, tans.mask, acc)?;
+        let groups = dielectric_groups(&cs, &cap, &tl, tans.mask, acc)?;
         let r = conductor_loss(&cs, acc)?;
         let mu0 = 1.0 / (EPS0 * C0 * C0);
+        let g = loss_sum(&groups, cap.c.len());
         Ok(LineMatrices {
             c: scale(&cap.c, EPS0),
             l: scale(&invert(&cap.c0)?, mu0),
             g_over_omega: scale(&g, EPS0),
             // 1/mm to 1/m.
             r_over_rs: scale(&r, 1000.0),
+            groups: groups
+                .into_iter()
+                .map(|grp| DielectricGroup { partial: scale(&grp.partial, EPS0), ..grp })
+                .collect(),
         })
     }
 }
@@ -1503,22 +1558,52 @@ pub fn dielectric_loss(
     tan_mask: f64,
     acc: Accuracy,
 ) -> Result<Vec<Vec<f64>>, SolveError> {
-    let mut groups: Vec<f64> =
-        tans.iter().copied().chain(cs.mask.map(|_| tan_mask)).filter(|t| *t > 0.0 && t.is_finite()).collect();
-    groups.sort_by(f64::total_cmp);
-    groups.dedup();
-    let n = base.c.len();
+    let tl: Vec<(f64, Option<f64>)> = tans.iter().map(|&t| (t, None)).collect();
+    Ok(loss_sum(&dielectric_groups(cs, base, &tl, tan_mask, acc)?, base.c.len()))
+}
+
+/// Σ tan δ · partial over the groups (`n`×`n`).
+fn loss_sum(groups: &[DielectricGroup], n: usize) -> Vec<Vec<f64>> {
     let mut g = vec![vec![0.0; n]; n];
-    for tan in groups {
+    for grp in groups {
+        for (row, prow) in g.iter_mut().zip(&grp.partial) {
+            for (x, p) in row.iter_mut().zip(prow) {
+                *x += grp.tan_d * p;
+            }
+        }
+    }
+    g
+}
+
+/// The lossy dielectric groups of `cs` (regions with the same loss tangent and dispersion
+/// reference) and their partial capacitances in units of ε₀: the derivative of C when the
+/// permittivities of the group's regions are scaled together (Euler: Σᵣ εᵣ ∂C/∂εᵣ). `tans`
+/// follows `cs.layers` (tan δ, Djordjevic–Sarkar reference frequency); the mask is
+/// frequency-independent.
+pub fn dielectric_groups(
+    cs: &CrossSection,
+    base: &Capacitance,
+    tans: &[(f64, Option<f64>)],
+    tan_mask: f64,
+    acc: Accuracy,
+) -> Result<Vec<DielectricGroup>, SolveError> {
+    let mask = cs.mask.map(|_| (tan_mask, None));
+    let mut keys: Vec<(f64, Option<f64>)> =
+        tans.iter().copied().chain(mask).filter(|t| t.0 > 0.0 && t.0.is_finite()).collect();
+    keys.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.unwrap_or(0.0).total_cmp(&b.1.unwrap_or(0.0))));
+    keys.dedup();
+    let n = base.c.len();
+    let mut out = Vec::new();
+    for key in keys {
         let scaled = |f: f64| {
             let mut c = cs.clone();
             for (l, t) in c.layers.iter_mut().zip(tans) {
-                if *t == tan {
+                if *t == key {
                     l.er *= 1.0 + f;
                 }
             }
             if let Some(m) = &mut c.mask
-                && tan_mask == tan
+                && mask == Some(key)
             {
                 m.er *= 1.0 + f;
             }
@@ -1526,14 +1611,15 @@ pub fn dielectric_loss(
         };
         let c1 = solve(&scaled(EPS_STEP), acc)?.c;
         let c2 = solve(&scaled(2.0 * EPS_STEP), acc)?.c;
+        let mut p = vec![vec![0.0; n]; n];
         for i in 0..n {
             for j in 0..n {
-                let d = (-3.0 * base.c[i][j] + 4.0 * c1[i][j] - c2[i][j]) / (2.0 * EPS_STEP);
-                g[i][j] += tan * d;
+                p[i][j] = (-3.0 * base.c[i][j] + 4.0 * c1[i][j] - c2[i][j]) / (2.0 * EPS_STEP);
             }
         }
+        out.push(DielectricGroup { tan_d: key.0, ref_freq: key.1, partial: p });
     }
-    Ok(g)
+    Ok(out)
 }
 
 /// Charge density induced on the plane y = 0 at (x, 0) by a unit charge density (σ/ε₀ = 1)

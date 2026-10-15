@@ -1269,6 +1269,54 @@ different); `bom.list` words generic, placeholder and other MPN-less lines apart
 design data unchanged in meaning (waivers are recorded decisions, hints are intent, supplier numbers remain the
 schematic's fields) and keep router internals untouched.
 
+### D63. Full-wave losses: surface impedance on conductor loops, Djordjevic–Sarkar dielectrics as fitted Debye terms (stackup `ref_freq`), solder mask layers (2026-10-15)
+Closes the limits D59 listed for `sim.sparams`. **Dielectrics:** `Dielectric` gains an optional `ref_freq`
+(exact decimal in Hz, `board.dielectric --ref-freq 1GHz`; `"0"` clears): εr and tan δ are given there and the
+dielectric follows the Djordjevic–Sarkar wideband Debye model (IEEE Trans. EMC 2001; corners fixed at 10 kHz
+and 1 THz, ε∞ and Δε in closed form from the two values; `electrical::dispersion`). The 2D models use it to
+first order: the field solver now keeps the partial capacitance of each group of regions sharing (tan δ,
+`ref_freq`) (`LineMatrices::groups`), so C(f) = C + Σ P (εr(f)/εr − 1) and G(f)/ω = Σ tan δ(f) P εr(f)/εr
+need no new solve per frequency (within 0.03 % / 0.2 % of a full re-solve); the closed forms take P = C ×
+their filling factor. `impedance.calc` and `net.loss` take a `ref_freq` override (impedance itself stays at
+the stackup's εr). The FDTD needs
+a causal model for every lossy dielectric: Djordjevic–Sarkar at `ref_freq`, or at the pulse's center f₀ when
+none is set (the old constant σ was exact only at f₀ and is replaced). Each is fitted over the result's band
+(`fdtd::fit`) as ε∞ + σ/(jωε₀) + Σ Δεₚ/(1 + jωτₚ) on relaxation times shared by every material (three per two
+decades, a third of the band below to three times above), weights by Lawson–Hanson NNLS (non-negative:
+passive, ε∞ ≥ 1); poles update by the auxiliary differential equation (bilinear in J), edges average ε∞, σ and
+each Δεₚ of their four cells. The energy criterion counts the polarizations (P²/2ε₀Δε, P = ε₀Δε E − τJ).
+**Conductors:** with a conductivity (default 58 MS/m as D52; `perfect_copper` keeps PEC; `roughness`,
+`huray_radius`/`huray_ratio` as D52) a surface impedance boundary condition (Maloney & Smith, Beggs et al.,
+both IEEE AP-40 1992): Zs = Rs K + j Rs fitted as r₀ + Σ rₚ s/(s + aₚ) (non-negative sections, recursive
+bilinear convolution). The tangential E of a surface edge is Zs times the current through the edge's dual loop
+(H circulation over its faces outside the conductor) divided by the copper surface that loop encloses, and it
+enters those faces' H updates: dissipation Rs I²/w. Inside a sheet each side is its own loop; at a sheet's
+edge one loop. Domain walls count as conductor for "inside" and surface extent. **Mask:** `export.openems` and
+`sim.sparams` take `mask`, `mask_copper`, `mask_er` (3.8), `mask_loss_tangent` (0.025), the field solver's
+options: a dielectric over the laminate and over the outer copper on both sides, open at pads with a mask
+opening, surfaces on mesh lines; in the export a `solder_mask` material plus `mask_openings` air primitives by
+priority, and dispersive dielectrics written with εr and κ at f₀. **End criterion:** `sim.sparams` defaults to
+60 dB (was 40). Validated (tests/fdtd.rs, ignored ones in release): cavity Q with copper plates = h/δ within 1 %
+from 1.4 to 14 GHz (and K with Hammerstad–Jensen, Huray), Djordjevic–Sarkar cavity resonance within 0.2 % and
+Q = 1/tan δ(f) within 1 % from 2.4 to 15 GHz, microstrip conductor loss against the field solver's within
+−5.7 to +3.3 % (3–8 GHz, 4 and 8 cells across), εeff(f) of a dispersive microstrip within 1 %, the full model's
+|S21| on a 60 mm line within −9.5 to +5 % of D52's total from 0.5 to 9.5 GHz (−0.8 to +5 % from 3 GHz),
+masked microstrip εeff within 0.5 %, bit-identical for any thread count.
+*Why:* a surface impedance is the textbook way to put skin-effect loss on FDTD conductors without meshing the
+skin depth, and the rational fit keeps it in the time domain and passive. Spreading each edge's current over the
+copper it can flow on, rather than taking each face's H as the surface field, is what makes edges and corners
+right: in the 2D solution the corners and the 35 µm sidewall of a 1 mm microstrip hold ~40 % of its conductor
+loss, which per-face sampling lost (40 % too little, converging as size^(1/3) — no affordable mesh fixes it),
+while the loop current is exact by Ampère's law on any mesh. A wideband Debye model is causal (a constant tan δ
+is not) and is what laminate vendors' data fits; giving it one reference frequency keeps the stored data two
+decimals and a frequency per dielectric, and leaves dielectrics without one exactly as D52 had them in the 2D
+models. Fitting shared poles, rather than one pole set per material, makes the interface average exact and the
+ADE cost one state per pole per edge. Six poles on a two-decade band hold the model to 0.1 % in εr. The
+board-level residual (−9 % at 1.6 GHz to +5 % at 9 GHz) is the open-region line measurement's, not the models'
+(the cavities agree to 1 %; a constant-conductivity line, whose loss is flat, measures 0.30–0.39 Np/m there).
+The export does not write openEMS's dispersive materials or conducting sheets: their XML attributes are not
+documented well enough to write without reading openEMS's code.
+
 ## Open questions
 
 

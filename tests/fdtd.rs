@@ -11,8 +11,11 @@ use std::f64::consts::PI;
 use cadlab::command::{Registry, RunOptions, Session};
 use cadlab::electrical::Model;
 use cadlab::electrical::complex::C64;
-use cadlab::electrical::fieldsolver::{self, Accuracy};
+use cadlab::electrical::dispersion::Dielectric as Dispersive;
+use cadlab::electrical::fieldsolver::{self, Accuracy, LossTangents};
+use cadlab::electrical::loss::{self, COPPER_CONDUCTIVITY, Conductor, Roughness};
 use cadlab::fdtd::engine::{C0, EPS0, Gaussian, Hooks, LumpedPort, Material, Probe, Settings, Simulation, Structure};
+use cadlab::fdtd::fit;
 use cadlab::openems::mesh;
 use serde_json::{Value, json};
 
@@ -28,7 +31,16 @@ fn uniform(cells: i64, d: i64) -> Vec<i64> {
 }
 
 fn settings(pml: [usize; 6], f0: f64, fc: f64, freqs: Vec<f64>, max_steps: u64) -> Settings {
-    Settings { pml, courant: 0.95, max_steps, end_db: 40.0, excitation: Gaussian { f0, fc }, freqs, threads: 0 }
+    Settings {
+        pml,
+        courant: 0.95,
+        max_steps,
+        end_db: 40.0,
+        excitation: Gaussian { f0, fc },
+        freqs,
+        threads: 0,
+        surface: None,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -376,6 +388,321 @@ fn threads_do_not_change_results() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Conductor loss (surface impedance) and dispersive dielectrics (Djordjevic–Sarkar).
+
+/// A microstrip with copper of thickness `t` on the strip and the ground plane (0: sheets),
+/// the plane over a thin air gap above the bottom wall: dielectric `er` / `tan`
+/// (Djordjevic–Sarkar through them at `ref_freq`, else at the pulse's center), copper of
+/// conductivity `sigma` (surface impedance) or perfect.
+#[derive(Clone)]
+struct Lossy {
+    er: f64,
+    tan: f64,
+    ref_freq: Option<f64>,
+    h: i64,
+    w: i64,
+    t: i64,
+    across: i64,
+    in_sub: i64,
+    dx: i64,
+    length: i64,
+    f_max: f64,
+    sigma: Option<f64>,
+    rough: Roughness,
+}
+
+impl Default for Lossy {
+    fn default() -> Self {
+        Lossy {
+            er: 4.0,
+            tan: 0.0,
+            ref_freq: None,
+            h: 500 * UM,
+            w: 1000 * UM,
+            t: 35 * UM,
+            across: 8,
+            in_sub: 8,
+            dx: 200 * UM,
+            length: 30 * MM,
+            f_max: 10e9,
+            sigma: Some(COPPER_CONDUCTIVITY),
+            rough: Roughness::Smooth,
+        }
+    }
+}
+
+/// A material for `er` / `tan` (Djordjevic–Sarkar at `ref_freq` or `anchor`) fitted over
+/// `lo .. hi`, as `sim.sparams` builds it.
+fn debye(st: &mut Structure, er: f64, tan: f64, ref_freq: Option<f64>, anchor: f64, lo: f64, hi: f64) -> u16 {
+    if tan == 0.0 {
+        return st.material(Material { eps_r: er, sigma: 0.0 });
+    }
+    let taus = fit::relaxation_times(lo, hi);
+    st.set_relaxation(taus.clone());
+    let d = Dispersive { er, tan_d: tan, ref_freq };
+    let f = fit::debye_fit(&d.model(anchor), &taus, lo, hi);
+    st.debye_material(Material { eps_r: f.eps_inf, sigma: f.sigma }, f.delta)
+}
+
+fn lossy_line(s: &Lossy, threads: usize, max_steps: u64, end_db: f64) -> Line {
+    let (h, w, t) = (s.h, s.w, s.t);
+    let fine = w / s.across;
+    let y = 10 * h + w / 2;
+    let (a, b) = (w / 2 - fine / 3, w / 2 + 2 * fine / 3);
+    let ys = mesh::smooth(&[-y, -b, -a, a, b, y], &|lo, hi| if lo >= -b && hi <= b { fine } else { h / 2 }, 1.3);
+    let gap = 100 * UM;
+    let top = h + t;
+    let mut zf = vec![-t - gap, -t, 0, h, top, top + 10 * h];
+    zf.dedup();
+    let zs = mesh::smooth(&zf, &|lo, hi| if lo >= 0 && hi <= top + h { h / s.in_sub } else { h }, 1.3);
+    let xs = uniform(s.length / s.dx, s.dx);
+    let mut st = Structure::new([xs, ys, zs]).unwrap();
+    let (f0, lo) = (s.f_max / 2.0, s.f_max / 100.0);
+    let m = debye(&mut st, s.er, s.tan, s.ref_freq, f0, lo, s.f_max);
+    st.fill(m, [0, -y, 0], [s.length, y, h], &|_, _| true);
+    // The ground plane down to the wall (no field below it), and the strip.
+    st.pec([0, -y, -t - gap], [s.length, y, 0], &|_, _| true);
+    st.pec([0, -y, h], [s.length, y, top], &|_, yy| (-w / 2..=w / 2).contains(&yy));
+    let n = st.n();
+    let feed = 12;
+    let (j0, j1) = (st.node(1, -w / 2), st.node(1, w / 2));
+    let (kg, kh, kt) = (st.node(2, 0), st.node(2, h), st.node(2, top));
+    let port = LumpedPort { axis: 2, lo: [feed, j0, kg], hi: [feed, j1, kh], positive_high: true, r: 50.0 };
+    let center = (n[0] + feed) / 2;
+    let dn = (n[0] - 10 - center).min(center - feed - 2) / 2;
+    let jm = st.node(1, 0);
+    let v = |i: usize| Probe::Voltage { axis: 2, from: [i, jm, kh], to: kg };
+    let probes = vec![
+        v(center - dn),
+        v(center),
+        v(center + dn),
+        Probe::Current { axis: 0, at: center - 1, lo: [j0, kh], hi: [j1, kt] },
+        Probe::Current { axis: 0, at: center, lo: [j0, kh], hi: [j1, kt] },
+    ];
+    let freqs: Vec<f64> = (1..=20).map(|k| k as f64 * s.f_max / 20.0).collect();
+    let surface = s.sigma.map(|sg| fit::surface_fit(sg, &s.rough, lo, s.f_max));
+    let set = Settings { threads, surface, end_db, ..settings([6, 6, 6, 6, 0, 6], f0, f0, freqs.clone(), max_steps) };
+    let sim = Simulation::new(&st, &[port], probes, set).unwrap();
+    Line { sim, freqs, d: (dn as i64 * s.dx) as f64 * 1e-9 }
+}
+
+/// The line's matrices from the field solver (D52), with the same dielectric model.
+fn d52_matrices(s: &Lossy) -> cadlab::electrical::fieldsolver::LineMatrices {
+    let st = fieldsolver::Structure {
+        model: Model::Microstrip,
+        h: s.h as f64 / 1e6,
+        er: s.er,
+        h2: 0.0,
+        er2: s.er,
+        t: s.t as f64 / 1e6,
+        etch: 0.0,
+        broadside: None,
+        coplanar_gap: None,
+        mask: None,
+    };
+    let tans = LossTangents { below: s.tan, ref_freq: [s.ref_freq, None, None], ..LossTangents::default() };
+    st.line_matrices(s.w as f64 / 1e6, None, false, &tans, Accuracy::default()).unwrap()
+}
+
+/// A parallel-plate cavity: `a × b` mm, 0.5 mm of a material between two copper plates (each a
+/// slab from the domain's wall), meshed in 40 × 24 × `nz` cells, a high-impedance source near a
+/// corner and a voltage probe elsewhere. Its TM_mn0 modes have E along z only.
+fn plate_cavity(a: i64, b: i64, nz: i64, mat: &dyn Fn(&mut Structure) -> u16, s: Settings) -> Simulation {
+    let (h, gap) = (500 * UM, 250 * UM);
+    let mut zs = vec![-gap];
+    zs.extend((0..=nz).map(|k| k * h / nz));
+    zs.push(h + gap);
+    let mut st = Structure::new([uniform(40, a / 40), uniform(24, b / 24), zs]).unwrap();
+    let m = mat(&mut st);
+    st.fill(m, [0, 0, 0], [a, b, h], &|_, _| true);
+    st.pec([0, 0, -gap], [a, b, 0], &|_, _| true);
+    st.pec([0, 0, h], [a, b, h + gap], &|_, _| true);
+    let port = LumpedPort { axis: 2, lo: [5, 4, 1], hi: [5, 4, 1 + nz as usize], positive_high: true, r: 1e9 };
+    Simulation::new(&st, &[port], vec![Probe::Voltage { axis: 2, from: [27, 15, 1], to: 1 + nz as usize }], s).unwrap()
+}
+
+/// TM_mn0 of an `a × b` mm box in vacuum.
+fn tm_vac(m: f64, n: f64, a: i64, b: i64) -> f64 {
+    C0 / 2.0 * ((m / (a as f64 * 1e-9)).powi(2) + (n / (b as f64 * 1e-9)).powi(2)).sqrt()
+}
+
+/// Q of the ringing mode from the decay of the field energy after a narrow pulse at `f`.
+fn ringing_q(sim: &mut Simulation, f: f64, periods: f64) -> f64 {
+    let g = Gaussian { f0: f, fc: f / 5.0 };
+    let dt = sim.dt();
+    let mut n = 0u64;
+    while (n as f64) * dt < g.end() {
+        sim.step(Some((0, g.at((n as f64 + 0.5) * dt))));
+        n += 1;
+    }
+    // Least-squares slope of ln W (smooths the E/H ripple of staggered samples).
+    let (mut sx, mut sy, mut sxx, mut sxy, mut m) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for k in 0..(periods / f / dt) as u64 {
+        sim.step(None);
+        let (x, y) = (k as f64 * dt, sim.energy().ln());
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+        m += 1.0;
+    }
+    let slope = (m * sxy - sx * sy) / (m * sxx - sx * sx);
+    2.0 * PI * f / -slope
+}
+
+/// The cavity's Q with copper plates of conductivity σ (surface impedance, fitted over 0.1–20 GHz)
+/// is h/δ: the two plates carry the same current, the side walls are lossless; a rough surface
+/// lowers it by its factor K.
+fn check_surface_q(a: i64, b: i64, rough: Roughness) {
+    let er = 4.4;
+    let lossless = |st: &mut Structure| st.material(Material { eps_r: er, sigma: 0.0 });
+    let f = tm_vac(1.0, 1.0, a, b) / er.sqrt();
+    let surface = Some(fit::surface_fit(COPPER_CONDUCTIVITY, &rough, 1e8, 2e10));
+    let s = Settings { surface, ..settings([0; 6], f, f / 5.0, vec![], 0) };
+    let mut sim = plate_cavity(a, b, 1, &lossless, s);
+    let q = ringing_q(&mut sim, f, 15.0);
+    let delta = loss::skin_depth(f, COPPER_CONDUCTIVITY);
+    let want = 500e-6 / delta / rough.factor(delta);
+    println!("{rough:?} {f:.4e} Hz: Q {q:.1} vs {want:.1}");
+    assert!((q - want).abs() < 0.01 * want, "{rough:?} {f} Hz: Q {q} vs {want}");
+}
+
+/// Surface impedance: the cavity's Q at 6.9 GHz, smooth and with Hammerstad–Jensen roughness.
+#[test]
+fn surface_impedance_cavity_q() {
+    check_surface_q(20 * MM, 12 * MM, Roughness::Smooth);
+    check_surface_q(20 * MM, 12 * MM, Roughness::HammerstadJensen { rms: 1e-6 });
+}
+
+/// The same at 1.4 and 14 GHz, and with Huray's roughness.
+#[test]
+#[ignore]
+fn surface_impedance_cavity_q_wideband() {
+    check_surface_q(100 * MM, 60 * MM, Roughness::Smooth);
+    check_surface_q(10 * MM, 6 * MM, Roughness::Smooth);
+    check_surface_q(20 * MM, 12 * MM, Roughness::Huray { radius: 0.5e-6, ratio: 2.0 });
+}
+
+/// A Djordjevic–Sarkar filling (εr 4, tan δ 0.02 at 1 GHz, Debye terms fitted over `band`): the
+/// mode resonates where ω √εr(ω) is the vacuum mode, with Q = 1 / tan δ(f).
+fn check_dispersive_cavity(band: (f64, f64), a: i64, b: i64) {
+    let d = Dispersive { er: 4.0, tan_d: 0.02, ref_freq: Some(1e9) };
+    let fill = |st: &mut Structure| debye(st, d.er, d.tan_d, d.ref_freq, 0.0, band.0, band.1);
+    let fv = tm_vac(1.0, 1.0, a, b);
+    // f = f_vac / √εr(f), by fixed point.
+    let mut f = fv / 2.0;
+    for _ in 0..20 {
+        f = fv / d.at(f).0.sqrt();
+    }
+    let freqs: Vec<f64> = (-40..=40).map(|k| f * (1.0 + k as f64 * 1e-3)).collect();
+    let s = settings([0; 6], f, f / 5.0, freqs.clone(), 20_000);
+    let mut sim = plate_cavity(a, b, 1, &fill, s.clone());
+    let run = sim.run(Some(0), &Hooks::none()).unwrap();
+    let fr = peak(&freqs, &run.probes[0]);
+    println!("{band:?} {f:.4e} Hz: resonance {:+.2} %", 100.0 * (fr / f - 1.0));
+    // Numerical dispersion at 40 × 24 cells lowers it by about 0.1 %.
+    assert!((fr - f).abs() < 0.003 * f, "{a}: resonance {fr} vs {f}");
+    let mut sim = plate_cavity(a, b, 1, &fill, Settings { freqs: vec![], ..s });
+    let q = ringing_q(&mut sim, f, 10.0);
+    let want = 1.0 / d.at(f).1;
+    println!("{band:?} {f:.4e} Hz: Q {q:.2} vs {want:.2}");
+    assert!((q - want).abs() < 0.01 * want, "{a}: Q {q} vs {want}");
+}
+
+/// Debye terms fitted over 0.1–10 GHz, as `sim.sparams` does for `f_max` 10 GHz: the mode at
+/// 2.4 GHz.
+#[test]
+fn dispersive_cavity_modes() {
+    check_dispersive_cavity((1e8, 1e10), 60 * MM, 36 * MM);
+}
+
+/// The same at 9 GHz, and with a fit over 0.5–20 GHz at 2.4 and 15 GHz.
+#[test]
+#[ignore]
+fn dispersive_cavity_modes_wideband() {
+    check_dispersive_cavity((1e8, 1e10), 16 * MM, 10 * MM);
+    check_dispersive_cavity((5e8, 2e10), 60 * MM, 36 * MM);
+    check_dispersive_cavity((5e8, 2e10), 10 * MM, 6 * MM);
+}
+
+/// The surface impedance on a microstrip with 35 µm copper (strip and plane) against the D52
+/// conductor loss of the field solver: the attenuation the conductivity adds (the same line
+/// with perfect conductors subtracted, which removes the probes' systematic error), 3 to
+/// 8 GHz, at 4 and 8 cells across the strip. A low conductivity (580 kS/m) makes the loss large
+/// enough to measure on 6 mm of line; Rs scales out of the comparison.
+#[test]
+#[ignore]
+fn conductor_loss_matches_d52() {
+    for across in [8, 4] {
+        let spec = Lossy { sigma: Some(5.8e5), across, in_sub: across, ..Lossy::default() };
+        let r = extract(&mut lossy_line(&spec, 0, 100_000, 40.0));
+        let r0 = extract(&mut lossy_line(&Lossy { sigma: None, ..spec.clone() }, 0, 100_000, 40.0));
+        let m = d52_matrices(&spec);
+        let cond = Conductor { sigma: 5.8e5, roughness: Roughness::Smooth, r_dc: 0.0 };
+        let (mut sum, mut count) = (0.0, 0.0);
+        for (&(f, g, _), &(_, g0, _)) in r.iter().zip(&r0).filter(|x| (3e9..=8e9).contains(&x.0.0)) {
+            let want = loss::at(&m, f, &cond).alpha;
+            let got = g.re - g0.re;
+            println!("{across} across, {f:.3e} Hz: α {got:.4} vs {want:.4} ({:+.1} %)", 100.0 * (got / want - 1.0));
+            assert!((got - want).abs() < 0.08 * want, "{across} across, {f} Hz: α {got} vs {want}");
+            sum += got / want;
+            count += 1.0;
+        }
+        assert!((sum / count - 1.0).abs() < 0.05, "{across} across: mean ratio {}", sum / count);
+    }
+}
+
+/// A Djordjevic–Sarkar laminate (εr 4, tan δ 0.02 at 1 GHz) under a microstrip with perfect
+/// conductors, against the field solver with the same model (D52): εeff(f) from 1 to 5 GHz (it
+/// falls with εr(f)), and the attenuation from 3 to 6 GHz on average (the probes' own error is
+/// about ±0.1 Np/m, the size of the attenuation below 3 GHz).
+#[test]
+#[ignore]
+fn dispersive_microstrip_matches_d52() {
+    let spec = Lossy { tan: 0.02, ref_freq: Some(1e9), sigma: None, ..Lossy::default() };
+    let r = extract(&mut lossy_line(&spec, 0, 100_000, 60.0));
+    let m = d52_matrices(&spec);
+    let cond = Conductor { sigma: f64::INFINITY, roughness: Roughness::Smooth, r_dc: 0.0 };
+    let (mut sum, mut count) = (0.0, 0.0);
+    for &(f, g, _) in r.iter().filter(|x| (1e9..=6e9).contains(&x.0)) {
+        let p = loss::at(&m, f, &cond);
+        let ee = eps_eff(g.im, f);
+        let want_ee = (p.beta / (2.0 * PI * f) * C0).powi(2);
+        println!("{f:.3e} Hz: εeff {ee:.4} vs {want_ee:.4}, α {:.4} vs {:.4}", g.re, p.alpha);
+        if f <= 5e9 {
+            assert!((ee - want_ee).abs() < 0.012 * want_ee, "{f}: εeff {ee} vs {want_ee}");
+        }
+        if f >= 3e9 {
+            sum += g.re / p.alpha;
+            count += 1.0;
+        }
+    }
+    assert!((sum / count - 1.0).abs() < 0.05, "mean α ratio {}", sum / count);
+}
+
+/// With the surface impedance and Debye terms (their own parallel passes), one thread and
+/// three give bit-identical spectra.
+#[test]
+fn threads_do_not_change_lossy_results() {
+    let spec = Lossy {
+        tan: 0.02,
+        ref_freq: Some(1e9),
+        across: 2,
+        in_sub: 2,
+        dx: 500 * UM,
+        length: 20 * MM,
+        rough: Roughness::HammerstadJensen { rms: 1e-6 },
+        ..Lossy::default()
+    };
+    let ra = lossy_line(&spec, 1, 200, 40.0).sim.run(Some(0), &Hooks::none()).unwrap();
+    let rb = lossy_line(&spec, 3, 200, 40.0).sim.run(Some(0), &Hooks::none()).unwrap();
+    assert_eq!(ra.steps, rb.steps);
+    for (x, y) in ra.probes.iter().flatten().zip(rb.probes.iter().flatten()) {
+        assert_eq!((x.re.to_bits(), x.im.to_bits()), (y.re.to_bits(), y.im.to_bits()));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Board level: `sim.sparams` on a routed microstrip.
 
 fn exec(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> Value {
@@ -383,6 +710,10 @@ fn exec(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> Value {
         Ok(o) => serde_json::to_value(&o).unwrap(),
         Err(f) => panic!("{cmd} failed: {}", f.error),
     }
+}
+
+fn codes_of(o: &Value) -> Vec<String> {
+    o["diagnostics"].as_array().unwrap().iter().map(|d| d["code"].as_str().unwrap().to_string()).collect()
 }
 
 fn fail(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> String {
@@ -479,7 +810,8 @@ fn sim_sparams_command() {
         json!({"f_max": "5GHz", "points": 11, "margin": "4mm", "air": "3mm", "max_cell": "1mm", "pml_cells": 4,
             "end_criteria": "30dB"}),
     );
-    let o = exec(&r, &mut s, "sim.sparams", args.clone());
+    let base = exec(&r, &mut s, "sim.sparams", args.clone());
+    let o = base.clone();
     let x = &o["output"];
     assert!(o["diagnostics"].as_array().unwrap().is_empty(), "{}", o["diagnostics"]);
     assert_eq!(x["runs"].as_array().unwrap().len(), 2);
@@ -507,11 +839,34 @@ fn sim_sparams_command() {
     let ts = cadlab::touchstone::parse(&std::fs::read_to_string(out.join("lumped.s2p")).unwrap(), Some(2)).unwrap();
     for (f, m) in ts.freqs.iter().zip(&ts.data) {
         let (s12, s21) = (c64(&m[1]), c64(&m[2]));
-        assert!(s21.abs() > 0.7 && s21.abs() < 1.0, "{f}: |S21| {}", s21.abs());
+        // Passive within the truncation of a 30 dB end criterion.
+        assert!(s21.abs() > 0.7 && s21.abs() < 1.002, "{f}: |S21| {}", s21.abs());
         assert!((s12 - s21).abs() < 0.01, "{f}: reciprocity {s12:?} {s21:?}");
     }
 
+    // Solder mask (assumed εr and tan δ noted), rough copper: a lossier line, still matched.
+    let mut masked = args.clone();
+    masked["name"] = json!("masked");
+    masked["mask"] = json!("50um");
+    masked["roughness"] = json!("2um");
+    let o = exec(&r, &mut s, "sim.sparams", masked);
+    let mut notes = codes_of(&o);
+    notes.sort();
+    assert_eq!(notes, ["openems.mask_er_assumed", "openems.mask_loss_tangent_assumed"]);
+    let mts = cadlab::touchstone::parse(&std::fs::read_to_string(out.join("masked.s2p")).unwrap(), Some(2)).unwrap();
+    for (f, m) in mts.freqs.iter().zip(&mts.data) {
+        let s21 = c64(&m[2]).abs();
+        assert!(c64(&m[0]).abs() < 0.2 && s21 > 0.9 && s21 < 1.002, "{f}: |S21| {s21}");
+    }
+    // Mesh lines at both surfaces of the mask on both sides.
+    let zl = |o: &Value| o["output"]["mesh"]["lines"][2].as_u64().unwrap();
+    assert!(zl(&o) >= zl(&base) + 2, "{} vs {}", zl(&o), zl(&base));
+
     // Guards and errors.
+    let mut copper = args.clone();
+    copper["perfect_copper"] = json!(true);
+    copper["conductivity"] = json!("58M");
+    assert_eq!(fail(&r, &mut s, "sim.sparams", copper), "sim.perfect_copper");
     let mut big = args.clone();
     big["max_cells"] = json!(1000);
     assert_eq!(fail(&r, &mut s, "sim.sparams", big), "sim.too_many_cells");
@@ -523,14 +878,17 @@ fn sim_sparams_command() {
     assert_eq!(fail(&r, &mut s, "sim.sparams", bad), "value.wrong_unit");
 }
 
-/// A 24 mm microstrip, 1 mm wide on 0.5 mm of εr 4 with tan δ 0.02, between microstrip ports:
-/// Z₀ and εeff from the S-parameters against the field solver, a matched line's |S11| and its
-/// attenuation against the perturbation model of D52.
+/// The full model through `sim.sparams`: a 64 mm microstrip, 1 mm wide on 0.5 mm of a
+/// Djordjevic–Sarkar laminate (εr 4, tan δ 0.02 at 1 GHz), 35 µm copper (solid) at 58 MS/m,
+/// between microstrip ports. Against D52 with the same models (field solver with the copper
+/// thickness, Djordjevic–Sarkar, skin effect): Z₀ and εeff from the S-parameters (ABCD of the
+/// 60 mm between the reference planes), a matched line's |S11|, and |S21| from 0.5 to 9.5 GHz.
 #[test]
 #[ignore]
 fn sim_sparams_microstrip_validation() {
     let r = Registry::with_builtins();
-    let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0.02", "1mm", 24);
+    let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0.02", "1mm", 64);
+    exec(&r, &mut s, "board.dielectric", json!({"ref_freq": "1GHz"}));
     let out = dir.path().join("out");
     let o = exec(
         &r,
@@ -539,37 +897,107 @@ fn sim_sparams_microstrip_validation() {
         sim_args(
             &out,
             id,
-            json!({"f_max": "10GHz", "points": 21, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6}),
+            json!({"f_max": "10GHz", "points": 21, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6,
+                "copper": "solid"}),
         ),
     );
     assert!(o["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true));
     let ts = cadlab::touchstone::parse(&std::fs::read_to_string(out.join("line.s2p")).unwrap(), Some(2)).unwrap();
-    let fs = field_solver(4.0, 0.5, 1.0);
+    let m = d52_matrices(&Lossy { tan: 0.02, ref_freq: Some(1e9), ..Lossy::default() });
+    let cond = Conductor {
+        sigma: COPPER_CONDUCTIVITY,
+        roughness: Roughness::Smooth,
+        r_dc: 1.0 / (COPPER_CONDUCTIVITY * 1e-3 * 35e-6),
+    };
     // The reference planes are 2 mm inside each end.
-    let l = 0.020;
-    let f0 = 5e9;
-    let ad = alpha_d(4.0, 0.02, 0.5, 1.0, f0);
-    let (mut alpha, mut s21_db, mut count) = (0.0, 0.0, 0.0);
-    for (f, m) in ts.freqs.iter().zip(&ts.data) {
-        let (z0, gl) = line_from_s(m, 50.0);
+    let l = 0.060;
+    for (f, sm) in ts.freqs.iter().zip(&ts.data) {
+        let (z0, gl) = line_from_s(sm, 50.0);
+        let p = loss::at(&m, *f, &cond);
         if (1e9..=3.5e9).contains(f) {
-            let ee = eps_eff(gl.im / l, *f);
-            assert!((z0.re - fs.z0).abs() < 0.02 * fs.z0, "{f}: Z0 {z0:?} vs {}", fs.z0);
-            assert!((ee - fs.er_eff).abs() < 0.02 * fs.er_eff, "{f}: εeff {ee} vs {}", fs.er_eff);
+            // βl beyond π: the branch (±θ + 2πm) nearest the model's.
+            let bl = [gl.im, -gl.im]
+                .map(|th| th + 2.0 * PI * ((p.beta * l - th) / (2.0 * PI)).round())
+                .into_iter()
+                .min_by(|a, b| (a - p.beta * l).abs().total_cmp(&(b - p.beta * l).abs()))
+                .unwrap();
+            let ee = eps_eff(bl / l, *f);
+            let want_ee = (p.beta / (2.0 * PI * f) * C0).powi(2);
+            println!("{f}: Z0 {:.2} vs {:.2}, εeff {ee:.4} vs {want_ee:.4}", z0.re, p.z0.re);
+            assert!((z0.re - p.z0.re).abs() < 0.03 * p.z0.re, "{f}: Z0 {z0:?} vs {:?}", p.z0);
+            assert!((ee - want_ee).abs() < 0.015 * want_ee, "{f}: εeff {ee} vs {want_ee}");
         }
         if (0.5e9..=9.5e9).contains(f) {
-            assert!(c64(&m[0]).abs() < 0.04, "{f}: |S11| {}", c64(&m[0]).abs());
-        }
-        // A constant σ keeps G, so the dielectric attenuation, constant over frequency: the
-        // band's mean against the model at f0.
-        if (1e9..=9e9).contains(f) {
-            alpha += gl.re.abs() / l;
-            s21_db += 20.0 * c64(&m[2]).abs().log10();
-            count += 1.0;
+            assert!(c64(&sm[0]).abs() < 0.04, "{f}: |S11| {}", c64(&sm[0]).abs());
+            let s21_db = 20.0 * c64(&sm[2]).abs().log10();
+            let want_db = -20.0 * std::f64::consts::LOG10_E * p.alpha * l;
+            // −9 % to +6 %: the residual of this open-region measurement (the same line with a
+            // constant conductivity, whose loss is flat, measures 0.30–0.39 Np/m over 0.6–4 GHz).
+            let tol = if *f < 2.5e9 { 0.10 } else { 0.06 };
+            println!("{f}: |S21| {s21_db:.4} vs {want_db:.4} dB ({:+.1} %)", 100.0 * (s21_db / want_db - 1.0));
+            assert!((s21_db - want_db).abs() < tol * want_db.abs(), "{f}: |S21| {s21_db} vs {want_db} dB");
         }
     }
-    let (alpha, s21_db) = (alpha / count, s21_db / count);
-    assert!((alpha - ad).abs() < 0.12 * ad, "α {alpha} vs {ad} Np/m");
-    let want = -20.0 * std::f64::consts::LOG10_E * ad * l;
-    assert!((s21_db - want).abs() < 0.05, "|S21| {s21_db} dB vs {want} dB");
+}
+
+/// Solder mask in `sim.sparams`: the 24 mm microstrip (sheet copper, lossless) under 25 µm of
+/// εr 3.8, against the field solver's conformal mask (zero thickness: a flat layer): Z₀ within
+/// 1.5 %, εeff within 0.5 %, and the change the mask makes to εeff within 30 % of the solver's.
+#[test]
+#[ignore]
+fn sim_sparams_mask_validation() {
+    let r = Registry::with_builtins();
+    let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0", "1mm", 24);
+    let out = dir.path().join("out");
+    let base = json!({"f_max": "10GHz", "points": 21, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm",
+        "pml_cells": 6, "perfect_copper": true});
+    let mut masked = base.clone();
+    masked["mask"] = json!("25um");
+    masked["mask_er"] = json!("3.8");
+    masked["mask_loss_tangent"] = json!("0");
+    masked["name"] = json!("masked");
+    let solve = |mask: Option<fieldsolver::Mask>| {
+        let st = fieldsolver::Structure {
+            model: Model::Microstrip,
+            h: 0.5,
+            er: 4.0,
+            h2: 0.0,
+            er2: 4.0,
+            t: 0.0,
+            etch: 0.0,
+            broadside: None,
+            coplanar_gap: None,
+            mask,
+        };
+        st.line(1.0, Accuracy::default()).unwrap()
+    };
+    let bare = solve(None);
+    let fs = solve(Some(fieldsolver::Mask { thickness: 0.025, over_copper: 0.025, er: 3.8 }));
+    let mut ee_runs = Vec::new();
+    for (name, args) in [("line", base), ("masked", masked)] {
+        exec(&r, &mut s, "sim.sparams", sim_args(&out, id, args));
+        let ts = cadlab::touchstone::parse(&std::fs::read_to_string(out.join(format!("{name}.s2p"))).unwrap(), Some(2))
+            .unwrap();
+        let (mut z, mut ee, mut n) = (0.0, 0.0, 0.0);
+        for (f, sm) in ts.freqs.iter().zip(&ts.data) {
+            if (1e9..=3.5e9).contains(f) {
+                let (z0, gl) = line_from_s(sm, 50.0);
+                z += z0.re;
+                ee += eps_eff(gl.im / 0.020, *f);
+                n += 1.0;
+            }
+        }
+        ee_runs.push((z / n, ee / n));
+    }
+    let ((_, ee0), (z1, ee1)) = (ee_runs[0], ee_runs[1]);
+    println!(
+        "masked: Z0 {z1:.2} vs {:.2}, εeff {ee1:.4} vs {:.4}; bare εeff {ee0:.4} vs {:.4}",
+        fs.z0, fs.er_eff, bare.er_eff
+    );
+    assert!((z1 - fs.z0).abs() < 0.015 * fs.z0, "Z0 {z1} vs {}", fs.z0);
+    assert!((ee1 - fs.er_eff).abs() < 0.005 * fs.er_eff, "εeff {ee1} vs {}", fs.er_eff);
+    // The mask's own effect (3 % of εeff) against the solver's: the bare line's +0.4 % bias
+    // (D59) is a sixth of it.
+    let (d_fdtd, d_fs) = (ee1 - ee0, fs.er_eff - bare.er_eff);
+    assert!(d_fs > 0.0 && (d_fdtd - d_fs).abs() < 0.3 * d_fs, "Δεeff {d_fdtd} vs {d_fs}");
 }
