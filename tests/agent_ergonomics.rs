@@ -560,3 +560,315 @@ fn footprint_create_from_a_pad_list() {
     );
     assert!(diag(&o, "footprint.pads_overlap").is_some(), "{o}");
 }
+
+// ---- Session 3 (docs/TESTING.md): session 2's open items and session 3's friction ----
+
+/// `footprint.create` keeps datasheet pad coordinates with an offset body (`body.at`): fab
+/// outline and courtyard follow the body; `origin: body` / `pads` move the origin instead.
+#[test]
+fn footprint_create_body_offset_and_origin() {
+    use cadlab::model::footprint::{GraphicGeometry, GraphicLayer};
+    let r = Registry::with_builtins();
+    let (_d, mut s) = new_project(&r);
+    let pads =
+        json!([{"number": "1", "at": ["-1mm", "0mm"], "size": ["0.6mm", "1mm"], "count": 3, "pitch": ["1mm", "0mm"]}]);
+    let body = json!({"width": "6mm", "length": "4mm", "height": "2mm", "at": ["0mm", "-2.5mm"]});
+    exec(&r, &mut s, "footprint.create", json!({"name": "OFF", "pads": pads, "body": body}));
+    let fab_box = |s: &Session, name: &str| {
+        let fp = &s.project.as_ref().unwrap().library().footprints[name];
+        let g = fp.graphics.iter().find(|g| g.layer == GraphicLayer::Fab).unwrap();
+        let GraphicGeometry::Polygon { points } = &g.geometry else { panic!("fab outline") };
+        (cadlab::geom::BBox::of_points(points.iter().copied()).unwrap(), fp.clone())
+    };
+    let um = cadlab::Nm::from_um;
+    let (fab, fp) = fab_box(&s, "OFF");
+    assert_eq!(fp.pads[0].at, cadlab::Point::new(um(-1000), cadlab::Nm::ZERO), "pads as given");
+    assert_eq!((fab.min.y, fab.max.y), (um(-4500), um(-500)), "{fab:?}");
+    assert_eq!(fp.body.unwrap().at.y, um(-2500));
+    let cy = cadlab::geom::BBox::of_points(fp.courtyard.iter().copied()).unwrap();
+    assert!(cy.min.y <= um(-4500) && cy.max.y >= um(500), "{cy:?}");
+
+    // Origin at the body center: everything shifts by +2.5 mm in Y.
+    exec(&r, &mut s, "footprint.create", json!({"name": "BODY", "pads": pads, "body": body, "origin": "body"}));
+    let (fab, fp) = fab_box(&s, "BODY");
+    assert_eq!(fp.pads[0].at.y, um(2500));
+    assert!(fp.body.unwrap().at.is_origin());
+    assert_eq!((fab.min.y, fab.max.y), (um(-2000), um(2000)));
+    // Origin at the pads' center.
+    exec(&r, &mut s, "footprint.create", json!({"name": "PADS", "pads": pads, "origin": "pads", "body": body}));
+    let fp = &s.project.as_ref().unwrap().library().footprints["PADS"];
+    assert_eq!(fp.pads[1].at, cadlab::Point::ORIGIN);
+    let e = fail(&r, &mut s, "footprint.create", json!({"name": "X", "pads": pads, "origin": "body"}));
+    assert_eq!(e.error.diagnostic.code, "footprint.origin_without_body");
+
+    // `footprint show` prints the body and where it is.
+    let dir = tempfile::tempdir().unwrap();
+    let o = cadlab(dir.path(), &["project", "new", "p"]);
+    assert!(o.status.success(), "{}", text(&o));
+    let p = dir.path().join("p");
+    let (pads_s, body_s) = (pads.to_string(), body.to_string());
+    let o = cadlab(&p, &["footprint", "create", "OFF", "--pads", &pads_s, "--body", &body_s]);
+    assert!(o.status.success(), "{}", text(&o));
+    let t = text(&cadlab(&p, &["footprint", "show", "OFF"]));
+    assert!(t.contains("body 6mm x 4mm x 2mm at (0mm, -2.5mm)"), "{t}");
+}
+
+/// Placement hints: persisted per designator, an edge for a connector, an LED pulled to an
+/// edge, renamed and removed with their component; `density` validated and used.
+#[test]
+fn placement_hints_and_density() {
+    let r = Registry::with_builtins();
+    let (_d, mut s) = spread_board(&r);
+    exec(&r, &mut s, "circuit.add", json!({"part": "LED red 0603", "refdes": "D1"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "R 1k 1% 0402", "refdes": "R1"}));
+    exec(&r, &mut s, "net.connect", json!({"net": "LED", "pins": ["U1.PD3", "R1.1"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "LED_A", "pins": ["R1.2", "D1.A"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["D1.K"]}));
+    let o = exec(&r, &mut s, "place.hint", json!({"refdes": ["J1"], "edge": "left"}));
+    assert_eq!(o["output"]["hints"]["J1"]["edge"], "left");
+    exec(&r, &mut s, "place.hint", json!({"refdes": ["J2,D1"], "edge": "top"}));
+    let listed = exec(&r, &mut s, "place.hint", json!({}));
+    assert_eq!(listed["output"]["hints"].as_object().unwrap().len(), 3, "{listed}");
+    let o = exec(&r, &mut s, "place.auto", json!({}));
+    let at = |o: &Value, r: &str| {
+        let f = &o["output"]["placements"][r];
+        (mm(&f["at"][0]), mm(&f["at"][1]))
+    };
+    assert!(at(&o, "J1").0 < 6.0, "J1 at the left edge: {:?}", at(&o, "J1"));
+    assert!(at(&o, "J2").1 > 39.0, "J2 at the top edge: {:?}", at(&o, "J2"));
+    assert!(at(&o, "D1").1 > 41.0, "D1 at the top edge: {:?}", at(&o, "D1"));
+    // Again: the same placement (hints are data, the placement deterministic).
+    let o2 = exec(&r, &mut s, "place.auto", json!({"replace": true}));
+    assert_eq!(o2["output"]["placements"], o["output"]["placements"]);
+
+    // Hints follow renames and removals; `clear` drops them.
+    exec(&r, &mut s, "circuit.rename", json!({"from": "D1", "to": "D9"}));
+    let listed = exec(&r, &mut s, "place.hint", json!({}));
+    assert!(listed["output"]["hints"].get("D9").is_some(), "{listed}");
+    exec(&r, &mut s, "circuit.remove", json!({"refdes": ["D9"]}));
+    exec(&r, &mut s, "place.hint", json!({"refdes": ["J2"], "clear": true}));
+    let listed = exec(&r, &mut s, "place.hint", json!({}));
+    assert_eq!(listed["output"]["hints"], json!({"J1": {"edge": "left"}}));
+    let e = fail(&r, &mut s, "place.hint", json!({"refdes": ["J1"], "edge": "top", "clear": true}));
+    assert_eq!(e.error.diagnostic.code, "place.hint_conflict");
+    let e = fail(&r, &mut s, "place.hint", json!({"refdes": ["J7"], "edge": "top"}));
+    assert_eq!(e.error.diagnostic.code, "component.not_found", "{}", e.error);
+
+    // Density: a percentage, not with `compact`; a lower one keeps groups closer.
+    let e = fail(&r, &mut s, "place.auto", json!({"replace": true, "density": 5}));
+    assert_eq!(e.error.diagnostic.code, "place.invalid_density");
+    let e = fail(&r, &mut s, "place.auto", json!({"replace": true, "density": 50, "compact": true}));
+    assert_eq!(e.error.diagnostic.code, "place.density_compact");
+    let (_d2, mut s2) = spread_board(&r);
+    let tight = exec(&r, &mut s2, "place.auto", json!({"density": 20}));
+    let (_d3, mut s3) = spread_board(&r);
+    let wide = exec(&r, &mut s3, "place.auto", json!({"density": 90}));
+    let (t, w) = (extent(&tight), extent(&wide));
+    assert!(t.0 * t.1 < w.0 * w.1, "density 20 {t:?} vs 90 {w:?}");
+}
+
+/// Unmapped shell pads get one warning with the pin to add; `part.create --replace` adds it,
+/// and refuses to drop a pin that is connected.
+#[test]
+fn part_create_suggests_a_shield_pin_and_replaces() {
+    let r = Registry::with_builtins();
+    let (_d, mut s) = new_project(&r);
+    let pads = json!([
+        {"number": "1", "at": ["-1mm", "0mm"], "size": ["0.6mm", "1mm"], "count": 3, "pitch": ["1mm", "0mm"]},
+        {"number": "S1", "at": ["-3mm", "-1mm"], "size": ["1mm", "2mm"], "drill": "0.6mm"},
+        {"number": "S1", "at": ["3mm", "-1mm"], "size": ["1mm", "2mm"], "drill": "0.6mm"},
+        {"number": "MH2", "at": ["0mm", "-3mm"], "size": ["1mm", "1mm"]}
+    ]);
+    exec(&r, &mut s, "footprint.create", json!({"name": "SHELL", "pads": pads}));
+    let pins = json!([{"number": "1", "name": "A"}, {"number": "2", "name": "B"}, {"number": "3", "name": "C"}]);
+    let o = exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "CONN", "category": "connector", "footprint": "SHELL", "pins": pins}),
+    );
+    let d = diag(&o, "part.unmapped_shield").expect("shield warning");
+    assert!(d["message"].as_str().unwrap().contains("S1, MH2"), "{d}");
+    let hint = d["hint"].as_str().unwrap();
+    assert!(hint.contains(r#"`pin_map` {"SH": ["S1", "MH2"]}"#), "{hint}");
+    assert!(hint.contains("--replace") && hint.contains("SHIELD"), "{hint}");
+    assert!(diag(&o, "part.unconnected_pad").is_none(), "one warning: {o}");
+
+    // The fix as hinted.
+    let mut with = pins.as_array().unwrap().clone();
+    with.push(json!({"number": "SH", "name": "SHIELD", "kind": "passive"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "CONN", "refdes": "J1"}));
+    exec(&r, &mut s, "net.connect", json!({"net": "N3", "pins": ["J1.3"]}));
+    let o = exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "CONN", "category": "connector", "footprint": "SHELL", "pins": with,
+               "pin_map": {"SH": ["S1", "MH2"]}, "replace": true}),
+    );
+    assert!(o["diagnostics"].as_array().unwrap().is_empty(), "{o}");
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["J1.SHIELD"]}));
+    // Dropping connected pin 3 is refused.
+    let e = fail(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "CONN", "category": "connector", "footprint": "SHELL", "pins": [{"number": "1"}, {"number": "2"}],
+               "replace": true}),
+    );
+    assert_eq!(e.error.diagnostic.code, "part.replace_drops_pins");
+    assert!(e.error.diagnostic.message.contains("J1.3"), "{}", e.error);
+    // Without `replace`, an existing ID is still a conflict.
+    let e = fail(&r, &mut s, "part.create", json!({"id": "CONN", "category": "connector", "footprint": "SHELL"}));
+    assert_eq!(e.error.diagnostic.code, "part.exists");
+}
+
+/// A buck converter: the output rail behind the inductor counts as driven (ERC), and its
+/// output capacitor is looked for there, not on the switch node (lint).
+#[test]
+fn buck_output_behind_its_inductor() {
+    let r = Registry::with_builtins();
+    let (_d, mut s) = new_project(&r);
+    let pins = json!([{"number":"1","name":"EN","kind":"input"},{"number":"2","name":"GND","kind":"power_in"},{"number":"3","name":"LX","kind":"power_out"},{"number":"4","name":"IN","kind":"power_in"},{"number":"5","name":"FB","kind":"input"}]);
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "BUCK", "category": "regulator", "package": "SOT-23-5", "pins": pins}),
+    );
+    let load = json!([{"number":"1","name":"VDD","kind":"power_in"},{"number":"2","name":"GND","kind":"power_in"},{"number":"3","name":"IO"}]);
+    exec(&r, &mut s, "part.create", json!({"id": "LOAD", "category": "ic", "package": "SOT-23", "pins": load}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "BUCK", "refdes": "U1"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "LOAD", "refdes": "U2"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "L 2.2uH 2A 1210", "refdes": "L1"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 10uF 10V X5R 0805", "count": 2}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 100nF 16V X7R 0402", "refdes": "C3"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "R 10k 1% 0402", "count": 2}));
+    for (net, pins) in [
+        ("VIN", json!(["U1.IN", "U1.EN", "C1.1"])),
+        ("GND", json!(["U1.GND", "U2.GND", "C1.2", "R2.2", "C3.2"])),
+        ("SW", json!(["U1.LX", "L1.1"])),
+        ("+3V3", json!(["L1.2", "U2.VDD", "R1.1"])),
+        ("FB", json!(["U1.FB", "R1.2", "R2.1"])),
+    ] {
+        exec(&r, &mut s, "net.connect", json!({"net": net, "pins": pins}));
+    }
+    exec(&r, &mut s, "net.connect", json!({"net": "IO", "pins": ["U2.IO", "C3.1"]}));
+    exec(&r, &mut s, "net.set", json!({"nets": ["VIN"], "driven": true}));
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert!(diag(&o, "erc.power_not_driven").is_none(), "{}", o["diagnostics"]);
+    // No output capacitor yet: lint names +3V3, not the switch node.
+    let o = exec(&r, &mut s, "circuit.lint", json!({}));
+    let found: Vec<&str> = o["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "lint.missing_decoupling")
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    assert!(found.iter().any(|m| m.contains("`+3V3`")), "{found:?}");
+    assert!(!found.iter().any(|m| m.contains("`SW`")), "{found:?}");
+    exec(&r, &mut s, "net.connect", json!({"net": "+3V3", "pins": ["C2.1"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["C2.2"]}));
+    let o = exec(&r, &mut s, "circuit.lint", json!({}));
+    assert!(diag(&o, "lint.missing_decoupling").is_none(), "{}", o["diagnostics"]);
+    // Without the inductor's link, the rail is not driven.
+    exec(&r, &mut s, "net.disconnect", json!({"pins": ["L1.2"]}));
+    let o = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert!(diag(&o, "erc.power_not_driven").is_some(), "{}", o["diagnostics"]);
+}
+
+/// `board.fab_stackup` applies a fab's published stackup in one step; the fab check accepts its
+/// copper, and the fab export names it in `fab-lock.json`.
+#[test]
+fn fab_stackup_applies_and_is_locked() {
+    let r = Registry::with_builtins();
+    let (d, mut s) = new_project(&r);
+    let e = fail(&r, &mut s, "board.fab_stackup", json!({"fab": "jlcpcb"}));
+    assert_eq!(e.error.diagnostic.code, "board.stackup_choose");
+    assert!(e.error.diagnostic.hint.as_deref().unwrap().contains("JLC04161H-7628"), "{}", e.error);
+    let e = fail(&r, &mut s, "board.fab_stackup", json!({"fab": "jlcpcb", "stackup": "JLC04161H-762"}));
+    assert_eq!(e.error.diagnostic.code, "board.unknown_stackup");
+    let e = fail(&r, &mut s, "board.fab_stackup", json!({"fab": "oshpark", "stackup": "x"}));
+    assert_eq!(e.error.diagnostic.code, "fab.no_stackups");
+    let o = exec(&r, &mut s, "board.fab_stackup", json!({"fab": "jlcpcb", "stackup": "jlc04161h-3313"}));
+    assert!(o["diagnostics"].as_array().unwrap().is_empty(), "{o}");
+    let st = &s.project.as_ref().unwrap().board().stackup;
+    assert_eq!(st.copper_layers, 4);
+    assert_eq!(st.inner_copper, cadlab::Nm(15_200));
+    assert_eq!(st.dielectrics[1].thickness, cadlab::Nm::from_um(1265));
+    assert_eq!(st.dielectrics[0].er.to_string(), "4.1");
+
+    exec(&r, &mut s, "circuit.add", json!({"part": "R 1k 1% 0402", "count": 2}));
+    exec(&r, &mut s, "net.connect", json!({"net": "A", "pins": ["R1.1", "R2.1"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "B", "pins": ["R1.2", "R2.2"]}));
+    exec(&r, &mut s, "board.outline", json!({"width": "20mm", "height": "20mm"}));
+    exec(&r, &mut s, "board.rules", json!({"fab": "jlcpcb"}));
+    exec(&r, &mut s, "place.auto", json!({}));
+    exec(&r, &mut s, "route.all", json!({}));
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "jlcpcb"}));
+    assert!(diag(&o, "fab.copper").is_none(), "{}", o["diagnostics"]);
+    let o = exec(&r, &mut s, "fab.export", json!({"fab": "jlcpcb", "dir": d.path().join("fab")}));
+    assert_eq!(o["output"]["stackup"], "JLC04161H-3313", "{o}");
+    let lock: Value =
+        serde_json::from_str(&std::fs::read_to_string(d.path().join("fab/fab-lock.json")).unwrap()).unwrap();
+    assert_eq!(lock["process"]["stackup"], "JLC04161H-3313");
+    // A dielectric changed by hand no longer matches: nothing is claimed.
+    exec(&r, &mut s, "board.dielectric", json!({"gap": 1, "thickness": "0.2mm"}));
+    let o = exec(&r, &mut s, "fab.export", json!({"fab": "jlcpcb", "dir": d.path().join("fab")}));
+    assert!(o["output"].get("stackup").is_none(), "{o}");
+}
+
+/// JSON-valued flags take a bare word as a string (`--outline board`).
+#[test]
+fn bare_words_for_json_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(cadlab(dir.path(), &["project", "new", "p"]).status.success());
+    let p = dir.path().join("p");
+    for a in [
+        &["board", "outline", "--width", "20mm", "--height", "20mm"][..],
+        &["board", "setup", "--layers", "4"],
+        &["circuit", "add", "R 1k 1% 0402"],
+        &["net", "connect", "GND", "R1.1"],
+    ] {
+        assert!(cadlab(&p, a).status.success());
+    }
+    let o = cadlab(&p, &["zone", "add", "GND", "--net", "GND", "--layers", "In1.Cu", "--outline", "board"]);
+    assert!(o.status.success(), "{}", text(&o));
+    // Malformed JSON still says so.
+    let o = cadlab(&p, &["zone", "add", "G2", "--net", "GND", "--layers", "In2.Cu", "--outline", "{\"rect\": "]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert!(text(&o).contains("expected JSON"), "{}", text(&o));
+}
+
+/// The generated pin-1 dot avoids every pad (a USB-C shell pad sat where it used to go).
+#[test]
+fn pin1_dot_avoids_other_pads() {
+    use cadlab::model::footprint::{GraphicGeometry, GraphicLayer};
+    let r = Registry::with_builtins();
+    let (_d, mut s) = new_project(&r);
+    let pads = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent_session3/usb_c_16p_pads.json"),
+    )
+    .unwrap();
+    let pads: Value = serde_json::from_str(&pads).unwrap();
+    let body = json!({"width": "8.94mm", "length": "7.3mm", "height": "3.2mm", "at": ["0mm", "-3.4mm"]});
+    exec(&r, &mut s, "footprint.create", json!({"name": "USBC", "pads": pads, "body": body}));
+    let fp = &s.project.as_ref().unwrap().library().footprints["USBC"];
+    let (c, rad) = fp
+        .graphics
+        .iter()
+        .find_map(|g| match g.geometry {
+            GraphicGeometry::Circle { center, radius, filled: true } if g.layer == GraphicLayer::Silk => {
+                Some((center, radius))
+            }
+            _ => None,
+        })
+        .expect("pin-1 dot");
+    for p in &fp.pads {
+        let (w, h) = p.shape.size();
+        let dx = ((c.x - p.at.x).0.abs() - w.0 / 2 - rad.0).max(0);
+        let dy = ((c.y - p.at.y).0.abs() - h.0 / 2 - rad.0).max(0);
+        assert!(dx.max(dy) >= 150_000, "dot at {c:?} within 0.15 mm of pad {} at {:?}", p.number, p.at);
+    }
+}

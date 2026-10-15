@@ -533,6 +533,7 @@ pub fn body_set(p: &Project) -> BodySet {
                 body.width = b.width;
                 body.length = b.length;
                 body.height = b.height;
+                body.offset = b.at;
                 set.bodies.push(body);
             }
             _ => set.no_body.push(refdes.clone()),

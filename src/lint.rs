@@ -6,7 +6,7 @@
 //!
 //! | Code | Severity | Finding |
 //! |---|---|---|
-//! | `lint.missing_decoupling` | warning | an IC power input (or regulator output) rail with no capacitor to ground |
+//! | `lint.missing_decoupling` | warning | an IC power input (or regulator output, behind its inductor for a switcher) rail with no capacitor to ground |
 //! | `lint.i2c_pullup` | warning | an I²C line (net or pin named SDA/SCL) without a resistor to a supply |
 //! | `lint.usb_esd` | warning | a USB data line reaching a connector with no ESD/TVS protection on it |
 //! | `lint.clock_termination` | info | a clock output driving other parts directly, with no series resistor |
@@ -163,9 +163,30 @@ fn decoupling(ctx: &Ctx, out: &mut Vec<Diagnostic>) {
                 rails.entry(net).or_default().push(pr);
             }
         }
-        for (net, pins) in rails {
-            let caps = ctx.others(&c.nets[net], Category::Capacitor);
-            if caps.iter().any(|(_, other)| other.is_some_and(|o| ctx.ground.contains(o))) {
+        for (rail, pins) in rails {
+            let has_cap = |net: &str| {
+                ctx.others(&c.nets[net], Category::Capacitor)
+                    .iter()
+                    .any(|(_, other)| other.is_some_and(|o| ctx.ground.contains(o)))
+            };
+            // A switching regulator's output pin drives its inductor (the switch node, which
+            // takes no capacitor): the output capacitor belongs behind the inductor.
+            let mut net = rail;
+            if regulator && pins.iter().all(|pr| ctx.pins[pr].2 == PinKind::PowerOut) {
+                let behind: Vec<&str> = ctx
+                    .others(&c.nets[rail], Category::Inductor)
+                    .into_iter()
+                    .filter_map(|(_, o)| o)
+                    .filter(|o| *o != rail && !ctx.ground.contains(o))
+                    .collect();
+                if !behind.is_empty() {
+                    match behind.into_iter().find(|n| !has_cap(n)) {
+                        Some(n) => net = n,
+                        None => continue,
+                    }
+                }
+            }
+            if has_cap(net) {
                 continue;
             }
             let labels: Vec<String> = pins.iter().map(|pr| format!("{pr} ({})", ctx.pins[pr].1)).collect();

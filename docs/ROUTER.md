@@ -302,7 +302,9 @@ between its two nets where it is smaller than the clearance.
    midpoints (Kruskal; an edge is taken only when it joins new islands of both nets), so both nets get the same
    topology. Ends on one component (an ESD array whose lines pass through it, pins 1/6 and 3/4) are joined
    first by a straight *flow-through* link per net. Pads without a partner (a pull-up on one net) are left to
-   the ordinary router and counted in the report (`left`, `route.diffpair_left` note).
+   the ordinary router and counted in the report (`left`, `route.diffpair_left` note), and so are
+   *interleaved* contacts of one part, whose straight link is blocked by a pad of the other net (a USB-C
+   receptacle's two rows, D− D+ D− D+): the ordinary router joins them with a via or a loop (D53).
 2. **Search.** Each coupled connection is routed as one fat path: the centerline, by A* on a grid (pitch a
    quarter of the fat width plus clearance, at least half the pair pitch) over states (cell, direction,
    polarity) with 0°/45° moves only (45° bends cost 0.6 steps; no 90° bends, no vias: the pair stays on one

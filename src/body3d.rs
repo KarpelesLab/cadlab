@@ -485,8 +485,9 @@ fn no_lead(out: &mut Vec<Solid>, fp: &Footprint, hx: f64, hy: f64, term: f64, wi
 fn fallback(out: &mut Vec<Solid>, fp: &Footprint) {
     if let Some(b) = &fp.body {
         let (hx, hy) = (mm(b.width) / 2.0, mm(b.length) / 2.0);
-        out.push(cuboid([-hx, -hy, 0.0], [hx, hy, mm(b.height).max(0.1)], MOLD));
-        if fp.pads.len() >= 5 {
+        let (cx, cy) = (mm(b.at.x), mm(b.at.y));
+        out.push(cuboid([cx - hx, cy - hy, 0.0], [cx + hx, cy + hy, mm(b.height).max(0.1)], MOLD));
+        if fp.pads.len() >= 5 && b.at.is_origin() {
             pin1_dot(out, fp, "1", hx, hy, mm(b.height).max(0.1));
         }
         return;

@@ -149,6 +149,10 @@ pub struct LockProcess {
     /// Inner copper (multilayer boards).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inner_copper: Option<Nm>,
+    /// The fab's published stackup the board's layers match (`board.fab_stackup`): order the
+    /// boards with it (impedance control).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stackup: Option<String>,
     /// Finish and colors.
     #[serde(flatten)]
     pub choices: Choices,
@@ -470,6 +474,7 @@ pub fn bundle(p: &Project, input: &BundleInput<'_>) -> std::io::Result<(Vec<Bund
             thickness: s.thickness,
             outer_copper: s.outer_copper,
             inner_copper: (s.copper_layers > 2).then_some(s.inner_copper),
+            stackup: input.process.matching_stackup(s).map(|st| st.id.clone()),
             choices: input.choices.clone(),
         }),
         files: fab

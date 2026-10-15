@@ -20,6 +20,7 @@ use crate::value::{Quantity, Unit};
 pub(crate) fn register(r: &mut Registry) {
     r.register::<Stackup>()
         .register::<SetDielectric>()
+        .register::<FabStackup>()
         .register::<Calc>()
         .register::<Solve>()
         .register::<NetLoss>()
@@ -171,7 +172,10 @@ fn stackup_diagnostics(o: &StackupInfo) -> Vec<Diagnostic> {
                     crate::model::board::DEFAULT_ER
                 ),
             )
-            .with_hint("set them from your fab's stackup with `board.dielectric --gap N --thickness .. --er ..`"),
+            .with_hint(
+                "apply your fab's published stackup (`board.fab_stackup jlcpcb`), or set each gap with \
+                 `board.dielectric --gap N --thickness .. --er ..`",
+            ),
         );
     }
     let (a, b) = (o.layers_thickness.0 as f64, o.thickness.0 as f64);
@@ -225,6 +229,93 @@ impl Command for Stackup {
     type Output = StackupInfo;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<StackupInfo, CommandError> {
+        let o = stackup_info(ctx.project()?);
+        for d in stackup_diagnostics(&o) {
+            ctx.report(d);
+        }
+        Ok(o)
+    }
+
+    fn summarize(o: &StackupInfo) -> String {
+        stackup_text(o)
+    }
+}
+
+/// Apply a stackup a fab publishes (from its fab profile): copper layer count, board
+/// thickness, copper weights and every dielectric (thickness, εr, material) in one step. The
+/// values are copied into the board (the design keeps no reference to the fab); without
+/// `stackup`, the error lists the fab's stackups.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FabStackup {
+    /// Fab profile (`jlcpcb`).
+    pub fab: String,
+    /// The fab's stackup name (`JLC04161H-7628`); case-insensitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stackup: Option<String>,
+}
+
+impl Command for FabStackup {
+    const NAME: &'static str = "board.fab_stackup";
+    const SUMMARY: &'static str =
+        "Apply a fab's published layer stackup (layers, thickness, copper, dielectrics) from its fab profile";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["fab", "stackup"];
+    type Output = StackupInfo;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<StackupInfo, CommandError> {
+        let ps = super::fab::profiles(ctx);
+        let (profile, _) = super::fab::profile(&ps, &self.fab)?;
+        let all: Vec<&crate::fab::FabStackup> = profile.processes.iter().flat_map(|q| q.stackups.iter()).collect();
+        let listing = || {
+            all.iter()
+                .map(|st| {
+                    let d: Vec<String> =
+                        st.dielectrics.iter().map(|d| format!("{} εr {}", d.thickness, d.er)).collect();
+                    format!("{} ({} layers, {}: {})", st.id, st.layers(), st.thickness, d.join(" / "))
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        if all.is_empty() {
+            return Err(CommandError::not_found(
+                "fab.no_stackups",
+                format!("fab profile `{}` publishes no stackups", profile.id),
+            )
+            .with_hint("set the dielectrics from the fab's documentation with `board.dielectric --gap N --thickness .. --er ..`"));
+        }
+        let Some(want) = &self.stackup else {
+            return Err(CommandError::invalid_args(
+                "board.stackup_choose",
+                format!("name one of {}'s stackups", profile.name),
+            )
+            .with_hint(format!("stackups: {}", listing())));
+        };
+        let Some(st) = all.iter().find(|st| st.id.eq_ignore_ascii_case(want)) else {
+            let near = crate::suggest::did_you_mean(want, all.iter().map(|st| st.id.as_str()), 3);
+            return Err(CommandError::not_found(
+                "board.unknown_stackup",
+                format!("{} has no stackup `{want}`", profile.name),
+            )
+            .with_suggestions(&near)
+            .with_hint_if_none(format!("stackups: {}", listing())));
+        };
+        let dielectrics: Vec<crate::model::board::Dielectric> = st
+            .dielectrics
+            .iter()
+            .map(|d| crate::model::board::Dielectric {
+                thickness: d.thickness,
+                er: d.er,
+                material: Some(d.material.clone()),
+                loss_tangent: None,
+            })
+            .collect();
+        let s = &mut ctx.project_mut()?.board_mut().stackup;
+        s.copper_layers = st.layers() as u8;
+        s.thickness = st.thickness;
+        s.outer_copper = st.outer_copper;
+        s.inner_copper = st.inner_copper;
+        s.dielectrics = dielectrics;
         let o = stackup_info(ctx.project()?);
         for d in stackup_diagnostics(&o) {
             ctx.report(d);

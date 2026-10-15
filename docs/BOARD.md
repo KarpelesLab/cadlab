@@ -187,7 +187,7 @@ change).
 | Group | Commands |
 |---|---|
 | `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
-| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
+| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
@@ -369,14 +369,28 @@ the courtyards of footprints that stay (locked ones, and placed ones unless `rep
    (penalized per pad for every other connector, placed or locked, closer than a quarter of the board's
    width plus height); small ICs whose signal nets reach only one larger IC (a crystal next to its MCU) are
    that IC's satellites, placed inside its room right after it; and during improvement anchors stay inside
-   their room, so the ratsnest cannot pull the groups back into one cluster.
+   their room, so the ratsnest cannot pull the groups back into one cluster. `density` (percent, 10–100)
+   replaces the 60 % share (and raises the 2.5× cap in proportion above it): lower keeps groups closer.
+
+   **Hints** (`place.hint`, D53): a part with an `edge` hint goes to that edge of the board's box (`any`:
+   the nearest; `top` is the largest Y) and only moves along it or closer; a two-terminal part with a hint
+   (an indicator LED, a button) is placed like an anchor instead of next to a pin; swaps never exchange parts
+   with different hints. When spreading, a connector that opens on one side (its courtyard center is off its
+   pads' centroid by more than 0.1 mm: a receptacle drawn from its datasheet) faces its edge: those rotations
+   are tried first at every room size, and improvement never turns it away. Hints of locked parts do nothing
+   (`place.hint_locked` note); they follow `circuit.rename` and go with `circuit.remove`.
 3. Passives, group by group (decoupling capacitors first, then chains), on a 0.25 mm grid within 3 mm, then
    8 mm, of their target pin, all rotations: the score is the distance from their connecting pad to the
    target pin (weighted 4 for decoupling, 2 otherwise) plus the distance of their other pads to the nearest
    placed pin of the same net (ground weighted 0.3). Candidates are tried best first; the first valid one wins.
    When spreading, every part's box covers its courtyard and its silkscreen (pin-1 dots outside the
-   courtyard included), so no silkscreen lands on a neighbour's pads. `compact` is the placement as before
-   D50 (the router benchmark boards use it).
+   courtyard included), so no silkscreen lands on a neighbour's pads, and passives keep out of each
+   differential pair's breakout: for every part with a pad of each net within 2 mm (an end), the box of the
+   two pads grown by 0.5 mm and stretched 2.5 mm away from the part's center (a D+ pull-up at its pin
+   blocked the pair's way out). Also when spreading (D53), a rail's first capacitor goes to a regulator's
+   input, and a passive without a signal net goes to the smallest power net it shares with an anchor (a
+   buck's inductor to its switch pin, not to the largest IC on the output rail). `compact` is the placement
+   as before D50 (the router benchmark boards use it).
 4. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
    and swaps of identical footprints, accepting the best valid move that lowers the ratsnest (MST per net over
    pad centers) plus tethers keeping passives at their target pins; connectors never move away from the edge.

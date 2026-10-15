@@ -13,7 +13,9 @@ use crate::fab::rules::{DerivedRule, Margin};
 use crate::geom::{BBox, Point};
 use crate::id::ObjectId;
 use crate::model::Project;
-use crate::model::board::{BoardSide, Contour, PlacedFootprint, RULE_FIELDS, RulePreset, Rules, Segment, Track, Via};
+use crate::model::board::{
+    BoardSide, Contour, EdgeHint, PlacedFootprint, PlacementHint, RULE_FIELDS, RulePreset, Rules, Segment, Track, Via,
+};
 use crate::model::sections::natural_cmp;
 use crate::suggest::did_you_mean;
 use crate::units::{Angle, Nm, Scale};
@@ -34,6 +36,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<PlaceLock>()
         .register::<PlaceRemove>()
         .register::<PlaceList>()
+        .register::<PlaceHint>()
         .register::<PlaceAuto>()
         .register::<TrackAdd>()
         .register::<TrackRemove>()
@@ -1283,6 +1286,104 @@ pub struct PlaceAuto {
     /// board (connectors still go to edges).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact: bool,
+    /// Groups: how much of the free board area the groups' rooms take, in percent (default 60;
+    /// lower keeps groups closer together, 100 uses the whole board). Not with `compact`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<u32>,
+}
+
+/// Set, clear or list automatic placement hints (persisted in the board, used by every later
+/// `place.auto`): `edge` sends a part to a board edge, e.g. the USB connector to the top
+/// (`place hint J1 --edge top`) or indicator LEDs to any edge (`place hint D2 D3 --edge any`).
+/// Without `edge` or `clear`, lists the hints.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlaceHint {
+    /// Designators (`J1`, `D2,D3`); none lists every hint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refdes: Vec<String>,
+    /// Board edge the parts go to: `any` (nearest), `left`, `right`, `top` (largest Y) or `bottom`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<EdgeHint>,
+    /// Remove the hints of these parts (all hints when no designator is given).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear: bool,
+}
+
+/// Placement hints by designator.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementHints {
+    /// Hints, by designator.
+    pub hints: BTreeMap<String, PlacementHint>,
+}
+
+impl Command for PlaceHint {
+    const NAME: &'static str = "place.hint";
+    const SUMMARY: &'static str = "Set, clear or list auto-placement hints (which board edge a part goes to)";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["refdes"];
+    type Output = PlacementHints;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<PlacementHints, CommandError> {
+        if self.clear && self.edge.is_some() {
+            return Err(CommandError::invalid_args("place.hint_conflict", "give either `edge` or `clear`, not both")
+                .with_hint("`place hint D2 --edge any` sets a hint, `place hint D2 --clear` removes it"));
+        }
+        let mut keys = Vec::new();
+        for r in self.refdes.iter().flat_map(|r| r.split(',')).map(str::trim).filter(|r| !r.is_empty()) {
+            keys.push(util::refdes_key(ctx.project()?, r)?);
+        }
+        if self.clear {
+            let p = ctx.project_mut()?;
+            if keys.is_empty() {
+                p.board_mut().placement_hints.clear();
+            }
+            for k in &keys {
+                if p.board().placement_hints.contains_key(k) {
+                    p.board_mut().placement_hints.remove(k);
+                }
+            }
+        } else if let Some(edge) = self.edge {
+            if keys.is_empty() {
+                return Err(CommandError::invalid_args("place.hint_no_parts", "`edge` needs designators")
+                    .with_hint("name the parts: `place hint J1 --edge top`"));
+            }
+            let p = ctx.project_mut()?;
+            for k in &keys {
+                p.board_mut().placement_hints.entry(k.clone()).or_default().edge = Some(edge);
+            }
+        }
+        let locked: Vec<String> = {
+            let b = ctx.project()?.board();
+            keys.iter()
+                .filter(|k| b.footprints.get(*k).is_some_and(|f| f.locked) && b.placement_hints.contains_key(*k))
+                .cloned()
+                .collect()
+        };
+        for k in &locked {
+            ctx.report(
+                Diagnostic::info("place.hint_locked", format!("{k} is locked: `place.auto` leaves it where it is"))
+                    .with_subject(crate::refs::ObjectRef::Name(k.clone()))
+                    .with_hint(format!("unlock it (`place lock {k} --locked false`) for the hint to apply")),
+            );
+        }
+        let hints = ctx.project()?.board().placement_hints.clone();
+        Ok(PlacementHints { hints })
+    }
+
+    fn summarize(o: &PlacementHints) -> String {
+        if o.hints.is_empty() {
+            return "no placement hints".into();
+        }
+        o.hints
+            .iter()
+            .map(|(r, h)| match h.edge {
+                Some(e) => format!("{r}: edge {}", util::wire_name(&e)),
+                None => format!("{r}: -"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 impl Command for PlaceAuto {
@@ -1314,7 +1415,24 @@ impl Command for PlaceAuto {
         let (mut out, outside) = match self.strategy.unwrap_or_default() {
             Strategy::Groups => {
                 let gap = self.spacing.unwrap_or(geo::place::DEFAULT_GAP);
-                let r = geo::place::auto_place(p, &moving, gap, !self.compact)
+                if self.compact && self.density.is_some() {
+                    return Err(CommandError::invalid_args(
+                        "place.density_compact",
+                        "`density` applies to spread placement, not `compact`",
+                    )
+                    .with_hint("drop `compact` and pass a low `density` (e.g. 30) to keep groups close"));
+                }
+                if let Some(d) = self.density.filter(|d| !(10..=100).contains(d)) {
+                    return Err(CommandError::invalid_args(
+                        "place.invalid_density",
+                        format!("`density` is a percentage between 10 and 100, not {d}"),
+                    )
+                    .with_hint("e.g. `--density 40` keeps groups closer, `--density 90` uses most of the board"));
+                }
+                let edges: BTreeMap<String, EdgeHint> =
+                    p.board().placement_hints.iter().filter_map(|(r, h)| h.edge.map(|e| (r.clone(), e))).collect();
+                let opts = geo::place::AutoOptions { gap, spread: !self.compact, density: self.density, edges };
+                let r = geo::place::auto_place(p, &moving, &opts)
                     .map_err(|e| CommandError::conflict(e.code, e.message).with_hint(e.hint))?;
                 (r.placements, r.unplaced)
             }

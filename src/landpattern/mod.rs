@@ -738,8 +738,8 @@ pub fn from_pads(
                 return Err(invalid("body width and length must be positive"));
             }
             crate::geom::BBox {
-                min: Point::new(-Nm(b.width.0 / 2), -Nm(b.length.0 / 2)),
-                max: Point::new(Nm(b.width.0 / 2), Nm(b.length.0 / 2)),
+                min: Point::new(b.at.x - Nm(b.width.0 / 2), b.at.y - Nm(b.length.0 / 2)),
+                max: Point::new(b.at.x + Nm(b.width.0 / 2), b.at.y + Nm(b.length.0 / 2)),
             }
         }
         None => draw::pads_box(&pads).ok_or_else(|| invalid("a footprint needs at least one pad"))?,
@@ -747,6 +747,12 @@ pub fn from_pads(
     let mount = if pads.iter().any(|p| matches!(p.kind, PadKind::Tht { .. })) { Mount::Tht } else { Mount::Smd };
     let marker = pads.iter().any(|p| p.number == "1" || p.number == "A1");
     draw::finish_box(name, mount, pads, bb, body, courtyard_excess, marker, opts)
+}
+
+/// Center of the pads' copper bounding box (`None` without pads).
+pub fn pads_center(pads: &[Pad]) -> Option<Point> {
+    let b = draw::pads_box(pads)?;
+    Some(Point::new(Nm((b.min.x.0 + b.max.x.0).div_euclid(2)), Nm((b.min.y.0 + b.max.y.0).div_euclid(2))))
 }
 
 /// Generates the footprint for `spec`.
@@ -761,7 +767,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                 smd_pad("1", Point::new(-row.center, Nm::ZERO), row.length, row.width, opts),
                 smd_pad("2", Point::new(row.center, Nm::ZERO), row.length, row.width, opts),
             ];
-            let body = Body { width: length.nominal(), length: width.nominal(), height: *height };
+            let body = Body::centered(length.nominal(), width.nominal(), *height);
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), kind.polarized(), opts)
         }
         PackageSpec::GullWing {
@@ -806,7 +812,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
+            let body = Body::centered(body_width.nominal(), body_length.nominal(), *height);
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
         PackageSpec::Dfn { pins, pitch, body_width, body_length, terminal, lead_width, height, exposed_pad } => {
@@ -821,7 +827,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
+            let body = Body::centered(body_width.nominal(), body_length.nominal(), *height);
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
         PackageSpec::Qfp { pins, pitch, span_x, span_y, body_x, body_y, terminal, lead_width, height, exposed_pad } => {
@@ -833,7 +839,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
+            let body = Body::centered(body_x.nominal(), body_y.nominal(), *height);
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
         PackageSpec::Qfn { pins, pitch, body_x, body_y, terminal, lead_width, height, exposed_pad } => {
@@ -845,7 +851,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             if let Some(ep) = exposed_pad {
                 pads.push(exposed(ep, pins + 1, opts));
             }
-            let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
+            let body = Body::centered(body_x.nominal(), body_y.nominal(), *height);
             draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)
         }
         PackageSpec::Tab {
@@ -907,7 +913,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             let tab_at = Point::new(Nm((tab.outer.0 + tab.inner.0) / 2), Nm::ZERO);
             let number = tab_number.unwrap_or(leads + 1).to_string();
             pads.push(smd_pad(&number, tab_at, tab.outer - tab.inner, tab.width, opts));
-            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
+            let body = Body::centered(body_width.nominal(), body_length.nominal(), *height);
             let mut fp = draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)?;
             if tab_protrusion.is_some() {
                 // Fab: the part of the tab outside the molded body.
@@ -927,14 +933,14 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             check_dims(&[("span", span), ("terminal", terminal), ("lead_width", lead_width)])?;
             let f = if *lead == SodLead::Flat { &ipc::FLAT } else { &ipc::GULLWING };
             let row = ipc::row_pads(*span, *terminal, *lead_width, f, opts);
-            let body = Body { width: body_length.nominal(), length: body_width.nominal(), height: *height };
+            let body = Body::centered(body_length.nominal(), body_width.nominal(), *height);
             draw::finish(name, Mount::Smd, two_pads(row, opts), body, f.courtyard(opts.density), true, opts)
         }
         PackageSpec::Molded { kind, length, body_length, width, terminal, lead_width, height } => {
             check_dims(&[("length", length), ("terminal", terminal), ("lead_width", lead_width)])?;
             let f = &ipc::MOLDED;
             let row = ipc::row_pads(*length, *terminal, *lead_width, f, opts);
-            let body = Body { width: body_length.nominal(), length: width.nominal(), height: *height };
+            let body = Body::centered(body_length.nominal(), width.nominal(), *height);
             let polarized = kind.polarized() || *kind == ChipKind::Capacitor;
             draw::finish(name, Mount::Smd, two_pads(row, opts), body, f.courtyard(opts.density), polarized, opts)
         }
@@ -942,7 +948,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
             check_dims(&[("length", length), ("diameter", diameter), ("terminal", terminal)])?;
             let f = &ipc::MELF;
             let row = ipc::row_pads(*length, *terminal, *diameter, f, opts);
-            let body = Body { width: length.nominal(), length: diameter.nominal(), height: diameter.max };
+            let body = Body::centered(length.nominal(), diameter.nominal(), diameter.max);
             draw::finish(name, Mount::Smd, two_pads(row, opts), body, f.courtyard(opts.density), kind.polarized(), opts)
         }
         PackageSpec::Dip { pins, pitch, row_spacing, body_width, body_length, height, drill, pad } => {
@@ -983,7 +989,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                     }
                 })
                 .collect();
-            let body = Body { width: body_width.nominal(), length: body_length.nominal(), height: *height };
+            let body = Body::centered(body_width.nominal(), body_length.nominal(), *height);
             draw::finish(name, Mount::Tht, pads, body, Nm::from_um(250), true, opts)
         }
         PackageSpec::Bga { rows, cols, pitch, ball, body_x, body_y, height, missing, missing_center } => {
@@ -1012,7 +1018,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                     overrides: Default::default(),
                 })
                 .collect();
-            let body = Body { width: body_x.nominal(), length: body_y.nominal(), height: *height };
+            let body = Body::centered(body_x.nominal(), body_y.nominal(), *height);
             let courtyard = Nm::from_um(ipc::BGA_COURTYARD[opts.density as usize]);
             draw::finish(name, Mount::Smd, pads, body, courtyard, true, opts)
         }
@@ -1047,7 +1053,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                     });
                 }
             }
-            let body = Body { width: *pitch * *rows as i64, length: *pitch * *pins_per_row as i64, height: *height };
+            let body = Body::centered(*pitch * *rows as i64, *pitch * *pins_per_row as i64, *height);
             draw::finish(name, Mount::Tht, pads, body, Nm::from_um(250), false, opts)
         }
     }?;

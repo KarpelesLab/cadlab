@@ -277,6 +277,8 @@ FabProfile                               fab-profiles/<id>.toml, deny_unknown_fi
 │   ├── min_silk_width, min_silk_height, silk_to_pad, mask_dam
 │   ├── via_in_pad, castellated
 │   ├── finishes[], mask_colors[], silk_colors[], max_size [a, b], min_size [a, b]
+│   ├── [[stackup]]  id, thickness, outer_copper, inner_copper, dielectrics [{thickness, er, material}]
+│   │                published impedance stackups (`board.fab_stackup`); their copper counts as offered
 │   └── cite {field = url}, unverified [field, ...]
 ├── [output]
 │   ├── include[]       file kinds or groups: copper, mask, paste, silk, profile, component, drill, ipc356
@@ -316,7 +318,8 @@ neither fab publishes a table, so they are user data (see D21).
 | `fab.substitute {fab, part, mpn?, remove?, force?, boards?, dir?}` | applies a substitute for one BOM line at one fab: `mpn` (default the best candidate) must be one of the line's candidates (`bom.substitutes`) unless `force` (basis `manual`). Writes it to the fab's `fab-lock.json` (creating a lock without files if there was no export yet), never to the project; `remove` undoes it. The next `fab.check` / `fab.export` for that fab order the substitute; other fabs are not affected |
 
 `fab-lock.json` records: lock version, generator, project, profile (`id`, `name`, `verified_at`, `source`),
-process (`id`, layers, thickness, copper, chosen finish/colors), every file written with its SHA-256 and size
+process (`id`, layers, thickness, copper, the published `stackup` the board matches exactly when there is
+one — order with it —, chosen finish/colors), every file written with its SHA-256 and size
 (the archive included, the lock excluded), each populated BOM line with the chosen manufacturer/MPN, the fab SKU
 and provider when one of the profile's `catalog` providers offers it, its availability status and, for a
 substituted line, the MPN it `replaces`, the rotation offsets applied per designator, and the `substitutions`

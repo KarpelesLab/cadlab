@@ -242,6 +242,10 @@ pub struct Create {
     /// description, parameters, package, datasheet. Pins still come from `pins`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fill_from_suppliers: bool,
+    /// Replace an existing part with this ID (to add a pin, fix a pin map): its components
+    /// keep using it; every pin they have on a net must still exist.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
 }
 
 /// Fills `create` from the best supplier listing of its MPN.
@@ -285,6 +289,14 @@ fn chip_kind(c: Category) -> ChipKind {
     }
 }
 
+/// Whether a pad number names a connector shell, shield or mounting tab (`S1`, `SH2`,
+/// `SHIELD`, `MH1`, `MP`, `EH`): pads usually left out of a pin list.
+fn is_shield_pad(pad: &str) -> bool {
+    let up = pad.to_ascii_uppercase();
+    let head = up.trim_end_matches(|c: char| c.is_ascii_digit());
+    matches!(head, "S" | "SH" | "SHIELD" | "SHELL" | "MH" | "MP" | "EH") && (head != "S" || head.len() < up.len())
+}
+
 impl Command for Create {
     const NAME: &'static str = "part.create";
     const SUMMARY: &'static str = "Create a part from a pin list and a package; symbol and footprint are generated";
@@ -302,7 +314,15 @@ impl Command for Create {
                 return Err(CommandError::invalid_args("part.missing_id", "give an `id` or an `mpn`"));
             }
         };
-        check_new_id(ctx.project()?, &id)?;
+        let replacing =
+            if self.replace { ctx.project()?.library().find_part_id_ci(&id).map(String::from) } else { None };
+        let id = match replacing.clone() {
+            Some(existing) => existing,
+            None => {
+                check_new_id(ctx.project()?, &id)?;
+                id
+            }
+        };
 
         let mut params = Params::default();
         for (k, v) in &self.params {
@@ -413,8 +433,39 @@ impl Command for Create {
                     used.insert(pad);
                 }
             }
+            // Shell and shield pads (USB-C S1/S2, mounting tabs) are one warning with the usual fix.
+            let shield: Vec<&str> =
+                pads.iter().copied().filter(|pad| !used.contains(*pad) && is_shield_pad(pad)).collect();
+            if !shield.is_empty() {
+                let fix = match shield.as_slice() {
+                    // All shell pads share one number: a pin with that number maps itself.
+                    [one] => format!(
+                        "add a shield pin numbered like the pads: `pins` += {{\"number\": \"{one}\", \"name\": \"SHIELD\", \
+                         \"kind\": \"passive\"}}"
+                    ),
+                    _ => {
+                        let list = shield.iter().map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(", ");
+                        let pin = if seen.contains("SH") { "SHIELD" } else { "SH" };
+                        format!(
+                            "add a shield pin and map every shell pad to it: `pins` += {{\"number\": \"{pin}\", \
+                             \"name\": \"SHIELD\", \"kind\": \"passive\"}} and `pin_map` {{\"{pin}\": [{list}]}}"
+                        )
+                    }
+                };
+                ctx.report(
+                    Diagnostic::warning(
+                        "part.unmapped_shield",
+                        format!("shell/shield pad(s) {} of `{}` are not mapped to any pin", shield.join(", "), fp.name),
+                    )
+                    .with_subject(ObjectRef::Part { scheme: "local".into(), id: id.clone() })
+                    .with_hint(format!(
+                        "{fix} (`part.create --replace`), then connect `<ref>.SHIELD` to GND (directly, or through \
+                         a resistor or capacitor)"
+                    )),
+                );
+            }
             for pad in pads {
-                if !used.contains(pad) {
+                if !used.contains(pad) && !shield.contains(&pad) {
                     ctx.report(
                         Diagnostic::warning(
                             "part.unconnected_pad",
@@ -459,6 +510,26 @@ impl Command for Create {
             datasheet: self.datasheet.clone(),
             provenance: Provenance { origin: Origin::Manual, detail: None, license: None },
         };
+        if replacing.is_some() {
+            let c = ctx.project()?.circuit();
+            let mut lost: Vec<String> = Vec::new();
+            for net in c.nets.values() {
+                for pin in &net.pins {
+                    let uses = c.components.get(&pin.refdes).is_some_and(|comp| comp.part == id);
+                    if uses && !seen.contains(&pin.pin) {
+                        lost.push(pin.to_string());
+                    }
+                }
+            }
+            if !lost.is_empty() {
+                lost.sort();
+                return Err(CommandError::conflict(
+                    "part.replace_drops_pins",
+                    format!("the new `{id}` has no pin for {}, which are connected", lost.join(", ")),
+                )
+                .with_hint("keep those pin numbers in `pins`, or disconnect them first (`net.disconnect`)"));
+            }
+        }
         let p = ctx.project_mut()?;
         let note = match (generated, footprint) {
             (Some(_), Some(fp)) => ensure_footprint(p, fp),

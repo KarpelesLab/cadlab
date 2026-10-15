@@ -471,3 +471,54 @@ What I would fix next (seen in the replay, not fixed):
   compactness for room when it wants to. Spreading also costs track: the router benchmark boards (which stay
   on `compact`) route at 100 % either way, but spread they need more length (ATtiny 104 → 136 mm) and vias
   (STM32 2-layer 57 → 84); ordering pins of a connector to face its IC would win some of that back.
+
+### Session 3 (2026-10-15): STM32 USB device, four layers, 90 Ω pair
+
+Session 2's four open items were fixed first (D53, tests in `tests/agent_ergonomics.rs`): `body.at` and
+`origin` in `footprint.create`; `place.hint` (per-part edge, persisted) and `place.auto --density`;
+`part.unmapped_shield` suggesting the shield pin. Then the session, with the built CLI only.
+
+Prompt: *"4-layer 60x45 mm board: STM32 (LQFP-48) with USB full-speed device on USB-C (D+/D- as a 90 Ω
+differential pair with ESD), SPI NOR flash, 3.3 V buck converter from 5 V with its inductor and caps, SWD header,
+8 MHz crystal, reset button, two LEDs. Use a JLCPCB 4-layer stackup, solve the USB pair impedance, place, route
+(pair first), length-match D+/D-, pass ERC/lint/DRC, render, export JLCPCB bundle and STEP."*
+
+Result: 30 components (STM32F103C8T6, USBLC6-2SC6 flow-through ESD, W25Q32 SOIC-8, SY8089 buck with 2.2 µH
+1210 inductor, 16-pin USB-C receptacle from a pad list with an offset body, 2x5 1.27 mm SWD header, tactile
+switch from a pad list), JLC04161H-7628 stackup, USB class solved to 0.268 mm / 0.15 mm gap (89.97 Ω), GND and
+3V3 planes on the inner layers, the pair routed coupled on F.Cu first (connector → ESD → MCU), everything else
+100 % routed, skew tuned to 0.057 mm (limit 0.1 mm), ERC/lint/DRC clean, JLCPCB bundle with the stackup in
+`fab-lock.json`, STEP with 30 bodies. Replayed by `tests/agent_session3.rs` (fixtures in
+`tests/fixtures/agent_session3/`).
+
+| # | Where the agent got stuck | Fix |
+|---|---|---|
+| 1 | "Use a JLCPCB 4-layer stackup": nothing knows one; three `board.dielectric` calls from memory, warning about the total thickness after each | `board.fab_stackup jlcpcb JLC04161H-7628` from the profile's `[[process.stackup]]` (JLCPCB's impedance page, three 1.6 mm stackups) |
+| 2 | The stackup page's 15.2 µm inner copper then failed `fab.check` (`fab.copper`: offered 17.5 µm) | A published stackup's copper counts as offered |
+| 3 | The order needs the stackup named, the bundle did not say which | `fab-lock.json` `process.stackup` (and the export summary) when the board matches one exactly |
+| 4 | Adding the SHIELD pin the new warning asked for: `part.create` refused the existing ID, so `part remove` + create | `part.create --replace` (refused when a connected pin would vanish); hint suggests a pin numbered like the pads when they share one number |
+| 5 | `erc.power_not_driven` on +3V3: the buck output comes through its inductor | Power propagates through two-pin inductors, ferrite beads and fuses |
+| 6 | `lint.missing_decoupling` asked for a capacitor on the buck's switch node | A regulator output driving an inductor is checked behind it |
+| 7 | `place auto` put the buck's inductor next to the MCU (largest IC on +3V3) and its input capacitor at the ESD chip | Spread placement: smallest shared power net first, regulator inputs first for a rail's capacitors |
+| 8 | The USB-C receptacle at its edge hint, but opening sideways | Connectors that open on one side face their edge (spread placement) |
+| 9 | `zone add --outline board` (as the help says) failed: "expected JSON" | Bare words are JSON strings for JSON-valued flags |
+| 10 | `route diffpair`: "no coupled path" from the MCU: the D+ pull-up had been placed in the pair's breakout | Passives keep out of differential pair breakouts (spread placement) |
+| 11 | `route diffpair` reported the USB-C's two contact rows (D− D+ D− D+) as a failed flow-through link | Interleaved contacts are left to the ordinary router (`route.diffpair_left` info) |
+| 12 | `drc.silk_over_pad` on the generated USB-C footprint: the pin-1 dot sat on the shell pad | The dot goes above or below pad 1 when another pad is left of it |
+| 13 | `footprint show` hid the body (and its offset) and the holes; `fab show` did not list stackups | Body line and drill/slot per pad; stackups listed |
+| 14 | Session-3 test: `place hint J1 --edge left` on three identical headers ended at the top | Improvement no longer swaps parts with different hints |
+
+What I would fix next (seen in the session, not fixed):
+
+- Pair lengths count every branch of a net (the D+ pull-up stub, the receptacle's row link), so the "skew"
+  of 6 mm before tuning was mostly stubs, and `route tune` compensated it with 30 bumps on the coupled
+  section (coupled 13 mm, uncoupled 31 mm afterwards). Measuring a pair between its ends (stubs excluded,
+  reported separately) would keep the coupling.
+- The pair is routed only on the layer the impedance was solved for; the ESD array's GND/VBUS pins between
+  the flow-through lines still need the router's vias, as noted in ROUTER.md.
+- Spread placement follows connectivity: the right third of the board stays empty (the connector, buck and
+  ESD gather at the bottom left). `--density 90` spreads rooms but moved the receptacle to the far side and
+  lengthened the ratsnest; a target "use the board evenly" is not what the ratsnest wants.
+- `board fab-stackup jlcpcb` without a name is an error listing the stackups (`fab show` lists them too); a
+  query form (`board fab-stackup jlcpcb --list`) would read better.
+

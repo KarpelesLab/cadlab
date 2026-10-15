@@ -162,8 +162,18 @@ Each pad: `number`, `at` (from the origin, Y up), `size` `[w, h]`, `shape` (`rou
 pads, `circle`/`oval` with a drill; `rect`, `radius`), `rotation`, `drill` or `slot` (plated through-hole),
 `layers` (`top`, `bottom` for the other side, `all`, `npth` for a plain hole), and `count` + `pitch` for a
 row (trailing digits of the number count up: `A1`, `A2`, ...). The silkscreen follows the body (centered on
-the origin) or the pads' box, clipped clear of the pads like generated footprints; a pin-1 dot marks pad `1`
-or `A1`; the fab outline is the body; the courtyard is `courtyard_margin` (0.25 mm) around everything.
+`body.at`, default the origin) or the pads' box, clipped clear of the pads like generated footprints; a pin-1
+dot marks pad `1` or `A1` (left of it, else above or below it, clear of every pad); the fab outline is the
+body; the courtyard is `courtyard_margin` (0.25 mm) around everything. Pads keep the datasheet's coordinates:
+a connector whose datasheet origin is its contact row gives `"at": ["0mm", "-3.4mm"]` in `body` (D53), and the
+3D view, STEP, IDF and IDX place the body there. `origin` moves the footprint origin instead: `given`
+(default), `body` (the body center) or `pads` (the pads' box center); pads and body shift together.
+`footprint.show` prints the body and each pad's hole.
+
+`part.create` warns once (`part.unmapped_shield`) when shell, shield or mounting pads (`S1`, `SH`, `SHIELD`,
+`MH1`, `MP`, `EH`) are not mapped to a pin, with the pin to add (a pin numbered like the pads when they share
+one number, else a `SH` pin and its `pin_map`); `part.create --replace` redefines a part in place (its
+components keep it; refused with `part.replace_drops_pins` when a connected pin would disappear).
 Through-hole when a pad is plated. Bad pads are refused with `footprint.invalid_pad` naming the pad (no size,
 hole without annular ring, a row without pitch); overlapping pads of different numbers warn
 (`footprint.pads_overlap`).

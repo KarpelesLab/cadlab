@@ -628,6 +628,17 @@ pub struct Body {
     pub length: Nm,
     /// Maximum height above the board.
     pub height: Nm,
+    /// Center of the body in footprint coordinates (default: the origin). Footprints whose
+    /// origin is not the body center (connectors drawn from a datasheet origin) set it.
+    #[serde(default, skip_serializing_if = "Point::is_origin")]
+    pub at: Point,
+}
+
+impl Body {
+    /// A body of `width` x `length` x `height` centered on the origin.
+    pub fn centered(width: Nm, length: Nm, height: Nm) -> Body {
+        Body { width, length, height, at: Point::ORIGIN }
+    }
 }
 
 /// Whether a footprint is surface-mount or through-hole, for assembly files.

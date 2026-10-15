@@ -755,7 +755,8 @@ pub fn export(p: &Project, o: &Options) -> Option<StepOut> {
         let breps = generated(&mut w, &b.footprint, &solids);
         let pr = if breps.is_empty() {
             let (hw, hl) = (b.width.0 / 2, b.length.0 / 2);
-            let pt = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
+            let (ox, oy) = (b.offset.x.0, b.offset.y.0);
+            let pt = |x: i64, y: i64| Point::new(Nm(ox + x), Nm(oy + y));
             let rect = Loop {
                 start: pt(-hw, -hl),
                 edges: vec![

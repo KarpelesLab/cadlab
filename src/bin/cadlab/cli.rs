@@ -125,6 +125,16 @@ pub fn json_arg(raw: &str) -> Result<Value, String> {
         Some(path) => std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path}`: {e}"))?,
         None => raw.to_string(),
     };
+    // A bare word is a JSON string (`--outline board` for `"board"`): the keyword forms of
+    // JSON-valued arguments read as they are documented.
+    let bare = !raw.starts_with('@')
+        && !raw.is_empty()
+        && raw.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
+        && !matches!(raw, "true" | "false" | "null")
+        && raw.parse::<f64>().is_err();
+    if bare {
+        return Ok(Value::from(raw));
+    }
     serde_json::from_str(&text).map_err(|e| {
         let what = raw.strip_prefix('@').map_or_else(|| "the value".to_string(), |path| format!("`{path}`"));
         format!("expected JSON ({what}: {e}); pass inline JSON or @file.json")

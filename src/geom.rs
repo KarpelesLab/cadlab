@@ -39,6 +39,11 @@ impl Point {
         Point { x, y }
     }
 
+    /// Whether this is the origin (serde `skip_serializing_if`).
+    pub fn is_origin(&self) -> bool {
+        *self == Point::ORIGIN
+    }
+
     /// Rotates around the origin. Exact for multiples of 90°, rounded to the nearest nanometer
     /// otherwise.
     pub fn rotated(self, a: Angle) -> Point {

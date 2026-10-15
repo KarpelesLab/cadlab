@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::{COPPER_TOL, contour_ring, footprint_for, pad_nets, placed_courtyard, placed_pads};
 use crate::geom::Point;
 use crate::model::Project;
-use crate::model::board::{BoardSide, PlacedFootprint};
+use crate::model::board::{BoardSide, EdgeHint, PlacedFootprint};
 use crate::model::circuit::PinRef;
 use crate::model::part::{Category, PinKind};
 use crate::model::sections::natural_cmp;
@@ -191,6 +191,9 @@ enum Kind {
     Connector,
     Ic,
     Passive,
+    /// A two-terminal part with an edge hint (an indicator LED, a button): placed like an
+    /// anchor, at its edge, rather than next to a pin.
+    Edge,
 }
 
 /// A position of a part being placed: origin, quarter turns, side.
@@ -223,9 +226,16 @@ struct Part {
     pads: Vec<(String, Option<usize>)>,
     /// Courtyard box and pad centers relative to the origin, per [side][quarter turn].
     rel: [[(Rect, Vec<Point>); 4]; 2],
+    /// Edge hint (`place.hint`).
+    edge: Option<EdgeHint>,
 }
 
 impl Part {
+    /// The edge this part goes to: its hint, or the nearest one for connectors.
+    fn edge_target(&self) -> Option<EdgeHint> {
+        self.edge.or((self.kind == Kind::Connector).then_some(EdgeHint::Any))
+    }
+
     fn rect(&self, pose: &Pose) -> Rect {
         self.rel[side_index(pose.side)][pose.rot as usize].0.shift(pose.at)
     }
@@ -273,10 +283,22 @@ struct Engine<'a> {
     /// Connector spacing when spreading: centers of connectors that stay, and the distance
     /// below which connectors crowd each other (0: no spacing).
     crowd: (Vec<Point>, f64),
+    /// Breakout areas of differential pairs in front of their pins (per side), kept free of
+    /// passives: a pull-up on D+ placed at its pin blocks the pair's way out.
+    pair_zones: Vec<(BoardSide, Rect)>,
+    /// Spreading (`place.auto` default). The packed placement (`compact`) keeps D50's rules
+    /// exactly: connectors are not turned to face their edge, and passives are assigned as then.
+    spread: bool,
 }
 
 /// With `silk`, the part's box also covers its silkscreen.
-fn build_part(p: &Project, refdes: &str, net_index: &BTreeMap<String, usize>, silk: bool) -> Option<Part> {
+fn build_part(
+    p: &Project,
+    refdes: &str,
+    net_index: &BTreeMap<String, usize>,
+    silk: bool,
+    edge: Option<EdgeHint>,
+) -> Option<Part> {
     let fp = footprint_for(p, refdes)?;
     let mut courtyard = local_courtyard(fp);
     if courtyard.is_empty() {
@@ -296,6 +318,8 @@ fn build_part(p: &Project, refdes: &str, net_index: &BTreeMap<String, usize>, si
         Kind::Connector
     } else if pins > 2 {
         Kind::Ic
+    } else if edge.is_some() {
+        Kind::Edge
     } else {
         Kind::Passive
     };
@@ -312,7 +336,7 @@ fn build_part(p: &Project, refdes: &str, net_index: &BTreeMap<String, usize>, si
             (r, fp.pads.iter().map(|pd| tf(pd.at)).collect())
         })
     });
-    Some(Part { refdes: refdes.to_string(), kind, pins, footprint: fp.name.clone(), pads, rel })
+    Some(Part { refdes: refdes.to_string(), kind, pins, footprint: fp.name.clone(), pads, rel, edge })
 }
 
 /// The allowed area of a board side for courtyards: outer contour shrunk by `edge`, minus
@@ -366,7 +390,13 @@ fn free_area(p: &Project, side: BoardSide, gap: i64, edge: i64, moving: &BTreeSe
 }
 
 impl<'a> Engine<'a> {
-    fn new(p: &'a Project, moving: &[String], gap: i64, silk: bool) -> Result<Self, PlaceError> {
+    fn new(
+        p: &'a Project,
+        moving: &[String],
+        gap: i64,
+        silk: bool,
+        edges: &BTreeMap<String, EdgeHint>,
+    ) -> Result<Self, PlaceError> {
         let b = p.board();
         let c = b.outline.contours.first().ok_or_else(PlaceError::no_outline)?;
         let board =
@@ -375,7 +405,7 @@ impl<'a> Engine<'a> {
         let net_index: BTreeMap<String, usize> = net_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
         let mut parts = Vec::new();
         for r in moving {
-            if let Some(part) = build_part(p, r, &net_index, silk) {
+            if let Some(part) = build_part(p, r, &net_index, silk, edges.get(r).copied()) {
                 parts.push(part);
             }
         }
@@ -428,6 +458,8 @@ impl<'a> Engine<'a> {
             tethers: Vec::new(),
             rooms: vec![None; n],
             crowd: (Vec::new(), 0.0),
+            pair_zones: Vec::new(),
+            spread: silk, // the same flag: spread placement also boxes silkscreen
         })
     }
 
@@ -510,6 +542,11 @@ impl<'a> Engine<'a> {
     /// Whether part `i` fits at `pose`: inside the allowed area, clear of the other parts.
     fn valid(&self, i: usize, pose: &Pose) -> bool {
         let r = self.parts[i].rect(pose);
+        if self.parts[i].kind == Kind::Passive
+            && self.pair_zones.iter().any(|(side, z)| *side == pose.side && !r.clear_of(z, 0))
+        {
+            return false;
+        }
         for (j, q) in self.poses.iter().enumerate() {
             if j == i {
                 continue;
@@ -555,10 +592,60 @@ impl<'a> Engine<'a> {
         out
     }
 
-    /// Distance from a box to the nearest side of the board's bounding box.
-    fn edge_distance(&self, r: &Rect) -> i64 {
+    /// Distance from a box to the side `edge` of the board's bounding box (the nearest side
+    /// for `any`), and whether that side is vertical.
+    fn edge_distance(&self, r: &Rect, edge: EdgeHint) -> (i64, bool) {
+        let (d, side) = self.nearest_side(r, edge);
+        (d, matches!(side, EdgeHint::Left | EdgeHint::Right))
+    }
+
+    /// The side of the board's bounding box `edge` means for a box (the nearest one for
+    /// `any`), and the distance to it.
+    fn nearest_side(&self, r: &Rect, edge: EdgeHint) -> (i64, EdgeHint) {
         let b = &self.board;
-        (r.x0 - b.x0).min(b.x1 - r.x1).min(r.y0 - b.y0).min(b.y1 - r.y1).max(0)
+        let sides = [
+            (EdgeHint::Left, r.x0 - b.x0),
+            (EdgeHint::Right, b.x1 - r.x1),
+            (EdgeHint::Bottom, r.y0 - b.y0),
+            (EdgeHint::Top, b.y1 - r.y1),
+        ];
+        let (side, d) =
+            sides.into_iter().filter(|s| edge == EdgeHint::Any || s.0 == edge).min_by_key(|s| s.1).expect("four sides");
+        (d.max(0), side)
+    }
+
+    /// How far connector `i` at `pose` turns its body away from its edge: the body (courtyard
+    /// center) should reach further towards the edge than the pads do, so a receptacle's
+    /// opening faces out. Zero for symmetric parts (headers) and other kinds.
+    fn facing(&self, i: usize, pose: &Pose, edge: EdgeHint) -> f64 {
+        let part = &self.parts[i];
+        if !self.spread || part.kind != Kind::Connector || part.pads.is_empty() {
+            return 0.0;
+        }
+        let r = part.rect(pose);
+        let (_, side) = self.nearest_side(&r, edge);
+        let n = part.pads.len() as i64;
+        let (mut sx, mut sy) = (0i64, 0i64);
+        for k in 0..part.pads.len() {
+            let q = part.pad_at(pose, k);
+            sx += q.x.0;
+            sy += q.y.0;
+        }
+        // From the pads to the body: the way the part opens.
+        let c = r.center();
+        let (ox, oy) = ((c.x.0 - sx / n) as f64, (c.y.0 - sy / n) as f64);
+        let len = (ox * ox + oy * oy).sqrt();
+        // Below 0.1 mm the part is symmetric for this purpose.
+        if len < 100_000.0 {
+            return 0.0;
+        }
+        let out = match side {
+            EdgeHint::Left | EdgeHint::Any => -ox,
+            EdgeHint::Right => ox,
+            EdgeHint::Bottom => -oy,
+            EdgeHint::Top => oy,
+        };
+        2.0 * n as f64 * (len - out)
     }
 
     /// Penalty of connector `i` at `pose` for crowding other connectors (placed ones being
@@ -587,6 +674,77 @@ impl<'a> Engine<'a> {
         let s = (a / 4000.0).sqrt();
         ((s / GRID as f64).ceil() as i64 * GRID).max(500_000)
     }
+}
+
+/// How far a differential pair's breakout area reaches out from its pins.
+const PAIR_BREAKOUT: i64 = 2_500_000;
+/// Largest distance between the two pins of a pair end on one part.
+const PAIR_END: i64 = 2_000_000;
+
+/// Breakout areas of the differential pairs on the anchors placed so far (and the footprints
+/// that stay): for each part with pads of both nets close together (an end), the box of the
+/// two pads (grown by 0.5 mm) stretched `PAIR_BREAKOUT` away from the part's center, along
+/// the axis the pads face.
+fn pair_zones(e: &Engine) -> Vec<(BoardSide, Rect)> {
+    let c = e.p.circuit();
+    let net_index: BTreeMap<&str, usize> = e.net_names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+    let mut out = Vec::new();
+    for d in c.diffpairs.values() {
+        let (Some(&np), Some(&nn)) = (net_index.get(d.p.as_str()), net_index.get(d.n.as_str())) else { continue };
+        // (part center, side, positive pads, negative pads) per part.
+        let mut parts: Vec<(Point, BoardSide, Vec<Point>, Vec<Point>)> = Vec::new();
+        for (i, part) in e.parts.iter().enumerate() {
+            let Some(pose) = e.poses[i].filter(|_| part.kind != Kind::Passive) else { continue };
+            let pick = |net: usize| -> Vec<Point> {
+                part.pads
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.1 == Some(net))
+                    .map(|(k, _)| part.pad_at(&pose, k))
+                    .collect()
+            };
+            parts.push((part.rect(&pose).center(), pose.side, pick(np), pick(nn)));
+        }
+        let mut fixed: BTreeMap<&str, (Vec<Point>, Vec<Point>)> = BTreeMap::new();
+        for ((r, _), (at, net)) in &e.fixed {
+            let entry = fixed.entry(r.as_str()).or_default();
+            if *net == Some(np) {
+                entry.0.push(*at);
+            } else if *net == Some(nn) {
+                entry.1.push(*at);
+            }
+        }
+        for (r, (pp, pn)) in fixed {
+            let side = e.p.board().footprints.get(r).map_or(BoardSide::Top, |f| f.side);
+            if let Some(b) = courtyard_box(e.p, r) {
+                parts.push((b.center(), side, pp, pn));
+            }
+        }
+        for (center, side, pp, pn) in parts {
+            for &a in &pp {
+                let Some(b) = pn
+                    .iter()
+                    .copied()
+                    .filter(|b| dist(a, *b) <= PAIR_END as f64)
+                    .min_by(|x, y| dist(a, *x).total_cmp(&dist(a, *y)).then(x.cmp(y)))
+                else {
+                    continue;
+                };
+                let mid = Point::new(Nm((a.x.0 + b.x.0) / 2), Nm((a.y.0 + b.y.0) / 2));
+                let (dx, dy) = (mid.x.0 - center.x.0, mid.y.0 - center.y.0);
+                let mut z = Rect::of([a, b]).expect("two points").expand(500_000);
+                if dx.abs() >= dy.abs() {
+                    if dx >= 0 { z.x1 += PAIR_BREAKOUT } else { z.x0 -= PAIR_BREAKOUT }
+                } else if dy >= 0 {
+                    z.y1 += PAIR_BREAKOUT;
+                } else {
+                    z.y0 -= PAIR_BREAKOUT;
+                }
+                out.push((side, z));
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -639,6 +797,9 @@ struct AnchorPads {
     pads: BTreeMap<String, Vec<(String, usize, PinKind)>>,
     /// anchor designator → (is IC, pin count).
     info: BTreeMap<String, (bool, usize)>,
+    /// Anchors that are regulators (LDOs, switchers): their input takes the first capacitor
+    /// of a rail.
+    regulators: BTreeSet<String>,
 }
 
 fn anchor_pads(e: &Engine) -> AnchorPads {
@@ -648,6 +809,7 @@ fn anchor_pads(e: &Engine) -> AnchorPads {
     let net_index: BTreeMap<&str, usize> = e.net_names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
     let mut pads = BTreeMap::new();
     let mut info = BTreeMap::new();
+    let mut regulators = BTreeSet::new();
     for (r, comp) in &c.components {
         let placed = e.index.contains_key(r) || p.board().footprints.contains_key(r);
         if !placed {
@@ -671,16 +833,26 @@ fn anchor_pads(e: &Engine) -> AnchorPads {
         }
         pads.insert(r.clone(), v);
         info.insert(r.clone(), (!connector, n));
+        if matches!(part.category, Category::Ldo | Category::Regulator) {
+            regulators.insert(r.clone());
+        }
     }
-    AnchorPads { pads, info }
+    AnchorPads { pads, info, regulators }
 }
 
 /// Anchor preference key: ICs before connectors, then more pins, then designator.
 type Rank = (bool, std::cmp::Reverse<usize>, String);
 
+/// Decoupling target preference: (capacitors already there, not a power input, not a regulator
+/// input, anchor rank).
+type DecapKey = (usize, u8, bool, Rank);
+
 /// Assigns every passive being placed a target: decoupling capacitors to the power pin of an
 /// anchor on their rail, other passives to an anchor (or a passive already assigned) sharing a
 /// signal net, then a power net.
+/// When spreading, a rail's first capacitor goes to a regulator's input, and passives without a
+/// signal net go to the smallest power net they share with an anchor (a buck's inductor at its
+/// switch pin); the packed placement keeps D50's choices.
 fn assign(e: &Engine, nets: &NetInfo, ap: &AnchorPads) -> BTreeMap<usize, Target> {
     let mut out: BTreeMap<usize, Target> = BTreeMap::new();
     // Anchor preference: ICs, then more pins, then designator.
@@ -699,14 +871,19 @@ fn assign(e: &Engine, nets: &NetInfo, ap: &AnchorPads) -> BTreeMap<usize, Target
         let rail = pn.iter().enumerate().find_map(|(k, n)| n.filter(|&n| nets.power[n]).map(|n| (k, n)));
         if has_ground && let Some((own_pad, rail)) = rail {
             // Power pins on the rail: inputs first, then outputs (regulator output caps).
-            let mut best: Option<((usize, u8, Rank), String, String)> = None;
+            let mut best: Option<(DecapKey, String, String)> = None;
             for (a, pads) in &ap.pads {
                 for (pad, n, kind) in pads {
                     if *n != rail || !matches!(kind, PinKind::PowerIn | PinKind::PowerOut) {
                         continue;
                     }
                     let used = decaps_on.get(&(a.clone(), pad.clone())).copied().unwrap_or(0);
-                    let key = (used, u8::from(*kind != PinKind::PowerIn), anchor_rank(a));
+                    let key = (
+                        used,
+                        u8::from(*kind != PinKind::PowerIn),
+                        !(e.spread && *kind == PinKind::PowerIn && ap.regulators.contains(a)),
+                        anchor_rank(a),
+                    );
                     if best.as_ref().is_none_or(|b| key < b.0) {
                         best = Some((key, a.clone(), pad.clone()));
                     }
@@ -769,13 +946,14 @@ fn assign(e: &Engine, nets: &NetInfo, ap: &AnchorPads) -> BTreeMap<usize, Target
             break;
         }
     }
-    // 3. A power net (not ground) shared with an anchor.
+    // 3. A power net (not ground) shared with an anchor: the smallest net first (a switching
+    // regulator's inductor belongs at its switch pin, not at the largest IC on the output rail).
     for &i in &passives {
         if out.contains_key(&i) {
             continue;
         }
         let part = &e.parts[i];
-        let mut best: Option<(Rank, Target)> = None;
+        let mut best: Option<((usize, Rank), Target)> = None;
         for (k, (_, n)) in part.pads.iter().enumerate() {
             let Some(n) = *n else { continue };
             if nets.ground[n] {
@@ -783,7 +961,7 @@ fn assign(e: &Engine, nets: &NetInfo, ap: &AnchorPads) -> BTreeMap<usize, Target
             }
             for (a, pads) in &ap.pads {
                 if let Some((pad, _, _)) = pads.iter().find(|x| x.1 == n) {
-                    let key = anchor_rank(a);
+                    let key = (if e.spread { e.net_pins[n].len() } else { 0 }, anchor_rank(a));
                     if best.as_ref().is_none_or(|b| key < b.0) {
                         best = Some((key, Target { refdes: a.clone(), pad: pad.clone(), own_pad: k, decap: false }));
                     }
@@ -842,6 +1020,26 @@ fn root_of<'t>(e: &Engine, targets: &'t BTreeMap<usize, Target>, i: usize) -> Op
 // ---------------------------------------------------------------------------------------------
 // Automatic placement
 
+/// Options of [`auto_place`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoOptions {
+    /// Courtyard-to-courtyard clearance.
+    pub gap: Nm,
+    /// Spread groups over the board (else pack them).
+    pub spread: bool,
+    /// Share of the free board area the groups' rooms take when spreading, in percent
+    /// (default [`SPREAD_DENSITY`]).
+    pub density: Option<u32>,
+    /// Edge hints by designator (`place.hint`): the part goes to that edge of the board.
+    pub edges: BTreeMap<String, EdgeHint>,
+}
+
+impl Default for AutoOptions {
+    fn default() -> Self {
+        AutoOptions { gap: DEFAULT_GAP, spread: true, density: None, edges: BTreeMap::new() }
+    }
+}
+
 /// Result of [`auto_place`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutoPlacement {
@@ -859,11 +1057,14 @@ pub struct AutoPlacement {
 /// shorten the total ratsnest. `gap` is the courtyard-to-courtyard clearance.
 ///
 /// With `spread`, each group's room grows with the free board area (up to [`SPREAD_DENSITY`]
-/// of it in all), anchors keep to that room during improvement, and connectors keep apart
-/// from each other along the edges, so a board larger than its parts is used rather than
-/// packed into one cluster. Without it groups are packed as tightly as their passives allow.
-pub fn auto_place(p: &Project, moving: &[String], gap: Nm, spread: bool) -> Result<AutoPlacement, PlaceError> {
-    let mut e = Engine::new(p, moving, gap.0.max(0), spread)?;
+/// of it in all, or `density`), anchors keep to that room during improvement, and connectors
+/// keep apart from each other along the edges, so a board larger than its parts is used
+/// rather than packed into one cluster. Without it groups are packed as tightly as their
+/// passives allow. Parts with an edge hint go to that edge (two-terminal parts then are
+/// placed like anchors rather than next to a pin) and only move along it or closer.
+pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<AutoPlacement, PlaceError> {
+    let spread = o.spread;
+    let mut e = Engine::new(p, moving, o.gap.0.max(0), spread, &o.edges)?;
     let nets = net_info(&e);
     let ap = anchor_pads(&e);
     let targets = assign(&e, &nets, &ap);
@@ -893,8 +1094,15 @@ pub fn auto_place(p: &Project, moving: &[String], gap: Nm, spread: bool) -> Resu
     // Spread: the share of the free area each unit of part area gets as room (1 when packed),
     // at most SPREAD_MAX: beyond that groups drift apart for nothing.
     let free_area = polyclip::area2(&e.free[0]) as f64 / 2.0;
-    let factor =
-        if spread && parts_area > 0.0 { (free_area * SPREAD_DENSITY / parts_area).clamp(1.0, SPREAD_MAX) } else { 1.0 };
+    // An explicit density lifts the cap in proportion: 100 % may use the whole board.
+    let (density, cap) = match o.density {
+        Some(d) => {
+            let d = f64::from(d.clamp(1, 100)) / 100.0;
+            (d, SPREAD_MAX * (d / SPREAD_DENSITY).max(1.0))
+        }
+        None => (SPREAD_DENSITY, SPREAD_MAX),
+    };
+    let factor = if spread && parts_area > 0.0 { (free_area * density / parts_area).clamp(1.0, cap) } else { 1.0 };
     let max_halo = if spread { (e.board.w().min(e.board.h()) / 4).max(8_000_000) } else { 8_000_000 };
     let halo_of = |e: &Engine, i: usize| -> i64 {
         let r = e.parts[i].rel[0][0].0;
@@ -976,41 +1184,49 @@ pub fn auto_place(p: &Project, moving: &[String], gap: Nm, spread: bool) -> Resu
         let cands = e.candidates(BoardSide::Top, None, step);
         let kind = e.parts[i].kind;
         let center = e.center;
-        let board = e.board;
         let is_first = kind == Kind::Ic && (first_ic || (spread && halos.is_empty()));
+        let edge = e.parts[i].edge_target();
         let score = |e: &Engine, pose: &Pose| -> f64 {
             let r = e.parts[i].rect(pose);
             let mut s = e.attraction(i, pose);
-            match kind {
-                Kind::Ic => s += dist(r.center(), center) * if is_first { 1.0 } else { 0.25 },
-                _ => {
-                    let edges = [
-                        (r.x0 - board.x0, true),
-                        (board.x1 - r.x1, true),
-                        (r.y0 - board.y0, false),
-                        (board.y1 - r.y1, false),
-                    ];
-                    let (d, vertical) = edges.into_iter().min_by_key(|x| x.0).expect("four edges");
+            match edge {
+                None => s += dist(r.center(), center) * if is_first { 1.0 } else { 0.25 },
+                Some(edge) => {
+                    let (d, vertical) = e.edge_distance(&r, edge);
                     // Stronger than the pull of all its pads together: connectors stay at the edge.
-                    s += 2.0 * e.parts[i].pads.len().max(2) as f64 * d.max(0) as f64;
+                    s += 2.0 * e.parts[i].pads.len().max(2) as f64 * d as f64;
                     // Long side along the edge.
                     let across = if vertical { r.w() - r.h() } else { r.h() - r.w() };
                     s += across.max(0) as f64;
+                    s += e.facing(i, pose, edge);
                     s += e.crowding(i, pose);
                 }
             }
             s
         };
         let mut found = None;
-        for h in [halo, halo / 2, 0] {
-            let fits = |pose: &Pose| {
-                let hr = e.parts[i].rect(pose).expand(h);
-                halos.iter().all(|(j, o)| Some(*j) == master || hr.clear_of(o, 0))
-            };
-            let c: Vec<Pose> = cands.iter().copied().filter(|c| fits(c)).collect();
-            if let Some(pose) = e.best(i, c, |c| score(&e, c)) {
-                found = Some((pose, h));
-                break;
+        // A connector that opens on one side (a receptacle) faces its edge: those poses are
+        // tried at every room size before the others.
+        let facing_out: Vec<Pose> = match edge {
+            Some(edge) => cands.iter().copied().filter(|c| e.facing(i, c, edge) < 1.0).collect(),
+            None => Vec::new(),
+        };
+        let sets: Vec<&[Pose]> = if facing_out.is_empty() || facing_out.len() == cands.len() {
+            vec![&cands]
+        } else {
+            vec![&facing_out, &cands]
+        };
+        'sets: for set in sets {
+            for h in [halo, halo / 2, 0] {
+                let fits = |pose: &Pose| {
+                    let hr = e.parts[i].rect(pose).expand(h);
+                    halos.iter().all(|(j, o)| Some(*j) == master || hr.clear_of(o, 0))
+                };
+                let c: Vec<Pose> = set.iter().copied().filter(|c| fits(c)).collect();
+                if let Some(pose) = e.best(i, c, |c| score(&e, c)) {
+                    found = Some((pose, h));
+                    break 'sets;
+                }
             }
         }
         match found {
@@ -1029,7 +1245,11 @@ pub fn auto_place(p: &Project, moving: &[String], gap: Nm, spread: bool) -> Resu
         }
     }
 
-    // 2. Passives, group by group (anchor order), decoupling capacitors first, then chains.
+    // 2. Passives, group by group (anchor order), decoupling capacitors first, then chains;
+    // clear of the differential pairs' breakouts.
+    if spread {
+        e.pair_zones = pair_zones(&e);
+    }
     let order_of: BTreeMap<String, usize> =
         halos.iter().enumerate().map(|(k, (i, _))| (e.parts[*i].refdes.clone(), k)).collect();
     let mut passives: Vec<usize> = (0..n).filter(|&i| e.parts[i].kind == Kind::Passive).collect();
@@ -1148,10 +1368,11 @@ fn improve(e: &mut Engine, passes: usize) {
                     moves.push(Pose { rot, ..cur });
                 }
             }
-            // Connectors only move along the edge or closer to it.
-            if e.parts[i].kind == Kind::Connector {
-                let d0 = e.edge_distance(&e.parts[i].rect(&cur));
-                moves.retain(|m| e.edge_distance(&e.parts[i].rect(m)) <= d0);
+            // Connectors and parts with an edge hint only move along the edge or closer to it.
+            if let Some(edge) = e.parts[i].edge_target() {
+                let d0 = e.edge_distance(&e.parts[i].rect(&cur), edge).0;
+                let f0 = e.facing(i, &cur, edge);
+                moves.retain(|m| e.edge_distance(&e.parts[i].rect(m), edge).0 <= d0 && e.facing(i, m, edge) <= f0);
             }
             // Spread anchors stay in their room.
             if let Some(room) = e.rooms[i] {
@@ -1181,7 +1402,11 @@ fn improve(e: &mut Engine, passes: usize) {
         for i in 0..n {
             for j in i + 1..n {
                 let (Some(a), Some(b)) = (e.poses[i], e.poses[j]) else { continue };
-                if e.parts[i].footprint != e.parts[j].footprint || a.side != b.side {
+                // Parts with different edge hints keep their edges.
+                if e.parts[i].footprint != e.parts[j].footprint
+                    || a.side != b.side
+                    || e.parts[i].edge != e.parts[j].edge
+                {
                     continue;
                 }
                 let mut nets = e.part_nets[i].clone();
@@ -1216,7 +1441,7 @@ fn improve(e: &mut Engine, passes: usize) {
 /// Total ratsnest length of the placed footprints: minimum spanning tree per net over pad
 /// centers, ignoring copper (an estimate of the routing effort of a placement).
 pub fn ratsnest_length(p: &Project) -> Nm {
-    match Engine::new(p, &[], 0, false) {
+    match Engine::new(p, &[], 0, false, &BTreeMap::new()) {
         Ok(e) => Nm(e.total().round() as i64),
         Err(_) => Nm::ZERO,
     }
@@ -1287,7 +1512,7 @@ pub fn place_near(
     let tpf = p.board().footprints.get(tref).ok_or_else(not_placed)?;
     let trect = courtyard_box(p, tref).ok_or_else(not_placed)?;
     let gap = distance.0.clamp(0, DEFAULT_GAP.0);
-    let mut e = Engine::new(p, &[refdes.to_string()], gap, false)?;
+    let mut e = Engine::new(p, &[refdes.to_string()], gap, false, &BTreeMap::new())?;
     let Some(&i) = e.index.get(refdes) else {
         return Err(PlaceError::new(
             "place.no_footprint",

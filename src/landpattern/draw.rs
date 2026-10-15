@@ -25,8 +25,8 @@ fn pad_box(p: &Pad, grow: Nm) -> BBox {
 
 fn body_box(body: &Body) -> BBox {
     BBox {
-        min: Point::new(-Nm(body.width.0 / 2), -Nm(body.length.0 / 2)),
-        max: Point::new(Nm(body.width.0 / 2), Nm(body.length.0 / 2)),
+        min: Point::new(body.at.x - Nm(body.width.0 / 2), body.at.y - Nm(body.length.0 / 2)),
+        max: Point::new(body.at.x + Nm(body.width.0 / 2), body.at.y + Nm(body.length.0 / 2)),
     }
 }
 
@@ -155,11 +155,23 @@ pub(super) fn finish_box(
     if pin1_marker && let Some(p1) = pads.iter().find(|p| p.number == "1" || p.number == "A1") {
         let b = pad_box(p1, Nm::ZERO);
         let r = opts.silk_width;
-        let mut center = Point::new(b.min.x - opts.silk_clearance - r * 2, p1.at.y);
+        let mut left = Point::new(b.min.x - opts.silk_clearance - r * 2, p1.at.y);
         // Keep it outside the silk outline too, so it stays visible on small parts.
-        if center.x > sb.min.x - r * 2 {
-            center.x = sb.min.x - r * 2;
+        if left.x > sb.min.x - r * 2 {
+            left.x = sb.min.x - r * 2;
         }
+        // Left of pad 1 unless another pad is there (a connector's shell): then above or
+        // below it, outside the outline.
+        let above = Point::new(p1.at.x, (b.max.y + opts.silk_clearance + r * 2).max(sb.max.y + r * 2));
+        let below = Point::new(p1.at.x, (b.min.y - opts.silk_clearance - r * 2).min(sb.min.y - r * 2));
+        let clear = |c: Point| {
+            let d = BBox { min: Point::new(c.x - r, c.y - r), max: Point::new(c.x + r, c.y + r) };
+            pads.iter().all(|p| {
+                let q = pad_box(p, opts.silk_clearance);
+                d.max.x <= q.min.x || q.max.x <= d.min.x || d.max.y <= q.min.y || q.max.y <= d.min.y
+            })
+        };
+        let center = [left, above, below].into_iter().find(|c| clear(*c)).unwrap_or(left);
         // Not part of the courtyard: IPC courtyards cover pads and body only.
         graphics.push(Graphic {
             layer: GraphicLayer::Silk,

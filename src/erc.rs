@@ -7,6 +7,10 @@
 //! | two or more push-pull/power outputs (`output`, `power_out`) on one net | error |
 //! | push-pull output with open-collector or tri-state pins | warning |
 //! | power inputs with no power output, unless the net is marked `driven` or they are all ground pins | error |
+//!
+//! A net reached from a powered net through a series inductor, ferrite bead or fuse (two pins,
+//! the other one on that net) is powered too: a buck converter's output behind its inductor,
+//! a filtered analog rail.
 //! | inputs with nothing that can drive them, unless `driven` | warning |
 //! | a pin of type `no_connect` connected to a net | warning |
 //! | net with a single pin | warning |
@@ -31,6 +35,57 @@ fn net_ref(n: &str) -> ObjectRef {
 
 fn list(pins: &[&PinRef]) -> String {
     pins.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+}
+
+/// Nets powered by a power output, marked `driven`, or reached from such a net through series
+/// inductors, ferrite beads and fuses (two-pin parts).
+fn fed_nets(p: &Project) -> BTreeSet<&str> {
+    let c = p.circuit();
+    let lib = p.library();
+    let mut fed: BTreeSet<&str> = BTreeSet::new();
+    for (name, net) in &c.nets {
+        let powered = net.driven
+            || net.pins.iter().any(|pin| {
+                c.components
+                    .get(&pin.refdes)
+                    .and_then(|comp| lib.parts.get(&comp.part))
+                    .and_then(|pt| pt.symbol.pins.iter().find(|s| s.number == pin.pin))
+                    .is_some_and(|s| s.kind == PinKind::PowerOut)
+            });
+        if powered {
+            fed.insert(name.as_str());
+        }
+    }
+    // Series parts: (net of one pin, net of the other).
+    let mut links: Vec<(&str, &str)> = Vec::new();
+    for (r, comp) in &c.components {
+        let Some(part) = lib.parts.get(&comp.part) else { continue };
+        if !matches!(part.category, Category::Inductor | Category::FerriteBead | Category::Fuse)
+            || part.symbol.pins.len() != 2
+        {
+            continue;
+        }
+        let nets: Vec<&str> = part.symbol.pins.iter().filter_map(|sp| c.net_of(&PinRef::new(r, &sp.number))).collect();
+        if let [a, b] = nets[..]
+            && a != b
+        {
+            links.push((a, b));
+        }
+    }
+    loop {
+        let before = fed.len();
+        for &(a, b) in &links {
+            if fed.contains(a) {
+                fed.insert(b);
+            }
+            if fed.contains(b) {
+                fed.insert(a);
+            }
+        }
+        if fed.len() == before {
+            return fed;
+        }
+    }
 }
 
 /// Runs every rule; diagnostics are ordered by net, then by component.
@@ -67,6 +122,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
         Ok((sp.kind, part.category, sp.label().to_string()))
     };
 
+    let fed = fed_nets(p);
     for (name, net) in &c.nets {
         let mut kinds: BTreeMap<PinKind, Vec<&PinRef>> = BTreeMap::new();
         let mut has_connector = false;
@@ -131,7 +187,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
                     .unwrap_or_default();
                 crate::symbolgen::is_ground(&name)
             });
-        if !power_in.is_empty() && !all_ground && get(PinKind::PowerOut).is_empty() && !net.driven {
+        if !power_in.is_empty() && !all_ground && !fed.contains(name.as_str()) {
             let hint = if has_connector {
                 format!("if `{name}` comes from a connector or external supply, mark it: `net.set {name} --driven`")
             } else {

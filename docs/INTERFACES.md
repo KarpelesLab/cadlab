@@ -98,7 +98,7 @@ cadlab config digikey | show | path | remove        # user settings: supplier cr
 - Exit codes: `0` ok, `1` command error, `2` usage error, `3` completed but checks failed (ERC/DRC errors).
   CI can then run `cadlab drc` and rely on the exit status.
 - Every length argument requires a unit; so do durations (`--budget 60s`).
-- JSON-valued flags take inline JSON or `@file.json`; points take `x,y` (`--at 12.7mm,8mm`) or JSON.
+- JSON-valued flags take inline JSON, `@file.json`, or a bare word as a JSON string (`--outline board`); points take `x,y` (`--at 12.7mm,8mm`) or JSON.
 - Summaries print enum values as arguments spell them (`power_out`, not `PowerOut`), so they can be typed back.
 - Text `describe` lists the values of enum fields nested in objects (`pins[].kind: input|output|...`).
 - Long lists of the same finding are summarized: `cadlab drc` before routing reports the unrouted connections

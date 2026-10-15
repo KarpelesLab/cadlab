@@ -38,7 +38,9 @@ gap. When the stackup has no dielectrics
 gaps, at εr 4.5 (a nominal FR-4 value near 1 GHz; laminate datasheets give 4.2–4.8). Results based on it come
 with an `impedance.stackup_assumed` warning. That assumption is a placeholder, not a fab value: real stackups
 (e.g. 0.2 mm prepreg outside a thick core on four layers) give very different outer-layer impedances, so set
-the dielectrics from the fab's published stackup. `board.stackup_thickness` warns when copper plus dielectrics
+the dielectrics from the fab's published stackup: `board.fab_stackup jlcpcb JLC04161H-7628` copies one from
+the fab profile in a step (layer count, thickness, copper, every dielectric with εr and material; D53), and
+the fab export then names it in `fab-lock.json`. `board.stackup_thickness` warns when copper plus dielectrics
 differ from the board thickness by more than 10 %.
 
 ## Impedance (`impedance.calc`, `impedance.solve`)
@@ -289,7 +291,7 @@ ground power pin; supply nets hold a power pin, are `driven`, have a `voltage`, 
 
 | Code | Severity | Rule |
 |---|---|---|
-| `lint.missing_decoupling` | warning | an MCU/IC/regulator/oscillator power input (and a regulator's output) on a supply net with no two-pin capacitor from that net to ground, once per part and rail |
+| `lint.missing_decoupling` | warning | an MCU/IC/regulator/oscillator power input (and a regulator's output) on a supply net with no two-pin capacitor from that net to ground, once per part and rail; a regulator output driving an inductor (a buck's switch node) is checked behind the inductor |
 | `lint.i2c_pullup` | warning | a net named with an `SDA`/`SCL` token (`I2C1_SDA`, `SCL0`), or holding a non-connector pin so named (`PB7/SDA`), without a resistor to a supply net |
 | `lint.usb_esd` | warning | a USB data net (`D+`, `D-`, `DP`, `DM`, `DN`, `USB_D+`... in the net name or a connector pin name) that reaches a connector and has no protection part on it (diode category, or `ESD`/`TVS` in the part ID, description or MPN) |
 | `lint.clock_termination` | info | exactly one push-pull output drives a clock net (oscillator part, or `CLK`/`CLOCK` in pin or net name) to inputs of other ICs, with no resistor on the net (no series termination) |

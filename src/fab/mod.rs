@@ -152,12 +152,65 @@ pub struct Process {
     /// Smallest board (either orientation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_size: Option<[Nm; 2]>,
+    /// Published layer stackups (`board.fab_stackup` applies one).
+    #[serde(default, rename = "stackup", skip_serializing_if = "Vec::is_empty")]
+    pub stackups: Vec<FabStackup>,
     /// Source URL per field, where it differs from the profile's first source.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cite: BTreeMap<String, String>,
     /// Fields whose value could not be confirmed on the sources.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified: Vec<String>,
+}
+
+/// A layer stackup a fab publishes (for impedance-controlled boards).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FabStackup {
+    /// The fab's name for it (`JLC04161H-7628`).
+    pub id: String,
+    /// Finished board thickness.
+    pub thickness: Nm,
+    /// Outer copper thickness.
+    pub outer_copper: Nm,
+    /// Inner copper thickness.
+    pub inner_copper: Nm,
+    /// Dielectrics between copper layers, top to bottom (one less than the copper layers).
+    pub dielectrics: Vec<FabDielectric>,
+}
+
+impl Process {
+    /// The published stackup a board's stackup matches: layer count, thickness, copper and
+    /// every dielectric's thickness and εr.
+    pub fn matching_stackup(&self, s: &crate::model::board::Stackup) -> Option<&FabStackup> {
+        self.stackups.iter().find(|st| {
+            st.layers() == usize::from(s.copper_layers)
+                && st.thickness == s.thickness
+                && st.outer_copper == s.outer_copper
+                && (s.copper_layers <= 2 || st.inner_copper == s.inner_copper)
+                && st.dielectrics.len() == s.dielectrics.len()
+                && st.dielectrics.iter().zip(&s.dielectrics).all(|(a, b)| a.thickness == b.thickness && a.er == b.er)
+        })
+    }
+}
+
+impl FabStackup {
+    /// Copper layer count.
+    pub fn layers(&self) -> usize {
+        self.dielectrics.len() + 1
+    }
+}
+
+/// A dielectric of a [`FabStackup`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FabDielectric {
+    /// Thickness, copper to copper.
+    pub thickness: Nm,
+    /// Relative permittivity.
+    pub er: crate::value::Quantity,
+    /// Material (`7628 prepreg`, `core`).
+    pub material: String,
 }
 
 /// Fields of [`Process`] that `cite` and `unverified` may name.
@@ -187,6 +240,7 @@ const PROCESS_FIELDS: &[&str] = &[
     "silk_colors",
     "max_size",
     "min_size",
+    "stackup",
 ];
 
 /// Kinds of fabrication file, as named in [`Output::names`] and [`Output::include`].
@@ -516,6 +570,16 @@ impl FabProfile {
                 return Err(format!("process `{}`: layers is empty", p.id));
             }
             fields_known(&format!("process `{}`", p.id), PROCESS_FIELDS, &p.cite, &p.unverified)?;
+            for st in &p.stackups {
+                if st.dielectrics.is_empty() || !p.layers.contains(&(st.layers() as u8)) {
+                    return Err(format!(
+                        "process `{}`: stackup `{}` has {} copper layers, not one of the process's",
+                        p.id,
+                        st.id,
+                        st.layers()
+                    ));
+                }
+            }
         }
         fields_known("output", OUTPUT_FIELDS, &self.output.cite, &self.output.unverified)?;
         for k in &self.output.include {

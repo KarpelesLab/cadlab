@@ -376,16 +376,36 @@ pub struct Create {
     /// Description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Package body, centered on the origin: silkscreen and fab outline follow it (default:
-    /// around the pads), and 3D previews use its height.
+    /// Package body: silkscreen and fab outline follow it (default: around the pads), 3D
+    /// previews and MCAD exports use it. Centered on `at` (default the origin), so pads can
+    /// keep the datasheet's coordinates when its origin is not the body center:
+    /// `{"width": "8.94mm", "length": "7.3mm", "height": "3.2mm", "at": ["0mm", "-3.1mm"]}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Body>,
+    /// Where the footprint origin ends up (the point `place.set --at` positions): `given`
+    /// (default: the origin of the pad coordinates, e.g. the datasheet's), `body` (the body
+    /// center) or `pads` (the center of the pads' box). Pads and body are shifted together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<FootprintOrigin>,
     /// Courtyard margin around pads, body and silkscreen (default 0.25 mm, IPC nominal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub courtyard_margin: Option<Nm>,
     /// Overwrite an existing footprint with the same name.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace: bool,
+}
+
+/// Where `footprint.create` puts the footprint origin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FootprintOrigin {
+    /// The origin of the coordinates given (the datasheet's origin).
+    #[default]
+    Given,
+    /// The body center (`body` is needed).
+    Body,
+    /// The center of the pads' bounding box.
+    Pads,
 }
 
 /// Pad boxes overlapping between different pad numbers (quarter-turn rotations exact).
@@ -453,7 +473,30 @@ impl Command for Create {
                     .with_hint("check their `at` and `size`; pads that are one contact share a number"),
             );
         }
-        let mut fp = landpattern::from_pads(self.name.clone(), pads, self.body, margin, &opts)
+        let mut body = self.body;
+        let shift = match self.origin.unwrap_or_default() {
+            FootprintOrigin::Given => Point::ORIGIN,
+            FootprintOrigin::Body => match body {
+                Some(b) => b.at,
+                None => {
+                    return Err(CommandError::invalid_args(
+                        "footprint.origin_without_body",
+                        "`origin: body` needs a `body`",
+                    )
+                    .with_hint("give `body` (width, length, height, and `at` for its center), or use `origin: pads`"));
+                }
+            },
+            FootprintOrigin::Pads => landpattern::pads_center(&pads).unwrap_or(Point::ORIGIN),
+        };
+        if !shift.is_origin() {
+            for pad in &mut pads {
+                pad.at = Point::new(pad.at.x - shift.x, pad.at.y - shift.y);
+            }
+            if let Some(b) = &mut body {
+                b.at = Point::new(b.at.x - shift.x, b.at.y - shift.y);
+            }
+        }
+        let mut fp = landpattern::from_pads(self.name.clone(), pads, body, margin, &opts)
             .map_err(|e| CommandError::invalid_args("footprint.invalid", e.to_string()))?;
         fp.description = self.description.unwrap_or_default();
         let p = ctx.project_mut()?;
@@ -544,9 +587,18 @@ impl Command for Show {
 
     fn summarize(f: &Footprint) -> String {
         let mut s = format!("{} ({}): {}", f.name, util::wire_name(&f.mount), f.description);
+        if let Some(b) = &f.body {
+            s += &format!("\n  body {} x {} x {} at ({}, {})", b.width, b.length, b.height, b.at.x, b.at.y);
+        }
         for p in &f.pads {
             let (w, h) = p.shape.size();
-            s += &format!("\n  pad {:>3} at ({}, {}) {} x {}", p.number, p.at.x, p.at.y, w, h);
+            let hole = match (p.kind, p.slot) {
+                (PadKind::Tht { .. } | PadKind::Npth { .. }, Some((x, y))) => format!(", slot {x} x {y}"),
+                (PadKind::Tht { drill }, None) => format!(", drill {drill}"),
+                (PadKind::Npth { drill }, None) => format!(", npth {drill}"),
+                _ => String::new(),
+            };
+            s += &format!("\n  pad {:>3} at ({}, {}) {} x {}{hole}", p.number, p.at.x, p.at.y, w, h);
         }
         s
     }

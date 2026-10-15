@@ -495,6 +495,39 @@ pub struct PlacedFootprint {
     pub footprint: Option<String>,
 }
 
+/// Which board edge a part goes to in automatic placement (`place.hint`). Sides are as seen
+/// from the top, Y up: `top` is the edge at the largest Y.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeHint {
+    /// The nearest edge (connectors' default; indicator LEDs, buttons).
+    Any,
+    /// The left edge (smallest X).
+    Left,
+    /// The right edge (largest X).
+    Right,
+    /// The top edge (largest Y).
+    Top,
+    /// The bottom edge (smallest Y).
+    Bottom,
+}
+
+/// What automatic placement should respect for one component (`place.hint`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlacementHint {
+    /// Board edge the part goes to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<EdgeHint>,
+}
+
+impl PlacementHint {
+    /// Whether the hint says nothing.
+    pub fn is_empty(&self) -> bool {
+        self.edge.is_none()
+    }
+}
+
 /// A copper track segment (or arc when `mid` is set).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -740,6 +773,9 @@ pub struct Board {
     /// Design rules for parts of the board (`board.custom_rule`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_rules: Vec<CustomRule>,
+    /// Automatic placement hints by designator (`place.hint`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub placement_hints: BTreeMap<String, PlacementHint>,
 }
 
 impl Board {

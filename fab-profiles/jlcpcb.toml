@@ -13,6 +13,7 @@ website = "https://jlcpcb.com"
 verified_at = "2026-10-04"
 sources = [
     "https://jlcpcb.com/capabilities/pcb-capabilities",
+    "https://jlcpcb.com/impedance",                      # stackups, read 2026-10-15
     "https://jlcpcb.com/capabilities/pcb-assembly-capabilities",
     "https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly",
     "https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly",
@@ -110,6 +111,43 @@ max_size = ["1016mm", "596mm"]
 min_size = ["3mm", "3mm"]
 # The page lists FR-4 thicknesses without a per-layer-count split.
 unverified = ["thickness"]
+
+[process.cite]
+stackup = "https://jlcpcb.com/impedance"
+
+# Impedance stackups as published (inner copper 0.0152 mm is the stackup page's 0.5 oz).
+[[process.stackup]]
+id = "JLC04161H-7628"
+thickness = "1.6mm"
+outer_copper = "35um"
+inner_copper = "15.2um"
+dielectrics = [
+    { thickness = "0.2104mm", er = "4.4", material = "7628 prepreg" },
+    { thickness = "1.065mm", er = "4.6", material = "core" },
+    { thickness = "0.2104mm", er = "4.4", material = "7628 prepreg" },
+]
+
+[[process.stackup]]
+id = "JLC04161H-3313"
+thickness = "1.6mm"
+outer_copper = "35um"
+inner_copper = "15.2um"
+dielectrics = [
+    { thickness = "0.0994mm", er = "4.1", material = "3313 prepreg" },
+    { thickness = "1.265mm", er = "4.6", material = "core" },
+    { thickness = "0.0994mm", er = "4.1", material = "3313 prepreg" },
+]
+
+[[process.stackup]]
+id = "JLC04161H-2116"
+thickness = "1.6mm"
+outer_copper = "35um"
+inner_copper = "15.2um"
+dielectrics = [
+    { thickness = "0.1164mm", er = "4.16", material = "2116 prepreg" },
+    { thickness = "1.265mm", er = "4.6", material = "core" },
+    { thickness = "0.1164mm", er = "4.16", material = "2116 prepreg" },
+]
 
 [[process]]
 id = "multilayer"

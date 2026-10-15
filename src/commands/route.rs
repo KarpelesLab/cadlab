@@ -290,7 +290,7 @@ fn report_pairs(ctx: &mut Context<'_>, pairs: &[PairReport], left_hint: bool) ->
                 Diagnostic::info(
                     "route.diffpair_left",
                     format!(
-                        "pair {}: {} connection(s) of {}/{} are not part of the coupled routing (pads without a partner)",
+                        "pair {}: {} connection(s) of {}/{} are not part of the coupled routing (pads without a partner, interleaved contacts of one part)",
                         pr.name, pr.left, pr.p, pr.n
                     ),
                 )

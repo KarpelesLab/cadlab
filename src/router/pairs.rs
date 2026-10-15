@@ -24,7 +24,7 @@ use crate::units::Nm;
 
 use super::geo::{BoxF, P, seg_seg_dist};
 use super::index::{Blocker, Checker, Index, Item, TOL};
-use super::model::{Profile, ProfileKey, RouterBoard};
+use super::model::{ObKind, Profile, ProfileKey, RouterBoard};
 use super::{Hooks, RouteError};
 
 /// Moves: 45° steps, counter-clockwise from +x.
@@ -80,7 +80,7 @@ pub(crate) struct PairOutcome {
     /// Coupled connections.
     pub conns: Vec<ConnOutcome>,
     /// Connections of the two nets that are not part of the coupled routing (pads without a
-    /// partner, such as a pull-up), left to the ordinary router.
+    /// partner, such as a pull-up; interleaved contacts of one part), left to the ordinary router.
     pub left: usize,
     /// A problem with the pair as a whole (missing net).
     pub error: Option<String>,
@@ -254,6 +254,9 @@ pub(crate) fn route_pairs(
                         hints: vec![],
                     });
                 }
+                // Interleaved contacts of one part: the ordinary router joins them (a via or a
+                // loop behind the pad row), like a pad without a partner.
+                Err(f) if f.interleaved => po.left += 1,
                 Err(f) => po.conns.push(ConnOutcome {
                     labels,
                     ok: false,
@@ -358,10 +361,19 @@ struct CoupledRoute {
 
 /// Why a coupled connection failed.
 struct Failure {
+    /// The two ends are interleaved contacts of one part (a USB-C receptacle's two rows, where
+    /// D+ and D− alternate): no straight link exists, and the ordinary router joins them.
+    interleaved: bool,
     reason: String,
     at: P,
     layer: Option<usize>,
     hints: Vec<String>,
+}
+
+impl Failure {
+    fn new(reason: String, at: P, layer: Option<usize>, hints: Vec<String>) -> Failure {
+        Failure { interleaved: false, reason, at, layer, hints }
+    }
 }
 
 /// One coupled connection to route.
@@ -424,6 +436,7 @@ impl Job<'_> {
             .collect();
         let mid = |e: End| P::new((t(e.tp).at.x + t(e.tn).at.x) / 2.0, (t(e.tp).at.y + t(e.tn).at.y) / 2.0);
         let mut fail = Failure {
+            interleaved: false,
             reason: format!(
                 "the pads {}/{} and {}/{} share no routing layer",
                 t(self.a.tp).label,
@@ -452,12 +465,24 @@ impl Job<'_> {
         let (w, gap, cl) = (self.rules.width.0 as f64, self.rules.gap.0 as f64, self.rules.clearance.0 as f64);
         let (pa, pb, na, nb) = (t(self.a.tp).at, t(self.b.tp).at, t(self.a.tn).at, t(self.b.tn).at);
         let mut why = format!("no common layer for {} and {}", t(self.a.tp).label, t(self.b.tp).label);
+        let mut interleaved = false;
+        let partner_pad = |b: Blocker, other: u32| match b {
+            Blocker::Obstacle(o) => {
+                let ob = &rb.obstacles[o as usize];
+                ob.net == Some(other) && ob.kind == ObKind::Pad
+            }
+            _ => false,
+        };
         for &l in slots {
             let bit = 1u64 << l.min(63);
             if [self.a.tp, self.a.tn, self.b.tp, self.b.tn].iter().any(|&x| t(x).layers & bit == 0) {
                 continue;
             }
-            if let Some(b) = ck.seg(l, pa, pb, self.pn).or_else(|| ck.seg(l, na, nb, self.nn)) {
+            let bp = ck.seg(l, pa, pb, self.pn);
+            let bn = ck.seg(l, na, nb, self.nn);
+            if let Some(b) = bp.or(bn) {
+                interleaved |=
+                    bp.is_some_and(|b| partner_pad(b, self.nn)) || bn.is_some_and(|b| partner_pad(b, self.pn));
                 why = format!("the straight link is blocked by {}", describe(rb, b));
                 continue;
             }
@@ -468,6 +493,7 @@ impl Job<'_> {
             return Ok(CoupledRoute { layer: l, p: vec![pa, pb], n: vec![na, nb] });
         }
         Err(Failure {
+            interleaved,
             reason: format!(
                 "flow-through link {}/{} to {}/{}: {why}",
                 t(self.a.tp).label,
@@ -572,7 +598,7 @@ impl Job<'_> {
             ny: (((bx.max.y - oy) / g).floor() as i32 + 1).max(1),
         };
         let ncell = win.cells();
-        let failure = |reason: String, at: P, hints: Vec<String>| Failure { reason, at, layer: Some(layer), hints };
+        let failure = |reason: String, at: P, hints: Vec<String>| Failure::new(reason, at, Some(layer), hints);
         // Fat-point legality per cell (0 unknown, 1 ok, 2 blocked) and edges per cell and
         // direction.
         let mut point_ok = vec![0u8; ncell];

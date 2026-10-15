@@ -186,6 +186,18 @@ impl Command for Show {
                 opt(q.min_drill),
                 opt(q.copper_to_edge)
             ));
+            for st in &q.stackups {
+                let d: Vec<String> = st.dielectrics.iter().map(|d| format!("{} εr {}", d.thickness, d.er)).collect();
+                s.push_str(&format!(
+                    "    stackup {}: {} layers, {}, {} (`board.fab_stackup {} {}`)\n",
+                    st.id,
+                    st.layers(),
+                    st.thickness,
+                    d.join(" / "),
+                    p.id,
+                    st.id
+                ));
+            }
         }
         if !o.unverified.is_empty() {
             s.push_str(&format!("  unverified: {}\n", o.unverified.join(", ")));
@@ -503,6 +515,9 @@ pub struct FabExported {
     pub process: String,
     /// Files written, the lock last.
     pub files: Vec<WrittenFile>,
+    /// The fab's published stackup the board matches (order with impedance control).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stackup: Option<String>,
     /// Substitute candidates for lines the fab cannot source as designed (suggestions only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub substitutes: Vec<LineSubstitutes>,
@@ -596,7 +611,8 @@ impl Command for Export {
             options: Options::default(),
             substitutions: parts.applied,
         };
-        let (files, _lock) = crate::fab::export::bundle(project, &input).map_err(|e| io(Path::new(LOCK_FILE), e))?;
+        let (files, lock) = crate::fab::export::bundle(project, &input).map_err(|e| io(Path::new(LOCK_FILE), e))?;
+        let stackup = lock.process.as_ref().and_then(|q| q.stackup.clone());
         for r in unplaced {
             ctx.report(
                 Diagnostic::warning(
@@ -622,6 +638,7 @@ impl Command for Export {
             fab: p.id.clone(),
             process: process_id,
             files: written,
+            stackup,
             substitutes: parts.substitutes,
             substituted,
         })
@@ -629,6 +646,9 @@ impl Command for Export {
 
     fn summarize(o: &FabExported) -> String {
         let mut s = format!("{} ({}): wrote {} file(s)", o.fab, o.process, o.files.len());
+        if let Some(st) = &o.stackup {
+            s.push_str(&format!("\n  stackup: {st} (order with impedance control; recorded in fab-lock.json)"));
+        }
         for f in &o.files {
             s.push_str(&format!("\n  {} ({})", f.path, f.function));
         }

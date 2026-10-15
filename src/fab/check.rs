@@ -143,14 +143,26 @@ impl Ctx<'_> {
                     .with_hint(format!("offered: {}; change it with board.setup", opts.join(", "))),
             );
         }
-        if !q.outer_copper.is_empty() && !q.outer_copper.contains(&s.outer_copper) {
+        // A published stackup's copper is offered even when the capability list rounds it.
+        let in_stackup = |inner: bool, v: Nm| {
+            q.stackups.iter().any(|st| {
+                st.layers() == usize::from(s.copper_layers)
+                    && v == if inner { st.inner_copper } else { st.outer_copper }
+            })
+        };
+        if !q.outer_copper.is_empty() && !q.outer_copper.contains(&s.outer_copper) && !in_stackup(false, s.outer_copper)
+        {
             let opts: Vec<String> = q.outer_copper.iter().map(Nm::to_string).collect();
             out.push(
                 Diagnostic::error("fab.copper", format!("{who} does not offer {} outer copper", s.outer_copper))
                     .with_hint(format!("offered (35 um = 1 oz): {}; change it with board.setup", opts.join(", "))),
             );
         }
-        if s.copper_layers > 2 && !q.inner_copper.is_empty() && !q.inner_copper.contains(&s.inner_copper) {
+        if s.copper_layers > 2
+            && !q.inner_copper.is_empty()
+            && !q.inner_copper.contains(&s.inner_copper)
+            && !in_stackup(true, s.inner_copper)
+        {
             let opts: Vec<String> = q.inner_copper.iter().map(Nm::to_string).collect();
             out.push(
                 Diagnostic::error("fab.copper", format!("{who} does not offer {} inner copper", s.inner_copper))

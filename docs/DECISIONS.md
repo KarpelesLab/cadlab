@@ -878,6 +878,40 @@ per dielectric; the user gives the datasheet values at the frequency of interest
 discontinuities and pair coupling: it is a budget figure, not an S-parameter simulation (left to the 3D solver
 stretch goal).
 
+### D53. Agent session 3: offset footprint bodies, placement hints and density, fab stackups, buck-aware ERC/lint, pair-aware placement (2026-10-15)
+Session 2's open items, and what session 3 (STM32 USB device on four layers, docs/TESTING.md) got stuck on.
+**Footprint bodies:** `Body` gains `at`, the body center in footprint coordinates (default the origin, not
+serialized then), used by the generated fab outline and silkscreen, the 3D view's fallback body, STEP, IDF and
+IDX; `footprint.create` takes it in `body` and an `origin` (`given` default, `body`, `pads`) that shifts pads
+and body together. Pads stay in datasheet coordinates; the pin-1 dot goes above or below pad 1 when another
+pad (a shell) is left of it. **Placement hints:** `place.hint` stores per-designator hints in `board.json`
+(`placement_hints`, only `edge` for now: `any|left|right|top|bottom`), which every `place.auto` applies: the
+part goes to that edge and only moves along it or closer, a two-terminal part with a hint is placed like an
+anchor, identical footprints with different hints are not swapped; hints follow renames and removals. Hints
+are data rather than `place.auto` flags so a re-placement (`--replace`) keeps them. `place.auto --density`
+(percent of the free area the rooms take, default 60) is an option only. **Spread placement only** (so that
+`compact`, the router benchmarks' placement, stays D50's exactly): receptacles face their edge (the side the
+courtyard center lies from the pads' centroid; those rotations first at every room size), passives keep out of
+the breakout boxes of differential pair ends, a rail's first capacitor goes to a regulator input, and
+passives without a signal net go to the smallest shared power net (a buck's inductor to its switch pin).
+**Fab stackups:** fab profiles may list `[[process.stackup]]` (id, thickness, copper, dielectrics with εr and
+material), JLCPCB's three 1.6 mm four-layer impedance stackups from its impedance page; `board.fab_stackup`
+copies one into the board (values only: the design names no fab), `fab.check` accepts their copper (the
+stackup page's 15.2 µm inner copper vs the capability page's 0.5 oz), and `fab.export` records in
+`fab-lock.json` (`process.stackup`) and its summary the published stackup the board matches exactly, which is
+what has to be ordered. **ERC/lint:** a net reached from a powered net through a two-pin inductor, ferrite bead
+or fuse is powered (a buck's output, a filtered analog rail); a regulator output driving an inductor has its
+output capacitor checked behind it, not on the switch node. **Parts:** `part.create --replace` redefines a part
+in place (refused when a connected pin would disappear); unmapped shell/shield/mounting pads get one
+`part.unmapped_shield` warning with the pin (and pin map) to add. **Router:** interleaved contacts of one part
+(USB-C's two rows) are left to the ordinary router like partner-less pads instead of failing as a
+flow-through link. **CLI:** a bare word given to a JSON-valued flag is a JSON string (`--outline board`).
+*Why:* the agent typed datasheet coordinates and wanted to say "this connector at the bottom, LEDs on top"
+once; ordering an impedance-controlled board needs the fab's stackup both in the design (for the solver) and
+in the order (the lock), with the numbers coming from the fab's published data rather than the agent's memory;
+and a buck converter, a USB-C receptacle and a D+ pull-up are ordinary parts of a USB device that each tripped a
+rule written for the simpler case.
+
 ## Open questions
 
 
