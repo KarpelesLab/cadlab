@@ -332,6 +332,17 @@ mod tests {
     use crate::router::geo::{BoxF, P};
     use crate::router::grid::BLOCKED;
 
+    /// Statics without scoped rules (the maps filled by the test).
+    fn plain() -> Statics {
+        Statics {
+            track: vec![],
+            via: vec![],
+            tst: vec![],
+            vst: vec![],
+            states: vec![crate::router::scoped::St::default()],
+        }
+    }
+
     /// A 9 × 5 cell grid on two layers with a wall across layer 0 at x = 4 (cells and
     /// midpoints), and vias blocked: each side of the wall is its own component, except for
     /// the net owning the wall; through a free via cell, the other layer joins them.
@@ -349,18 +360,20 @@ mod tests {
             m
         };
         let blocked_vias = vec![BLOCKED; grid.cells()];
-        let st = Statics { track: vec![vec![wall(BLOCKED), wall(BLOCKED)]], via: vec![blocked_vias.clone()] };
+        let st =
+            Statics { track: vec![vec![wall(BLOCKED), wall(BLOCKED)]], via: vec![blocked_vias.clone()], ..plain() };
         let node = |s: u32, x: i32, y: i32| s * grid.cells() as u32 + grid.cidx(x, y) as u32;
         let (a, b) = (node(0, 1, 1), node(0, 7, 3));
         assert!(Components::new(1).may_reach(&grid, &st, 0, 5, &[(a, 0.0)], &[node(0, 2, 3)]));
         assert!(!Components::new(1).may_reach(&grid, &st, 0, 5, &[(a, 0.0)], &[b]));
         // The wall owned by net 3 (state 4): passable for it only.
-        let st = Statics { track: vec![vec![wall(4), wall(BLOCKED)]], via: vec![blocked_vias.clone()] };
+        let st = Statics { track: vec![vec![wall(4), wall(BLOCKED)]], via: vec![blocked_vias.clone()], ..plain() };
         let c = Components::new(1);
         assert!(c.may_reach(&grid, &st, 0, 3, &[(a, 0.0)], &[b]));
         assert!(!c.may_reach(&grid, &st, 0, 5, &[(a, 0.0)], &[b]));
         // Layer 1 free and every via cell free: both sides join for every net.
-        let st = Statics { track: vec![vec![wall(BLOCKED), wall(FREE)]], via: vec![vec![FREE; grid.cells()]] };
+        let st =
+            Statics { track: vec![vec![wall(BLOCKED), wall(FREE)]], via: vec![vec![FREE; grid.cells()]], ..plain() };
         assert!(Components::new(1).may_reach(&grid, &st, 0, 5, &[(a, 0.0)], &[b]));
     }
 }

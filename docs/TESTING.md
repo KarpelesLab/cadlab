@@ -547,6 +547,15 @@ breakouts were planned); `board fab-stackup jlcpcb` lists the stackups. Tests: `
 (tightened: path ends, stubs, at most 2 skew bumps, coupled ≥ 70 %, parts in every third of the board),
 `tests/diffpair.rs` (`pair_length_follows_the_signal_path_and_reports_stubs`), `tests/agent_ergonomics.rs`.
 
+D55 also held the pair's end parts still during improvement: with the receptacle a few mm closer to the ESD
+array, `route diffpair` failed with "polarity". D61 found two causes: the pair's plan hung the flow-through
+array off the receptacle–MCU link on a branch (or joined it from the side that makes the nets cross), and a
+moved end part could bring its breakout onto a passive. The array now sits in the signal path, a side that would
+cross takes the other way through it, and improvement moves end parts only where their breakouts stay clear of
+passives; the hold in improvement is gone (the group moves still keep the ends' arrangement).
+`tests/diffpair.rs` (`pair_routes_wherever_the_receptacle_sits`: 21 receptacle positions, 12 of which failed
+before) checks it.
+
 ### Session 4 (2026-10-15): KiCad migration through the MCP server
 
 This time the agent used only `cadlab mcp` (JSON-RPC over stdio, a small Python client of its own): the

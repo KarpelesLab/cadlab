@@ -115,28 +115,32 @@ fn stretch(pts: &[P], layer: usize, net: u32, ck: &Checker<'_>, grid: f64, any_a
                 if ob.tracks & bit == 0 || (ob.net == Some(net) && matches!(ob.kind, ObKind::Pad | ObKind::Copper)) {
                     continue;
                 }
-                push(hull_shape(&ob.shape, pr.hw + ob.clear.with(pr.c) + MARGIN));
+                let st = rb.st_track_box(pr, &[layer], &ob.bbox.expand(pr.hw + rb.max_clear()));
+                push(hull_shape(&ob.shape, pr.hw + rb.c_ob(pr, st, ob) + MARGIN));
             }
             Item::Seg { net: m, layer: l, a: s, b: e } => {
                 if m == net || l as usize != layer {
                     continue;
                 }
                 let po = rb.profile(m);
-                push(octagon_hull(s, e, pr.hw + po.hw + pr.c.max(po.c) + MARGIN));
+                let c = super::rooms::seg_clear(rb, pr, layer, po, s, e, po.hw);
+                push(octagon_hull(s, e, pr.hw + po.hw + c + MARGIN));
             }
             Item::Sized { net: m, layer: l, a: s, b: e, hw } => {
                 if m == net || l as usize != layer {
                     continue;
                 }
                 let po = rb.profile(m);
-                push(octagon_hull(s, e, pr.hw + hw + pr.c.max(po.c) + MARGIN));
+                let c = super::rooms::seg_clear(rb, pr, layer, po, s, e, hw);
+                push(octagon_hull(s, e, pr.hw + hw + c + MARGIN));
             }
             Item::Via { net: m, at } => {
                 if m == net {
                     continue;
                 }
                 let po = rb.profile(m);
-                push(octagon_hull(at, at, pr.hw + po.rv + pr.c.max(po.c) + MARGIN));
+                let c = super::rooms::via_clear(rb, pr, Some(layer), po, at);
+                push(octagon_hull(at, at, pr.hw + rb.via_out(po, c) + MARGIN));
             }
         }
     }

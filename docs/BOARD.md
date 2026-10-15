@@ -426,12 +426,16 @@ to a routed board, such as an imported one, land clear of its copper).
    spread evenly over the free area, relative to a fully free window's share. The full stretch is tried
    first, then three quarters, half, a quarter and none; the first whose ratsnest stays within 25 % (scaled
    by the density) of the ratsnest before is kept, else the groups stay where they were. The central IC's
-   group and the groups holding ends of differential pairs (a part with pads of both nets) do not move,
-   here or in the improvement below: the pair's breakouts were planned for where they are. Groups at an edge
-   stay at it, facing it no worse; a move that does not fit is shortened or not made.
+   group and the groups holding ends of differential pairs (a part with pads of both nets) do not move in
+   these group moves: the arrangement of a pair's ends (an ESD array between the receptacle and the MCU)
+   stays the one the constructive placement chose. Groups at an edge stay at it, facing it no worse; a move
+   that does not fit is shortened or not made.
 5. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
    and swaps of identical footprints, accepting the best valid move that lowers the ratsnest (MST per net over
    pad centers) plus tethers keeping passives at their target pins; connectors never move away from the edge.
+   Ends of differential pairs move here too (D61; D55 held them): a move of one keeps its pair breakouts
+   clear of every passive, as passives keep clear of them, and the pair router no longer depends on where
+   exactly they sit.
 
 On the ATtiny85 test board (10 parts, 40 × 30 mm) this gives a ratsnest of about 97 mm against 175 mm for
 `rows`, the 3V3 decoupling capacitor pad 1.6 mm from the MCU's VCC pad (C1 1.75 mm from the LDO input), no DRC

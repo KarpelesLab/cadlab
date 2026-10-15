@@ -26,7 +26,7 @@ use crate::geom::poly as pc;
 
 use super::geo::{BoxF, P, Shape};
 use super::index::{Index, Item};
-use super::model::{ObKind, RouterBoard};
+use super::model::{ObKind, Profile, RouterBoard};
 use super::shove::{MARGIN, octagon_hull, octagon_hull_pts};
 
 /// A room: the convex trapezoid between `x0` and `x1` under the top edge (`yt0` at `x0` to
@@ -324,8 +324,10 @@ impl Grown {
     fn track(&self, rb: &RouterBoard, prof: usize, o: usize) -> &[pc::Ring] {
         self.track[prof][o].get_or_init(|| {
             let (pr, ob) = (&rb.profiles[prof], &rb.obstacles[o]);
+            // Layer-independent: the largest clearance any track near it may need.
+            let st = rb.st_track_box(pr, &[], &ob.bbox.expand(pr.hw + rb.max_clear()));
             let mut v = Vec::new();
-            grow(&ob.shape, pr.hw + ob.clear.with(pr.c) + MARGIN, &mut v);
+            grow(&ob.shape, pr.hw + rb.c_ob(pr, st, ob) + MARGIN, &mut v);
             v
         })
     }
@@ -333,7 +335,12 @@ impl Grown {
     fn via(&self, rb: &RouterBoard, prof: usize, o: usize, own_pad: bool) -> &[pc::Ring] {
         self.via[prof][o].get_or_init(|| {
             let (pr, ob) = (&rb.profiles[prof], &rb.obstacles[o]);
-            let d = if own_pad { pr.rv } else { pr.rv + ob.clear.with(pr.c) };
+            let d = if own_pad {
+                pr.rv
+            } else {
+                let st = rb.st_via_box(pr, &ob.bbox.expand(rb.via_out(pr, rb.max_clear())));
+                rb.via_out(pr, rb.c_ob(pr, st, ob))
+            };
             let mut v = Vec::new();
             grow(&ob.shape, d + MARGIN, &mut v);
             v
@@ -404,24 +411,65 @@ pub(crate) fn track_space(
             Item::Seg { net: m, layer: l, a, b } => {
                 if m != net && l as usize == layer {
                     let po = rb.profile(m);
-                    holes.push(ring_of(&octagon_hull(a, b, pr.hw + po.hw + pr.c.max(po.c) + MARGIN)));
+                    let c = seg_clear(rb, pr, layer, po, a, b, po.hw);
+                    holes.push(ring_of(&octagon_hull(a, b, pr.hw + po.hw + c + MARGIN)));
                 }
             }
             Item::Sized { net: m, layer: l, a, b, hw } => {
                 if m != net && l as usize == layer {
                     let po = rb.profile(m);
-                    holes.push(ring_of(&octagon_hull(a, b, pr.hw + hw + pr.c.max(po.c) + MARGIN)));
+                    let c = seg_clear(rb, pr, layer, po, a, b, hw);
+                    holes.push(ring_of(&octagon_hull(a, b, pr.hw + hw + c + MARGIN)));
                 }
             }
             Item::Via { net: m, at } => {
                 if m != net {
                     let po = rb.profile(m);
-                    holes.push(ring_of(&octagon_hull(at, at, pr.hw + po.rv + pr.c.max(po.c) + MARGIN)));
+                    let c = via_clear(rb, pr, Some(layer), po, at);
+                    holes.push(ring_of(&octagon_hull(at, at, pr.hw + rb.via_out(po, c) + MARGIN)));
                 }
             }
         }
     }
     free_space(rb, region, &holes)
+}
+
+/// The clearance between new tracks of profile `pr` near a track of profile `po` (half width
+/// `hw`) from `a` to `b` on `layer` and that track: the largest any state there gives.
+pub(crate) fn seg_clear(rb: &RouterBoard, pr: &Profile, layer: usize, po: &Profile, a: P, b: P, hw: f64) -> f64 {
+    if !rb.scoped.on {
+        return pr.c.max(po.c);
+    }
+    let theirs = rb.st_seg(po, layer, a, b, hw);
+    let near = rb.st_track_box(pr, &[layer], &BoxF::of2(a, b).expand(hw + pr.hw + rb.max_clear()));
+    rb.c_cu(pr, near, po, theirs)
+}
+
+/// The clearance between new vias of profile `pr` near a track of profile `po` (half width
+/// `hw`) from `a` to `b` on `layer` and that track.
+pub(crate) fn seg_via_clear(rb: &RouterBoard, pr: &Profile, layer: usize, po: &Profile, a: P, b: P, hw: f64) -> f64 {
+    if !rb.scoped.on {
+        return pr.c.max(po.c);
+    }
+    let theirs = rb.st_seg(po, layer, a, b, hw);
+    let near = rb.st_via_box(pr, &BoxF::of2(a, b).expand(hw + rb.via_out(pr, rb.max_clear())));
+    rb.c_cu(pr, near, po, theirs)
+}
+
+/// The clearance between new tracks (on `layer`) or vias (`None`) of profile `pr` near a via of
+/// profile `po` at `at` and that via.
+pub(crate) fn via_clear(rb: &RouterBoard, pr: &Profile, layer: Option<usize>, po: &Profile, at: P) -> f64 {
+    if !rb.scoped.on {
+        return pr.c.max(po.c);
+    }
+    let theirs = rb.st_via(po, at, 0.0);
+    let reach = rb.via_out(po, rb.max_clear()) + pr.hw.max(pr.rv);
+    let bb = BoxF::of2(at, at).expand(reach);
+    let near = match layer {
+        Some(l) => rb.st_track_box(pr, &[l], &bb),
+        None => rb.st_via_box(pr, &bb),
+    };
+    rb.c_cu(pr, near, po, theirs)
 }
 
 /// Free space for the centers of through vias of `net` within `region`: every layer's
@@ -452,23 +500,25 @@ pub(crate) fn via_space(
                 holes.extend_from_slice(grown.via(rb, prof, o as usize, own && ob.kind == ObKind::Pad));
             }
             _ if against == Against::Static => {}
-            Item::Seg { net: m, a, b, .. } => {
+            Item::Seg { net: m, layer: l, a, b } => {
                 if m != net {
                     let po = rb.profile(m);
-                    holes.push(ring_of(&octagon_hull(a, b, pr.rv + po.hw + pr.c.max(po.c) + MARGIN)));
+                    let c = seg_via_clear(rb, pr, l as usize, po, a, b, po.hw);
+                    holes.push(ring_of(&octagon_hull(a, b, rb.via_out(pr, c) + po.hw + MARGIN)));
                 }
             }
-            Item::Sized { net: m, a, b, hw, .. } => {
+            Item::Sized { net: m, layer: l, a, b, hw } => {
                 if m != net {
                     let po = rb.profile(m);
-                    holes.push(ring_of(&octagon_hull(a, b, pr.rv + hw + pr.c.max(po.c) + MARGIN)));
+                    let c = seg_via_clear(rb, pr, l as usize, po, a, b, hw);
+                    holes.push(ring_of(&octagon_hull(a, b, rb.via_out(pr, c) + hw + MARGIN)));
                 }
             }
             Item::Via { net: m, at } => {
                 if m != net {
                     let po = rb.profile(m);
-                    let d = (pr.rv + po.rv + pr.c.max(po.c)).max(pr.dr + po.dr + rb.h2h);
-                    holes.push(ring_of(&octagon_hull(at, at, d + MARGIN)));
+                    let c = via_clear(rb, pr, None, po, at);
+                    holes.push(ring_of(&octagon_hull(at, at, rb.via_via(pr, po, c) + MARGIN)));
                 }
             }
         }

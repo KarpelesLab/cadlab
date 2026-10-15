@@ -12,7 +12,7 @@
 //! `CADLAB_CORPUS_DIR`, default `target/corpus`; circuits built from the boards, no KiCad needed),
 //! rips every track and via (zones stay), routes again and prints completion, vias, length, time
 //! and DRC errors per board, with the failed connections grouped by reason
-//! (`CADLAB_BENCH_VERBOSE=1` lists each one). The budget defaults to 60 s here.
+//! (`CADLAB_BENCH_VERBOSE=1` lists each one, and each new DRC error). The budget defaults to 60 s here.
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets.
 
@@ -140,6 +140,12 @@ fn corpus(filters: &[String]) {
         q.board_mut().tracks.extend(r.tracks.iter().cloned());
         q.board_mut().vias.extend(r.vias.iter().cloned());
         let drc = drc_errors(&q).saturating_sub(errors_before);
+        if verbose && drc > 0 {
+            let before: std::collections::BTreeSet<String> = drc_messages(&p).into_iter().collect();
+            for m in drc_messages(&q).into_iter().filter(|m| !before.contains(m)) {
+                eprintln!("  DRC: {m}");
+            }
+        }
         if let Some(dir) = std::env::var_os("CADLAB_ROUTE_RENDER").map(PathBuf::from) {
             render(&q, &dir.join(format!("{}.png", e.name)), std::env::var("CADLAB_BENCH_AROUND").ok());
         }
@@ -194,6 +200,15 @@ fn render(p: &Project, path: &std::path::Path, around: Option<String>) {
     if let Err(f) = r.execute(&mut s, "render.board", args, RunOptions::default()) {
         eprintln!("render failed: {}", f.error);
     }
+}
+
+/// The DRC errors (other than unrouted connections) as `code: message` lines.
+fn drc_messages(p: &Project) -> Vec<String> {
+    cadlab::drc::check(p)
+        .into_iter()
+        .filter(|d| d.severity == cadlab::Severity::Error && d.code != "drc.unrouted")
+        .map(|d| format!("{}: {}", d.code, d.message))
+        .collect()
 }
 
 fn drc_errors(p: &Project) -> usize {

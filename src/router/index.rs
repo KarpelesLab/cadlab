@@ -1,8 +1,9 @@
 //! Spatial index over obstacles and routed copper, with exact clearance checks for track
 //! segments and vias. Used for pad access stubs, post-processing and failure explanations.
 
-use super::geo::{BoxF, P, point_seg_d2, seg_seg_dist};
+use super::geo::{BoxF, P};
 use super::model::{ObKind, RouterBoard};
+use super::scoped::St;
 
 /// Distance slack (nm) when comparing with rule values: the DRC accepts a 2 µm deficit
 /// (`crate::drc::TOLERANCE`), the router uses half of it.
@@ -36,6 +37,7 @@ pub(crate) enum Blocker {
 }
 
 /// Uniform bucket grid.
+#[derive(Clone)]
 pub(crate) struct Index {
     origin: P,
     cell: f64,
@@ -154,26 +156,40 @@ impl Checker<'_> {
         skip: Option<u32>,
         statics: bool,
     ) -> Option<Blocker> {
-        let pr = self.rb.profile(net);
-        if !self.rb.inside(a) || !self.rb.inside(b) {
+        let rb = self.rb;
+        let pr = rb.profile(net);
+        if !rb.inside(a) || !rb.inside(b) {
             return Some(Blocker::Outside);
         }
+        let scoped = rb.scoped.on;
+        // Pieces of the track with the state of their points (scoped rules).
+        let mine: Vec<(P, P, St)> =
+            if scoped { rb.pieces(pr, layer, a, b, pr.hw + extra) } else { vec![(a, b, St::default())] };
         let q = BoxF::of2(a, b).expand(pr.hw + extra + self.index.reach);
         let bit = 1u64 << layer.min(63);
         for (_, it) in self.index.query(&q) {
             match it {
                 Item::Static(o) => {
-                    let ob = &self.rb.obstacles[o as usize];
+                    let ob = &rb.obstacles[o as usize];
                     let own = ob.net == Some(net) || (skip.is_some() && ob.net == skip);
                     if ob.tracks & bit == 0 || (own && matches!(ob.kind, ObKind::Pad | ObKind::Copper)) {
                         continue;
                     }
-                    let req = pr.hw + ob.clear.with(pr.c) + extra;
-                    if !ob.bbox.expand(req).intersects(&BoxF::of2(a, b)) {
+                    if !scoped || ob.item.is_none() {
+                        let req = pr.hw + ob.clear.with(pr.c) + extra;
+                        if !ob.bbox.expand(req).intersects(&BoxF::of2(a, b)) {
+                            continue;
+                        }
+                        if ob.shape.dist_seg(a, b) < req - TOL {
+                            return Some(Blocker::Obstacle(o));
+                        }
                         continue;
                     }
-                    if ob.shape.dist_seg(a, b) < req - TOL {
-                        return Some(Blocker::Obstacle(o));
+                    for &(pa, pb, st) in &mine {
+                        let req = pr.hw + rb.c_ob(pr, st, ob) + extra;
+                        if ob.bbox.expand(req).intersects(&BoxF::of2(pa, pb)) && ob.shape.dist_seg(pa, pb) < req - TOL {
+                            return Some(Blocker::Obstacle(o));
+                        }
                     }
                 }
                 _ if statics => {}
@@ -181,8 +197,8 @@ impl Checker<'_> {
                     if m == net || Some(m) == skip || l as usize != layer {
                         continue;
                     }
-                    let po = self.rb.profile(m);
-                    if seg_seg_dist(a, b, c, d) < pr.hw + po.hw + pr.c.max(po.c) + extra - TOL {
+                    let po = rb.profile(m);
+                    if rb.segs_conflict(pr, layer, &mine, extra, po, c, d, po.hw) {
                         return Some(Blocker::Net(m, Some(l)));
                     }
                 }
@@ -190,8 +206,8 @@ impl Checker<'_> {
                     if m == net || Some(m) == skip || l as usize != layer {
                         continue;
                     }
-                    let po = self.rb.profile(m);
-                    if seg_seg_dist(a, b, c, d) < pr.hw + hw + pr.c.max(po.c) + extra - TOL {
+                    let po = rb.profile(m);
+                    if rb.segs_conflict(pr, layer, &mine, extra, po, c, d, hw) {
                         return Some(Blocker::Net(m, Some(l)));
                     }
                 }
@@ -199,8 +215,8 @@ impl Checker<'_> {
                     if m == net || Some(m) == skip {
                         continue;
                     }
-                    let po = self.rb.profile(m);
-                    if point_seg_d2(at, a, b).sqrt() < pr.hw + po.rv + pr.c.max(po.c) + extra - TOL {
+                    let po = rb.profile(m);
+                    if rb.seg_via_conflict(pr, &mine, extra, po, at) {
                         return Some(Blocker::Net(m, None));
                     }
                 }
@@ -241,14 +257,16 @@ impl Checker<'_> {
         skip: Option<u32>,
         statics: bool,
     ) -> Option<Blocker> {
-        if !self.rb.inside(at) {
+        let rb = self.rb;
+        if !rb.inside(at) {
             return Some(Blocker::Outside);
         }
-        for h in &self.rb.holes {
-            if h.at.dist(at) < pr.dr + h.r + self.rb.h2h - TOL {
+        for h in &rb.holes {
+            if h.at.dist(at) < pr.dr + h.r + rb.h2h - TOL {
                 return Some(Blocker::Hole);
             }
         }
+        let st = rb.st_via(pr, at, 0.0);
         let q = BoxF::of2(at, at).expand(pr.rv.max(pr.dr) + self.index.reach);
         for (id, it) in self.index.query(&q) {
             if Some(id) == skip {
@@ -256,7 +274,7 @@ impl Checker<'_> {
             }
             match it {
                 Item::Static(o) => {
-                    let ob = &self.rb.obstacles[o as usize];
+                    let ob = &rb.obstacles[o as usize];
                     if !ob.vias {
                         continue;
                     }
@@ -265,7 +283,7 @@ impl Checker<'_> {
                         // No via in a pad, even of its own net.
                         ObKind::Pad if own => pr.rv,
                         ObKind::Copper if own => continue,
-                        _ => pr.rv + ob.clear.with(pr.c),
+                        _ => rb.via_out(pr, rb.c_ob(pr, st, ob)),
                     };
                     if ob.shape.dist_point(at) < req - TOL {
                         return Some(Blocker::Obstacle(o));
@@ -276,8 +294,8 @@ impl Checker<'_> {
                     if m == net {
                         continue;
                     }
-                    let po = self.rb.profile(m);
-                    if point_seg_d2(at, a, b).sqrt() < pr.rv + po.hw + pr.c.max(po.c) - TOL {
+                    let po = rb.profile(m);
+                    if rb.via_seg_conflict(pr, at, st, po, layer as usize, a, b, po.hw) {
                         return Some(Blocker::Net(m, Some(layer)));
                     }
                 }
@@ -285,15 +303,18 @@ impl Checker<'_> {
                     if m == net {
                         continue;
                     }
-                    let po = self.rb.profile(m);
-                    if point_seg_d2(at, a, b).sqrt() < pr.rv + hw + pr.c.max(po.c) - TOL {
+                    let po = rb.profile(m);
+                    if rb.via_seg_conflict(pr, at, st, po, layer as usize, a, b, hw) {
                         return Some(Blocker::Net(m, Some(layer)));
                     }
                 }
                 Item::Via { net: m, at: o } => {
-                    let po = self.rb.profile(m);
-                    let holes = pr.dr + po.dr + self.rb.h2h;
-                    let req = if m == net { holes } else { holes.max(pr.rv + po.rv + pr.c.max(po.c)) };
+                    let po = rb.profile(m);
+                    let req = if m == net {
+                        pr.dr + po.dr + rb.h2h
+                    } else {
+                        rb.via_via(pr, po, rb.c_cu(pr, st, po, rb.st_via(po, o, 0.0)))
+                    };
                     if at.dist(o) < req - TOL {
                         return Some(Blocker::Net(m, None));
                     }

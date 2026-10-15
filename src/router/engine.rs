@@ -15,6 +15,7 @@ use super::geo::{BoxF, P, point_seg_d2};
 use super::grid::{Grid, Statics, delta, ok};
 use super::index::TOL;
 use super::model::RouterBoard;
+use super::scoped::St;
 
 /// Direction vectors, counter-clockwise from east.
 pub(crate) const DIRS: [(i32, i32); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
@@ -438,30 +439,84 @@ impl<'a> Engine<'a> {
     /// Halo keys of a track segment of `net` on `slot`.
     fn raster_seg(&self, net: u32, slot: usize, a: P, b: P, offgrid: bool, out: &mut Vec<u64>) {
         let pn = self.rb.profile(net);
+        if !self.rb.scoped.on {
+            self.raster_piece(net, slot, a, b, St::default(), offgrid, out);
+            return;
+        }
+        for (pa, pb, st) in self.rb.pieces(pn, self.slots[slot], a, b, pn.hw) {
+            self.raster_piece(net, slot, pa, pb, st, offgrid, out);
+        }
+    }
+
+    /// Halo keys of a piece of track of `net` on `slot` in state `sn`.
+    #[allow(clippy::too_many_arguments)]
+    fn raster_piece(&self, net: u32, slot: usize, a: P, b: P, sn: St, offgrid: bool, out: &mut Vec<u64>) {
+        let pn = self.rb.profile(net);
         let s_diag = self.grid.g * std::f64::consts::SQRT_2 / 2.0;
         let bb = BoxF::of2(a, b);
+        let scoped = self.rb.scoped.positional();
+        let mut cache: Vec<f64> = Vec::new();
         for (ai, &pi) in self.active.iter().enumerate() {
             let pp = &self.rb.profiles[pi];
-            let c = pn.c.max(pp.c);
-            let mut r = pn.hw + pp.hw + c - TOL;
-            if offgrid {
-                r += delta(r, s_diag);
-            }
+            // Track centers of `pp` near the piece, per state there.
+            let radius = |c: f64| {
+                let mut r = pn.hw + pp.hw + c - TOL;
+                if offgrid {
+                    r += delta(r, s_diag);
+                }
+                r
+            };
+            let hi = if scoped { self.rb.max_clear() } else { self.rb.c_cu(pn, sn, pp, St::default()) };
+            let r = radius(hi);
+            cache.clear();
+            cache.resize(self.st.states.len(), f64::NAN);
             if let Some((i0, j0, i1, j1)) = self.grid.drange(&bb.expand(r)) {
                 for j in j0..=j1 {
                     for i in i0..=i1 {
-                        if point_seg_d2(self.grid.dpt(i, j), a, b) < r * r {
-                            out.push(self.key(ai, slot, self.grid.didx(i, j)));
+                        let k = self.grid.didx(i, j);
+                        let d2 = point_seg_d2(self.grid.dpt(i, j), a, b);
+                        if d2 >= r * r {
+                            continue;
+                        }
+                        let rk = if scoped {
+                            let sid = if self.st.tst.is_empty() { 0 } else { self.st.tst[slot][k] as usize };
+                            if cache[sid].is_nan() {
+                                cache[sid] = radius(self.rb.c_cu(pn, sn, pp, self.st.states[sid]));
+                            }
+                            cache[sid]
+                        } else {
+                            r
+                        };
+                        if d2 < rk * rk {
+                            out.push(self.key(ai, slot, k));
                         }
                     }
                 }
             }
-            let rv = pn.hw + pp.rv + c - TOL;
+            // Via centers of `pp` near the piece.
+            let vradius = |c: f64| pn.hw + self.rb.via_out(pp, c) - TOL;
+            let rv = vradius(hi);
+            cache.clear();
+            cache.resize(self.st.states.len(), f64::NAN);
             if let Some((x0, y0, x1, y1)) = self.grid.crange(&bb.expand(rv)) {
                 for y in y0..=y1 {
                     for x in x0..=x1 {
-                        if point_seg_d2(self.grid.cell(x, y), a, b) < rv * rv {
-                            out.push(self.key(ai, self.slots.len(), self.grid.cidx(x, y)));
+                        let k = self.grid.cidx(x, y);
+                        let d2 = point_seg_d2(self.grid.cell(x, y), a, b);
+                        if d2 >= rv * rv {
+                            continue;
+                        }
+                        let rk = if scoped {
+                            let sid = if self.st.vst.is_empty() { 0 } else { self.st.vst[k] as usize };
+                            if cache[sid].is_nan() {
+                                cache[sid] = vradius(self.rb.c_cu(pn, sn, pp, self.st.states[sid]));
+                            }
+                            cache[sid]
+                        } else {
+                            rv
+                        };
+                        if d2 < rk * rk {
+                            out.push(self.key(ai, self.slots.len(), k));
                         }
                     }
                 }
@@ -474,30 +529,70 @@ impl<'a> Engine<'a> {
     fn raster_via(&self, net: u32, at: P, offgrid: bool, out: &mut Vec<u64>) {
         let pn = self.rb.profile(net);
         let s_diag = self.grid.g * std::f64::consts::SQRT_2 / 2.0;
+        let scoped = self.rb.scoped.positional();
+        let sn = self.rb.st_via(pn, at, 0.0);
+        let mut cache: Vec<f64> = Vec::new();
         for (ai, &pi) in self.active.iter().enumerate() {
             let pp = &self.rb.profiles[pi];
-            let c = pn.c.max(pp.c);
-            let mut r = pn.rv + pp.hw + c - TOL;
-            if offgrid {
-                r += delta(r, s_diag);
-            }
+            let radius = |c: f64| {
+                let mut r = self.rb.via_out(pn, c) + pp.hw - TOL;
+                if offgrid {
+                    r += delta(r, s_diag);
+                }
+                r
+            };
+            let hi = if scoped { self.rb.max_clear() } else { self.rb.c_cu(pn, sn, pp, St::default()) };
+            let r = radius(hi);
             if let Some((i0, j0, i1, j1)) = self.grid.drange(&BoxF::of2(at, at).expand(r)) {
-                for j in j0..=j1 {
-                    for i in i0..=i1 {
-                        if self.grid.dpt(i, j).dist(at) < r {
-                            for s in 0..self.slots.len() {
-                                out.push(self.key(ai, s, self.grid.didx(i, j)));
+                for s in 0..self.slots.len() {
+                    cache.clear();
+                    cache.resize(self.st.states.len(), f64::NAN);
+                    for j in j0..=j1 {
+                        for i in i0..=i1 {
+                            let k = self.grid.didx(i, j);
+                            let d = self.grid.dpt(i, j).dist(at);
+                            if d >= r {
+                                continue;
+                            }
+                            let rk = if scoped {
+                                let sid = if self.st.tst.is_empty() { 0 } else { self.st.tst[s][k] as usize };
+                                if cache[sid].is_nan() {
+                                    cache[sid] = radius(self.rb.c_cu(pn, sn, pp, self.st.states[sid]));
+                                }
+                                cache[sid]
+                            } else {
+                                r
+                            };
+                            if d < rk {
+                                out.push(self.key(ai, s, k));
                             }
                         }
                     }
                 }
             }
-            let rv = (pn.rv + pp.rv + c).max(pn.dr + pp.dr + self.rb.h2h) - TOL;
+            let vradius = |c: f64| self.rb.via_via(pn, pp, c) - TOL;
+            let rv = vradius(hi);
+            cache.clear();
+            cache.resize(self.st.states.len(), f64::NAN);
             if let Some((x0, y0, x1, y1)) = self.grid.crange(&BoxF::of2(at, at).expand(rv)) {
                 for yy in y0..=y1 {
                     for xx in x0..=x1 {
-                        if self.grid.cell(xx, yy).dist(at) < rv {
-                            out.push(self.key(ai, self.slots.len(), self.grid.cidx(xx, yy)));
+                        let k = self.grid.cidx(xx, yy);
+                        let d = self.grid.cell(xx, yy).dist(at);
+                        if d >= rv {
+                            continue;
+                        }
+                        let rk = if scoped {
+                            let sid = if self.st.vst.is_empty() { 0 } else { self.st.vst[k] as usize };
+                            if cache[sid].is_nan() {
+                                cache[sid] = vradius(self.rb.c_cu(pn, sn, pp, self.st.states[sid]));
+                            }
+                            cache[sid]
+                        } else {
+                            rv
+                        };
+                        if d < rk {
+                            out.push(self.key(ai, self.slots.len(), k));
                         }
                     }
                 }
@@ -707,22 +802,22 @@ impl<'a> Engine<'a> {
     /// allow (exact).
     fn geo_hits(&self, net: u32, w: &Wire, f: &mut dyn FnMut(Option<usize>, P, u32)) {
         use super::index::Item;
-        let pr = self.rb.profile(net);
+        let rb = self.rb;
+        let pr = rb.profile(net);
         let (segs, vias) = self.wire_geometry(w);
         for (s, a, b) in segs {
             let layer = self.slots[s];
+            let mine = if rb.scoped.on { rb.pieces(pr, layer, a, b, pr.hw) } else { vec![(a, b, St::default())] };
             let q = BoxF::of2(a, b).expand(pr.hw + self.dynamic.reach);
             for (_, it) in self.dynamic.query(&q) {
                 let hit = match it {
                     Item::Seg { net: m, layer: l, a: c, b: d } if m != net && l as usize == layer => {
-                        let po = self.rb.profile(m);
-                        let req = pr.hw + po.hw + pr.c.max(po.c) - TOL;
-                        (super::geo::seg_seg_dist(a, b, c, d) < req).then(|| (closest_on(a, b, c, d), m))
+                        let po = rb.profile(m);
+                        rb.segs_conflict(pr, layer, &mine, 0.0, po, c, d, po.hw).then(|| (closest_on(a, b, c, d), m))
                     }
                     Item::Via { net: m, at } if m != net => {
-                        let po = self.rb.profile(m);
-                        let req = pr.hw + po.rv + pr.c.max(po.c) - TOL;
-                        (point_seg_d2(at, a, b).sqrt() < req).then(|| (super::geo::project(at, a, b), m))
+                        let po = rb.profile(m);
+                        rb.seg_via_conflict(pr, &mine, 0.0, po, at).then(|| (super::geo::project(at, a, b), m))
                     }
                     _ => None,
                 };
@@ -732,16 +827,17 @@ impl<'a> Engine<'a> {
             }
         }
         for at in vias {
+            let st = rb.st_via(pr, at, 0.0);
             let q = BoxF::of2(at, at).expand(pr.rv + self.dynamic.reach);
             for (_, it) in self.dynamic.query(&q) {
                 let hit = match it {
-                    Item::Seg { net: m, a, b, .. } if m != net => {
-                        let po = self.rb.profile(m);
-                        (point_seg_d2(at, a, b).sqrt() < pr.rv + po.hw + pr.c.max(po.c) - TOL).then_some(m)
+                    Item::Seg { net: m, layer, a, b } if m != net => {
+                        let po = rb.profile(m);
+                        rb.via_seg_conflict(pr, at, st, po, layer as usize, a, b, po.hw).then_some(m)
                     }
                     Item::Via { net: m, at: o } if m != net => {
-                        let po = self.rb.profile(m);
-                        let req = (pr.rv + po.rv + pr.c.max(po.c)).max(pr.dr + po.dr + self.rb.h2h);
+                        let po = rb.profile(m);
+                        let req = rb.via_via(pr, po, rb.c_cu(pr, st, po, rb.st_via(po, o, 0.0)));
                         (at.dist(o) < req - TOL).then_some(m)
                     }
                     _ => None,

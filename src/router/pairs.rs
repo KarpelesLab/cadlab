@@ -106,6 +106,7 @@ fn dot(a: P, b: P) -> f64 {
 }
 
 /// Union-find over small integer sets.
+#[derive(Clone)]
 struct Sets(Vec<usize>);
 
 impl Sets {
@@ -178,7 +179,7 @@ pub(crate) fn route_pairs(
         let fr = half * (1.0 + MITER_45) + w / 2.0;
         let key =
             ProfileKey { width: Nm((2.0 * fr).ceil() as i64), clear: r.clearance, via_drill: Nm(0), via_dia: Nm(0) };
-        let k = add_profile(&mut rb, Profile { key, hw: fr, c: cl, rv: 0.0, dr: 0.0 });
+        let k = add_profile(&mut rb, Profile { key, hw: fr, c: cl, rv: 0.0, dr: 0.0, inner: half });
         let id = rb.nets.len() as u32;
         rb.nets.push(format!("~pair:{name}"));
         rb.net_profile.push(k);
@@ -204,78 +205,135 @@ pub(crate) fn route_pairs(
             out.push(po);
             continue;
         };
-        let (ends, conns, left) = plan(&rb, pn, nn);
+        let (ends, conns, left, series) = plan(&rb, pn, nn);
         po.left = left;
-        for (a, b, through) in conns {
-            let ea: End = ends[a];
-            let eb: End = ends[b];
-            let labels = [
-                rb.terminals[ea.tp].label.clone(),
-                rb.terminals[eb.tp].label.clone(),
-                rb.terminals[ea.tn].label.clone(),
-                rb.terminals[eb.tn].label.clone(),
-            ];
-            let job = Job { rb: &rb, pn, nn, fat: fat[name], rules: r, a: ea, b: eb };
-            let res = {
-                let ck = Checker { rb: &rb, index: &index };
-                if through { Ok(job.through(&ck, slots)) } else { job.route(&ck, slots, deadline, hooks) }?
-            };
-            match res {
-                Ok(cp) => {
-                    let ci = po.conns.len();
-                    let hw = r.width.0 as f64 / 2.0;
-                    for (net, pts) in [(pn, &cp.p), (nn, &cp.n)] {
-                        for w in pts.windows(2) {
-                            index.insert(
-                                Item::Seg { net, layer: cp.layer as u8, a: w[0], b: w[1] },
-                                BoxF::of2(w[0], w[1]).expand(hw),
-                            );
-                            po.tracks.push((
+        let job = |a: End, b: End| Job { rb: &rb, pn, nn, fat: fat[name], rules: r, a, b };
+        let mut best = route_conns(&rb, &index, &ends, &conns, &job, slots, deadline, hooks)?;
+        // A pair that would have to cross between the sides of a flow-through part goes through
+        // it the other way (each outside end joins the other side).
+        for &link in &series {
+            if !best.1.iter().any(|c| c.reason.as_deref().is_some_and(|x| x.starts_with("polarity"))) {
+                break;
+            }
+            let mut alt = swap_sides(&conns, link);
+            alt.sort_by_key(|&(i, j, t)| (!t, ends_dist(&rb, &ends, i, j), i, j));
+            let other = route_conns(&rb, &index, &ends, &alt, &job, slots, deadline, hooks)?;
+            let failed = |o: &Routed| o.1.iter().filter(|c| !c.ok).count();
+            if failed(&other) < failed(&best) {
+                best = other;
+            }
+        }
+        let (tracks, conns_out, extra_left, idx) = best;
+        index = idx;
+        po.tracks = tracks;
+        po.conns = conns_out;
+        po.left += extra_left;
+        out.push(po);
+    }
+    Ok(out)
+}
+
+/// The outcome of routing a pair's connections: tracks (with their connection), the
+/// connections, those left to the ordinary router, and the index with the new tracks.
+type Routed = (Vec<(usize, Track)>, Vec<ConnOutcome>, usize, Index);
+
+/// Distance between the midpoints of two ends (rounded to the nanometer), for ordering.
+fn ends_dist(rb: &RouterBoard, ends: &[End], i: usize, j: usize) -> i64 {
+    let mid = |e: &End| {
+        let (a, b) = (rb.terminals[e.tp].at, rb.terminals[e.tn].at);
+        P::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+    };
+    mid(&ends[i]).dist(mid(&ends[j])).round() as i64
+}
+
+/// Routes the connections `conns` of a pair in order on a copy of `index` (each routed one
+/// becomes an obstacle for the next).
+#[allow(clippy::too_many_arguments)]
+fn route_conns<'a>(
+    rb: &'a RouterBoard,
+    index: &Index,
+    ends: &[End],
+    conns: &[(usize, usize, bool)],
+    job: &dyn Fn(End, End) -> Job<'a>,
+    slots: &[usize],
+    deadline: Option<Instant>,
+    hooks: &Hooks<'_>,
+) -> Result<Routed, RouteError> {
+    let mut index = index.clone();
+    let mut tracks: Vec<(usize, Track)> = Vec::new();
+    let mut outs: Vec<ConnOutcome> = Vec::new();
+    let mut left = 0;
+    for &(a, b, through) in conns {
+        let ea: End = ends[a];
+        let eb: End = ends[b];
+        let labels = [
+            rb.terminals[ea.tp].label.clone(),
+            rb.terminals[eb.tp].label.clone(),
+            rb.terminals[ea.tn].label.clone(),
+            rb.terminals[eb.tn].label.clone(),
+        ];
+        let job = job(ea, eb);
+        let res = {
+            let ck = Checker { rb, index: &index };
+            if through { Ok(job.through(&ck, slots)) } else { job.route(&ck, slots, deadline, hooks) }?
+        };
+        match res {
+            Ok(cp) => {
+                let ci = outs.len();
+                let hw = job.rules.width.0 as f64 / 2.0;
+                for (net, pts) in [(job.pn, &cp.p), (job.nn, &cp.n)] {
+                    for w in pts.windows(2) {
+                        index.insert(
+                            Item::Seg { net, layer: cp.layer as u8, a: w[0], b: w[1] },
+                            BoxF::of2(w[0], w[1]).expand(hw),
+                        );
+                        // Split where the scoped rules change.
+                        for (s, e) in rb.split_track(cp.layer, w[0], w[1], hw) {
+                            tracks.push((
                                 ci,
                                 Track {
                                     id: ObjectId(0),
                                     layer: rb.layer_names[cp.layer].clone(),
-                                    width: r.width,
+                                    width: job.rules.width,
                                     net: Some(rb.nets[net as usize].clone()),
-                                    start: w[0].to_point(),
-                                    end: w[1].to_point(),
+                                    start: s,
+                                    end: e,
                                     mid: None,
                                     locked: false,
                                 },
                             ));
                         }
                     }
-                    po.conns.push(ConnOutcome {
-                        labels,
-                        ok: true,
-                        reason: None,
-                        at: None,
-                        layer: Some(rb.layer_names[cp.layer].clone()),
-                        hints: vec![],
-                    });
                 }
-                // Interleaved contacts of one part: the ordinary router joins them (a via or a
-                // loop behind the pad row), like a pad without a partner.
-                Err(f) if f.interleaved => po.left += 1,
-                Err(f) => po.conns.push(ConnOutcome {
+                outs.push(ConnOutcome {
                     labels,
-                    ok: false,
-                    reason: Some(f.reason),
-                    at: Some(f.at),
-                    layer: f.layer.map(|l| rb.layer_names[l].clone()),
-                    hints: f.hints,
-                }),
+                    ok: true,
+                    reason: None,
+                    at: None,
+                    layer: Some(rb.layer_names[cp.layer].clone()),
+                    hints: vec![],
+                });
             }
+            // Interleaved contacts of one part: the ordinary router joins them (a via or a
+            // loop behind the pad row), like a pad without a partner.
+            Err(f) if f.interleaved => left += 1,
+            Err(f) => outs.push(ConnOutcome {
+                labels,
+                ok: false,
+                reason: Some(f.reason),
+                at: Some(f.at),
+                layer: f.layer.map(|l| rb.layer_names[l].clone()),
+                hints: f.hints,
+            }),
         }
-        out.push(po);
     }
-    Ok(out)
+    Ok((tracks, outs, left, index))
 }
 
 /// Ends of a pair and the connections joining them (indices into the ends, and whether it is a
 /// flow-through link: both ends on one component, such as an ESD array whose lines pass
 /// through it), plus the number of connections of the two nets left out.
-type Plan = (Vec<End>, Vec<(usize, usize, bool)>, usize);
+type Plan = (Vec<End>, Vec<(usize, usize, bool)>, usize, Vec<(usize, usize)>);
 
 fn plan(rb: &RouterBoard, pn: u32, nn: u32) -> Plan {
     let pads = |net: u32| -> Vec<usize> {
@@ -325,14 +383,47 @@ fn plan(rb: &RouterBoard, pn: u32, nn: u32) -> Plan {
     }
     edges.sort_unstable();
     let mut conns = Vec::new();
-    for (_, _, i, j) in edges {
+    let take = |i: usize, j: usize, sp: &mut Sets, sn: &mut Sets, conns: &mut Vec<(usize, usize, bool)>| {
         let (a, b) = (ends[i], ends[j]);
         if sp.find(isl(a.tp)) == sp.find(isl(b.tp)) || sn.find(isl(a.tn)) == sn.find(isl(b.tn)) {
-            continue;
+            return false;
         }
         sp.join(isl(a.tp), isl(b.tp));
         sn.join(isl(a.tn), isl(b.tn));
         conns.push((i, j, through(i, j)));
+        true
+    };
+    for &(t, _, i, j) in &edges {
+        if !t {
+            take(i, j, &mut sp, &mut sn, &mut conns);
+        }
+    }
+    // Flow-through parts sit in the signal path: their two sides join the nearest ends of two
+    // other parts (the shortest such pair of links), rather than the part hanging off one of
+    // them on a branch (a stub) because the parts beside it are closer to each other.
+    let series: Vec<(usize, usize)> =
+        conns.iter().filter(|c| c.2 && !interleaved(rb, &ends[c.0], &ends[c.1])).map(|c| (c.0, c.1)).collect();
+    for &(i, j) in &series {
+        let ci = comp(ends[i].tp);
+        let d = |x: usize, y: usize| mid(&ends[x]).dist(mid(&ends[y])).round() as i64;
+        let mut best: Option<(i64, usize, usize)> = None;
+        for x in (0..ends.len()).filter(|&x| comp(ends[x].tp) != ci) {
+            for y in (0..ends.len()).filter(|&y| comp(ends[y].tp) != ci && comp(ends[y].tp) != comp(ends[x].tp)) {
+                let cost = d(x, i) + d(y, j);
+                if best.is_none_or(|b| (cost, x, y) < b) {
+                    best = Some((cost, x, y));
+                }
+            }
+        }
+        if let Some((_, x, y)) = best {
+            let (mut sp2, mut sn2, mut c2) = (sp.clone(), sn.clone(), conns.clone());
+            if take(x, i, &mut sp2, &mut sn2, &mut c2) && take(y, j, &mut sp2, &mut sn2, &mut c2) {
+                (sp, sn, conns) = (sp2, sn2, c2);
+            }
+        }
+    }
+    for (_, _, i, j) in edges {
+        take(i, j, &mut sp, &mut sn, &mut conns);
     }
     // What is left: islands (with pads) of each net not joined by the coupled routing.
     let groups = |net_pads: &[usize], s: &mut Sets| {
@@ -344,7 +435,40 @@ fn plan(rb: &RouterBoard, pn: u32, nn: u32) -> Plan {
     let left = groups(&pp, &mut sp) + groups(&np, &mut sn);
     // Flow-through links, then short connections first.
     conns.sort_by_key(|&(i, j, t)| (!t, mid(&ends[i]).dist(mid(&ends[j])).round() as i64, i, j));
-    (ends, conns, left)
+    (ends, conns, left, series)
+}
+
+/// Whether ends `a` and `b` (of one part) are interleaved contacts: the straight link of one
+/// net passes over a pad of the other (a USB-C receptacle's two rows, D− D+ D− D+), not a
+/// flow-through.
+fn interleaved(rb: &RouterBoard, a: &End, b: &End) -> bool {
+    let t = |i: usize| &rb.terminals[i];
+    let (pa, pb, na, nb) = (t(a.tp).at, t(b.tp).at, t(a.tn).at, t(b.tn).at);
+    [a.tn, b.tn].iter().any(|&n| t(n).shape.dist_seg(pa, pb) <= 0.0)
+        || [a.tp, b.tp].iter().any(|&p| t(p).shape.dist_seg(na, nb) <= 0.0)
+}
+
+/// The connections with the outside ends of flow-through link `(i, j)` swapped between its two
+/// sides (the other way through the part).
+fn swap_sides(conns: &[(usize, usize, bool)], (i, j): (usize, usize)) -> Vec<(usize, usize, bool)> {
+    conns
+        .iter()
+        .map(|&(a, b, t)| {
+            if t {
+                return (a, b, t);
+            }
+            let s = |e: usize| {
+                if e == i {
+                    j
+                } else if e == j {
+                    i
+                } else {
+                    e
+                }
+            };
+            (s(a), s(b), t)
+        })
+        .collect()
 }
 
 /// Upper bound of island ids (they are item indices).

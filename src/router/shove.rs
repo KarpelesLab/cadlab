@@ -43,6 +43,7 @@ use super::geo::{BoxF, P, point_seg_d2, seg_seg_dist};
 use super::index::{Index, Item, TOL};
 use super::model::{ObKind, RouterBoard};
 use super::post;
+use super::scoped::St;
 
 /// Distance kept beyond the rules by moved copper (nm), against rounding.
 pub(crate) const MARGIN: f64 = 500.0;
@@ -213,7 +214,10 @@ impl<'a> World<'a> {
         for v in &vias {
             reach = reach.max(v.diameter.0 as f64 / 2.0);
         }
-        let cmax = rb.profiles.iter().map(|p| p.c).fold(rb.rules.copper_to_edge.0 as f64, f64::max);
+        let mut cmax = rb.profiles.iter().map(|p| p.c).fold(rb.rules.copper_to_edge.0 as f64, f64::max);
+        if rb.scoped.on || rb.scoped.hc > 0.0 {
+            cmax = cmax.max(rb.max_clear());
+        }
         let reach = 2.0 * reach + cmax + rb.h2h + 2.0 * TOL;
         let mut index = Index::new(rb.bbox.expand(2_000_000.0), 500_000.0, reach);
         for (i, ob) in rb.obstacles.iter().enumerate() {
@@ -435,8 +439,44 @@ impl<'a> World<'a> {
         self.insert_line(li);
     }
 
-    fn c(&self, net: u32) -> f64 {
-        self.rb.profile(net).c
+    /// Clearance between copper of nets `n` and `m` in states `sn`, `sm` (scoped rules).
+    fn cc(&self, n: u32, sn: St, m: u32, sm: St) -> f64 {
+        self.rb.c_cu(self.rb.profile(n), sn, self.rb.profile(m), sm)
+    }
+
+    /// Clearance between copper of `net` in state `st` and obstacle `ob`.
+    fn cob(&self, net: u32, st: St, ob: &super::model::Obstacle) -> f64 {
+        self.rb.c_ob(self.rb.profile(net), st, ob)
+    }
+
+    /// A state covering any copper of `net` (tracks on any layer, vias) in `bbox`.
+    fn near(&self, net: u32, bbox: &BoxF) -> St {
+        let pr = self.rb.profile(net);
+        self.rb.st_track_box(pr, &[], bbox).union(self.rb.st_via_box(pr, bbox))
+    }
+
+    /// The state of line `li` (any of its points).
+    fn line_st(&self, li: usize) -> St {
+        let l = &self.lines[li];
+        if !self.rb.scoped.positional() {
+            return St::default();
+        }
+        let pr = self.rb.profile(l.net);
+        let mut st: Option<St> = None;
+        for w in l.pts.windows(2) {
+            let s = self.rb.st_seg(pr, l.layer, w[0], w[1], l.hw);
+            st = Some(st.map_or(s, |o| o.union(s)));
+        }
+        st.unwrap_or_else(|| self.rb.st_seg(pr, l.layer, l.pts[0], l.pts[0], l.hw))
+    }
+
+    /// The state of via `vi`.
+    fn via_st(&self, vi: usize) -> St {
+        let v = &self.vias[vi];
+        if !self.rb.scoped.positional() {
+            return St::default();
+        }
+        self.rb.scoped.st(super::scoped::Kind::Via, 0, v.at, 0.0, v.rv)
     }
 
     /// Everything a track segment of `net` (half width `hw`) on `layer` along `a`–`b` comes
@@ -447,7 +487,10 @@ impl<'a> World<'a> {
         if !rb.inside(a) || !rb.inside(b) {
             out.push((Hit::Outside, 0.0));
         }
-        let c = self.c(net);
+        let pr = rb.profile(net);
+        let c = pr.c;
+        let scoped = rb.scoped.on;
+        let mine: Vec<(P, P, St)> = if scoped { rb.pieces(pr, layer, a, b, hw) } else { vec![(a, b, St::default())] };
         let bit = 1u64 << layer.min(63);
         let q = BoxF::of2(a, b).expand(hw + self.reach);
         for (id, it) in self.index.query(&q) {
@@ -458,9 +501,12 @@ impl<'a> World<'a> {
                     {
                         continue;
                     }
-                    let req = hw + ob.clear.with(c);
-                    if ob.bbox.expand(req).intersects(&BoxF::of2(a, b)) && ob.shape.dist_seg(a, b) < req - TOL {
-                        out.push((Hit::Static(o), req));
+                    for &(pa, pb, st) in &mine {
+                        let req = hw + self.cob(net, st, ob);
+                        if ob.bbox.expand(req).intersects(&BoxF::of2(pa, pb)) && ob.shape.dist_seg(pa, pb) < req - TOL {
+                            out.push((Hit::Static(o), req));
+                            break;
+                        }
                     }
                 }
                 Item::Seg { net: m, layer: l, a: p, b: q } => {
@@ -468,9 +514,21 @@ impl<'a> World<'a> {
                         continue;
                     }
                     let Some(Owner::Seg(li)) = self.owner.get(&id) else { continue };
-                    let req = hw + self.lines[*li].hw + c.max(self.c(m));
-                    if seg_seg_dist(a, b, p, q) < req - TOL {
-                        out.push((Hit::Line(*li), req));
+                    let lhw = self.lines[*li].hw;
+                    if !scoped {
+                        let req = hw + lhw + c.max(rb.profile(m).c);
+                        if seg_seg_dist(a, b, p, q) < req - TOL {
+                            out.push((Hit::Line(*li), req));
+                        }
+                        continue;
+                    }
+                    let theirs = rb.st_seg(rb.profile(m), layer, p, q, lhw);
+                    for &(pa, pb, st) in &mine {
+                        let req = hw + lhw + self.cc(net, st, m, theirs);
+                        if seg_seg_dist(pa, pb, p, q) < req - TOL {
+                            out.push((Hit::Line(*li), req));
+                            break;
+                        }
                     }
                 }
                 Item::Sized { .. } => {} // widened tracks: final pass only
@@ -479,9 +537,14 @@ impl<'a> World<'a> {
                         continue;
                     }
                     let Some(Owner::Via(vi)) = self.owner.get(&id) else { continue };
-                    let req = hw + self.vias[*vi].rv + c.max(self.c(m));
-                    if point_seg_d2(at, a, b).sqrt() < req - TOL {
-                        out.push((Hit::Via(*vi), req));
+                    let v = &self.vias[*vi];
+                    let sv = self.via_st(*vi);
+                    for &(pa, pb, st) in &mine {
+                        let req = hw + rb.scoped.via_out(v.rv, v.dr, self.cc(net, st, m, sv));
+                        if point_seg_d2(at, pa, pb).sqrt() < req - TOL {
+                            out.push((Hit::Via(*vi), req));
+                            break;
+                        }
                     }
                 }
             }
@@ -501,7 +564,7 @@ impl<'a> World<'a> {
         if !rb.inside(at) {
             out.push((Hit::Outside, 0.0));
         }
-        let c = self.c(net);
+        let st = self.via_st(vi);
         for (hi, h) in rb.holes.iter().enumerate() {
             if h.via.is_some_and(|id| self.moving_holes.contains(&id)) {
                 continue;
@@ -525,18 +588,20 @@ impl<'a> World<'a> {
                     let own = ob.net == Some(net);
                     let req = match ob.kind {
                         ObKind::Pad | ObKind::Copper if own => continue,
-                        _ => rv + ob.clear.with(c),
+                        _ => rb.scoped.via_out(rv, dr, self.cob(net, st, ob)),
                     };
                     if ob.shape.dist_point(at) < req - TOL {
                         out.push((Hit::Static(o), req));
                     }
                 }
-                Item::Seg { net: m, a, b, .. } => {
+                Item::Seg { net: m, layer, a, b } => {
                     if m == net {
                         continue;
                     }
                     let Some(Owner::Seg(li)) = self.owner.get(&id) else { continue };
-                    let req = rv + self.lines[*li].hw + c.max(self.c(m));
+                    let lhw = self.lines[*li].hw;
+                    let theirs = rb.st_seg(rb.profile(m), layer as usize, a, b, lhw);
+                    let req = rb.scoped.via_out(rv, dr, self.cc(net, st, m, theirs)) + lhw;
                     if point_seg_d2(at, a, b).sqrt() < req - TOL {
                         out.push((Hit::Line(*li), req));
                     }
@@ -545,8 +610,11 @@ impl<'a> World<'a> {
                 Item::Via { net: m, at: o } => {
                     let Some(Owner::Via(wj)) = self.owner.get(&id) else { continue };
                     let w = &self.vias[*wj];
-                    let holes = dr + w.dr + rb.h2h;
-                    let req = if m == net { holes } else { holes.max(rv + w.rv + c.max(self.c(m))) };
+                    let req = if m == net {
+                        dr + w.dr + rb.h2h
+                    } else {
+                        rb.scoped.via_via((rv, dr), (w.rv, w.dr), self.cc(net, st, m, self.via_st(*wj)), rb.h2h)
+                    };
                     if at.dist(o) < req - TOL {
                         out.push((Hit::Via(*wj), req));
                     }
@@ -588,11 +656,12 @@ impl<'a> World<'a> {
 
     /// The hull of `h` for an item of `net` with radius `r` (half width or via radius).
     fn hull_of(&self, h: Hit, r: f64, net: u32) -> Option<Vec<P>> {
-        let c = self.c(net);
+        let reach = r + self.rb.max_clear() + self.rb.scoped.hc;
         match h {
             Hit::Static(o) => {
                 let ob = &self.rb.obstacles[o as usize];
-                Some(hull_shape(&ob.shape, r + ob.clear.with(c) + MARGIN))
+                let st = self.near(net, &ob.bbox.expand(reach));
+                Some(hull_shape(&ob.shape, r + self.cob(net, st, ob) + MARGIN))
             }
             Hit::Hole(hi) => {
                 let hole = &self.rb.holes[hi as usize];
@@ -600,11 +669,18 @@ impl<'a> World<'a> {
             }
             Hit::Line(li) => {
                 let l = &self.lines[li];
-                Some(octagon_hull_pts(&l.pts, r + l.hw + c.max(self.c(l.net)) + MARGIN))
+                let mut bb = BoxF::EMPTY;
+                for q in &l.pts {
+                    bb.add(*q);
+                }
+                let c = self.cc(net, self.near(net, &bb.expand(l.hw + reach)), l.net, self.line_st(li));
+                Some(octagon_hull_pts(&l.pts, r + l.hw + c + MARGIN))
             }
             Hit::Via(vi) => {
                 let v = &self.vias[vi];
-                Some(octagon_hull(v.at, v.at, r + v.rv + c.max(self.c(v.net)) + MARGIN))
+                let near = self.near(net, &BoxF::of2(v.at, v.at).expand(v.rv + reach));
+                let c = self.cc(net, near, v.net, self.via_st(vi));
+                Some(octagon_hull(v.at, v.at, r + self.rb.scoped.via_out(v.rv, v.dr, c) + MARGIN))
             }
             Hit::Outside => None,
         }
@@ -879,7 +955,7 @@ impl World<'_> {
         match h {
             Hit::Line(lj) => {
                 let o = &self.lines[lj];
-                let d = l.hw + o.hw + self.c(l.net).max(self.c(o.net)) + MARGIN;
+                let d = l.hw + o.hw + self.cc(l.net, self.line_st(li), o.net, self.line_st(lj)) + MARGIN;
                 let (a, b) = (l.pts[si], l.pts[(si + 1).min(l.pts.len() - 1)]);
                 // The segments of `o` that come too close to `a`–`b`.
                 let near: Vec<usize> = (0..o.pts.len().saturating_sub(1))
@@ -1009,7 +1085,8 @@ impl World<'_> {
                                 // The pusher's segments near `lj`'s segment.
                                 let me = &self.lines[li];
                                 let o = &self.lines[lj];
-                                let d = me.hw + o.hw + self.c(me.net).max(self.c(o.net)) + MARGIN;
+                                let d =
+                                    me.hw + o.hw + self.cc(me.net, self.line_st(li), o.net, self.line_st(lj)) + MARGIN;
                                 let (a, bb) = (o.pts[sj], o.pts[(sj + 1).min(o.pts.len() - 1)]);
                                 let near: Vec<usize> = (0..me.pts.len().saturating_sub(1))
                                     .filter(|&k| seg_seg_dist(a, bb, me.pts[k], me.pts[k + 1]) < d - TOL)
@@ -1020,7 +1097,8 @@ impl World<'_> {
                             Body::Via(vi) => {
                                 let v = &self.vias[vi];
                                 let o = &self.lines[lj];
-                                octagon_hull(v.at, v.at, v.rv + o.hw + self.c(v.net).max(self.c(o.net)) + MARGIN)
+                                let c = self.cc(v.net, self.via_st(vi), o.net, self.line_st(lj));
+                                octagon_hull(v.at, v.at, self.rb.scoped.via_out(v.rv, v.dr, c) + o.hw + MARGIN)
                             }
                         };
                         let pts = self.lines[lj].pts.clone();
@@ -1040,7 +1118,8 @@ impl World<'_> {
                         Body::Line(li) => {
                             let me = &self.lines[li];
                             let v = &self.vias[vj];
-                            let d = me.hw + v.rv + self.c(me.net).max(self.c(v.net)) + MARGIN;
+                            let c = self.cc(me.net, self.line_st(li), v.net, self.via_st(vj));
+                            let d = me.hw + self.rb.scoped.via_out(v.rv, v.dr, c) + MARGIN;
                             let s = si.min(me.pts.len().saturating_sub(2));
                             let (a, bb) = (me.pts[s], me.pts[(s + 1).min(me.pts.len() - 1)]);
                             octagon_hull(a, bb, d)
@@ -1048,8 +1127,8 @@ impl World<'_> {
                         Body::Via(vi) => {
                             let me = &self.vias[vi];
                             let v = &self.vias[vj];
-                            let holes = me.dr + v.dr + self.rb.h2h;
-                            let d = holes.max(me.rv + v.rv + self.c(me.net).max(self.c(v.net))) + MARGIN;
+                            let c = self.cc(me.net, self.via_st(vi), v.net, self.via_st(vj));
+                            let d = self.rb.scoped.via_via((me.rv, me.dr), (v.rv, v.dr), c, self.rb.h2h) + MARGIN;
                             octagon_hull(me.at, me.at, d)
                         }
                     };
@@ -1074,13 +1153,17 @@ impl World<'_> {
             let hull = match h {
                 Hit::Line(lj) => {
                     let o = &self.lines[lj];
-                    octagon_hull_pts(&o.pts, v.rv + o.hw + self.c(v.net).max(self.c(o.net)) + MARGIN)
+                    let c = self.cc(v.net, self.via_st(vi), o.net, self.line_st(lj));
+                    octagon_hull_pts(&o.pts, self.rb.scoped.via_out(v.rv, v.dr, c) + o.hw + MARGIN)
                 }
                 Hit::Via(vj) => {
                     let o = &self.vias[vj];
-                    let holes = v.dr + o.dr + self.rb.h2h;
-                    let req =
-                        if o.net == v.net { holes } else { holes.max(v.rv + o.rv + self.c(v.net).max(self.c(o.net))) };
+                    let req = if o.net == v.net {
+                        v.dr + o.dr + self.rb.h2h
+                    } else {
+                        let c = self.cc(v.net, self.via_st(vi), o.net, self.via_st(vj));
+                        self.rb.scoped.via_via((v.rv, v.dr), (o.rv, o.dr), c, self.rb.h2h)
+                    };
                     octagon_hull(o.at, o.at, req + MARGIN)
                 }
                 Hit::Hole(hi) => {
@@ -1089,7 +1172,8 @@ impl World<'_> {
                 }
                 Hit::Static(o) => {
                     let ob = &self.rb.obstacles[o as usize];
-                    hull_shape(&ob.shape, v.rv + ob.clear.with(self.c(v.net)) + MARGIN)
+                    let c = self.cob(v.net, self.via_st(vi), ob);
+                    hull_shape(&ob.shape, self.rb.scoped.via_out(v.rv, v.dr, c) + MARGIN)
                 }
                 Hit::Outside => return Err(self.fail(h, v.at, None, FailWhy::Stuck)),
             };
@@ -1303,20 +1387,22 @@ pub(crate) fn run(
             out.moved_nets.insert(l.net);
         }
         for s in l.pts.windows(2) {
-            let (a, b) = (s[0].to_point(), s[1].to_point());
-            if a == b {
+            if s[0].to_point() == s[1].to_point() {
                 continue;
             }
-            out.tracks.push(Track {
-                id: ObjectId(0),
-                layer: names[l.layer].clone(),
-                width: l.width,
-                net: Some(rb.nets[l.net as usize].clone()),
-                start: a,
-                end: b,
-                mid: None,
-                locked: false,
-            });
+            // Split where the scoped rules change.
+            for (a, b) in rb.split_track(l.layer, s[0], s[1], l.hw) {
+                out.tracks.push(Track {
+                    id: ObjectId(0),
+                    layer: names[l.layer].clone(),
+                    width: l.width,
+                    net: Some(rb.nets[l.net as usize].clone()),
+                    start: a,
+                    end: b,
+                    mid: None,
+                    locked: false,
+                });
+            }
         }
     }
     for vi in (first_head_via..w.vias.len()).chain(0..first_head_via) {

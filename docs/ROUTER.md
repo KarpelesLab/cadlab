@@ -61,6 +61,26 @@ other-net pads, tracks and vias with the larger of both nets' clearances, board 
 `hole_to_hole`. Zone fills are not obstacles: they are refilled around the new copper. Net classes give each net
 a *profile* (track width, clearance, via drill and diameter).
 
+**Scoped rules** (`scoped`, D61). The router keeps the clearance the DRC computes for each pair of items
+(`board::clearance`): the last custom rule holding either item (rules between two scopes included), else the
+larger local clearance, else the larger net clearance, never under `min_clearance`. Existing copper gets its
+rules exactly. For new copper they depend on where it is, so every rule scope that can hold a track or via (its
+kinds, layer, courtyards, areas) is a *condition*, and new copper has a state per condition: surely held (a track
+centerline 1 µm inside a courtyard, 5 µm plus its half width inside an area for "entirely inside"), surely not
+(1 µm beyond its own reach), or maybe (the band between, or the uncertainty of where the copper is: a grid sample
+covers every point of a move through it). The clearance used is the largest the DRC could resolve for any
+combination of the maybes, so it is never too small. The grid's static maps and halos read a state raster per
+layer (and per via cell); exact checks (`index`, gridless, post-processing, push-and-shove) split each segment into
+pieces of uniform state (bisection to 20 nm) and check each piece. The DRC decides per item, and a track crossing
+a boundary would be decided as a whole (one that merely reaches into a courtyard is held everywhere, one partly
+outside an area nowhere), so routed tracks are split where their state changes: every output track is held
+uniformly and decided as the router assumed. Plated holes keep `hole_clearance` from other nets' copper (D56):
+holes of pads and existing vias are obstacles at that distance, and a new via keeps the larger of its pad plus the
+clearance and its drill plus the hole clearance. Fanout heuristics (rings left to the router, fine-pitch rows,
+neck-down widths, never under a track width rule that may hold the neck) use the clearance in effect near the pad.
+Without custom clearance rules, local clearances or a hole clearance every value is the classes' as before (the
+benchmark baseline is identical).
+
 **Grid.** Pitch = (track width + clearance) / 2 of the finest routed profile (option `grid` overrides), so two
 parallel tracks fit at two cells. When the pad pitch most fine-pitch rows share (at least 8 pads of multi-pin
 parts, no track between neighbors) is `2m` times a pitch at most 6 % coarser, the grid takes that pitch instead:
@@ -330,7 +350,12 @@ between its two nets where it is smaller than the clearance.
    by distance, at most 10 mm apart): an *end*. Ends are joined by a minimum spanning tree over their
    midpoints (Kruskal; an edge is taken only when it joins new islands of both nets), so both nets get the same
    topology. Ends on one component (an ESD array whose lines pass through it, pins 1/6 and 3/4) are joined
-   first by a straight *flow-through* link per net. Pads without a partner (a pull-up on one net) are left to
+   first by a straight *flow-through* link per net, and such a part sits in the signal path: its two sides join
+   the ends of two other parts (the pair of links shortest together), not one side hanging off the part beside
+   it on a branch because the receptacle is closer to the MCU than to the array's far side. When a connection then
+   fails because the nets would swap sides (polarity), the outside ends join the other sides (the pair goes
+   through the part the other way) and the pair is routed again; the result with fewer failures is kept.
+   Pads without a partner (a pull-up on one net) are left to
    the ordinary router and counted in the report (`left`, `route.diffpair_left` note), and so are
    *interleaved* contacts of one part, whose straight link is blocked by a pad of the other net (a USB-C
    receptacle's two rows, D− D+ D− D+): the ordinary router joins them with a via or a loop (D53).
@@ -452,6 +477,11 @@ its gap and skew. Results are identical for 1 and 4 threads.
 - Through vias only; no blind/buried vias, no via-in-pad (dog bones only).
 - Neck-down is per net: a necked net routes at its neck width everywhere and is widened afterwards where the
   class width fits, so a long run between two fine-pitch parts can stay narrow. Only dog bones get smaller vias.
+- Scoped rules: near a boundary (within the copper's reach, or a grid move's span) the larger of the clearances
+  on both sides applies; the grid pitch follows the net classes, not the rules; custom track width rules bound
+  neck-down widths only (a class width under a rule's width elsewhere is left to the DRC); copper moved by
+  push-and-shove and gridless rooms take the largest clearance any copper near an obstacle could need. More than
+  64 positional conditions are "maybe" everywhere.
 - The gridless search is region-limited (its rooms cover the connection or the net with a margin, not the whole
   board) and its probe-based rip-up is limited to 8 nets per failed connection; `gridless` alone negotiates less
   well and much slower than the grid on grid-friendly boards (see the benchmarks), so `auto` is the default. Its
@@ -740,12 +770,36 @@ before and after):
 | cynthion | 4 | 693 | 96.0% | 96.1% | negotiation converges no further (4–6 nets in conflict for its last 20 iterations); what fails is around the ECP5 BGA and 8 resistor-array pads |
 | tinytapeout-demo | 4 | 359 → 351 | 81.1% | **83.2%** | no longer budget-bound (negotiation done at 16 s instead of 45 s) |
 
-What is left, by cause: the QFN-80 and the carrier connector J5 of tinytapeout-demo (45 of its 59 failures: pads of
-the 0.25 mm-clearance Power/Analog classes are only legal under the board's custom rules scoped to the QFN's
-courtyard, 0.16 mm for tracks, which the router does not apply: it routes with the net class clearance, so it
-finds no way out), budget (glasgow-revD1 still ends negotiation after about 9 iterations with overuse left;
-iterations are bound by the batches, about two nets each, so the threads hardly help), cynthion's BGA and
-resistor arrays, congestion on the small nrfmicro around its USB-C receptacle, and the split keyboard (sweep).
+What was left then, by cause: the QFN-80 and the carrier connector J5 of tinytapeout-demo (45 of its 59 failures:
+pads of the 0.25 mm-clearance Power/Analog classes are only legal under the board's custom rules scoped to the
+QFN's courtyard, 0.16 mm for tracks, which the router did not apply), budget (glasgow-revD1 still ends negotiation
+after about 9 iterations with overuse left; iterations are bound by the batches, about two nets each, so the
+threads hardly help), cynthion's BGA and resistor arrays, congestion on the small nrfmicro around its USB-C
+receptacle, and the split keyboard (sweep).
+
+**Corpus re-route, D61** (scoped rules; same command, *before* the version before D61 and *after* this one, run
+side by side on a shared, loaded 64-core Linux machine: boards that end on the budget move by a few connections
+from run to run, and on tinytapeout-demo two runs of the same build gave 93.7 % and 95.3 %):
+
+| board | layers | connections | before | after | DRC errors before → after | main change |
+|---|---|---|---|---|---|---|
+| nrfmicro | 2 | 85 | 97.6% | 97.6% | 0 → 0 | 6 vias fewer |
+| buspirate-flash-sop | 2 | 47 | 100% | 100% | 0 → 0 | |
+| buspirate-rs232 | 2 | 43 | 100% | 100% | 0 → 0 | |
+| buspirate5-rev10 | 4 | 479 | 99.6% | **100%** | 0 → 0 | |
+| lumenpnp-ringlight | 2 | 37 | 100% | 100% | 0 → 0 | |
+| lumenpnp-mobo | 4 | 461 | 99.3% | 99.1% | 0 → 0 | one more congestion failure |
+| sweep-v2.2 | 2 | 47 | 93.6% | 93.6% | 0 → 0 | |
+| corne-cherry | 2 | 431 | 98.6% | 97.7% | 0 → 0 | budget-bound now (local clearances and hole clearance change the negotiation; with both ignored it routes exactly as before) |
+| glasgow-revC3 | 4 | 740 → 739 | 93.0% | **94.9%** | **1 → 0** | hole clearance kept: before, 26–28 connections were ripped by the DRC (`drc.hole_clearance`, dog-bone vias at 0.2 mm from other nets' tracks, 0.25 mm asked) and one error stayed |
+| glasgow-revD1 | 6 | 1619 → 1628 | 93.5% | 93.1% | **22 → 0** | hole clearance kept (22 fanout vias too close to other nets' pads before); budget-bound |
+| cynthion | 4 | 693 | 96.1% | 96.0% | 0 → 0 | budget-bound |
+| tinytapeout-demo | 4 | 351 → 364 | 83.2% | **93.7–95.3%** | 0 → 0 | the QFN-80's and J5's pads get out under the custom rules (0.16 mm in their courtyards, 0.18 mm for the QFN's pads): 124 escapes; 8–10 QFN pads are still walled in by their neighbors' escapes |
+
+The ROUTER.md D57 numbers (corne-cherry 99.1 %, glasgow-revC3 97.3 %) came from an idle machine; on this one the
+budget-bound boards end lower before and after alike. What is left: the QFN-80 pads without an escape on
+tinytapeout-demo (greedy escape planning, as corne-cherry's before D57), budget (glasgow, cynthion, corne), the
+split keyboard (sweep) and congestion near nrfmicro's receptacle.
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).

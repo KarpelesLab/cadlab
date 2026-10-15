@@ -57,6 +57,7 @@ mod model;
 mod pairs;
 mod post;
 mod rooms;
+mod scoped;
 mod shove;
 mod tune;
 
@@ -1005,6 +1006,7 @@ fn soften(rb: &mut RouterBoard, soft: Soft) {
             vias.insert(*id);
         }
         ob.clear = Clear::Fixed(0.0);
+        ob.item = None;
         if soft == Soft::Centerline
             && let geo::Shape::Capsule { r, .. } = &mut ob.shape
         {
@@ -2103,18 +2105,22 @@ fn fanout_items(
     let mut escapes = fanout::escape(&rb, &routes, slots, &grid, &mut index, only, &open, &cross);
     escapes.splice(0..0, cross.exits);
     let (first, last) = (rb.layer_names[0].clone(), rb.layer_names[rb.layer_names.len() - 1].clone());
-    let track = |net: u32, layer: usize, a: P, b: P| {
+    // Split where the scoped rules change (see `RouterBoard::split_track`).
+    let track = |net: u32, layer: usize, a: P, b: P| -> Vec<Track> {
         let key = rb.profile(net).key;
-        Track {
-            id: ObjectId(0),
-            layer: rb.layer_names[layer].clone(),
-            width: key.width,
-            net: Some(rb.nets[net as usize].clone()),
-            start: a.to_point(),
-            end: b.to_point(),
-            mid: None,
-            locked: false,
-        }
+        rb.split_track(layer, a, b, key.width.0 as f64 / 2.0)
+            .into_iter()
+            .map(|(s, e)| Track {
+                id: ObjectId(0),
+                layer: rb.layer_names[layer].clone(),
+                width: key.width,
+                net: Some(rb.nets[net as usize].clone()),
+                start: s,
+                end: e,
+                mid: None,
+                locked: false,
+            })
+            .collect()
     };
     let mut out: Vec<FanItem> = bones
         .into_iter()
@@ -2133,7 +2139,7 @@ fn fanout_items(
                 locked: false,
             };
             FanItem {
-                tracks: vec![track(b.net, b.layer, b.pad, b.via)],
+                tracks: track(b.net, b.layer, b.pad, b.via),
                 via: Some(via),
                 label: b.label,
                 escape: None,
@@ -2142,7 +2148,7 @@ fn fanout_items(
         })
         .collect();
     for e in escapes {
-        let tracks = e.pts.windows(2).map(|w| track(e.net, e.layer, w[0], w[1])).collect();
+        let tracks = e.pts.windows(2).flat_map(|w| track(e.net, e.layer, w[0], w[1])).collect();
         out.push(FanItem { tracks, via: None, label: e.label, escape: Some((e.layer, e.pts)), tracks_net: None });
     }
     Ok(out)
@@ -2211,6 +2217,14 @@ fn apply_necks(rb: &mut RouterBoard, routes: &mut [NetRoute], slots: &[usize]) {
 /// Largest extra distance a check adds beyond an item's own extent.
 pub(crate) fn reach(rb: &RouterBoard) -> f64 {
     let mut r = rb.rules.copper_to_edge.0 as f64;
+    if rb.scoped.on || rb.scoped.hc > 0.0 {
+        // Scoped rules: any rule's clearance, and holes keeping the hole clearance.
+        let c = rb.max_clear();
+        for p in &rb.profiles {
+            r = r.max(c + p.hw).max(rb.via_out(p, c)).max(rb.h2h + 2.0 * p.dr);
+        }
+        return r.max(c) + 2.0 * index::TOL;
+    }
     for p in &rb.profiles {
         r = r.max(p.c + p.hw.max(p.rv)).max(rb.h2h + 2.0 * p.dr);
     }
@@ -2292,7 +2306,7 @@ fn snap_pitch(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> Option<f64> {
                 dy - (a.max.y - a.min.y) / 2.0 - (b.max.y - b.min.y) / 2.0
             };
             let pr = rb.profile(term.net);
-            if gap < 2.0 * pr.hw + 2.0 * pr.c {
+            if gap < 2.0 * pr.hw + 2.0 * rb.c_pad_near(t) {
                 *count.entry((d / 1_000.0).round() as i64).or_default() += 1;
             }
         }
@@ -2489,18 +2503,26 @@ fn build_items(p: &Project, rb: &RouterBoard, routes: &[NetRoute], geoms: &[post
                 }
                 let mid = path.mids.get(k).copied().flatten().map(P::to_point);
                 let width = path.widths.get(k).copied().flatten().map_or(key.width, |h| Nm((2.0 * h).round() as i64));
-                let id: ObjectId = alloc.alloc_id();
-                out.owner.insert(("track".into(), id.0), (ri, path.wire));
-                out.tracks.push(Track {
-                    id,
-                    layer: rb.layer_names[path.layer].clone(),
-                    width,
-                    net: net.clone(),
-                    start: a,
-                    end: b,
-                    mid,
-                    locked: false,
-                });
+                // Straight tracks are split where the scoped rules change.
+                let pieces = if mid.is_some() {
+                    vec![(a, b)]
+                } else {
+                    rb.split_track(path.layer, w[0], w[1], width.0 as f64 / 2.0)
+                };
+                for (s, e) in pieces {
+                    let id: ObjectId = alloc.alloc_id();
+                    out.owner.insert(("track".into(), id.0), (ri, path.wire));
+                    out.tracks.push(Track {
+                        id,
+                        layer: rb.layer_names[path.layer].clone(),
+                        width,
+                        net: net.clone(),
+                        start: s,
+                        end: e,
+                        mid,
+                        locked: false,
+                    });
+                }
             }
         }
         for (v, wi) in &g.vias {

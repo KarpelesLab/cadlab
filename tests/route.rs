@@ -1021,3 +1021,80 @@ fn usb_c_crossover_routes() {
     assert!(o["output"]["stats"]["fanout_vias"].as_u64().unwrap() >= 1, "{o}");
     assert_eq!(drc_errors(&s), Vec::<String>::new());
 }
+
+/// Scoped clearance rules (D57's open item): a QFN-40 at 0.4 mm pitch with a 0.25 mm class
+/// clearance leaves no way out of its pads, not even necked down to the 0.2 mm minimum width;
+/// custom rules allowing 0.15 mm for the QFN's pads and for tracks in its courtyard (as on
+/// tinytapeout-demo) let the router out, and the result is DRC-clean under the full rule set.
+#[test]
+fn scoped_rules_let_tracks_out_of_a_fine_pitch_qfn() {
+    let r = Registry::with_builtins();
+    let mut results = Vec::new();
+    for rules in [false, true] {
+        let mut s = Session::new();
+        let _d = new_project(&r, &mut s);
+        qfn_neck_board(&r, &mut s);
+        exec(
+            &r,
+            &mut s,
+            "board.rules",
+            json!({"track_width": "0.2mm", "clearance": "0.25mm", "min_clearance": "0.1mm"}),
+        );
+        if rules {
+            exec(
+                &r,
+                &mut s,
+                "board.custom_rule",
+                json!({"name": "qfn tracks", "in_courtyard": "U1", "kinds": ["track", "via"], "clearance": "0.15mm"}),
+            );
+            exec(
+                &r,
+                &mut s,
+                "board.custom_rule",
+                json!({"name": "qfn pads", "kinds": ["pad"], "footprint": "U1", "clearance": "0.15mm"}),
+            );
+        }
+        let o = exec(&r, &mut s, "route.all", json!({"seed": 1}));
+        report(&format!("qfn40 scoped rules={rules}"), &o, 0);
+        let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+        assert_eq!(errors, Vec::<String>::new(), "rules={rules}");
+        assert_eq!(o["output"]["stats"]["drc_removed"], 0, "rules={rules}: {}", o["output"]["stats"]);
+        results.push(completion(&o));
+    }
+    assert!(results[0] < 20.0, "the class clearance walls the pads in: {results:?}");
+    assert!(results[1] >= 70.0, "the scoped rules let them out: {results:?}");
+}
+
+/// A scoped rule asking for more than the class (a high-voltage area, entirely-inside scope)
+/// and the board's hole clearance from plated holes: the router keeps both, so the DRC removes
+/// nothing; tracks crossing the area's boundary are split there, so the DRC decides each piece
+/// as the router did.
+#[test]
+fn scoped_rules_asking_for_more_are_kept() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    generated_board(&r, &mut s, 3, 2, 2, 7);
+    exec(&r, &mut s, "board.rules", json!({"hole_clearance": "0.35mm"}));
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "hv", "outline": {"rect": {"from": ["0mm", "0mm"], "to": ["24mm", "40mm"]}}, "rule_area": true}),
+    );
+    exec(&r, &mut s, "board.custom_rule", json!({"name": "hv", "in_area": "hv", "clearance": "0.4mm"}));
+    let o = exec(&r, &mut s, "route.all", json!({"seed": 1}));
+    report("scoped rules asking for more", &o, 0);
+    let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+    assert_eq!(errors, Vec::<String>::new());
+    assert_eq!(o["output"]["stats"]["drc_removed"], 0, "{}", o["output"]["stats"]);
+    assert!(completion(&o) >= 90.0, "{}", o["output"]["stats"]);
+    assert!(o["output"]["stats"]["vias"].as_u64().unwrap() > 0, "vias keep the hole clearance");
+    // Tracks are split at the area's boundary: none reaches from well inside to well outside.
+    let b = s.project.as_ref().unwrap().board();
+    let x = |p: cadlab::Point| p.x.0 as f64 / 1e6;
+    assert!(
+        b.tracks.iter().all(|t| !(x(t.start).min(x(t.end)) < 23.0 && x(t.start).max(x(t.end)) > 25.0)),
+        "a track crosses the area's boundary unsplit"
+    );
+}

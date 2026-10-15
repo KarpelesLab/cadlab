@@ -18,8 +18,8 @@
 //!    unevenness ([`Windows`]) drops: a side of the board the constructive placement left
 //!    empty gets the groups that cost least to move there, and a stretch that overshot comes
 //!    back towards its connections. The central IC's group and the groups holding ends of
-//!    differential pairs stay (the pair's routing depends on where its ends are relative to
-//!    each other).
+//!    differential pairs stay (the arrangement of a pair's ends, an ESD array between the
+//!    receptacle and the MCU, stays the one the constructive placement chose).
 //!
 //! Groups at an edge (a connector, a part with an edge hint) stay at it, facing it no worse. A
 //! move that does not fit (another part, the outline, a keep-out, a pair's breakout) is
@@ -306,7 +306,7 @@ pub(super) fn relax_groups(
 }
 
 /// Whether part `i` is an end of a differential pair (pads of both nets): such groups keep the
-/// relative places the constructive placement gave them, which the pair's routing depends on.
+/// arrangement the constructive placement gave them in the group moves.
 pub(super) fn pair_end(e: &Engine, i: usize) -> bool {
     let nets: Vec<&str> = e.parts[i].pads.iter().filter_map(|(_, n)| n.map(|n| e.net_names[n].as_str())).collect();
     e.p.circuit().diffpairs.values().any(|d| nets.contains(&d.p.as_str()) && nets.contains(&d.n.as_str()))

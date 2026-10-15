@@ -192,6 +192,40 @@ impl<'a> Scope<'a> {
     }
 }
 
+/// The terms of a rule scope that decide whether it holds a new track or via (the router's
+/// view of a scope, `router` module): kinds, layer and the positional terms, with the
+/// courtyards and areas they name. A track or via is in the scope when every term set holds.
+pub struct Placement {
+    /// Item kinds (empty: any).
+    pub kinds: Vec<ItemKind>,
+    /// Copper layer.
+    pub layer: Option<String>,
+    /// The scope names footprints: it never holds a track or via.
+    pub never: bool,
+    /// `in_courtyard`: the courtyards (reached into by more than the tolerance), outer rings.
+    pub courtyards: Option<Vec<Ring>>,
+    /// `in_area`: the areas (entirely inside one of them).
+    pub areas: Option<Vec<Ring>>,
+    /// `touches_area`: the areas (reached into by more than the tolerance).
+    pub touched: Option<Vec<Ring>>,
+}
+
+/// How a rule scope can hold new tracks and vias (see [`Placement`]).
+pub fn placement(p: &Project, scope: &RuleScope) -> Placement {
+    let s = Scope::new(p, scope);
+    Placement {
+        kinds: scope.kinds.clone(),
+        layer: scope.layer.clone(),
+        never: scope.footprint.is_some(),
+        courtyards: scope.in_courtyard.as_ref().map(|_| s.courtyards.iter().map(|c| c.outer.clone()).collect()),
+        areas: scope.in_area.as_ref().map(|_| s.areas.clone()),
+        touched: scope.touches_area.as_ref().map(|_| s.touched.iter().map(|c| c.outer.clone()).collect()),
+    }
+}
+
+/// How far copper must reach into a courtyard or an area to be in it (the DRC's tolerance).
+pub const REACH_TOL: Nm = Nm(REACH);
+
 /// Whether a scope can hold zone fills (its kinds allow them).
 fn may_hold_zones(s: &RuleScope) -> bool {
     s.kinds.is_empty() || s.kinds.contains(&ItemKind::Zone)
@@ -364,6 +398,35 @@ impl Clearances {
             },
         };
         (v.max(self.floor), rule.map(|r| r.0))
+    }
+
+    /// Net (class) clearance of item `i`.
+    pub fn class(&self, i: usize) -> Nm {
+        self.class[i]
+    }
+
+    /// Local clearance of item `i`.
+    pub fn local(&self, i: usize) -> Option<Nm> {
+        self.local[i]
+    }
+
+    /// The last custom rule without `with` (rule index, clearance) holding item `i`.
+    pub fn rule(&self, i: usize) -> Option<(usize, Nm)> {
+        self.rule[i]
+    }
+
+    /// The rules between two scopes (with a clearance) whose `scope`, and those whose `with`,
+    /// hold item `i` (rule indices, ascending).
+    pub fn paired_sides(&self, i: usize) -> (&[u32], &[u32]) {
+        match &self.paired {
+            Some(pr) => (&pr.a[i], &pr.b[i]),
+            None => (&[], &[]),
+        }
+    }
+
+    /// The board's `min_clearance`, below which no clearance goes.
+    pub fn floor(&self) -> Nm {
+        self.floor
     }
 
     /// The largest clearance any pair could need (for spatial search margins).

@@ -1181,6 +1181,44 @@ KiCad's alone, far below any fab's resolution.
 the fab makes, and the island pairing states what an open connection is (two islands), not which ends a tool
 prints.
 
+### D61. Router applies scoped custom rules, local clearances and hole clearance; flow-through pair parts in series (2026-10-15)
+The router now keeps the clearance the DRC resolves for each pair of items (`board::clearance`: last custom rule
+holding either item, pair scopes included, else the larger local clearance, else the larger class clearance, never
+under `min_clearance`), where it used the net classes only. Existing copper gets its rules exactly. New copper's
+rules depend on where it is, so every rule scope that can hold a track or via becomes a condition (kinds, layer,
+courtyards and areas as polygons) and new copper has a state per condition — surely held, surely not, or maybe
+(the band of its own reach around a boundary, 1 µm margins; 5 µm for "entirely inside", whose DRC test uses the
+copper's polygon) — as two bitsets (`router::scoped`); the clearance used is the largest any combination of the
+maybes resolves to. The grid reads per-layer state rasters whose samples cover every point of a move through them;
+exact checks split segments into pieces of uniform state (bisection to 20 nm). Because the DRC decides a whole
+item (a track merely reaching into a courtyard is held everywhere, one partly outside an area nowhere), routed
+tracks are split where their state changes (main router, fanout, pairs, push-and-shove), so each output track is
+held uniformly and decided as assumed. Plated holes of pads and existing vias keep `hole_clearance` from other
+nets' copper (D56 added the check, not the router side: glasgow lost 26–28 connections per run to it and kept up
+to 22 errors from fanout vias), and a new via keeps the larger of pad + clearance and drill + hole clearance.
+Fanout heuristics use the clearance in effect near the pad, and neck-down widths never go under a track width
+rule that may hold them. With no custom clearance rule, local clearance or hole clearance every value is the
+classes' as before: the generated-board baseline is identical. Tried and dropped: a grid pitch from the smallest
+rule clearance (no gain on a QFN test board, twice the time) and an escape spacing using the per-point states
+(more escapes too close together: tinytapeout-demo fell 2 points). Corpus: tinytapeout-demo 83.2 % → 93.7–95.3 %,
+glasgow-revC3 93.0 → 94.9 %, buspirate5-rev10 99.6 → 100 %, glasgow DRC errors 1 and 22 → 0; corne-cherry
+98.6 → 97.7 % (it is budget-bound and its local clearances change the negotiation; ignoring them reproduces the
+old result exactly, but that result relied on clearances the DRC does not apply).
+**Pairs.** The "polarity" failure D55 worked around by holding pair ends still in improvement had two causes: the
+pair's spanning tree hung a flow-through ESD array off the receptacle–MCU link when those two were closer to each
+other than to its far side (a stub through the array), or joined a side that makes the nets cross; and an end part
+moved by improvement could bring its breakout onto a passive. A flow-through part (not interleaved contacts) now
+sits in series: its two sides first join the ends of two other parts (the shortest such pair), and when a
+connection fails on polarity the outside ends swap sides and the pair is routed again (kept when fewer fail).
+Placement checks a moving pair end's breakout areas against the passives, as passives are checked against them.
+The improvement hold is removed; spread's group moves still keep pair-end groups in place (removing that too
+leaves session 3's ESD array mirrored past the MCU, and an unrelated net then fails to route: an arrangement
+choice, not the router's fragility). A focused test moves the receptacle through 21 positions (12 failed before).
+*Why:* boards carry their design rules as custom rules scoped to parts and areas (tinytapeout's QFN-80 is routable
+only under them), and a router that is more or less permissive than the DRC either fails connections the design
+allows or has its work ripped up afterwards; a conservative band at boundaries plus splitting the output keeps the
+two in agreement without a geometric model of every rule term.
+
 ## Open questions
 
 

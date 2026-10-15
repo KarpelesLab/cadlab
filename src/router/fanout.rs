@@ -146,7 +146,7 @@ pub(crate) fn plan(
             }
             let pr = rb.profile(term.net);
             let gap = arr.pitch.0.min(arr.pitch.1) - pad_size;
-            let free_rings = if gap >= 2.0 * pr.hw + 2.0 * pr.c { 2 } else { 1 };
+            let free_rings = if gap >= 2.0 * pr.hw + 2.0 * rb.c_pad_near(t) { 2 } else { 1 };
             if ring < free_rings {
                 continue;
             }
@@ -282,7 +282,8 @@ pub(crate) fn crossovers(
                 }
                 // Boxed: no track passes between the pad and either neighbor.
                 let pr = rb.profile(x);
-                if gap(k - 1, k) >= 2.0 * pr.hw + 2.0 * pr.c || gap(k, k + 1) >= 2.0 * pr.hw + 2.0 * pr.c {
+                let c = rb.c_pad_near(t);
+                if gap(k - 1, k) >= 2.0 * pr.hw + 2.0 * c || gap(k, k + 1) >= 2.0 * pr.hw + 2.0 * c {
                     continue;
                 }
                 // Tightly interleaved (X Y X Y): the next pad but one is X's (another island),
@@ -369,7 +370,7 @@ fn grid_access(rb: &RouterBoard, index: &Index, grid: &Grid, t: usize, layer: us
     let Some((x0, y0, x1, y1)) = grid.crange(&term.shape.bbox().expand(1.6 * grid.g)) else { return false };
     // The cell itself as the grid samples it: with the sampling margin of its static maps.
     let pr = rb.profile(term.net);
-    let margin = delta(pr.hw + pr.c, grid.g * std::f64::consts::SQRT_2 / 2.0);
+    let margin = delta(pr.hw + pr.c.min(rb.c_pad_near(t)), grid.g * std::f64::consts::SQRT_2 / 2.0);
     (y0..=y1).any(|y| {
         (x0..=x1).any(|x| {
             let c = grid.cell(x, y);
@@ -397,7 +398,8 @@ fn partner_exit(
     let lat = P::new(-axis.y, axis.x);
     let off = (term.at.x - end.x) * lat.x + (term.at.y - end.y) * lat.y;
     let u = if off >= 0.0 { lat } else { P::new(-lat.x, -lat.y) };
-    let need = (pn.hw + pr.hw.max(pr.rv) + pr.c.max(pn.c) + 2.0 * TOL - off.abs()).max(0.0);
+    let c = rb.c_nets_near(t, nn);
+    let need = (pn.hw + pr.hw.max(pr.rv) + c + 2.0 * TOL - off.abs()).max(0.0);
     let steps = (CROSS_DEPTH / CROSS_STEP).round() as i64;
     for i in 0..=steps {
         let t0 = i as f64 * CROSS_STEP;
@@ -499,7 +501,7 @@ fn neighbor_exit(
     let lat = P::new(-axis.y, axis.x);
     let off = (term.at.x - from.x) * lat.x + (term.at.y - from.y) * lat.y;
     let u = if off >= 0.0 { lat } else { P::new(-lat.x, -lat.y) };
-    let need = (rv + pr.hw + pr.c + 2.0 * TOL - off.abs()).max(0.0);
+    let need = (rv + pr.hw + rb.c_tracks_near(t) + 2.0 * TOL - off.abs()).max(0.0);
     let base = (term.at.x - from.x) * axis.x + (term.at.y - from.y) * axis.y;
     let end = depth - base;
     let mut t0 = 0.0;
@@ -605,13 +607,14 @@ pub(crate) fn escape(
             // Fine pitch: the nearest pad of the component leaves no room for a track.
             let nearest =
                 terms.iter().filter(|&&o| o != t).map(|&o| rb.terminals[o].at.dist(term.at)).fold(f64::MAX, f64::min);
-            if nearest - lat_size >= 2.0 * pr.hw + 2.0 * pr.c {
+            let c = rb.c_pad_near(t);
+            if nearest - lat_size >= 2.0 * pr.hw + 2.0 * c {
                 continue;
             }
             // Too far from a grid line for a track along it to clear the neighbors.
             let u = if axis.x != 0.0 { term.at.y - grid.oy } else { term.at.x - grid.ox };
             let off = u.rem_euclid(g);
-            needed |= nearest - lat_size / 2.0 - pr.hw - off.min(g - off) < pr.c + TOL;
+            needed |= nearest - lat_size / 2.0 - pr.hw - off.min(g - off) < c + TOL;
             if off.min(g - off) >= 1_000.0 {
                 fine.push((t, layer, axis, half_len, lat));
             }
@@ -735,7 +738,17 @@ fn apart(rb: &RouterBoard, grid: &Grid, o: &Escape, net: u32, layer: usize, pts:
         return true;
     }
     let (a, b) = (rb.profile(net), rb.profile(o.net));
-    let r = a.hw + b.hw + a.c.max(b.c);
+    let c = if rb.scoped.on {
+        let mut bb = BoxF::EMPTY;
+        for q in pts.iter().chain(&o.pts) {
+            bb.add(*q);
+        }
+        let st = rb.st_track_box(a, &[layer], &bb.expand(a.hw.max(b.hw) + grid.g));
+        rb.c_cu(a, st, b, st)
+    } else {
+        a.c.max(b.c)
+    };
+    let r = a.hw + b.hw + c;
     let r = r + delta(r, grid.g * std::f64::consts::SQRT_2 / 2.0) + 2.0 * TOL;
     let clear = |cell: P, segs: &[P]| segs.windows(2).all(|s| point_seg_d2(cell, s[0], s[1]) >= r * r);
     clear(*pts.last().expect("end"), &o.pts) && clear(*o.pts.last().expect("end"), pts)
@@ -843,7 +856,9 @@ pub(crate) fn necks(rb: &RouterBoard, index: &Index, slots: &[usize], nets: &[u3
             // the finest grid such a width can give (pitch (w + c) / 2 ≤ half the pad pitch)
             // and the router's tolerances.
             let margin = delta(pitch, pitch * std::f64::consts::SQRT_2 / 4.0) + 3.0 * TOL;
-            let cap = (pitch - pr.c - 2.0 * TOL - margin).min(2.0 * pr.hw).max(min_w);
+            // The narrowest width the rules allow here (custom track width rules too).
+            let min_w = min_w.max(rb.min_width_near(t));
+            let cap = (pitch - rb.c_tracks_near(t) - 2.0 * TOL - margin).min(2.0 * pr.hw).max(min_w);
             let mut w = (cap / NECK_STEP).floor() * NECK_STEP;
             if w >= 2.0 * pr.hw {
                 w -= NECK_STEP;

@@ -528,3 +528,46 @@ fn pair_length_follows_the_signal_path_and_reports_stubs() {
     let len = mm(&o["output"]["status"]["members"][0]["length"]);
     assert!(len < mm(&pr["length_p"]) - 5.0, "the group's ends apply to its pair: {len}");
 }
+
+/// The pair routes coupled wherever the receptacle sits around the ESD array (D55 noted a
+/// "polarity" failure with the connector a few mm closer to it): the flow-through array stays
+/// in the signal path (its two sides join the receptacle and the MCU, also when the MCU is
+/// closer to the receptacle than to the array's far side), and a side that would make the pair
+/// cross takes the other way through the array.
+#[test]
+fn pair_routes_wherever_the_receptacle_sits() {
+    let r = Registry::with_builtins();
+    let mut failed = Vec::new();
+    // (x, y, rotation): the header (seven pins, 2.54 mm) upright left of the array, then lying
+    // along the bottom and top edges.
+    #[rustfmt::skip]
+    let spots = [(2, 12, 0), (4, 12, 0), (6, 12, 0), (8, 12, 0), (10, 12, 0), (3, 10, 0), (5, 14, 0),
+        (10, 3, 90), (14, 3, 90), (18, 3, 90), (22, 3, 90), (26, 3, 90), (12, 21, 90), (20, 21, 90), (24, 21, 270),
+        (37, 12, 0), (37, 12, 180), (30, 3, 90), (30, 21, 90), (16, 21, 270), (16, 3, 270)];
+    for (x, y, rot) in spots {
+        let mut s = Session::new();
+        let _d = new_project(&r, &mut s);
+        usb_board(&r, &mut s);
+        exec(
+            &r,
+            &mut s,
+            "place.set",
+            json!({"refdes": "J1", "at": [format!("{x}mm"), format!("{y}mm")], "rotation": rot}),
+        );
+        exec(&r, &mut s, "diffpair.add", json!({"p": "USB_DP", "n": "USB_DM"}));
+        let o = exec(&r, &mut s, "route.diffpair", json!({}));
+        let pr = &o["output"]["pairs"][0];
+        if pr["status"] != "routed" {
+            failed.push(format!("J1 at ({x}, {y}, {rot}): {}", pr["failures"]));
+            continue;
+        }
+        assert_eq!(drc_errors(&s), Vec::<String>::new(), "J1 at ({x}, {y})");
+        // The array is in the path: receptacle to MCU through it, no stub on its far side.
+        let l = exec(&r, &mut s, "diffpair.list", json!({}));
+        let path = &l["output"]["pairs"][0]["path_p"];
+        if !path["stubs"].as_array().is_none_or(|a| a.is_empty()) {
+            failed.push(format!("J1 at ({x}, {y}, {rot}): stub {path}"));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}

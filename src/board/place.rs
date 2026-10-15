@@ -299,6 +299,11 @@ struct Engine<'a> {
     /// Breakout areas of differential pairs in front of their pins (per side), kept free of
     /// passives: a pull-up on D+ placed at its pin blocks the pair's way out.
     pair_zones: Vec<(BoardSide, Rect)>,
+    /// The differential pairs' (positive, negative) net indices.
+    pair_nets: Vec<(usize, usize)>,
+    /// Parts (not passives) with pads of both nets of a pair: ends whose breakouts move with
+    /// them.
+    pair_end: Vec<bool>,
     /// Spreading (`place.auto` default). The packed placement (`compact`) keeps D50's rules
     /// exactly: connectors are not turned to face their edge, and passives are assigned as then.
     spread: bool,
@@ -474,6 +479,23 @@ impl<'a> Engine<'a> {
         let fb = polyclip::Geometry::bbox(&top);
         let center = fb.map(|r| Point::new(Nm((r.min.x + r.max.x) / 2), Nm((r.min.y + r.max.y) / 2)));
         let n = parts.len();
+        let pair_nets: Vec<(usize, usize)> = {
+            let net_index: BTreeMap<&str, usize> = net_names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+            p.circuit()
+                .diffpairs
+                .values()
+                .filter_map(|d| Some((*net_index.get(d.p.as_str())?, *net_index.get(d.n.as_str())?)))
+                .collect()
+        };
+        let pair_end: Vec<bool> = parts
+            .iter()
+            .map(|part| {
+                part.kind != Kind::Passive
+                    && pair_nets.iter().any(|&(a, b)| {
+                        part.pads.iter().any(|x| x.1 == Some(a)) && part.pads.iter().any(|x| x.1 == Some(b))
+                    })
+            })
+            .collect();
         Ok(Engine {
             p,
             gap,
@@ -491,6 +513,8 @@ impl<'a> Engine<'a> {
             rooms: vec![None; n],
             crowd: (Vec::new(), 0.0),
             pair_zones: Vec::new(),
+            pair_nets,
+            pair_end,
             spread: silk, // the same flag: spread placement also boxes silkscreen
         })
     }
@@ -571,13 +595,30 @@ impl<'a> Engine<'a> {
         s
     }
 
-    /// Whether part `i` fits at `pose`: inside the allowed area, clear of the other parts.
+    /// Whether part `i` fits at `pose`: inside the allowed area, clear of the other parts; a
+    /// passive clear of the differential pairs' breakouts, and an end of a pair (moving) with
+    /// its breakouts clear of the passives.
     fn valid(&self, i: usize, pose: &Pose) -> bool {
         let r = self.parts[i].rect(pose);
         if self.parts[i].kind == Kind::Passive
             && self.pair_zones.iter().any(|(side, z)| *side == pose.side && !r.clear_of(z, 0))
         {
             return false;
+        }
+        if self.pair_end[i] && self.poses[i].is_some_and(|q| q != *pose) {
+            let zones = part_zones(self, i, pose);
+            for (side, z) in &zones {
+                for (j, q) in self.poses.iter().enumerate() {
+                    if let Some(q) = q
+                        && j != i
+                        && self.parts[j].kind == Kind::Passive
+                        && q.side == *side
+                        && !self.parts[j].rect(q).clear_of(z, 0)
+                    {
+                        return false;
+                    }
+                }
+            }
         }
         for (j, q) in self.poses.iter().enumerate() {
             if j == i {
@@ -713,16 +754,56 @@ const PAIR_BREAKOUT: i64 = 2_500_000;
 /// Largest distance between the two pins of a pair end on one part.
 const PAIR_END: i64 = 2_000_000;
 
+/// The breakout areas (see [`pair_zones`]) of part `i` (not a passive) at `pose`.
+fn part_zones(e: &Engine, i: usize, pose: &Pose) -> Vec<(BoardSide, Rect)> {
+    let part = &e.parts[i];
+    let mut out = Vec::new();
+    for &(np, nn) in &e.pair_nets {
+        let pick = |net: usize| -> Vec<Point> {
+            part.pads.iter().enumerate().filter(|(_, x)| x.1 == Some(net)).map(|(k, _)| part.pad_at(pose, k)).collect()
+        };
+        let (pp, pn) = (pick(np), pick(nn));
+        if pp.is_empty() || pn.is_empty() {
+            continue;
+        }
+        end_zones(part.rect(pose).center(), pose.side, &pp, &pn, &mut out);
+    }
+    out
+}
+
+/// The breakout areas of the pair ends among pads `pp` (positive) and `pn` (negative) of a part
+/// centered at `center`.
+fn end_zones(center: Point, side: BoardSide, pp: &[Point], pn: &[Point], out: &mut Vec<(BoardSide, Rect)>) {
+    for &a in pp {
+        let Some(b) = pn
+            .iter()
+            .copied()
+            .filter(|b| dist(a, *b) <= PAIR_END as f64)
+            .min_by(|x, y| dist(a, *x).total_cmp(&dist(a, *y)).then(x.cmp(y)))
+        else {
+            continue;
+        };
+        let mid = Point::new(Nm((a.x.0 + b.x.0) / 2), Nm((a.y.0 + b.y.0) / 2));
+        let (dx, dy) = (mid.x.0 - center.x.0, mid.y.0 - center.y.0);
+        let mut z = Rect::of([a, b]).expect("two points").expand(500_000);
+        if dx.abs() >= dy.abs() {
+            if dx >= 0 { z.x1 += PAIR_BREAKOUT } else { z.x0 -= PAIR_BREAKOUT }
+        } else if dy >= 0 {
+            z.y1 += PAIR_BREAKOUT;
+        } else {
+            z.y0 -= PAIR_BREAKOUT;
+        }
+        out.push((side, z));
+    }
+}
+
 /// Breakout areas of the differential pairs on the anchors placed so far (and the footprints
 /// that stay): for each part with pads of both nets close together (an end), the box of the
 /// two pads (grown by 0.5 mm) stretched `PAIR_BREAKOUT` away from the part's center, along
 /// the axis the pads face.
 fn pair_zones(e: &Engine) -> Vec<(BoardSide, Rect)> {
-    let c = e.p.circuit();
-    let net_index: BTreeMap<&str, usize> = e.net_names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
     let mut out = Vec::new();
-    for d in c.diffpairs.values() {
-        let (Some(&np), Some(&nn)) = (net_index.get(d.p.as_str()), net_index.get(d.n.as_str())) else { continue };
+    for &(np, nn) in &e.pair_nets {
         // (part center, side, positive pads, negative pads) per part.
         let mut parts: Vec<(Point, BoardSide, Vec<Point>, Vec<Point>)> = Vec::new();
         for (i, part) in e.parts.iter().enumerate() {
@@ -753,27 +834,7 @@ fn pair_zones(e: &Engine) -> Vec<(BoardSide, Rect)> {
             }
         }
         for (center, side, pp, pn) in parts {
-            for &a in &pp {
-                let Some(b) = pn
-                    .iter()
-                    .copied()
-                    .filter(|b| dist(a, *b) <= PAIR_END as f64)
-                    .min_by(|x, y| dist(a, *x).total_cmp(&dist(a, *y)).then(x.cmp(y)))
-                else {
-                    continue;
-                };
-                let mid = Point::new(Nm((a.x.0 + b.x.0) / 2), Nm((a.y.0 + b.y.0) / 2));
-                let (dx, dy) = (mid.x.0 - center.x.0, mid.y.0 - center.y.0);
-                let mut z = Rect::of([a, b]).expect("two points").expand(500_000);
-                if dx.abs() >= dy.abs() {
-                    if dx >= 0 { z.x1 += PAIR_BREAKOUT } else { z.x0 -= PAIR_BREAKOUT }
-                } else if dy >= 0 {
-                    z.y1 += PAIR_BREAKOUT;
-                } else {
-                    z.y0 -= PAIR_BREAKOUT;
-                }
-                out.push((side, z));
-            }
+            end_zones(center, side, &pp, &pn, &mut out);
         }
     }
     out
@@ -1430,12 +1491,11 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
 fn improve(e: &mut Engine, passes: usize) {
     const EPS: f64 = 1_000.0;
     let n = e.parts.len();
-    // Spreading: the ends of differential pairs keep their places relative to each other (the
-    // pair's breakouts depend on them; the spread steps keep them too).
-    let held: Vec<bool> = (0..n).map(|i| e.spread && spread::pair_end(e, i)).collect();
+    // The ends of differential pairs move too: a move keeps their breakouts clear of passives
+    // (`valid`), and the pair router takes them wherever they end up.
     for _ in 0..passes {
         let mut improved = false;
-        for i in (0..n).filter(|&i| !held[i]) {
+        for i in 0..n {
             let Some(cur) = e.poses[i] else { continue };
             let nets = e.part_nets[i].clone();
             let before = e.local_cost(&[i], &nets) + e.crowding(i, &cur);
@@ -1486,9 +1546,7 @@ fn improve(e: &mut Engine, passes: usize) {
             for j in i + 1..n {
                 let (Some(a), Some(b)) = (e.poses[i], e.poses[j]) else { continue };
                 // Parts with different edge hints keep their edges.
-                if held[i]
-                    || held[j]
-                    || e.parts[i].footprint != e.parts[j].footprint
+                if e.parts[i].footprint != e.parts[j].footprint
                     || a.side != b.side
                     || e.parts[i].edge != e.parts[j].edge
                 {

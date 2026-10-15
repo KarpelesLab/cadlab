@@ -7,9 +7,12 @@
 //! this exact: if two samples `s` apart are both at least `r + δ` from an obstacle, with
 //! `δ = √(r² + s²/4) − r`, every point of the segment between them is at least `r` away.
 
+use std::collections::BTreeMap;
+
 use super::geo::{BoxF, P};
 use super::index::TOL;
 use super::model::{ObKind, RouterBoard};
+use super::scoped::St;
 
 /// Map state: nothing near.
 pub(crate) const FREE: u32 = 0;
@@ -125,6 +128,60 @@ pub(crate) struct Statics {
     pub track: Vec<Vec<Vec<u32>>>,
     /// `[profile][cell index]`.
     pub via: Vec<Vec<u32>>,
+    /// Scoped rules: the state of new tracks near each double-grid point (`[slot][index]`,
+    /// into `states`), covering every point of a grid move through it; empty without
+    /// positional rules (every state is the default).
+    pub tst: Vec<Vec<u16>>,
+    /// The state of a via on each cell.
+    pub vst: Vec<u16>,
+    /// The distinct states.
+    pub states: Vec<St>,
+}
+
+/// State rasters of the scoped rules (see [`Statics::tst`]).
+fn state_rasters(
+    rb: &RouterBoard,
+    grid: &Grid,
+    slots: &[usize],
+    active: &[bool],
+) -> (Vec<Vec<u16>>, Vec<u16>, Vec<St>) {
+    if !rb.scoped.positional() {
+        return (vec![], vec![], vec![St::default()]);
+    }
+    let act = || rb.profiles.iter().zip(active).filter(|(_, a)| **a).map(|(p, _)| p);
+    let hw = act().map(|p| p.hw).fold(0.0, f64::max);
+    let rv = act().map(|p| p.rv).fold(0.0, f64::max);
+    let inner = act().map(|p| p.inner).fold(0.0, f64::max);
+    // A move spans one sample spacing: every point of a move is within that of a sample.
+    let slack = grid.g * std::f64::consts::SQRT_2 / 2.0 + inner;
+    let mut ids: BTreeMap<St, u16> = BTreeMap::new();
+    ids.insert(St::default(), 0);
+    let mut states = vec![St::default()];
+    let mut intern = |st: St| -> u16 {
+        *ids.entry(st).or_insert_with(|| {
+            states.push(st);
+            (states.len() - 1) as u16
+        })
+    };
+    let tst = slots
+        .iter()
+        .map(|&layer| {
+            let mut v = Vec::with_capacity((grid.dw() * grid.dh()) as usize);
+            for j in 0..grid.dh() {
+                for i in 0..grid.dw() {
+                    v.push(intern(rb.scoped.st(super::scoped::Kind::Track, layer, grid.dpt(i, j), slack, hw)));
+                }
+            }
+            v
+        })
+        .collect();
+    let mut vst = Vec::with_capacity(grid.cells());
+    for y in 0..grid.h {
+        for x in 0..grid.w {
+            vst.push(intern(rb.scoped.st(super::scoped::Kind::Via, 0, grid.cell(x, y), 0.0, rv)));
+        }
+    }
+    (tst, vst, states)
 }
 
 /// Inside-board mask on the double grid (scanline over the outline rings, even-odd).
@@ -164,6 +221,8 @@ impl Statics {
     pub fn build(rb: &RouterBoard, grid: &Grid, slots: &[usize], active: &[bool]) -> Statics {
         let inside = inside_mask(rb, grid);
         let s_diag = grid.g * std::f64::consts::SQRT_2 / 2.0;
+        let (tst, vst, states) = state_rasters(rb, grid, slots, active);
+        let scoped = rb.scoped.on;
         let mut track = Vec::new();
         let mut via = Vec::new();
         for (pi, pr) in rb.profiles.iter().enumerate() {
@@ -173,16 +232,30 @@ impl Statics {
                 continue;
             }
             let mut per_slot = Vec::new();
-            for &layer in slots {
+            // Per state, the clearance to the current obstacle (NaN: not computed yet).
+            let mut cache: Vec<f64> = vec![f64::NAN; states.len()];
+            for (si, &layer) in slots.iter().enumerate() {
                 let bit = 1u64 << layer.min(63);
                 let mut m: Vec<u32> = inside.iter().map(|&i| if i { FREE } else { BLOCKED }).collect();
                 for ob in &rb.obstacles {
                     if ob.tracks & bit == 0 {
                         continue;
                     }
-                    let r = pr.hw + ob.clear.with(pr.c);
-                    let reach = r + delta(r, s_diag) - TOL;
                     let owned = if matches!(ob.kind, ObKind::Pad | ObKind::Copper) { ob.net } else { None };
+                    // Clearance per point when it depends on the state of the copper there.
+                    let varies = scoped && ob.item.is_some() && !tst.is_empty();
+                    let r_of = |c: f64| {
+                        let r = pr.hw + c;
+                        r + delta(r, s_diag) - TOL
+                    };
+                    let hi = if varies {
+                        cache.iter_mut().for_each(|c| *c = f64::NAN);
+                        let nb = ob.bbox.expand(pr.hw + rb.max_clear() + s_diag);
+                        rb.c_ob(pr, rb.scoped.st_box(super::scoped::Kind::Track, &[layer], &nb, pr.hw), ob)
+                    } else {
+                        rb.c_ob(pr, St::default(), ob)
+                    };
+                    let reach = r_of(hi);
                     let Some((i0, j0, i1, j1)) = grid.drange(&ob.bbox.expand(reach)) else { continue };
                     for j in j0..=j1 {
                         for i in i0..=i1 {
@@ -191,6 +264,15 @@ impl Statics {
                             if st == BLOCKED || owned.is_some_and(|n| st == n + 1) {
                                 continue;
                             }
+                            let reach = if varies {
+                                let sid = tst[si][k] as usize;
+                                if cache[sid].is_nan() {
+                                    cache[sid] = r_of(rb.c_ob(pr, states[sid], ob));
+                                }
+                                cache[sid]
+                            } else {
+                                reach
+                            };
                             if ob.shape.dist_point(grid.dpt(i, j)) < reach {
                                 m[k] = combine(st, owned);
                             }
@@ -207,7 +289,14 @@ impl Statics {
                 .collect();
             for ob in rb.obstacles.iter().filter(|o| o.vias) {
                 let owned = if matches!(ob.kind, ObKind::Pad | ObKind::Copper) { ob.net } else { None };
-                let req = pr.rv + ob.clear.with(pr.c) - TOL;
+                let varies = scoped && ob.item.is_some() && !vst.is_empty();
+                let hi = if varies {
+                    let nb = ob.bbox.expand(rb.via_out(pr, rb.max_clear()));
+                    rb.c_ob(pr, rb.scoped.st_box(super::scoped::Kind::Via, &[], &nb, pr.rv), ob)
+                } else {
+                    rb.c_ob(pr, St::default(), ob)
+                };
+                let req = rb.via_out(pr, hi) - TOL;
                 let Some((x0, y0, x1, y1)) = grid.crange(&ob.bbox.expand(req)) else { continue };
                 for y in y0..=y1 {
                     for x in x0..=x1 {
@@ -216,6 +305,8 @@ impl Statics {
                         if st == BLOCKED {
                             continue;
                         }
+                        let req =
+                            if varies { rb.via_out(pr, rb.c_ob(pr, states[vst[k] as usize], ob)) - TOL } else { req };
                         let d = ob.shape.dist_point(grid.cell(x, y));
                         if ob.kind == ObKind::Pad && d < pr.rv - TOL {
                             v[k] = BLOCKED; // no via in pad
@@ -238,6 +329,6 @@ impl Statics {
             }
             via.push(v);
         }
-        Statics { track, via }
+        Statics { track, via, tst, vst, states }
     }
 }
