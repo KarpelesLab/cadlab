@@ -3,7 +3,7 @@
   "steps": {
     "Project::load": 7.9,
     "base_copper_items": 18.0,
-    "board.export_kicad": 30.2,
+    "board.export_kicad": 1630.0,
     "board.ratsnest (fills cached)": 86.3,
     "copper_items (with fill)": 1313.1,
     "drc.run (fills cached)": 221.1,

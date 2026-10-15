@@ -545,7 +545,7 @@ zone fill cache cleared before each run, i.e. what a fresh CLI process sees); `t
 | `drc::check` (with fill) / fills cached | 8797 / ~6600 ms | 1587 / 206 ms | 1170 / 199 ms | 317 / 175 ms |
 | `render.board` PNG (with fill) / fills cached | 6331 / ~4100 ms | 1854 / 431 ms | 1363 / 429 ms | 392 / 251 ms |
 | `export.gerber` (with fill) / fills cached | 2505 / ~300 ms | 1569 / 167 ms | 1131 / 159 ms | 308 / 146 ms |
-| `board.export_kicad` | 62 ms | 27 ms | 30 ms | 31 ms |
+| `board.export_kicad` | 62 ms | 27 ms | 30 ms | 31 ms (with the zone fills it writes since D62: one fill, ~1.6 s at one thread) |
 | `render.schematic` (layout + PNG, 5 sheets) | 1492 ms | 1538 ms | (unchanged code) | 866 ms |
 | `place.auto` (all 528 parts, `replace`) | | 182 s | 39 s | |
 

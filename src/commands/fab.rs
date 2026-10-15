@@ -298,15 +298,18 @@ fn run_check(
     Ok((report, pr))
 }
 
-/// Output directory of a fab: `dir` (relative to the project), default `out/fab/<fab>`.
-/// `path` relative to the project directory when it lies inside it, else as given.
+/// `path` relative to the project directory when it lies inside it (with `/` separators on every
+/// OS, so outputs are the same everywhere), else as given.
 pub(crate) fn project_relative(ctx: &Context<'_>, path: &Path) -> String {
     match ctx.session.root().and_then(|root| path.strip_prefix(root).ok()) {
-        Some(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+        Some(rel) if !rel.as_os_str().is_empty() => {
+            rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+        }
         _ => path.display().to_string(),
     }
 }
 
+/// Output directory of a fab: `dir` (relative to the project), default `out/fab/<fab>`.
 pub(crate) fn out_dir(ctx: &Context<'_>, fab: &str, dir: Option<&Path>) -> PathBuf {
     let rel = dir.map(Path::to_path_buf).unwrap_or_else(|| Path::new("out/fab").join(fab));
     match ctx.session.root() {
