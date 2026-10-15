@@ -290,4 +290,6 @@ Research-sized items beyond the milestones above; none blocks a release.
   `describe`, KiCad footprint names, `footprint.create`). Session 3 done (STM32 USB device on 4 layers with a
   90 Ω pair, buck, flash; JLCPCB bundle and STEP; D53), replayed by `tests/agent_session3.rs`; its open items
   fixed (D55: signal-path lengths with stubs reported, spread placement over the whole board, fab stackups
-  listed).
+  listed). Session 4 done through the MCP server (KiCad migration of the lumenpnp ring light: netlist and
+  board import, package swap, power LED, mounting hole, reroute, DRC with waivers, JLCPCB and PCBWay bundles,
+  KiCad re-export; D58), replayed by `tests/agent_session4.rs`.

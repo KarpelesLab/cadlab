@@ -95,6 +95,12 @@ impl Command for Board {
         let nets: Vec<&str> = p.circuit().nets.keys().map(String::as_str).collect();
         let mut highlight = Vec::new();
         for h in &self.highlight {
+            // Subjects as findings print them work too: `net:GND`, `U1.3` (the component).
+            let h = h.strip_prefix("net:").filter(|n| nets.contains(n)).unwrap_or(h);
+            let h = &match h.split_once('.') {
+                Some((r, _)) if !nets.contains(&h) && board.footprints.contains_key(r) => r.to_string(),
+                _ => h.to_string(),
+            };
             if board.footprints.contains_key(h) || nets.contains(&h.as_str()) {
                 highlight.push(h.clone());
             } else {
@@ -104,7 +110,7 @@ impl Command for Board {
                     format!("`{h}` is neither a net nor a placed component"),
                 )
                 .with_suggestions(&did_you_mean(h, cands, 3))
-                .with_hint("highlight takes net names (GND) or designators of placed components (U1)"));
+                .with_hint("highlight takes net names (GND or net:GND) or designators of placed components (U1)"));
             }
         }
         let side = self.realistic.map(|r| match r {

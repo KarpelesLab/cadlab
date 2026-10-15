@@ -56,7 +56,8 @@ Project
 │   ├── stackup     layers, thicknesses, materials, copper weights, board spec (finish/color preferences)
 │   ├── outline     edge cuts, cutouts, slots
 │   ├── rules       design rules (engineering intent, fab-independent), per net class overrides; solder
-│   │               mask expansion and minimum web, paste margins; custom rules for parts of the board
+│   │               mask expansion and minimum web, paste margins; custom rules for parts of the board;
+│   │               DRC waivers (findings accepted on purpose, with a reason)
 │   ├── footprints  component placement: position, rotation, side, locked
 │   ├── tracks      segments and arcs: layer, width, net
 │   ├── vias        position, drill, pad, layer span (through/blind/buried/micro)

@@ -208,7 +208,13 @@ fn report_outcome(g: &Globals, o: &Outcome) -> u8 {
         }
         print_diagnostics(&o.diagnostics);
     }
-    if o.diagnostics.iter().any(|d| d.severity == Severity::Error) { exit::CHECKS_FAILED } else { exit::OK }
+    // A DRC that lists only some findings (`--codes`, `--limit`) still fails on the others.
+    let unlisted_errors = o.command == "drc.run" && o.output.get("errors").and_then(Value::as_u64).unwrap_or(0) > 0;
+    if unlisted_errors || o.diagnostics.iter().any(|d| d.severity == Severity::Error) {
+        exit::CHECKS_FAILED
+    } else {
+        exit::OK
+    }
 }
 
 fn report_failure(g: &Globals, f: &Failure) -> u8 {

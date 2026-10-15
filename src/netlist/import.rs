@@ -11,7 +11,7 @@
 //!   value and footprint name give a spec (`R 10k 0402`), and everything else gets a part built
 //!   from the netlist (pins, names and types from the `libparts` section, footprint generated when
 //!   the footprint name is a package cadlab knows, MPN and manufacturer from fields). Parts left
-//!   without a footprint are placeholders, reported per component (`import.placeholder_part`).
+//!   without a footprint are placeholders, reported once per part (`import.placeholder_part`).
 //! - **Nets** keep their names, without KiCad's root sheet prefix (`/LED` → `LED`; sub-sheet
 //!   paths stay, `/power/VIN` → `power/VIN`). Single-pin `unconnected-(...)` nets, which KiCad
 //!   writes for every unconnected pin, are skipped. Net classes are kept when the project
@@ -260,6 +260,11 @@ const MPN_FIELDS: &[&str] = &[
     "mfg part number",
     "mfg_pn",
     "part number",
+    "part #",
+    "part#",
+    "mfr part #",
+    "mfg part #",
+    "manufacturer part #",
 ];
 
 /// Field names holding the manufacturer (case-insensitive).
@@ -789,6 +794,9 @@ pub fn import(
         }
     }
     let mut group_parts: BTreeMap<GroupKey, (String, Resolution, bool)> = BTreeMap::new();
+    // Groups of symbols without pins (fiducials, logos, mounting holes without a pad): their
+    // components' one pin is marked no-connect.
+    let mut pinless: BTreeSet<GroupKey> = BTreeSet::new();
     for (key, members) in &groups {
         let c = members[0].1;
         let mut pins: BTreeMap<String, Pin> = BTreeMap::new();
@@ -802,39 +810,25 @@ pub fn import(
         if pins.is_empty() {
             // A symbol without pins (logo, mounting hole without pad): give it nothing to connect.
             pins.push(Pin::new("1", "", PinKind::Passive));
+            pinless.insert(key.clone());
         }
         let made = create_part(p, key, c, libpart(c), pins, opts, &mut diags);
         group_parts.insert(key.clone(), made);
     }
 
-    // Components.
+    // Components. Placeholders are reported once per part, with all its components.
     let mut used: BTreeMap<(String, Resolution, bool), Vec<String>> = BTreeMap::new();
+    let mut placeholders: BTreeMap<String, (Vec<String>, &NetlistComponent, Category)> = BTreeMap::new();
     for (r, c, pend) in resolved {
         let (id, how, created) = match pend {
             Pending::Part(id, how, created) => (id, how, created),
             Pending::Group(k) => {
                 let (id, how, created) = group_parts[&k].clone();
                 if how == Resolution::Placeholder {
-                    let why = match &c.footprint {
-                        Some(f) => {
-                            format!("its footprint `{f}` is not in the project and is no package cadlab can generate")
-                        }
-                        None => "the netlist gives no footprint".to_string(),
-                    };
-                    let generic = generic_prefix(k.category)
-                        .map(|g| format!("`bom.replace {id} \"{g} <value> <package>\"` (a generic part), or "))
-                        .unwrap_or_default();
-                    diags.push(
-                        Diagnostic::warning(
-                            "import.placeholder_part",
-                            format!("`{r}` (value `{}`) matched no library part and {why}; it uses the placeholder part `{id}`, which has no footprint", c.value),
-                        )
-                        .with_subject(ObjectRef::Name(r.clone()))
-                        .with_subject(ObjectRef::Part { scheme: "local".into(), id: id.clone() })
-                        .with_hint(format!(
-                            "replace it: {generic}`part.create` (MPN, pins, package) then `bom.replace {id} <new part>`; or give it a footprint: `footprint.generate` (package name or dimensions), then `part.set {id} --footprint <name>`"
-                        )),
-                    );
+                    placeholders.entry(id.clone()).or_insert_with(|| (Vec::new(), c, k.category)).0.push(r.clone());
+                }
+                if pinless.contains(&k) {
+                    p.circuit_mut().no_connect.insert(PinRef::new(r.clone(), "1"));
                 }
                 (id, how, created)
             }
@@ -852,6 +846,36 @@ pub fn import(
             p.bom_mut().dnp.insert(r.clone());
         }
         used.entry((id, how, created)).or_default().push(r);
+    }
+    for (id, (mut refs, c, category)) in placeholders {
+        refs.sort_by(|a, b| natural_cmp(a, b));
+        let why = match &c.footprint {
+            Some(f) => format!("footprint `{f}` is not in the project and is no package cadlab can generate"),
+            None => "the netlist gives no footprint".to_string(),
+        };
+        let who = if refs.len() == 1 {
+            format!("`{}` (value `{}`) matches", refs[0], c.value)
+        } else {
+            format!("{} components ({}, value `{}`) match", refs.len(), refs.join(", "), c.value)
+        };
+        let generic = generic_prefix(category)
+            .map(|g| format!("`bom.replace {id} \"{g} <value> <package>\"` (a generic part), or "))
+            .unwrap_or_default();
+        let board = if c.footprint.is_some() {
+            "importing the KiCad board (`board.import_kicad`) adds the footprints it uses and gives them to these parts; otherwise "
+        } else {
+            ""
+        };
+        let mut d = Diagnostic::warning(
+            "import.placeholder_part",
+            format!("{who} no library part and its {why}; placeholder part `{id}` (no footprint yet)"),
+        );
+        for r in &refs {
+            d = d.with_subject(ObjectRef::Name(r.clone()));
+        }
+        diags.push(d.with_subject(ObjectRef::Part { scheme: "local".into(), id: id.clone() }).with_hint(format!(
+            "{board}replace it: {generic}`part.create` (MPN, pins, package) then `bom.replace {id} <new part>`; or give it a footprint: `footprint.generate` (package name or dimensions), then `part.set {id} --footprint <name>`"
+        )));
     }
     report.components = comps.len();
     // One entry per part. A part created by this import and found again by later components

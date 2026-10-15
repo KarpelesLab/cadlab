@@ -1079,6 +1079,39 @@ crossover a topological constraint that one via resolves, and the budget went to
 proven cheaply; each change is exact or checked exactly, so DRC stays clean and the benchmark baseline did not
 move. corne-cherry 91.8 % → 99.1 %, glasgow-revD1 92.5 % → 93.7 %, tinytapeout-demo 81.1 % → 83.2 % (ROUTER.md).
 
+### D58. MCP agent session 4: hints with JSON arguments, structured server errors, DRC filters and waivers, KiCad migration fixes (2026-10-15)
+Session 4 (docs/TESTING.md) migrated a KiCad project through the MCP server only. What it changed:
+**MCP surface.** Hints stay written once, CLI-style (`net.set +5V --driven`): the server rewrites every
+backticked command span of a hint into `group.action {json args}` by parsing it with the CLI's own clap
+mapping (positionals, flags, lists, points), so an MCP client can call a hint as written and the CLI keeps
+its form; spans that do not parse stay. `history` and `drc` run their default action without `action`, as on the
+CLI; `action` may be `group.action`. Errors of the server itself carry `kind`, `code`, `message` and `hint` like
+command errors (`mcp.missing_action` lists the actions; `describe` of an unknown name suggests one and
+explains the meta tools); unknown tools get a "did you mean" in the JSON-RPC error. `describe` leaves the output
+schema out unless `output_schema: true` (it was most of the 8–16 KB per command) and names the tool and action;
+every tool property has a description. Argument type errors locate the argument in the schema (`at[0]`) and
+point at units, since serde's message does not say where.
+**DRC.** `drc.run` takes `severity`, `codes` (exact or prefix), `limit`, `offset`, and reports `by_code`,
+`listed` and `not_listed`; counts never depend on the selection, and the CLI exits 3 on errors even when
+they are not listed. Findings can be **waived** (`drc.waive` code + subjects + reason, `drc.unwaive`,
+`drc.waivers`), stored in `board.json` `drc_waivers`: a waived finding leaves the errors and warnings and is
+counted; unused waivers are reported; fab checks drop waived warnings but never fab errors. A waiver is a
+recorded decision with a reason, which KiCad projects express with DRC exclusions (not imported: their
+format keys on KiCad item UUIDs and positions). `drc.footprint_outside` says how far the courtyard
+overhangs; `zone.split` says where the smaller islands are.
+**Migration.** Filled silkscreen polygons of pad-less footprints (kibuzzard labels, logos) stay filled
+(they became zero-width outlines that printed nothing and raised 76 width warnings). Symbols without pins
+(fiducials) get their placeholder pin marked no-connect, and a footprint without numbered pads does not
+report missing pads. Placeholder warnings are one per part, and they are dropped once the board import gave
+the part its footprint. "Part #"-style fields are MPNs. `bom.replace` and `part.set footprint` drop the
+placement's own footprint choice (an imported board's), which had kept the old package on the board, and
+warn (`board.footprint_changed_routed`) when routed nets met the old pads, naming the nets to rip up.
+Placement (`place.auto`, `place.near`) keeps new parts clear of the tracks and vias already on the board.
+`render` highlights accept subjects as findings print them (`net:GND`, `U1.3`).
+*Why:* an MCP client has no shell to translate CLI syntax, no `grep` for a 43 KB DRC report, and no way to
+accept an intended violation; each fix removes a step where the session agent guessed (and guessed wrong:
+`{"net": "+5V"}` for `nets`) or had to fight output size.
+
 ## Open questions
 
 

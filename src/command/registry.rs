@@ -123,8 +123,18 @@ pub fn schema_of<T: JsonSchema>() -> Value {
 
 fn run_erased<C: Command>(ctx: &mut Context<'_>, args: Value) -> Result<(Value, String), CommandError> {
     let args = if args.is_null() { Value::Object(Default::default()) } else { args };
-    let cmd: C = serde_json::from_value(args).map_err(|e| {
-        CommandError::invalid_args("args.invalid", format!("invalid arguments for `{}`: {e}", C::NAME))
+    let cmd: C = serde_json::from_value(args.clone()).map_err(|e| {
+        // serde does not say where a wrong type sits: find it in the schema.
+        let (what, units) = match mismatch(&schema_of::<C>(), &args, "") {
+            Some(m) => (format!("`{}`: expected {}, got {}", m.path, m.expected, m.got), m.units),
+            None => (e.to_string(), false),
+        };
+        let units = if units {
+            " (lengths, angles and durations are strings with units: \"1.2mm\", \"90deg\", \"30s\")"
+        } else {
+            ""
+        };
+        CommandError::invalid_args("args.invalid", format!("invalid arguments for `{}`: {what}{units}", C::NAME))
             .with_hint(format!("see `describe {}` for the expected arguments", C::NAME))
     })?;
     let out = cmd.run(ctx)?;
@@ -132,6 +142,126 @@ fn run_erased<C: Command>(ctx: &mut Context<'_>, args: Value) -> Result<(Value, 
     let value = serde_json::to_value(&out)
         .map_err(|e| CommandError::new(super::ErrorKind::Internal, "internal.serialize", e.to_string()))?;
     Ok((value, summary))
+}
+
+/// Where arguments do not fit their schema.
+struct Mismatch {
+    path: String,
+    expected: String,
+    got: String,
+    /// A number given where a string is expected (a length without its unit).
+    units: bool,
+}
+
+/// JSON type name of a value, for messages.
+fn json_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// The first place where `v` does not fit `schema` (types, enum values; serde names unknown
+/// fields itself), with its path (`at[0]`, `pins[2].kind`). Covers what argument schemas use;
+/// None when it fits or the schema says too little to tell.
+fn mismatch(schema: &Value, v: &Value, path: &str) -> Option<Mismatch> {
+    let here = |expected: String| {
+        let got = match v {
+            Value::String(s) => format!("\"{s}\""),
+            Value::Object(_) => "an object".into(),
+            Value::Array(_) => "an array".into(),
+            x => x.to_string(),
+        };
+        let units = matches!(v, Value::Number(_)) && expected.contains("string");
+        Some(Mismatch { path: if path.is_empty() { "arguments".into() } else { path.into() }, expected, got, units })
+    };
+    if let Some(variants) = schema.get("anyOf").or_else(|| schema.get("oneOf")).and_then(Value::as_array) {
+        let found: Vec<Mismatch> = variants.iter().filter_map(|x| mismatch(x, v, path)).collect();
+        if found.len() < variants.len() {
+            return None;
+        }
+        // A union of constants: list the values.
+        let consts: Vec<String> = variants.iter().filter_map(|x| x.get("const")).map(|c| c.to_string()).collect();
+        if consts.len() == variants.len() {
+            return here(format!("one of {}", consts.join(", ")));
+        }
+        // The deepest mismatch tells most.
+        return found.into_iter().max_by_key(|m| m.path.len());
+    }
+    if let Some(c) = schema.get("const") {
+        return if c == v { None } else { here(c.to_string()) };
+    }
+    if let Some(e) = schema.get("enum").and_then(Value::as_array) {
+        if e.contains(v) {
+            return None;
+        }
+        let vals: Vec<String> = e.iter().map(Value::to_string).collect();
+        return here(format!("one of {}", vals.join(", ")));
+    }
+    let types: Vec<&str> = match schema.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+        _ => return None,
+    };
+    let t = json_type(v);
+    let fits = types.iter().any(|x| *x == t || (*x == "number" && t == "integer"));
+    if !fits {
+        let names: Vec<String> = types
+            .iter()
+            .map(|x| match *x {
+                "integer" => "an integer".to_string(),
+                "array" | "object" => format!("an {x}"),
+                x => format!("a {x}"),
+            })
+            .collect();
+        return here(names.join(" or "));
+    }
+    match v {
+        Value::Array(items) => {
+            if let Some(prefix) = schema.get("prefixItems").and_then(Value::as_array) {
+                if items.len() != prefix.len() {
+                    return here(format!("{} values", prefix.len()));
+                }
+                return items
+                    .iter()
+                    .zip(prefix)
+                    .enumerate()
+                    .find_map(|(i, (x, s))| mismatch(s, x, &format!("{path}[{i}]")));
+            }
+            let item = schema.get("items")?;
+            items.iter().enumerate().find_map(|(i, x)| mismatch(item, x, &format!("{path}[{i}]")))
+        }
+        Value::Object(fields) => {
+            let props = schema.get("properties").and_then(Value::as_object);
+            let extra = schema.get("additionalProperties");
+            for (k, x) in fields {
+                let sub = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                match props.and_then(|p| p.get(k)) {
+                    Some(s) => {
+                        if let Some(m) = mismatch(s, x, &sub) {
+                            return Some(m);
+                        }
+                    }
+                    None => match extra {
+                        // Unknown fields: serde's message names them and the known ones.
+                        Some(s) if s.is_object() => {
+                            if let Some(m) = mismatch(s, x, &sub) {
+                                return Some(m);
+                            }
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 impl Registry {

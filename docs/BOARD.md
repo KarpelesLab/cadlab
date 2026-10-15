@@ -35,8 +35,10 @@ Board
 ├── holes         mounting holes: name (H1), center, drill, plated pad diameter and net (none = NPTH)
 ├── graphics      silkscreen/fab/user drawings, filled polygons and texts; on copper layers they
 │                 are netless copper
-└── custom_rules  clearance / track width for a scope: item kinds, layer, footprint, courtyard,
-                  rule area (see "Local settings, net ties and custom rules")
+├── custom_rules  clearance / track width for a scope: item kinds, layer, footprint, courtyard,
+│                 rule area (see "Local settings, net ties and custom rules")
+└── drc_waivers   DRC findings accepted on purpose: code, subjects (all must be named by the finding;
+                  none: every finding of the code), reason (`drc.waive`, D58)
 ```
 
 Footprints (in the project library, shared by their placements) carry the per-footprint and
@@ -192,7 +194,7 @@ change).
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
 | `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given; `rule_area`: forbid nothing, a named area for custom rules), `remove`, `list` |
-| `drc` | `run` (plus `fab.check` warnings for the manifest `targets`; `unrouted`: `auto` lists up to 10 unrouted connections and summarizes more in one finding, `each`, `summary`) |
+| `drc` | `run` (plus `fab.check` warnings for the manifest `targets`; `unrouted`: `auto` lists up to 10 unrouted connections and summarizes more in one finding, `each`, `summary`; `severity`, `codes` (a code or a prefix: `fab.silk`), `limit` and `offset` select what is listed, never the counts; `by_code` counts errors and warnings per code; `show_waived`), `waive` (code, subjects, reason), `unwaive`, `waivers` |
 | `board` (stackup) | `stackup` (copper, dielectrics, line model per layer), `dielectric` (thickness, εr, material per gap; [ELECTRICAL.md](ELECTRICAL.md)) |
 | `impedance` | `calc` (Z0 / Zdiff of a width on a layer), `solve` (width for a target, optionally into a net class) |
 | `current` | `width` (IPC-2152 width per layer for a current; optionally raises a net class width) |
@@ -361,7 +363,9 @@ can be read against the imported project.
 
 Courtyards are handled as their boxes at quarter-turn rotations. The allowed area of a side is the outer contour
 shrunk by max(`copper_to_edge`, spacing), minus cutouts grown by that margin, `no_footprints` keep-outs, holes and
-the courtyards of footprints that stay (locked ones, and placed ones unless `replace`), grown by the spacing.
+the courtyards of footprints that stay (locked ones, and placed ones unless `replace`), grown by the spacing, and
+the tracks of the side's outer layer and the vias already on the board, grown by the clearance (D58: parts added
+to a routed board, such as an imported one, land clear of its copper).
 
 `place.auto` with strategy `groups` (default):
 
@@ -462,7 +466,7 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.outside_board` | error | copper or a non-plated board hole not inside the outer contour, or overlapping a cutout |
 | `drc.copper_to_edge` | error | copper closer than `copper_to_edge` to any contour |
 | `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine), or a board hole is inside a courtyard (either side); every piece counts: the courtyard and the closed courtyard drawings, on the footprint's side or (`back`) the other one |
-| `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout |
+| `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout; the message says how far the courtyard reaches past the outer edge (a connector flush with the edge is a waiver, not a move) |
 | `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's exposed copper on that side, or (`silk_check: mask`) overlapping its solder mask opening (grown by its mask margin; non-plated holes included) |
 | `drc.silk_over_mask_opening` | warning | silkscreen overlapping a mask opening drawn by a footprint or on the board (`silk_check: mask`) |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
@@ -471,6 +475,13 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.unrouted` | error | a ratsnest connection, with both ends; `drc.run` reports more than 10 as one finding with the count per net (`unrouted: each` lists them) and the total in `unrouted` |
 | `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |
 | `drc.impedance` | warning | tracks of a net whose class has an `impedance` target more than 10 % off on their layer |
+
+**Waivers** (`drc.waive`, D58): a finding whose code a waiver names, and whose subjects (as the finding prints
+them: `J1`, `net:GND`, `graphic#208`) include all of the waiver's, is left out of the errors and warnings and
+counted in `waived`; a waiver matching nothing is reported (`drc.waiver_unused`, info) so stale ones get
+removed. `fab.check` and `fab.export` drop waived warnings too (reported as `fab.waived`); fab errors
+(capabilities) cannot be waived. Waivers are for deliberate departures (an edge connector over the edge,
+silkscreen the fab clips), each with its reason; KiCad's own DRC exclusions are not imported.
 
 Candidate pairs come from a uniform grid over bounding boxes (no extra dependency), so a board with a few
 thousand items checks in well under a second in release builds (3000 tracks + 200 vias: about 75 ms). Zone

@@ -135,6 +135,8 @@ impl fmt::Display for ObjectRef {
         match self {
             ObjectRef::Net(n) => write!(f, "net:{n}"),
             ObjectRef::Part { scheme, id } => write!(f, "{scheme}:{id}"),
+            // An unnumbered pad (fiducial, board hole) names its component alone.
+            ObjectRef::Pin { component, pin } if pin.is_empty() => f.write_str(component),
             ObjectRef::Pin { component, pin } => write!(f, "{component}.{pin}"),
             ObjectRef::Layer(l) if is_layer_name(l) => f.write_str(l),
             ObjectRef::Layer(l) => write!(f, "layer:{l}"),

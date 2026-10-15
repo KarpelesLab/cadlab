@@ -773,5 +773,19 @@ pub fn area_mm2(s: &PolygonSet) -> f64 {
     poly::area2(s) as f64 / 2.0 / 1e12
 }
 
+/// The islands of a fill, largest first: area in mm² and a point on each (a vertex of its
+/// outline), so a report can say where the small pieces are.
+pub fn islands(s: &PolygonSet) -> Vec<(f64, crate::geom::Point)> {
+    let mut v: Vec<(f64, crate::geom::Point)> = s
+        .iter()
+        .map(|q| {
+            let at = q.any_point().map(|p| crate::geom::Point::new(Nm(p.x), Nm(p.y))).unwrap_or_default();
+            (poly::area2(q) as f64 / 2.0 / 1e12, at)
+        })
+        .collect();
+    v.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| (a.1.x, a.1.y).cmp(&(b.1.x, b.1.y))));
+    v
+}
+
 #[cfg(test)]
 mod tests;

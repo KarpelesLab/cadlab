@@ -207,9 +207,12 @@ fn imports_a_hand_written_board() {
     );
     assert!(b.graphics.iter().any(|g| matches!(&g.kind, GraphicKind::Text { text, rotation, size, .. }
         if text == "v1.0" && *rotation == Angle::DEG_90 && *size == Nm(1_500_000))));
+    // The logo's filled silkscreen polygon stays an area (a 0-wide outline would print nothing).
     assert!(
-        lines.iter().any(|g| matches!(&g.kind, GraphicKind::Line { points, .. } if points.len() == 4)),
-        "logo polygon closed"
+        b.graphics.iter().any(|g| g.layer == "F.SilkS"
+            && matches!(&g.kind, GraphicKind::Polygon { points, width } if points.len() == 3 && *width == Nm::ZERO)),
+        "logo polygon filled: {:?}",
+        b.graphics
     );
     // UUIDs.
     assert_eq!(r.uuids["t1"], format!("track#{}", b.tracks[0].id.0));

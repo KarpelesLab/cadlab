@@ -483,6 +483,7 @@ pub enum ItemRef {
 impl std::fmt::Display for ItemRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ItemRef::Pad(r, n) if n.is_empty() => f.write_str(r),
             ItemRef::Pad(r, n) => write!(f, "{r}.{n}"),
             ItemRef::Track(id) => write!(f, "track#{}", id.0),
             ItemRef::Via(id) => write!(f, "via#{}", id.0),

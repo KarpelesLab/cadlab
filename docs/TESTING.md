@@ -542,3 +542,70 @@ breakouts were planned); `board fab-stackup jlcpcb` lists the stackups. Tests: `
 (tightened: path ends, stubs, at most 2 skew bumps, coupled ≥ 70 %, parts in every third of the board),
 `tests/diffpair.rs` (`pair_length_follows_the_signal_path_and_reports_stubs`), `tests/agent_ergonomics.rs`.
 
+### Session 4 (2026-10-15): KiCad migration through the MCP server
+
+This time the agent used only `cadlab mcp` (JSON-RPC over stdio, a small Python client of its own): the
+initialize instructions, `tools/list`, `describe`, results and error payloads, no CLI and no source.
+
+Prompt: *"Take an open-source KiCad project (2 layers), import its netlist and board, inspect it (summaries,
+DRC, BOM), make a design change (swap a part for a different package, add an LED indicator with its resistor
+on a power rail, add a mounting hole, re-pour zones, rip up and reroute the affected nets), pass DRC, and
+export fab outputs for two fabs plus a KiCad re-export."*
+
+Project: `lumenpnp-ringlight` from the corpus (round board with a central cutout, eight WS2812B, a level
+shifter, two JST connectors on a tab; CERN-OHL-W). Netlist exported with `kicad-cli`, imported, then the
+board. Changes: R1 0805 → 0603 (a first attempt, the 74AHCT1G32 from SC-70-5 to SOT-23-5, did not fit the
+crowded tab and was undone with `history.undo`), a red power LED with 1 kΩ on +5V placed by `place.auto`, a
+2.2 mm mounting hole, R1's nets ripped up and rerouted, the LED routed, zones refilled, 100 % routed. DRC: two
+connectors whose courtyards reach 0.03 and 0.15 mm over the tab's edge (as in the original) and the
+original's thin and clipped silkscreen waived with reasons, then clean; JLCPCB and PCBWay bundles and the
+KiCad re-export written (KiCad's DRC of the re-export after a zone refill: no unconnected pads, no clearance
+errors). Replayed by `tests/agent_session4.rs`: `migration_of_a_cadlab_board` always runs (the "KiCad
+project" is one cadlab writes first through MCP), `migration_of_the_lumenpnp_ring_light` when
+`CADLAB_CORPUS_DIR` is set (netlist from `kicad-cli` with `CADLAB_ORACLES=1`, else the circuit from the board).
+
+MCP friction:
+
+| # | Where the agent got stuck | Fix |
+|---|---|---|
+| 1 | Hints are CLI syntax: `net.set +5V --driven` became `{"net": "+5V", "driven": true}` (wrong: the field is `nets`, a list) | The server rewrites command spans in hints to `net.set {"nets":["+5V"],"driven":true}` with the CLI's own argument parser; the replay calls hints as written |
+| 2 | `history` "alone: list steps" per its description, but the tool said `missing action` | `history` and `drc` run their default action; other tools say which actions exist |
+| 3 | Server errors (`missing action`, `describe batch`, bad `steps`) were `{"message"}` without code or hint | Same shape as command errors: kind, code, message, hint (`mcp.missing_action`, `describe.meta_tool`, `command.unknown` with suggestions) |
+| 4 | `describe board.rules` returned 16 KB, most of it the output schema, plus a `cli:` line | Output schema only with `output_schema: true`; text names the tool and action and a one-line `returns:` |
+| 5 | `drc.run` returned 43 KB (76 identical silkscreen warnings) with no way to narrow it | `severity`, `codes`, `limit`, `offset`; `by_code` counts and a by-code summary line |
+| 6 | `{"at": [1, 2]}`: "invalid type: integer `1`, expected a string", without saying which argument | "`at[0]`: expected a string, got 1 (lengths ... are strings with units)" |
+| 7 | `describe`/`call` properties had no descriptions; unknown tool names got a bare JSON-RPC error | Descriptions on every property; "did you mean" in the error |
+
+General friction:
+
+| # | Where the agent got stuck | Fix |
+|---|---|---|
+| 8 | 76 `fab.silk_width` "0mm wide" warnings: the kibuzzard labels (filled silkscreen polygons in pad-less footprints) were imported as zero-width outlines, which print nothing | Filled drawings stay filled polygons (render, Gerber, KiCad export) |
+| 9 | Fiducials (symbols without pins) got a phantom pin: `import.pad_missing` ×3, `erc.unconnected` ×3, and "FID1." in messages | Their pin is no-connect; footprints without numbered pads report nothing missing; unnumbered pads print as the designator |
+| 10 | 11 identical `import.placeholder_part` warnings (17 KB), claiming footprints "not in the project" after the board import had added them | One warning per part; dropped once the board gave the part its footprint; hint names `board.import_kicad` |
+| 11 | `bom.replace` to the 0603 resistor changed nothing on the board: the imported placement kept its own footprint | Placements drop their footprint choice when the part changes (`bom.replace`, `part.set footprint`); `board.footprint_changed_routed` names the nets to rip up |
+| 12 | `place.auto` put the new LED on a GND via | Placement keeps clear of existing tracks and vias (with the clearance) |
+| 13 | Two connectors over the tab's edge by design: an error with "move it inside", no way to accept it | `drc.waive` / `unwaive` / `waivers` with reasons; the message says by how much the courtyard overhangs |
+| 14 | `zone.split`: "split into 3 islands", nowhere to put the stitching via | Areas and locations of the smaller islands |
+| 15 | `render` `highlight: ["net:GND"]` refused, though findings print subjects that way (and INTERFACES.md shows it) | `net:` prefixes and pins accepted |
+| 16 | MPNs in the netlist's `Part #` fields were ignored (BOM "no MPN yet") | `Part #`-style fields are MPN fields |
+| 17 | Stale hint "impedance control comes in M8" on import | Points at `board.dielectric` / `board.fab_stackup` |
+
+What I would fix next (seen in the session, not fixed):
+
+- Netlists need `kicad-cli` (D13 keeps `.kicad_sch` out); an MCP agent without KiCad installed can only build
+  the circuit from the board, which loses the schematic's view (here C8 vs the board's C10). A schematic
+  netlist reader would close the gap, or the import could say which board footprints the netlist lacks.
+- KiCad's DRC exclusions (`.kicad_pro`) are not imported as waivers; the original's own waived findings come
+  back as errors on import.
+- `place.near` finds no room on a routed board (the free area now excludes tracks) and `place.auto` placed
+  the LED's resistor 15 mm from the LED: their shared net does not outweigh both parts' pull to +5V/GND. A
+  "keep together" hint (`place.hint --near D9`) would say what the agent meant.
+- `route.nets` failed one GND connection that `route.connection --shove` routed; the failure hint suggests a
+  smaller clearance instead of shoving.
+- `fab.export` text lists every file by absolute path (15 lines of ~180 characters); `circuit.list` shows the
+  part's footprint, not the one the placement uses; the BOM calls placeholders "generic"; the KiCad
+  re-export has no zone fills (KiCad reports every zone-connected pad unconnected until a refill).
+- Supplier part numbers in the netlist (`LCSC` fields) are kept as properties but not offered to
+  `fab.substitute` for the JLCPCB BOM.
+

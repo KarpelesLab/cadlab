@@ -786,6 +786,33 @@ pub struct Board {
     /// Automatic placement hints by designator (`place.hint`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub placement_hints: BTreeMap<String, PlacementHint>,
+    /// DRC findings accepted on purpose (`drc.waive`): left out of the check's errors and
+    /// warnings, and counted as waived.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drc_waivers: Vec<DrcWaiver>,
+}
+
+/// A DRC finding accepted on purpose, with the reason (an edge connector's courtyard over the
+/// board edge, silkscreen art the fab clips).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DrcWaiver {
+    /// Finding code (`drc.footprint_outside`, `fab.silk_width`).
+    pub code: String,
+    /// Subjects the finding must all name (`J1`, `net:GND`, `graphic#208`), as findings print
+    /// them; empty: every finding of the code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subjects: Vec<String>,
+    /// Why the finding is accepted.
+    pub reason: String,
+}
+
+impl DrcWaiver {
+    /// Whether this waiver covers a finding with `code` and `subjects` (printed as findings
+    /// print them).
+    pub fn covers(&self, code: &str, subjects: &[String]) -> bool {
+        self.code == code && self.subjects.iter().all(|s| subjects.iter().any(|x| x.eq_ignore_ascii_case(s)))
+    }
 }
 
 impl Board {

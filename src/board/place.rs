@@ -388,6 +388,25 @@ fn free_area(p: &Project, side: BoardSide, gap: i64, edge: i64, moving: &BTreeSe
             obstacles.push(polyclip::Polygon::new(r, vec![]));
         }
     }
+    // Routing already on the board: a part dropped onto a track or via of its side shorts it
+    // (pads of the moving parts keep the board's clearance from them).
+    let clearance = b.rules.clearance.0.max(0);
+    for t in b.tracks.iter().filter(|t| t.layer == cu) {
+        let pts: Vec<polyclip::Point> =
+            std::iter::once(t.start).chain(t.mid).chain(std::iter::once(t.end)).map(polyclip::Point::from).collect();
+        let half = (t.width.0 / 2 + clearance).max(1);
+        if let Ok(s) =
+            polyclip::offset_paths(&vec![polyclip::Path(pts)], half, Join::Round, polyclip::EndCap::Round, COPPER_TOL)
+        {
+            obstacles.extend(s);
+        }
+    }
+    for v in &b.vias {
+        let r = Circle { center: v.at.into(), radius: v.diameter.0 / 2 + clearance }.to_ring(COPPER_TOL);
+        if let Ok(r) = r {
+            obstacles.push(polyclip::Polygon::new(r, vec![]));
+        }
+    }
     for (r, pf) in &b.footprints {
         if moving.contains(r) || pf.side != side {
             continue;
@@ -1670,7 +1689,9 @@ pub fn place_near(
         PlaceError::new(
             "place.no_room",
             format!("no room for {refdes} next to {tref}"),
-            "move nearby parts, choose another side, or place it with place.set",
+            "the part needs room clear of courtyards, holes and the tracks and vias already on the board (with the \
+             board's clearance): choose another side or target, move nearby parts, let place.auto search the whole \
+             board, or place it with place.set",
         )
     })?;
     let mut pf = pose.placed();

@@ -680,7 +680,9 @@ pub struct Set {
     /// Parameters to set; null removes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Option<String>>,
-    /// Preferred footprint (must exist in the library and have pads for every pin).
+    /// Preferred footprint (must exist in the library and have pads for every pin). Placed
+    /// components of the part switch to it (their placement's own footprint choice, as an
+    /// imported board sets it, is dropped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footprint: Option<String>,
 }
@@ -721,6 +723,8 @@ impl Command for Set {
                 .map_err(|e| CommandError::invalid_args("part.invalid_param", format!("parameter `{k}`: {e}")))?;
             parsed.push((k.clone(), v));
         }
+        let users: Vec<String> = p.circuit().using_part(&id).map(|(r, _)| r.clone()).collect();
+        let before = util::placed_footprints(p, &users);
         let part = ctx.project_mut()?.library_mut().parts.get_mut(&id).expect("found above");
         let opt = |s: String| (!s.is_empty()).then_some(s);
         if let Some(d) = self.description {
@@ -745,8 +749,19 @@ impl Command for Set {
         }
         if let Some(name) = fp {
             part.footprints.retain(|f| f.footprint != name);
-            part.footprints.insert(0, FootprintRef::new(name));
+            part.footprints.insert(0, FootprintRef::new(name.clone()));
+            // The components follow: placements drop their own footprint choice (an imported
+            // board's).
+            let board = ctx.project_mut()?.board_mut();
+            for r in &users {
+                if let Some(pf) = board.footprints.get_mut(r)
+                    && pf.footprint.as_ref().is_some_and(|f| *f != name)
+                {
+                    pf.footprint = None;
+                }
+            }
         }
+        util::warn_footprint_changed_under_routing(ctx, &before);
         let p = ctx.project()?;
         Ok(PartSummary::of(p, &p.library().parts[&id]))
     }

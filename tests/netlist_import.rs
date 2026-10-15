@@ -320,3 +320,49 @@ fn library_parts_are_matched_by_mpn_and_checked() {
     assert!(d["message"].as_str().unwrap().contains("pin(s) 5"), "{d}");
     assert_eq!(s.project.as_ref().unwrap().circuit().components["U1"].part, "AP2112K-3.3TRG1");
 }
+
+/// Fiducials (symbols without pins) and an MPN in a "Part #" field, as in the lumenpnp ring
+/// light (agent session 4).
+const FIDUCIAL_NET: &str = r#"(export (version "E")
+  (design (source "/p/p.kicad_sch") (tool "Eeschema 8.0.0"))
+  (components
+    (comp (ref "FID1") (value "Fiducial") (footprint "Fiducial:Fiducial_1mm_Mask2mm")
+      (libsource (lib "Mechanical") (part "Fiducial") (description "Fiducial Marker")) (tstamps "f1"))
+    (comp (ref "FID2") (value "Fiducial") (footprint "Fiducial:Fiducial_1mm_Mask2mm")
+      (libsource (lib "Mechanical") (part "Fiducial") (description "Fiducial Marker")) (tstamps "f2"))
+    (comp (ref "R1") (value "330") (footprint "Resistor_SMD:R_0805_2012Metric")
+      (fields (field (name "Part #") "0805W8F3300T5E"))
+      (libsource (lib "Device") (part "R") (description "Resistor")) (tstamps "r1")))
+  (libparts
+    (libpart (lib "Mechanical") (part "Fiducial") (description "Fiducial Marker"))
+    (libpart (lib "Device") (part "R") (description "Resistor")
+      (pins (pin (num "1") (name "~") (type "passive")) (pin (num "2") (name "~") (type "passive")))))
+  (nets
+    (net (code "1") (name "A") (node (ref "R1") (pin "1") (pintype "passive")))
+    (net (code "2") (name "B") (node (ref "R1") (pin "2") (pintype "passive")))))
+"#;
+
+#[test]
+fn symbols_without_pins_and_part_number_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = Registry::with_builtins();
+    let mut s = new_project(&r, dir.path(), "p");
+    let path = dir.path().join("fid.net");
+    std::fs::write(&path, FIDUCIAL_NET).unwrap();
+    let o = exec(&r, &mut s, "circuit.import", json!({"path": path}));
+    // One placeholder warning for the part, naming both fiducials.
+    let w: Vec<&Value> =
+        o["diagnostics"].as_array().unwrap().iter().filter(|d| d["code"] == "import.placeholder_part").collect();
+    assert_eq!(w.len(), 1, "{o}");
+    let m = w[0]["message"].as_str().unwrap();
+    assert!(m.contains("2 components (FID1, FID2"), "{m}");
+    assert!(w[0]["hint"].as_str().unwrap().contains("board.import_kicad"), "{}", w[0]);
+    // Their placeholder pin is marked no-connect: ERC has nothing to say about them.
+    let p = s.project.as_ref().unwrap();
+    let nc: Vec<String> = p.circuit().no_connect.iter().map(ToString::to_string).collect();
+    assert_eq!(nc, ["FID1.1", "FID2.1"]);
+    let erc = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert!(!erc.to_string().contains("FID"), "{erc}");
+    // "Part #" is an MPN field.
+    assert_eq!(components(&s)["R1"].2.as_deref(), Some("0805W8F3300T5E"));
+}

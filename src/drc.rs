@@ -977,6 +977,32 @@ impl BoardShape {
         polyclip::contains(&self.outer, g)
     }
 
+    /// How far the vertices of `g` outside the outer contour lie from it (0 when none is).
+    fn overhang<G: Geometry + ?Sized>(&self, g: &G) -> i64 {
+        let v = &self.outer.0;
+        let mut worst = 0f64;
+        g.visit_segments(&mut |p, _| {
+            if even_odd_inside(&self.outer, p) {
+                return;
+            }
+            let mut best = f64::INFINITY;
+            for i in 0..v.len() {
+                let (a, b) = (v[i], v[(i + 1) % v.len()]);
+                let (dx, dy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+                let len2 = dx * dx + dy * dy;
+                let t = if len2 > 0.0 {
+                    ((((p.x - a.x) as f64) * dx + ((p.y - a.y) as f64) * dy) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (qx, qy) = (a.x as f64 + t * dx, a.y as f64 + t * dy);
+                best = best.min((p.x as f64 - qx).hypot(p.y as f64 - qy));
+            }
+            worst = worst.max(best);
+        });
+        if worst.is_finite() { worst.round() as i64 } else { 0 }
+    }
+
     /// Whether `g` comes closer than `d` to a board edge.
     fn near_edge<G: Geometry + ?Sized>(&self, g: &G, d: i64) -> bool {
         // Only segments within `d` of `g`'s box can be closer than `d`.
@@ -1144,11 +1170,17 @@ fn courtyard_rules(cy: &Courtyards, outline: Option<&BoardShape>, out: &mut Vec<
             if o.outside(*c) {
                 last = Some(*r);
                 let at = polyclip::centroid(*c).map(|q| from_f(q.x, q.y)).unwrap_or_default();
+                // How far the courtyard reaches past the outer edge: a connector meant to hang
+                // over the edge by a fraction of a millimeter reads differently from a misplaced part.
+                let over = o.overhang(*c);
+                let how_far = if over > 0 { format!(" (its courtyard by up to {})", Nm(over)) } else { String::new() };
                 out.push(
-                    Diagnostic::error("drc.footprint_outside", format!("{r} is partly outside the board"))
+                    Diagnostic::error("drc.footprint_outside", format!("{r} is partly outside the board{how_far}"))
                         .with_subject(ObjectRef::Name((*r).clone()))
                         .at(at)
-                        .with_hint(format!("move {r} inside the board outline (place.set / place.move)")),
+                        .with_hint(format!(
+                            "move {r} inside the board outline (place.set / place.move); if it overhangs the edge by design (an edge connector), waive the finding: `drc.waive drc.footprint_outside --subjects {r} --reason <why>`"
+                        )),
                 );
             }
         }

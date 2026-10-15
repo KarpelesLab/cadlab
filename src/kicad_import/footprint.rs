@@ -70,6 +70,10 @@ pub(super) struct Converted {
     /// UUIDs of the KiCad drawings each of `fp.graphics` was made of, by index (graphics
     /// added after the drawings, mask and paste apertures, have none).
     pub graphic_uuids: Vec<Vec<String>>,
+    /// UUIDs of filled KiCad drawings (`(fill solid)`): a cadlab footprint polygon is an area
+    /// only on copper, mask and paste, so a filled silkscreen logo keeps its fill only when the
+    /// footprint becomes board graphics (a footprint without pads).
+    pub filled_uuids: BTreeSet<String>,
 }
 
 /// Footprint layer of a KiCad layer name, for a footprint on `side`, and whether it is on the
@@ -304,6 +308,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
     // Graphics.
     let mut graphics: Vec<Graphic> = Vec::new();
     let mut graphic_uuids: Vec<Vec<String>> = Vec::new();
+    let mut filled_uuids: BTreeSet<String> = BTreeSet::new();
     let mut edges = Vec::new();
     let tf_point = |q: Point| -> Point {
         let q = if side == BoardSide::Bottom { Point::new(-q.x, q.y) } else { q };
@@ -323,6 +328,9 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         let layer = layer_of(c).unwrap_or("");
         let width = width_of(c);
         let filled = c.get("fill").and_then(Sexpr::value).is_some_and(|f| matches!(f, "solid" | "yes"));
+        if filled && let Some(u) = &uuid {
+            filled_uuids.insert(u.clone());
+        }
         let mut geom = local_geometry(head, c, &loc, filled);
         // On copper, mask and paste a cadlab polygon is an area: an outline only becomes a
         // closed polyline.
@@ -564,6 +572,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         edges,
         uuids,
         graphic_uuids,
+        filled_uuids,
     }
 }
 

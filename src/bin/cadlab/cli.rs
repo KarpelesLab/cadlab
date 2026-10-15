@@ -155,7 +155,7 @@ fn properties(e: &Entry) -> Vec<(String, Value, bool)> {
 }
 
 /// The clap subcommand for one registry entry.
-fn entry_command(e: &Entry) -> ClapCommand {
+pub fn entry_command(e: &Entry) -> ClapCommand {
     let mut cmd = ClapCommand::new(e.action().to_string()).about(e.summary.to_string());
     if e.action().contains('_') {
         cmd = cmd.visible_alias(e.action().replace('_', "-"));

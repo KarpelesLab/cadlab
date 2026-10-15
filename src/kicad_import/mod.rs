@@ -749,6 +749,14 @@ pub fn import(
     } else {
         build_circuit(p, &comps, opts, &mut chosen, &mut report, &mut notes)?
     };
+    // Placeholder parts the board gave a footprint are no longer placeholders.
+    notes.list.retain(|d| {
+        d.code != "import.placeholder_part"
+            || !d.subjects.iter().any(|s| {
+                matches!(s, ObjectRef::Part { id, .. }
+                    if p.library().parts.get(id).is_some_and(|part| !part.footprints.is_empty()))
+            })
+    });
     let map_net = |k: &Option<String>| -> Option<String> {
         let k = k.as_ref()?;
         match net_map.get(k) {
@@ -1087,7 +1095,7 @@ fn read_stackup(su: &Sexpr, st: &mut Stackup, notes: &mut Notes) {
                 "import.stackup_dielectric",
                 "dielectric layers of the stackup (materials, thicknesses) are not kept: cadlab stores the finished thickness and copper weights",
             )
-            .with_hint("give the fab the stackup in the order notes if it matters (impedance control comes in M8)"),
+            .with_hint("set the dielectrics for impedance and loss calculations (`board.dielectric`, or a fab's published stackup with `board.fab_stackup`); tell the fab the stackup in the order notes if it matters"),
         );
     }
 }
@@ -1812,17 +1820,19 @@ fn footprint_drawings(p: &Project, c: &Converted, graphics: &mut Vec<(BoardGraph
         if points.len() < 2 {
             continue;
         }
-        // Areas (copper, mask, paste polygons) stay filled.
+        // The KiCad drawings this graphic was made of name it in the UUID table.
+        let uuids = c.graphic_uuids.get(i).cloned().unwrap_or_default();
+        // Areas (copper, mask, paste polygons) stay filled, and so do filled drawings on other
+        // layers (silkscreen logos and labels): a polygon without a stroke width is an area too.
+        let filled = (!uuids.is_empty() && uuids.iter().all(|u| c.filled_uuids.contains(u))) || g.width == Nm::ZERO;
         let area = matches!(g.geometry, GraphicGeometry::Polygon { .. })
-            && matches!(g.layer, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste);
+            && (filled || matches!(g.layer, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste));
         let kind = if area {
             points.pop();
             GraphicKind::Polygon { points, width: g.width }
         } else {
             GraphicKind::Line { points, width: g.width }
         };
-        // The KiCad drawings this graphic was made of name it in the UUID table.
-        let uuids = c.graphic_uuids.get(i).cloned().unwrap_or_default();
         graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, uuids));
         n += 1;
     }
@@ -1933,7 +1943,11 @@ fn match_circuit(
             .flat_map(|pin| fref.pads_for(&pin.number))
             .filter(|pad| !fp_pads.contains(pad.as_str()))
             .collect();
-        if !missing.is_empty() {
+        // A footprint without numbered pads (fiducial, mounting hole) for a part whose pins are
+        // on no net (a symbol without pins gets one placeholder pin) loses nothing.
+        let mechanical = fp_pads.iter().all(|n| n.is_empty())
+            && part.symbol.pins.iter().all(|pin| !pin_net.contains_key(&(refdes.clone(), pin.number.clone())));
+        if !missing.is_empty() && !mechanical {
             notes.push(
                 Diagnostic::warning(
                     "import.pad_missing",
@@ -2156,6 +2170,22 @@ fn build_circuit(
             notes.push(d);
         }
         report.netlist = Some(r);
+        // Footprints without numbered pads (fiducials, logos with a mask pad) gave their parts
+        // no pins to match: those placeholder parts take the board's footprint, as they do when
+        // a netlist came first (`match_circuit`).
+        for c in comps {
+            let refdes = c.refdes.trim().to_uppercase();
+            if !c.fp.pad_numbers().iter().all(|n| n.is_empty()) {
+                continue;
+            }
+            let Some(part_id) = p.circuit().components.get(&refdes).map(|x| x.part.clone()) else { continue };
+            if let Some(part) = p.library_mut().parts.get_mut(&part_id)
+                && part.footprints.is_empty()
+            {
+                part.footprints.push(FootprintRef::new(chosen[&refdes].clone()));
+                report.parts_given_footprint.push(part_id);
+            }
+        }
     }
     Ok(map)
 }

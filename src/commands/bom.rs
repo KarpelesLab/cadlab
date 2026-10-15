@@ -318,9 +318,18 @@ impl Command for Replace {
                 .with_hint("connections to those pins were dropped; check the pinouts and reconnect"),
             );
         }
+        let before = util::placed_footprints(ctx.project()?, &targets);
         let p = ctx.project_mut()?;
+        let to_footprints: Vec<String> =
+            p.library().parts[&to].footprints.iter().map(|f| f.footprint.clone()).collect();
         for r in &targets {
             p.circuit_mut().components.get_mut(r).expect("checked").part = to.clone();
+            // A placement's footprint choice (an imported board's) belongs to the old part.
+            if let Some(pf) = p.board_mut().footprints.get_mut(r)
+                && pf.footprint.as_ref().is_some_and(|f| !to_footprints.contains(f))
+            {
+                pf.footprint = None;
+            }
             // Connections to pins the new part does not have are dropped (warned above).
             let gone: Vec<crate::model::circuit::PinRef> = p
                 .circuit()
@@ -333,6 +342,7 @@ impl Command for Replace {
             crate::connect::disconnect(p.circuit_mut(), &gone);
             p.circuit_mut().no_connect.retain(|pin| pin.refdes != *r || new_pins.contains(&pin.pin));
         }
+        util::warn_footprint_changed_under_routing(ctx, &before);
         let mut refdes = targets;
         refdes.sort_by(|a, b| crate::model::sections::natural_cmp(a, b));
         Ok(Replaced { refdes, from, to })

@@ -522,14 +522,35 @@ impl Command for ZoneFill {
                         ),
                 );
             } else if f.fill.len() > 1 {
-                diags.push(
-                    Diagnostic::warning(
-                        "zone.split",
-                        format!("zone:{} on {} is split into {} islands", f.name, f.layer, f.fill.len()),
-                    )
-                    .with_subject(subject)
-                    .with_hint("join the pieces with vias or tracks of the net, or move what divides them"),
-                );
+                // Where the pieces apart from the largest are, so stitching vias can go there.
+                let islands = zones::islands(&f.fill);
+                const SHOWN: usize = 5;
+                let mut where_: Vec<String> = islands
+                    .iter()
+                    .skip(1)
+                    .take(SHOWN)
+                    .map(|(a, at)| format!("{a:.2} mm² at ({}, {})", at.x, at.y))
+                    .collect();
+                if islands.len() > SHOWN + 1 {
+                    where_.push(format!("{} more", islands.len() - SHOWN - 1));
+                }
+                let mut d = Diagnostic::warning(
+                    "zone.split",
+                    format!(
+                        "zone:{} on {} is split into {} islands: the largest {:.2} mm², others {}",
+                        f.name,
+                        f.layer,
+                        f.fill.len(),
+                        islands[0].0,
+                        where_.join(", ")
+                    ),
+                )
+                .with_subject(subject)
+                .with_hint("join the pieces with vias or tracks of the net (a `via.add` of the net in each smaller island stitches it to the other layers), or move what divides them");
+                if let Some((_, at)) = islands.get(1) {
+                    d = d.at(*at);
+                }
+                diags.push(d);
             }
             out.push(LayerFill {
                 zone: f.name.clone(),

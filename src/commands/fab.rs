@@ -263,6 +263,23 @@ fn run_check(
 ) -> Result<(check::Report, check::PartsReport), CommandError> {
     let project = ctx.project()?;
     let mut report = check::check(project, p, process);
+    // Warnings waived on the board (`drc.waive`) are accepted; fab errors cannot be waived.
+    let waivers = &project.board().drc_waivers;
+    let before = report.diagnostics.len();
+    report.diagnostics.retain(|d| {
+        let subjects: Vec<String> = d.subjects.iter().map(ToString::to_string).collect();
+        d.severity != Severity::Warning || !waivers.iter().any(|w| w.covers(&d.code, &subjects))
+    });
+    let waived = before - report.diagnostics.len();
+    if waived > 0 {
+        report.diagnostics.push(
+            Diagnostic::info(
+                "fab.waived",
+                format!("{waived} warning(s) waived on the board (`drc.waivers` lists the waivers)"),
+            )
+            .with_hint("waivers apply to warnings; fab errors (capabilities) cannot be waived"),
+        );
+    }
     if let Some(d) = report.diagnostics.iter().find(|d| d.code == "fab.unknown_process") {
         let mut e = CommandError::invalid_args("fab.unknown_process", d.message.clone());
         if let Some(h) = &d.hint {

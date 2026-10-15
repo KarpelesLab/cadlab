@@ -23,7 +23,12 @@ const INSTRUCTIONS: &str = "cadlab is a headless electronics CAD tool. Start by 
 with the `project` tool (action `new` or `open`); later calls act on that project unless `project` names another \
 directory. Each tool groups related actions: pass `action` and its `args`. Use `describe` to get the full argument \
 schema of any action. All lengths need units (\"0.2mm\", \"8mil\"). Use `dry_run: true` to preview a change, \
-`history` to undo. Errors include a `hint` on how to fix them.";
+`history` to undo. Errors include a `hint` on how to fix them; hints name commands as `group.action {json args}`: \
+call the tool `group` with that `action` and those `args` (or `call`). Long check results take `codes`, `severity`, \
+`limit` and `offset` to narrow them.";
+
+/// Groups whose tool runs a default action when `action` is left out (as the CLI does).
+const DEFAULT_ACTIONS: &[(&str, &str)] = &[("history", "list"), ("drc", "run")];
 
 type Writer = Arc<Mutex<std::io::Stdout>>;
 
@@ -187,27 +192,36 @@ impl Server {
             for e in &entries {
                 desc += &format!("\n- {}: {}. args: {}", e.action(), e.summary, args_signature(&e.input_schema));
             }
+            if let Some((_, a)) = DEFAULT_ACTIONS.iter().find(|(g, _)| *g == group) {
+                desc += &format!("\nWithout `action`: `{a}`.");
+            }
             desc += "\nCall `describe` with \"<group>.<action>\" for the full schema.";
             let actions: Vec<&str> = entries.iter().map(|e| e.action()).collect();
-            tools.push(json!({
+            let mut tool = json!({
                 "name": group,
                 "description": desc,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": actions},
+                        "action": {"type": "string", "enum": actions, "description": "Action to run, from the list in the description"},
                         "args": {"type": "object", "description": "Arguments of the action, as listed in the description"},
                         "project": project_prop,
                         "dry_run": dry_run_prop,
                     },
-                    "required": ["action"],
                 },
-            }));
+            });
+            if !DEFAULT_ACTIONS.iter().any(|(g, _)| *g == group) {
+                tool["inputSchema"]["required"] = json!(["action"]);
+            }
+            tools.push(tool);
         }
         tools.push(json!({
             "name": "describe",
-            "description": "List all commands, or return the full argument and output JSON Schema of one command (\"project.new\") or group (\"project\").",
-            "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}},
+            "description": "List all commands, or return the full argument JSON Schema of one command (\"project.new\") or group (\"project\").",
+            "inputSchema": {"type": "object", "properties": {
+                "command": {"type": "string", "description": "Command (\"group.action\") or group to describe; leave out to list every command"},
+                "output_schema": {"type": "boolean", "description": "Also return the JSON Schema of the command's output (large; default false)"},
+            }},
         }));
         tools.push(json!({
             "name": "call",
@@ -215,8 +229,8 @@ impl Server {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string"},
-                    "args": {"type": "object"},
+                    "command": {"type": "string", "description": "Full command name, \"group.action\" (e.g. \"net.connect\")"},
+                    "args": {"type": "object", "description": "Arguments of the command (`describe` gives its schema)"},
                     "project": project_prop,
                     "dry_run": dry_run_prop,
                 },
@@ -231,7 +245,11 @@ impl Server {
                 "properties": {
                     "steps": {
                         "type": "array",
-                        "items": {"type": "object", "properties": {"cmd": {"type": "string"}, "args": {"type": "object"}}, "required": ["cmd"]},
+                        "description": "Commands to run in order",
+                        "items": {"type": "object", "properties": {
+                            "cmd": {"type": "string", "description": "Full command name, \"group.action\""},
+                            "args": {"type": "object", "description": "Arguments of the command"},
+                        }, "required": ["cmd"]},
                     },
                     "project": project_prop,
                     "dry_run": dry_run_prop,
@@ -244,36 +262,86 @@ impl Server {
 
     fn call_tool(&mut self, params: &Value, cancel: &CancelToken) -> Result<Value, (i64, String)> {
         let name = params.get("name").and_then(Value::as_str).ok_or((-32602, "missing tool name".to_string()))?;
+        if let Some(a) = params.get("arguments")
+            && !a.is_object()
+            && !a.is_null()
+        {
+            return Ok(tool_error(
+                "mcp.invalid_arguments",
+                "tool arguments must be a JSON object",
+                "pass {\"action\": ..., \"args\": {...}}",
+            ));
+        }
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
         let project = args.get("project").and_then(Value::as_str).map(PathBuf::from);
         let opts = RunOptions { dry_run: args.get("dry_run").and_then(Value::as_bool).unwrap_or(false) };
         let progress = McpProgress { out: self.out.clone(), token: params.pointer("/_meta/progressToken").cloned() };
         let cmd_args = args.get("args").cloned().unwrap_or(json!({}));
         match name {
-            "describe" => Ok(self.describe(args.get("command").and_then(Value::as_str))),
+            "describe" => Ok(self.describe(
+                args.get("command").and_then(Value::as_str),
+                args.get("output_schema").and_then(Value::as_bool).unwrap_or(false),
+            )),
             "call" => {
-                let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+                let Some(cmd) = args.get("command").and_then(Value::as_str) else {
+                    return Ok(tool_error(
+                        "mcp.missing_command",
+                        "missing `command`",
+                        "name the command as \"group.action\" (`describe` without arguments lists them)",
+                    ));
+                };
                 Ok(self.run(cmd, cmd_args, project.as_deref(), opts, &progress, cancel))
             }
             "batch" => {
                 let steps: Vec<Step> = match serde_json::from_value(args.get("steps").cloned().unwrap_or(json!([]))) {
                     Ok(s) => s,
-                    Err(e) => return Ok(tool_error(&format!("invalid steps: {e}"))),
+                    Err(e) => {
+                        return Ok(tool_error(
+                            "args.invalid",
+                            &format!("invalid steps: {e}"),
+                            "`steps` is a list of {\"cmd\": \"group.action\", \"args\": {...}}",
+                        ));
+                    }
                 };
                 Ok(self.run_batch(steps, project.as_deref(), opts))
             }
             group if self.registry.groups().contains_key(group) => {
-                let Some(action) = args.get("action").and_then(Value::as_str) else {
-                    return Ok(tool_error("missing `action`"));
+                let action = match args.get("action").and_then(Value::as_str) {
+                    Some(a) => a,
+                    None => match DEFAULT_ACTIONS.iter().find(|(g, _)| *g == group) {
+                        Some((_, a)) => a,
+                        None => {
+                            let actions: Vec<&str> = self.registry.groups()[group].iter().map(|e| e.action()).collect();
+                            return Ok(tool_error(
+                                "mcp.missing_action",
+                                &format!("missing `action` for the `{group}` tool"),
+                                &format!("pass one of: {}", actions.join(", ")),
+                            ));
+                        }
+                    },
                 };
+                // `{"action": "board.info"}` or `{"action": "info"}` both mean `board.info`.
+                let action = action.strip_prefix(&format!("{group}.")).unwrap_or(action);
                 let cmd = format!("{group}.{action}");
                 Ok(self.run(&cmd, cmd_args, project.as_deref(), opts, &progress, cancel))
             }
-            _ => Err((-32602, format!("unknown tool: {name}"))),
+            _ => {
+                let names: Vec<&str> =
+                    self.registry.groups().keys().copied().chain(["describe", "call", "batch"]).collect();
+                let s = cadlab::suggest::did_you_mean(name, names, 3);
+                let mut m = format!("unknown tool: {name}");
+                if !s.is_empty() {
+                    m += &format!(
+                        " (did you mean {}?)",
+                        s.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ")
+                    );
+                }
+                Err((-32602, m))
+            }
         }
     }
 
-    fn describe(&self, name: Option<&str>) -> Value {
+    fn describe(&self, name: Option<&str>, output_schema: bool) -> Value {
         let Some(name) = name else {
             let list: Vec<Value> =
                 self.registry.iter().map(|e| json!({"name": e.name, "kind": e.kind, "summary": e.summary})).collect();
@@ -286,10 +354,53 @@ impl Server {
             None => self.registry.iter().filter(|e| e.group() == name).collect(),
         };
         if entries.is_empty() {
-            return tool_error(&format!("unknown command or group `{name}`"));
+            if ["describe", "call", "batch"].contains(&name) {
+                return tool_error(
+                    "describe.meta_tool",
+                    &format!("`{name}` is a tool of this server, not a cadlab command"),
+                    "its input schema is in the tools list (tools/list)",
+                );
+            }
+            let names: Vec<&str> =
+                self.registry.iter().map(|e| e.name).chain(self.registry.groups().keys().copied()).collect();
+            let s = cadlab::suggest::did_you_mean(name, names, 3);
+            let d =
+                Diagnostic::error("command.unknown", format!("unknown command or group `{name}`")).with_suggestions(&s);
+            let hint = d.hint.clone().unwrap_or_else(|| "call `describe` without `command` to list them".into());
+            return tool_error("command.unknown", &d.message, &hint);
         }
-        let text = entries.iter().map(|e| crate::describe_text(e)).collect::<Vec<_>>().join("\n\n");
-        tool_ok(text, json!({"commands": entries.iter().map(|e| e.describe()).collect::<Vec<_>>()}))
+        let text = entries
+            .iter()
+            .map(|e| {
+                let mut t = crate::describe_text(e).replacen(
+                    &format!("\n  cli: cadlab {} {}", e.group(), e.action()),
+                    &format!(
+                        "\n  tool `{}`, action `{}`; cli: cadlab {} {}",
+                        e.group(),
+                        e.action(),
+                        e.group(),
+                        e.action()
+                    ),
+                    1,
+                );
+                if !output_schema {
+                    t += &format!("\n  returns: {}", args_signature(&e.output_schema));
+                }
+                t
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let described: Vec<Value> = entries
+            .iter()
+            .map(|e| {
+                let mut d = e.describe();
+                if !output_schema && let Some(o) = d.as_object_mut() {
+                    o.remove("output_schema");
+                }
+                d
+            })
+            .collect();
+        tool_ok(text, json!({"commands": described}))
     }
 
     /// Finds or opens the session for `project` (or the current one).
@@ -346,6 +457,7 @@ impl Server {
             }
             let mut s = self.new_session();
             let r = self.registry.execute_with(&mut s, cmd, args, opts, progress, cancel);
+            let r = self.mcp_hints(r);
             return match r {
                 Ok(o) => {
                     let root = s.root().map(Path::to_path_buf).unwrap_or_default();
@@ -365,6 +477,7 @@ impl Server {
             Err(f) => return failure_result(&f),
         };
         let r = self.registry.execute_with(&mut self.sessions[i].1, cmd, args, opts, progress, cancel);
+        let r = self.mcp_hints(r);
         let result = match r {
             Ok(o) => match self.maybe_save_at(i) {
                 Ok(()) => outcome_result(&o),
@@ -385,6 +498,19 @@ impl Server {
             Err(f) => return failure_result(&f),
         };
         let r = self.registry.execute_batch(&mut self.sessions[i].1, steps, opts);
+        let r = match r {
+            Ok(mut outs) => {
+                for o in &mut outs {
+                    hints_for_mcp(self.registry, &mut o.diagnostics);
+                }
+                Ok(outs)
+            }
+            Err(mut f) => {
+                hints_for_mcp(self.registry, std::slice::from_mut(&mut *f.error.diagnostic));
+                hints_for_mcp(self.registry, &mut f.diagnostics);
+                Err(f)
+            }
+        };
         let result = match r {
             Ok(outs) => match self.maybe_save_at(i) {
                 Ok(()) => {
@@ -397,6 +523,21 @@ impl Server {
         };
         self.drop_empty_sessions();
         result
+    }
+
+    /// Rewrites the hints of a result for MCP clients (see [`hint_for_mcp`]).
+    fn mcp_hints(&self, r: Result<Outcome, Failure>) -> Result<Outcome, Failure> {
+        match r {
+            Ok(mut o) => {
+                hints_for_mcp(self.registry, &mut o.diagnostics);
+                Ok(o)
+            }
+            Err(mut f) => {
+                hints_for_mcp(self.registry, std::slice::from_mut(&mut *f.error.diagnostic));
+                hints_for_mcp(self.registry, &mut f.diagnostics);
+                Err(f)
+            }
+        }
     }
 
     fn maybe_save_at(&mut self, i: usize) -> Result<(), Failure> {
@@ -455,12 +596,94 @@ fn tool_ok(text: String, structured: Value) -> Value {
     json!({"content": [{"type": "text", "text": text}], "structuredContent": structured, "isError": false})
 }
 
-fn tool_error(message: &str) -> Value {
+/// An error of the server itself (not of a command), shaped like a command's error: kind,
+/// code, message and hint.
+fn tool_error(code: &str, message: &str, hint: &str) -> Value {
     json!({
-        "content": [{"type": "text", "text": message}],
-        "structuredContent": {"ok": false, "error": {"message": message}},
+        "content": [{"type": "text", "text": format!("error[{code}]: {message}\n  hint: {hint}")}],
+        "structuredContent": {"ok": false, "error": {
+            "kind": "invalid_args", "severity": "error", "code": code, "message": message, "hint": hint,
+        }},
         "isError": true,
     })
+}
+
+fn hints_for_mcp(registry: &Registry, ds: &mut [Diagnostic]) {
+    for d in ds {
+        if let Some(h) = &d.hint {
+            d.hint = Some(hint_for_mcp(registry, h));
+        }
+    }
+}
+
+/// Hints name commands the way the CLI takes them (`net.set +5V --driven`). For MCP clients
+/// each such span becomes the command with its JSON arguments (`net.set {"nets":["+5V"],
+/// "driven":true}`), parsed with the CLI's own argument mapping; spans that do not parse stay
+/// as they are.
+pub(crate) fn hint_for_mcp(registry: &Registry, hint: &str) -> String {
+    let mut out = String::new();
+    let mut rest = hint;
+    while let Some(a) = rest.find('`') {
+        let Some(b) = rest[a + 1..].find('`') else { break };
+        let span = &rest[a + 1..a + 1 + b];
+        out += &rest[..a];
+        out.push('`');
+        out += &cli_span_to_json(registry, span).unwrap_or_else(|| span.to_string());
+        out.push('`');
+        rest = &rest[a + 2 + b..];
+    }
+    out + rest
+}
+
+fn cli_span_to_json(registry: &Registry, span: &str) -> Option<String> {
+    let tokens = hint_tokens(span)?;
+    let (name, args) = tokens.split_first()?;
+    if args.is_empty() {
+        return None;
+    }
+    let entry = registry.get(name)?;
+    let cmd = crate::cli::entry_command(entry).no_binary_name(true).mut_args(|a| a.required(false));
+    let m = cmd.try_get_matches_from(args).ok()?;
+    let v = crate::cli::to_args(entry, &m).ok()?;
+    if v.as_object().is_some_and(|o| o.is_empty()) {
+        return None;
+    }
+    Some(format!("{name} {v}"))
+}
+
+/// Words of a hint span: whitespace-separated, with `"..."` and `<...>` kept whole (quotes
+/// removed). None when quotes are unbalanced.
+fn hint_tokens(span: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut angle = false;
+    for ch in span.chars() {
+        match ch {
+            '"' if !angle => quoted = !quoted,
+            '<' if !quoted => {
+                angle = true;
+                cur.push(ch);
+            }
+            '>' if !quoted && angle => {
+                angle = false;
+                cur.push(ch);
+            }
+            c if c.is_whitespace() && !quoted && !angle => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if quoted || angle {
+        return None;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    Some(out)
 }
 
 fn outcome_result(o: &Outcome) -> Value {
@@ -528,6 +751,24 @@ fn failure_result(f: &Failure) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cli_hints_become_json_arguments() {
+        let r = cadlab::registry();
+        let h = super::hint_for_mcp(r, "mark it: `net.set +5V --driven`");
+        assert_eq!(h, r#"mark it: `net.set {"nets":["+5V"],"driven":true}`"#);
+        // Placeholders and quoted words stay whole; plain command names stay as they are.
+        let h = super::hint_for_mcp(
+            r,
+            r#"`bom.replace WS2812B "LED <value> <package>"`, or `part.set WS2812B --footprint <name>`; see `circuit.list`"#,
+        );
+        assert_eq!(
+            h,
+            r#"`bom.replace {"from":"WS2812B","to":"LED <value> <package>"}`, or `part.set {"id":"WS2812B","footprint":"<name>"}`; see `circuit.list`"#
+        );
+        // Unknown flags leave the span alone.
+        assert_eq!(super::hint_for_mcp(r, "`net.set X --bogus`"), "`net.set X --bogus`");
+    }
+
     #[test]
     fn base64_rfc4648() {
         for (i, o) in [

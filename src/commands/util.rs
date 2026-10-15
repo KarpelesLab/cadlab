@@ -109,3 +109,58 @@ pub(crate) fn wire_name<T: serde::Serialize>(v: &T) -> String {
         Err(_) => String::new(),
     }
 }
+
+/// The footprint each placed component of `refdes` uses now (by name), to compare after a
+/// change of parts or footprints.
+pub(crate) fn placed_footprints(p: &Project, refdes: &[String]) -> Vec<(String, Option<String>)> {
+    refdes
+        .iter()
+        .filter(|r| p.board().footprints.contains_key(*r))
+        .map(|r| (r.clone(), crate::board::footprint_for(p, r).map(|f| f.name.clone())))
+        .collect()
+}
+
+/// Warns about placed components whose footprint changed (from `before`, as
+/// [`placed_footprints`] gave it) while tracks or vias of their nets are on the board: the
+/// routing was made for the old pads.
+pub(crate) fn warn_footprint_changed_under_routing(ctx: &mut Context<'_>, before: &[(String, Option<String>)]) {
+    let Ok(p) = ctx.project() else { return };
+    let board = p.board();
+    let routed: std::collections::BTreeSet<&str> = board
+        .tracks
+        .iter()
+        .filter_map(|t| t.net.as_deref())
+        .chain(board.vias.iter().filter_map(|v| v.net.as_deref()))
+        .collect();
+    let mut found = Vec::new();
+    for (r, old) in before {
+        let new = crate::board::footprint_for(p, r).map(|f| f.name.clone());
+        if new == *old {
+            continue;
+        }
+        let nets: Vec<String> = p
+            .circuit()
+            .nets
+            .iter()
+            .filter(|(name, n)| routed.contains(name.as_str()) && n.pins.iter().any(|pin| pin.refdes == *r))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !nets.is_empty() {
+            found.push((r.clone(), old.clone().unwrap_or_default(), new.unwrap_or_default(), nets));
+        }
+    }
+    for (r, old, new, nets) in found {
+        let mut d = crate::diag::Diagnostic::warning(
+            "board.footprint_changed_routed",
+            format!("{r} is placed and routed: its footprint changed from `{old}` to `{new}`, and the tracks of {} were laid out for the old pads", nets.join(", ")),
+        )
+        .with_subject(ObjectRef::Name(r.clone()));
+        for n in &nets {
+            d = d.with_subject(ObjectRef::Net(n.clone()));
+        }
+        let list = nets.join(",");
+        ctx.report(d.with_hint(format!(
+            "check `drc.run`, or rip up and reroute them: `route.rip {list}` then `route.nets {list}` (fill zones again after)"
+        )));
+    }
+}

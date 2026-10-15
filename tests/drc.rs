@@ -547,3 +547,57 @@ fn net_class_view_and_per_class_via_rules() {
     let f = r.execute(&mut s, "netclass.show", json!({"name": "gn"}), RunOptions::default()).unwrap_err();
     assert_eq!(f.error.diagnostic.code, "netclass.not_found");
 }
+
+/// `drc.run` selection (severity, codes, limit, offset) never changes the counts; waivers take
+/// findings out of them, with their reason, and stale waivers are reported (agent session 4).
+#[test]
+fn selection_and_waivers() {
+    let (_d, r, mut s) = setup();
+    exec(&r, &mut s, "board.outline", json!({"width": "20mm", "height": "15mm"}));
+    exec(&r, &mut s, "place.auto", json!({}));
+    exec(&r, &mut s, "place.remove", json!({"refdes": ["C2"]}));
+    let run = |s: &mut Session, args: Value| {
+        let o = r.execute(s, "drc.run", args, RunOptions::default()).unwrap();
+        (serde_json::to_value(&o).unwrap(), o.summary)
+    };
+    let (all, _) = run(&mut s, json!({"unrouted": "each"}));
+    let errors = all["output"]["errors"].as_u64().unwrap();
+    assert!(errors >= 2, "{all}");
+    assert_eq!(all["output"]["warnings"], 1, "{all}");
+    assert_eq!(all["output"]["by_code"][0]["code"], "drc.unrouted");
+    // Only findings at least as severe as `error`: the unplaced C2 is not listed, but counted.
+    let (e, _) = run(&mut s, json!({"unrouted": "each", "severity": "error"}));
+    assert_eq!(e["output"]["errors"], errors);
+    assert_eq!(e["output"]["warnings"], 1);
+    assert!(e["diagnostics"].as_array().unwrap().iter().all(|d| d["severity"] == "error"));
+    // A code and a page of one.
+    let (p, summary) = run(&mut s, json!({"unrouted": "each", "codes": ["drc.unrouted"], "limit": 1, "offset": 1}));
+    assert_eq!(p["output"]["listed"], 1);
+    assert_eq!(p["output"]["not_listed"], errors - 1);
+    assert!(summary.contains("more not listed"), "{summary}");
+    // A prefix.
+    let (u, _) = run(&mut s, json!({"codes": ["drc.unpl"]}));
+    assert!(u["diagnostics"].as_array().unwrap().is_empty(), "a prefix ends at a dot or underscore: {u}");
+    let (u, _) = run(&mut s, json!({"codes": ["drc"], "severity": "warning", "unrouted": "summary"}));
+    assert_eq!(u["diagnostics"].as_array().unwrap().len(), 2, "{u}");
+
+    // Waive the unplaced part: no longer a warning, counted as waived.
+    let w =
+        exec(&r, &mut s, "drc.waive", json!({"code": "drc.unplaced", "subjects": ["C2"], "reason": "fitted by hand"}));
+    assert_eq!(w["output"]["waivers"][0]["reason"], "fitted by hand");
+    let (a, summary) = run(&mut s, json!({}));
+    assert_eq!((a["output"]["warnings"].clone(), a["output"]["waived"].clone()), (json!(0), json!(1)), "{a}");
+    assert!(summary.contains("(1 waived)"), "{summary}");
+    let (shown, _) = run(&mut s, json!({"show_waived": true, "codes": ["drc.unplaced"]}));
+    assert!(shown["diagnostics"][0]["message"].as_str().unwrap().starts_with("[waived]"), "{shown}");
+    // A waiver for subjects nothing has: reported as unused.
+    exec(&r, &mut s, "drc.waive", json!({"code": "drc.unplaced", "subjects": ["C9"], "reason": "x"}));
+    let (a, _) = run(&mut s, json!({}));
+    assert!(a["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "drc.waiver_unused"), "{a}");
+    exec(&r, &mut s, "drc.unwaive", json!({"code": "drc.unplaced", "subjects": ["C9"]}));
+    let l = exec(&r, &mut s, "drc.waivers", json!({}));
+    assert_eq!(l["output"]["waivers"].as_array().unwrap().len(), 1);
+    assert_eq!(s.project.as_ref().unwrap().board().drc_waivers[0].subjects, ["C2"]);
+    let e = r.execute(&mut s, "drc.unwaive", json!({"code": "drc.clearance"}), RunOptions::default()).unwrap_err();
+    assert_eq!(e.error.diagnostic.code, "drc.waiver_not_found");
+}

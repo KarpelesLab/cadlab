@@ -121,7 +121,12 @@ Exposing hundreds of fine-grained commands as separate tools would flood an agen
    argument. Changes are autosaved by default; `cadlab mcp --no-autosave` keeps them in memory until
    `project.save`.
 
-Tool groups are the same strings as CLI groups, so docs and examples carry over.
+Tool groups are the same strings as CLI groups, so docs and examples carry over. As on the CLI, `history` without
+`action` lists the steps and `drc` without `action` runs the check (the tool description says so, and `action`
+is not required there); `action` may also be given as `group.action`. Errors of the server itself (missing
+`action`, unknown command in `describe`, malformed `batch` steps) have the shape of command errors: `kind`,
+`code`, `message`, `hint`. `describe` of a command returns its input schema (and, in text, the tool and action
+to call and a one-line `returns:` signature); `output_schema: true` adds the output's JSON Schema.
 
 ### Output for agents
 
@@ -129,7 +134,13 @@ Tool groups are the same strings as CLI groups, so docs and examples carry over.
   narrower follow-up command suggested.
 - `render` returns MCP **image content** (PNG) so multimodal agents can look at the board or schematic directly,
   optionally with highlighting (`highlight: ["net:VBUS", "U2"]`) and DRC markers.
-- Diagnostics always include `code`, `subjects` and `hint` (see ARCHITECTURE.md).
+- Diagnostics always include `code`, `subjects` and `hint` (see ARCHITECTURE.md). Hints name commands as the CLI
+  takes them (`net.set +5V --driven`); the MCP server rewrites each such span with the command's JSON arguments
+  (`net.set {"nets":["+5V"],"driven":true}`), parsed with the CLI's own argument mapping, so a hint can be
+  called as written. Spans that do not parse (placeholders like `--at ...`) stay as they are.
+- Argument type errors name the argument (`at[0]`: expected a string, got 1) and remind that lengths take units.
+- Long check results take filters: `drc.run` `severity`, `codes`, `limit`, `offset`, with counts per code in
+  the output and the summary.
 - Long-running tools (route, part search) send progress notifications and honor cancellation.
 
 ### Resources
