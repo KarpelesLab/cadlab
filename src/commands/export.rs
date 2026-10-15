@@ -61,7 +61,7 @@ fn summary(o: &Exported) -> String {
     s
 }
 
-fn resolve(ctx: &Context<'_>, path: Option<&Path>, default: PathBuf) -> PathBuf {
+pub(crate) fn resolve(ctx: &Context<'_>, path: Option<&Path>, default: PathBuf) -> PathBuf {
     let p = path.map(Path::to_path_buf).unwrap_or(default);
     match ctx.session.root() {
         Some(root) if p.is_relative() => root.join(p),
@@ -73,7 +73,7 @@ fn io(path: &Path, e: std::io::Error) -> CommandError {
     crate::model::ModelError::Io { path: path.to_path_buf(), source: e }.into()
 }
 
-fn write(files: Vec<(PathBuf, OutFile)>) -> Result<Exported, CommandError> {
+pub(crate) fn write(files: Vec<(PathBuf, OutFile)>) -> Result<Exported, CommandError> {
     let mut out = Vec::new();
     for (path, f) in files {
         if let Some(dir) = path.parent() {
@@ -1130,6 +1130,11 @@ pub struct OpenEms {
     /// Maximum number of timesteps per run (default 200000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timesteps: Option<u64>,
+    /// Thirds rule: mesh lines a third of a fine cell inside and two thirds outside each
+    /// axis-aligned copper edge instead of one line on it (more accurate line impedances; the
+    /// default of `sim.sparams`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thirds: bool,
 }
 
 /// Gaussian excitation.
@@ -1164,7 +1169,7 @@ pub struct OpenEmsExported {
     pub nets: Vec<String>,
 }
 
-fn hertz(q: Quantity, field: &str) -> Result<u64, CommandError> {
+pub(crate) fn hertz(q: Quantity, field: &str) -> Result<u64, CommandError> {
     let q = crate::commands::electrical::expect_unit(q, Unit::Hertz, field)?;
     let v = q.to_f64();
     if !(0.0..1e15).contains(&v) {
@@ -1235,6 +1240,8 @@ impl Command for OpenEms {
             grading_permille: grading,
             end_criteria_db: end,
             timesteps: self.timesteps.unwrap_or(200_000),
+            thirds: self.thirds,
+            port_planes: false,
         };
         let x = openems::export(p, &opts).map_err(|e| {
             let base = if e.code.starts_with("openems.unknown") {

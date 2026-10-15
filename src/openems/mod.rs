@@ -169,6 +169,12 @@ pub struct Options {
     pub end_criteria_db: u32,
     /// Maximum number of timesteps.
     pub timesteps: u64,
+    /// Thirds rule at copper edges (mesh lines a third of a cell inside and two thirds outside
+    /// instead of one line on the edge).
+    pub thirds: bool,
+    /// Mesh lines at the microstrip ports' feed and reference planes (where the built-in solver
+    /// feeds and measures).
+    pub port_planes: bool,
 }
 
 impl Default for Options {
@@ -196,6 +202,8 @@ impl Default for Options {
             grading_permille: 1500,
             end_criteria_db: 40,
             timesteps: 200_000,
+            thirds: false,
+            port_planes: false,
         }
     }
 }
@@ -300,19 +308,19 @@ pub struct Export {
 
 /// A copper layer in z (nm).
 #[derive(Clone, Debug)]
-struct Layer {
-    name: String,
-    bottom: i64,
-    top: i64,
+pub(crate) struct Layer {
+    pub(crate) name: String,
+    pub(crate) bottom: i64,
+    pub(crate) top: i64,
 }
 
 /// A dielectric box in z (nm).
 #[derive(Clone, Debug)]
-struct Diel {
-    gap: usize,
-    bottom: i64,
-    top: i64,
-    d: Dielectric,
+pub(crate) struct Diel {
+    pub(crate) gap: usize,
+    pub(crate) bottom: i64,
+    pub(crate) top: i64,
+    pub(crate) d: Dielectric,
 }
 
 /// The stack: copper layers top to bottom, dielectrics top to bottom, whether assumed.
@@ -371,6 +379,72 @@ fn set_bbox(s: &[Polygon]) -> Option<Rect> {
     s.iter().filter_map(Polygon::bbox).reduce(|a, b| a.union(&b))
 }
 
+/// Mesh lines of the thirds rule around copper: at each axis-aligned copper edge, one line a
+/// third of a fine cell `δ` inside the copper and one two thirds outside, so the edge falls
+/// between lines (an FDTD conductor ending on a line behaves as if wider by about a third of a
+/// cell). `δ` is at most `fine` and half the copper's width across the edge; where it would be
+/// under twice `min`, the edge gets one line as without the rule. Rounded ends (no
+/// axis-aligned edge at the extreme) keep a line at their extreme.
+#[allow(clippy::needless_range_loop)]
+fn thirds(shape: &[Polygon], fine: i64, min: i64, fx: &mut Vec<Fixed>, fy: &mut Vec<Fixed>) {
+    // Axis-aligned edges per axis: (coordinate, span start, span end).
+    let mut edges: [Vec<(i64, i64, i64)>; 2] = Default::default();
+    for q in shape {
+        for r in q.rings() {
+            for (a, b) in r.edges() {
+                if a.x == b.x && (a.y - b.y).abs() >= min {
+                    edges[0].push((a.x, a.y.min(b.y), a.y.max(b.y)));
+                }
+                if a.y == b.y && (a.x - b.x).abs() >= min {
+                    edges[1].push((a.y, a.x.min(b.x), a.x.max(b.x)));
+                }
+            }
+        }
+    }
+    let probe = (min / 4).clamp(1, 1_000);
+    for axis in 0..2 {
+        let out = if axis == 0 { &mut *fx } else { &mut *fy };
+        for &(at, s0, s1) in &edges[axis] {
+            let mid = s0 + (s1 - s0) / 2;
+            let inside = |d: i64| {
+                let p = if axis == 0 { poly::Point::new(at + d, mid) } else { poly::Point::new(mid, at + d) };
+                poly::locate(shape, p) == Location::Inside
+            };
+            let side = match (inside(probe), inside(-probe)) {
+                (true, false) => 1,
+                (false, true) => -1,
+                _ => {
+                    out.push(Fixed::soft(at));
+                    continue;
+                }
+            };
+            // The copper's width across the edge: the nearest parallel edge on the copper's side
+            // whose span overlaps this one.
+            let width = edges[axis]
+                .iter()
+                .filter(|&&(o, a, b)| (o - at) * side > 0 && a < s1 && b > s0)
+                .map(|&(o, _, _)| (o - at).abs())
+                .min()
+                .unwrap_or(i64::MAX);
+            let d = fine.min(width / 2);
+            if d < 2 * min {
+                out.push(Fixed::soft(at));
+                continue;
+            }
+            out.extend([Fixed::soft(at + side * d / 3), Fixed::soft(at - side * 2 * d / 3)]);
+        }
+        // Extremes without an axis-aligned edge (rounded ends).
+        if let Some(b) = shape.iter().filter_map(Polygon::bbox).reduce(|a, b| a.union(&b)) {
+            let (lo, hi) = if axis == 0 { (b.min.x, b.max.x) } else { (b.min.y, b.max.y) };
+            for v in [lo, hi] {
+                if !edges[axis].iter().any(|e| e.0 == v) {
+                    out.push(Fixed::soft(v));
+                }
+            }
+        }
+    }
+}
+
 /// Splits polygons with holes into hole-free rings: a polygon is cut in two by a vertical
 /// line through the middle of its first hole (which opens that hole), recursively.
 fn hole_free(polys: &[Polygon], out: &mut Vec<Ring>) {
@@ -403,22 +477,22 @@ fn split(p: &Polygon, out: &mut Vec<Ring>, depth: u32) {
 }
 
 /// A copper group: one net on one layer, clipped to the window.
-struct Copper {
-    layer: usize,
-    net: Option<String>,
-    shape: Vec<Polygon>,
+pub(crate) struct Copper {
+    pub(crate) layer: usize,
+    pub(crate) net: Option<String>,
+    pub(crate) shape: Vec<Polygon>,
 }
 
 /// A drilled hole in the region.
-struct Hole {
-    net: Option<String>,
-    plated: bool,
-    center: Point,
-    radius: i64,
+pub(crate) struct Hole {
+    pub(crate) net: Option<String>,
+    pub(crate) plated: bool,
+    pub(crate) center: Point,
+    pub(crate) radius: i64,
     /// Slots: the outline (extruded instead of a cylinder).
-    slot: Option<Polygon>,
+    pub(crate) slot: Option<Polygon>,
     /// Copper layer span (top index, bottom index).
-    span: (usize, usize),
+    pub(crate) span: (usize, usize),
 }
 
 /// Where a port sits: net, signal layer index, position, span axis (pads) or propagation axis
@@ -426,14 +500,17 @@ struct Hole {
 type Located = (Option<String>, usize, Point, usize, i64, Option<(i64, i64)>);
 
 /// A resolved port with its geometry (nm).
-struct Port {
-    info: PortInfo,
-    start: [i64; 3],
-    stop: [i64; 3],
+pub(crate) struct Port {
+    pub(crate) info: PortInfo,
+    /// Sheet corners (nm): lumped ports from the reference surface to the signal surface,
+    /// microstrip ports from the track end on the signal surface to the reference surface.
+    pub(crate) start: [i64; 3],
+    pub(crate) stop: [i64; 3],
     /// Lumped: excitation direction axis; microstrip: propagation axis (0 x, 1 y).
-    prop: usize,
-    feed_shift: i64,
-    meas_shift: i64,
+    pub(crate) prop: usize,
+    /// Microstrip: feed and measurement plane distances from `start` along `prop`.
+    pub(crate) feed_shift: i64,
+    pub(crate) meas_shift: i64,
 }
 
 fn ground_like(name: &str) -> bool {
@@ -444,8 +521,71 @@ fn hz(v: u64) -> f64 {
     v as f64
 }
 
+/// A board region extracted for full-wave simulation: the stack, the copper, holes, board
+/// shape, ports and the graded mesh. Shared by the openEMS export and the built-in FDTD solver
+/// ([`crate::fdtd`]).
+pub(crate) struct Region {
+    pub(crate) layers: Vec<Layer>,
+    pub(crate) diels: Vec<Diel>,
+    pub(crate) copper: Vec<Copper>,
+    pub(crate) holes: Vec<Hole>,
+    /// Board outline within the window (dielectrics are only inside it).
+    pub(crate) board: Vec<Polygon>,
+    pub(crate) ports: Vec<Port>,
+    /// Mesh lines in x, y, z (nm).
+    pub(crate) lines: [Vec<i64>; 3],
+    pub(crate) window: Rect,
+    pub(crate) z_range: (i64, i64),
+    pub(crate) mesh: MeshInfo,
+    pub(crate) nets: Vec<String>,
+    /// Gaussian pulse center and 20 dB half-bandwidth (Hz).
+    pub(crate) f0: u64,
+    pub(crate) fc: u64,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+}
+
 /// Builds the export.
 pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
+    let r = extract(p, o)?;
+    let geometry = xml::Geometry {
+        title: &o.title,
+        layers: &r.layers,
+        diels: &r.diels,
+        copper: &r.copper,
+        holes: &r.holes,
+        board: &r.board,
+        kappa_hz: r.f0,
+        lines: [&r.lines[0], &r.lines[1], &r.lines[2]],
+        window: r.window,
+    };
+    let xml = xml::write(&geometry);
+    let n = r.ports.len();
+    let touchstone = format!("{}.s{}p", o.name, n.max(1));
+    let script = script::write(o, &r.ports, &touchstone, r.f0, r.fc);
+    let mut diags = r.diagnostics;
+    if r.ports.is_empty() {
+        diags.push(
+            Diagnostic::warning("openems.no_ports", "no ports: the driver has nothing to excite")
+                .with_hint("add `ports` (pads like `J1.1`, or track ends like `track#3` with `end`)"),
+        );
+    }
+    let window = r.window;
+    Ok(Export {
+        xml,
+        script,
+        touchstone,
+        window: (Point::new(Nm(window.min.x), Nm(window.min.y)), Point::new(Nm(window.max.x), Nm(window.max.y))),
+        z_range: (Nm(r.z_range.0), Nm(r.z_range.1)),
+        ports: r.ports.into_iter().map(|p| p.info).collect(),
+        mesh: r.mesh,
+        nets: r.nets,
+        excitation: (r.f0, r.fc),
+        diagnostics: diags,
+    })
+}
+
+/// Extracts the region, its geometry, ports and mesh (no files).
+pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
     if o.f_max_hz == 0 {
         return Err(Error::new(
             "openems.no_frequency",
@@ -605,7 +745,12 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
             }
         }
     };
+    let h_min = diels.iter().map(|d| d.top - d.bottom).filter(|&t| t > 0).min().unwrap_or(res_sub);
     for c in &copper {
+        if o.thirds {
+            thirds(&c.shape, res_sub.min(h_min / 2), min_xy, &mut fx, &mut fy);
+            continue;
+        }
         for q in &c.shape {
             for r in q.rings() {
                 add_ring(r, &mut fx, &mut fy);
@@ -635,10 +780,28 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
     }
     for port in &ports {
         for a in 0..2 {
+            // With the thirds rule, the port's sides across the line are the copper's edges:
+            // their lines are the thirds already (a line on the edge would undo them).
+            let across = match port.info.kind {
+                PortKind::Lumped => port.start[a] != port.stop[a],
+                PortKind::Msl => a != port.prop,
+            };
+            if o.thirds && across {
+                continue;
+            }
             let f = if a == 0 { &mut fx } else { &mut fy };
             f.extend([Fixed::hard(port.start[a]), Fixed::hard(port.stop[a])]);
         }
         fz.extend([Fixed::hard(port.start[2]), Fixed::hard(port.stop[2])]);
+        if o.port_planes && port.info.kind == PortKind::Msl {
+            let a = port.prop;
+            let s = (port.stop[a] - port.start[a]).signum();
+            let f = if a == 0 { &mut fx } else { &mut fy };
+            f.extend([
+                Fixed::hard(port.start[a] + s * port.feed_shift),
+                Fixed::hard(port.start[a] + s * port.meas_shift),
+            ]);
+        }
     }
     let xs = mesh::smooth(&mesh::merge(fx, window.min.x, window.max.x, min_xy), &|_, _| res_sub, ratio);
     let ys = mesh::smooth(&mesh::merge(fy, window.min.y, window.max.y, min_xy), &|_, _| res_sub, ratio);
@@ -698,37 +861,20 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
     let nets: Vec<String> = copper.iter().filter_map(|c| c.net.clone()).collect::<BTreeSet<_>>().into_iter().collect();
     let f0 = (o.f_min_hz + o.f_max_hz) / 2;
     let fc = (o.f_max_hz - o.f_min_hz) / 2;
-    let geometry = xml::Geometry {
-        title: &o.title,
-        layers: &layers,
-        diels: &diels,
-        copper: &copper,
-        holes: &holes,
-        board: &board_shape,
-        kappa_hz: f0,
-        lines: [&xs, &ys, &zs],
+    Ok(Region {
+        layers,
+        diels,
+        copper,
+        holes,
+        board: board_shape,
+        ports,
+        lines: [xs, ys, zs],
         window,
-    };
-    let xml = xml::write(&geometry);
-    let n = ports.len();
-    let touchstone = format!("{}.s{}p", o.name, n.max(1));
-    let script = script::write(o, &ports, &touchstone, f0, fc);
-    if ports.is_empty() {
-        diags.push(
-            Diagnostic::warning("openems.no_ports", "no ports: the driver has nothing to excite")
-                .with_hint("add `ports` (pads like `J1.1`, or track ends like `track#3` with `end`)"),
-        );
-    }
-    Ok(Export {
-        xml,
-        script,
-        touchstone,
-        window: (Point::new(Nm(window.min.x), Nm(window.min.y)), Point::new(Nm(window.max.x), Nm(window.max.y))),
-        z_range: (Nm(z_lo - air), Nm(z_hi + air)),
-        ports: ports.into_iter().map(|p| p.info).collect(),
+        z_range: (z_lo - air, z_hi + air),
         mesh: mesh_info,
         nets,
-        excitation: (f0, fc),
+        f0,
+        fc,
         diagnostics: diags,
     })
 }

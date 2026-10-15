@@ -162,6 +162,7 @@ expression: names
   "export.spice",
   "export.openems",
   "touchstone.summary",
+  "sim.sparams",
   "fab.list",
   "fab.show",
   "fab.check",

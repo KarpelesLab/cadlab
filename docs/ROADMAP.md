@@ -268,7 +268,14 @@ Research-sized items beyond the milestones above; none blocks a release.
       items such as a via or connector, or a window) as CSXCAD geometry (stackup dielectrics with εr and loss
       tangent, copper per layer and net, vias and holes), a graded λ/N mesh, and a Python driver with lumped or
       microstrip ports, Gaussian excitation and PML/MUR boundaries that writes a Touchstone file; the Touchstone
-      1.1/2.0 reader and `touchstone.summary` read results back. Open: the built-in full-wave solver itself
+      1.1/2.0 reader and `touchstone.summary` read results back. Built-in solver done as FDTD (D59;
+      ELECTRICAL.md "Full-wave solver"): `sim.sparams` simulates the same region (Yee grid on the graded mesh,
+      perfect-conductor copper and vias, lossy dielectrics, CPML, lumped and microstrip ports, Gaussian
+      excitation, S = B A⁻¹ from DFT power waves, Touchstone out), with a cell guard, progress and
+      cancellation, thread-count-independent results; validated against the 2D field solver (Z₀, εeff within
+      1.5 %), the loss model (D52), cavity resonances and Q, energy conservation and the Courant limit. Open:
+      finite copper conductivity (surface impedance), dispersive dielectrics (Debye/Djordjevic–Sarkar), solder
+      mask, lumped components on pads, subgridding or conformal (Dey–Mittra) edges for curved copper, FEM
 
 ---
 

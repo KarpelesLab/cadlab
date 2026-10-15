@@ -28,7 +28,8 @@ M1 added `value` (exact electrical quantities), `landpattern` (IPC-7351B footpri
 reader for KiCad files), `netlist::import` (D27) and `kicad_import` (`.kicad_pcb` and project rules, D32; the user's `.kicad_mod` / `.kicad_sym` libraries, D41). M8
 added `electrical` (impedance: closed forms and a 2D boundary element field solver; IPC-2152 current), `lengths` (differential pairs, length groups), `spice` (SPICE netlist export) and `lint` (design lint beyond
 ERC), see [ELECTRICAL.md](ELECTRICAL.md); later `openems` (export of a board region to the openEMS full-wave
-solver) and `touchstone` (Touchstone S-parameter files). M9 added `models3d` (3D model files decoded through the
+solver), `fdtd` (the built-in 3D FDTD solver on the same region, D59) and `touchstone` (Touchstone S-parameter
+files). M9 added `models3d` (3D model files decoded through the
 oxideav-mesh3d crates and placed on footprints, D36) and `body3d` (package bodies generated from footprint
 package specs, shared by the 3D view and the STEP export, D47). Modules to come: `erc` (M2),
 `schematic` and `render` (M3), `board`, `drc`, `io` and `fab` (M4), `router` and `specctra`

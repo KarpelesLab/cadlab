@@ -21,6 +21,7 @@ pub mod placement;
 pub mod project;
 pub mod render;
 pub mod route;
+pub mod sim;
 pub mod touchstone;
 mod util;
 pub mod zone;
@@ -50,6 +51,7 @@ pub fn register_all(r: &mut Registry) {
     kicad_lib::register(r);
     export::register(r);
     touchstone::register(r);
+    sim::register(r);
     fab::register(r);
     history::register(r);
 }
@@ -83,6 +85,7 @@ pub const GROUP_SUMMARIES: &[(&str, &str)] = &[
     ("schematic", "Schematic placement overrides and KiCad schematic export"),
     ("export", "Generic fab and MCAD outputs: Gerber, drill, pick-and-place, IPC, STEP; simulation: SPICE, openEMS"),
     ("touchstone", "Read Touchstone (.sNp) S-parameter files: summaries of simulation or measurement results"),
+    ("sim", "Built-in simulation: full-wave (FDTD) S-parameters of a board region, written as Touchstone"),
     ("fab", "Fab profiles: check, compare, export a fab's file bundle, substitutes"),
     ("history", "Undo/redo history (alone: list steps)"),
 ];

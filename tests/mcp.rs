@@ -112,6 +112,7 @@ fn mcp_session() {
             "schematic",
             "export",
             "touchstone",
+            "sim",
             "fab",
             "history",
             "describe",

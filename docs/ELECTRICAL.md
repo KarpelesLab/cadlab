@@ -2,11 +2,12 @@
 
 Calculations and checks that need more than connectivity and geometry: transmission line impedance from the
 stackup, track width for a current, a SPICE netlist for simulation, a full-wave (openEMS) model of a board
-region with Touchstone results read back, and a design lint beyond ERC. Code: `src/electrical/` (impedance
-closed forms, 2D field solver, current, DRC checks), `src/spice.rs`, `src/openems/`, `src/touchstone.rs`,
-`src/lint.rs`; commands in `src/commands/electrical.rs`, `export.spice`, `export.openems`,
-`touchstone.summary` and `circuit.lint`. Decisions: DECISIONS D29, D49 (field solver), D52 (losses), D54 (openEMS export,
-Touchstone).
+region with Touchstone results read back, a built-in full-wave (FDTD) solver for the S-parameters of a region,
+and a design lint beyond ERC. Code: `src/electrical/` (impedance closed forms, 2D field solver, current, DRC
+checks), `src/spice.rs`, `src/openems/`, `src/fdtd/`, `src/touchstone.rs`, `src/lint.rs`; commands in
+`src/commands/electrical.rs`, `export.spice`, `export.openems`, `sim.sparams`, `touchstone.summary` and
+`circuit.lint`. Decisions: DECISIONS D29, D49 (field solver), D52 (losses), D54 (openEMS export, Touchstone),
+D59 (FDTD solver).
 
 Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md), "Differential pairs"
 and "Length tuning", D38); this document covers the numbers they route to. A pair (`diffpair.add`) routes at
@@ -335,8 +336,9 @@ gaps are filled with cells of at most λ/N (`cells_per_wavelength`, default 20) 
 the stack (in air above and below: λ₀/N), at least four cells per dielectric, and neighbouring cells differ by
 at most the `grading` ratio (default 1.5), refined until the grading holds across fixed lines. `max_cell`
 replaces the wavelength rule. The output gives the line counts, the cell count, the smallest cells and the
-Courant timestep they imply (`openems.large_mesh` above 50 M cells). The thirds rule (lines at 1/3–2/3 around
-metal edges) is not applied.
+Courant timestep they imply (`openems.large_mesh` above 50 M cells). `thirds: true` applies the thirds rule at
+copper edges (lines a third of a fine cell inside and two thirds outside, see "Full-wave solver" below; the
+default of `sim.sparams`, off here so existing exports keep their mesh).
 
 **Excitation and boundaries.** A Gaussian pulse covering `f_min` .. `f_max` (f₀ = (f_min + f_max) / 2, 20 dB
 half-bandwidth f_c = (f_max − f_min) / 2); `boundary: pml` (default, `PML_8` on all sides, `pml_cells`) or `mur`;
@@ -363,6 +365,100 @@ documentation and the golden file `tests/golden/openems/via.{xml,py}` (a 4-layer
 the optional oracle (`CADLAB_ORACLES=1`, `openEMS` on the PATH or `CADLAB_ORACLE_OPENEMS`, the driver run by
 `python3` or `CADLAB_ORACLE_PYTHON`) runs the driver on that board and checks |S21| > −3 dB and |S11| < −6 dB
 at 1 GHz (`tests/openems.rs`).
+
+## Full-wave solver: FDTD (`sim.sparams`)
+
+The S-parameters of a board region computed in cadlab itself: a 3D finite-difference time-domain (FDTD)
+solver, `src/fdtd/` (DECISIONS D59). It takes exactly the region, stack, copper, holes, ports and graded mesh
+of `export.openems` (same arguments; the openEMS export stays available for larger or cross-checked runs),
+simulates once per port and writes a Touchstone file.
+
+```
+cadlab sim sparams --f-max 10GHz --around track#12 --copper sheet \
+  --ports '[{"at": "track#12", "kind": "msl", "length": "4mm"}, {"at": "track#12", "end": "end", "kind": "msl", "length": "4mm"}]'
+cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
+```
+
+**Method** (written from the textbooks, no code of openEMS, Meep, gprMax or any other solver used):
+
+- Yee's staggered grid (K. S. Yee, IEEE Trans. AP-14, 1966) on the graded rectilinear mesh, in integral form
+  (curls as circulations over primal and dual cell faces; A. Taflove and S. C. Hagness, *Computational
+  Electrodynamics*, 3rd ed., ch. 3). Fields in single precision, coefficients from double precision.
+- Materials: each E edge takes the area-weighted average of εr and σ of the four cells around it, with the
+  semi-implicit conductivity update. Dielectrics are the stackup's, inside the board outline (air outside),
+  with σ = 2π f₀ ε₀ εr tan δ at the pulse's center f₀ (tan δ 0.02 when unset), as in the openEMS export: the
+  dielectric loss is exact at f₀ and the conductance G stays constant over frequency (a constant tan δ would
+  have it grow with f). Non-plated holes are air.
+- Copper is a perfect conductor: the E edges lying in the copper volume (`copper: solid`, between the mesh
+  lines of both copper surfaces) or on the sheet (`sheet`), x and y edges by their midpoint, z edges by their
+  node; plated holes and vias are metal cylinders (plus the node column nearest their center, so a barrel
+  thinner than the cells still connects its layers). Copper conductivity and roughness are not modeled.
+- Boundaries: a convolutional PML (J. A. Roden and S. D. Gedney, Microwave Opt. Technol. Lett. 27, 2000;
+  Taflove ch. 7) in the outer `pml_cells` cells (default 8) of every side, inside the region like openEMS's:
+  polynomial grading m = 3, σ_max = 0.8 (m + 1) / (η₀ Δ), κ = 1, a CFS α falling from 2π ε₀ f₀ / 10 to 0
+  into the layer; the electric walls behind it close the domain. Copper running into the layer is absorbed
+  (a line through the region's edge is a matched continuation).
+- Ports: lumped ports are resistive voltage sources of the reference impedance z0 (M. Piket-May, A. Taflove,
+  J. Baron, IEEE Trans. MTT-42, 1994; Taflove ch. 15): columns of z edges from the reference copper's surface
+  to the signal copper's, across the port's width, each column `z0 · columns` in series with the source, the
+  resistance folded into the edges' conductivity. Their voltage (mean of the columns) and current (exact
+  element current, V + z0 I = V_s) are sampled at the half step. Microstrip ports feed the same source on the
+  line at a fifth of their length and measure at its middle (the reference plane, `reference_plane` in the
+  output): voltage from the line's middle to the reference surface, current from the circulation of H around
+  the strip on both sides of the plane, interpolated to it. Their feed and reference planes get mesh lines.
+- Excitation: a Gaussian pulse covering f_min .. f_max at −20 dB (f₀ = (f_min + f_max)/2, τ = √ln10 / (π f_c),
+  starting 3.5 τ before its peak); one run per port, the other ports terminated by their resistances.
+- S-parameters: running DFTs of every port's voltage and current at their sampling times give the power waves
+  a = (V + z0 I) / 2√z0, b = (V − z0 I) / 2√z0 of each port in each run; S = B A⁻¹ over the runs, so a
+  termination that is not matched (a microstrip port's source on a line of another impedance) does not
+  bias the result. Written as Touchstone 1.1 (RI, the ports' z0, 2.0 when they differ), 7 significant digits.
+- Timestep: 0.95 of the Courant limit of the smallest cells, 1 / (c √(Σ 1/Δ²)); each run stops when the field
+  energy has decayed by `end_criteria` (40 dB) below its peak after the pulse, or at `timesteps` (100000,
+  `sim.not_converged` warning). Progress is reported every 32 steps (timestep, energy in dB) and the run can
+  be cancelled.
+- Mesh: the export's, with the thirds rule on by default (`thirds`): at each axis-aligned copper edge, a mesh
+  line a third of a fine cell inside the copper and one two thirds outside instead of one on the edge (a
+  perfect conductor ending on a mesh line behaves about a third of a cell wider: without the rule a microstrip
+  sixteen to four cells wide came out 3–10 % low in Z₀). The fine cell is the smallest of the largest cell, half
+  the thinnest dielectric and half the copper's width across the edge; `export.openems --thirds` writes the
+  same mesh.
+- Determinism and threads: with the `parallel` feature the planes of the grid are split between threads (one
+  per 131072 nodes, a pool of the solver's own); every update reads only the other field, reductions are
+  summed per plane in order, so results are bit-identical for any thread count.
+
+**Guards.** `max_cells` (default 4 million cells, `sim.too_many_cells` with what to shrink); `timesteps` per
+run. The cost is cells × timesteps × ports; a release build updates about 80 million cells per second per
+thread (the timestep follows the smallest cell: a 35 µm copper layer in `solid` copper forces small steps;
+`copper: sheet` avoids it). Errors: the export's (`openems.*`), `sim.no_ports`, `sim.port_too_thin` (a lumped
+port spanning no cell), `sim.port_too_short` (a microstrip port whose feed and reference plane share a mesh
+line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
+
+**Accuracy** (tests in `tests/fdtd.rs`; the `#[ignore]` ones run in release, `cargo test --release --test fdtd
+-- --ignored`):
+
+| Case | Reference | Agreement |
+|---|---|---|
+| zero-thickness microstrip W = 1 mm on 0.5 mm of εr 4, probes on the line, thirds rule, 4 cells across and in the substrate | 2D field solver (D49): Z₀ 50.81 Ω, εeff 3.071 | Z₀ +0.5–0.7 %, εeff +0.1–0.7 % (1–3 GHz) |
+| the same, 8 cells across and in the substrate | field solver | Z₀ +0.1–0.4 %, εeff +0.2–0.3 % |
+| the same without the thirds rule, 8 / 16 cells across | field solver | Z₀ −5.4 % / −3.4 %, εeff +1.0 % / +0.6 % |
+| the same with tan δ 0.02: attenuation at f₀ = 5 GHz | perturbation model (D52), αd = 1.636 Np/m | +0.5 % |
+| `sim.sparams` on a routed 24 mm line (the same section, microstrip ports 4 mm), Z₀ and εeff from the S-parameters (ABCD of the 20 mm between the reference planes), 1–3.5 GHz | field solver | Z₀ −0.4 to −0.8 %, εeff +0.3–1.4 % |
+| the same: matched line | |S₁₁| < −28 dB from 0.5 to 9.5 GHz |
+| the same: attenuation and |S₂₁|, mean over 1–9 GHz | D52: 1.636 Np/m, −0.284 dB | α +6 %, |S₂₁| −0.299 dB |
+| 20 × 12 mm PEC cavity, εr 4.4, 0.5 mm cells: TM₁₁₀ and TM₂₁₀ | analytic c/(2√εr) √((m/a)² + (n/b)²) | −0.05 %, −0.08 % (numerical dispersion) |
+| the same with σ for tan δ 0.01 at TM₁₁₀: energy decay | Q = 1 / tan δ = 100 | 99.99 |
+| lossless graded mesh (ratio 1.4) with a dielectric and a strip, 6000 steps after the pulse | energy conservation | within −0.7 % / +0.05 % (the staggered E/H sampling) |
+| uniform cubic grid at 0.99 and 1.03 of the Courant limit | stability | stable / diverges |
+| one thread against three | | bit-identical spectra |
+
+**Limits.** Perfect conductors (no skin-effect loss: add D52's conductor attenuation per length for a budget),
+frequency-independent εr and the single-frequency σ above, no solder mask, no components (pads are bare
+copper; terminate them with ports), staircased curves (arcs and round pads follow the mesh; vias are
+cylinders of whole edges), quasi-uniform lines need the mesh lines that the export puts at copper edges
+(diagonal tracks staircase). Accuracy depends on the mesh as for any FDTD: keep `cells_per_wavelength` ≥ 20
+and several cells across the narrowest copper and dielectric (`max_cell` refines everything; the thirds rule
+the edges). Runs are long on large regions: cut the region to the structure (`around` a via or connector,
+`margin`), use `sheet` copper, and keep `f_max` to what is needed.
 
 ## Touchstone files (`touchstone.summary`)
 

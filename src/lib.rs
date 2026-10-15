@@ -44,6 +44,7 @@ pub mod electrical;
 pub mod erc;
 pub mod fab;
 pub mod fabout;
+pub mod fdtd;
 pub mod geom;
 pub mod id;
 pub mod kicad_import;

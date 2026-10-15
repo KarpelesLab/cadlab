@@ -1112,6 +1112,39 @@ Placement (`place.auto`, `place.near`) keeps new parts clear of the tracks and v
 accept an intended violation; each fix removes a step where the session agent guessed (and guessed wrong:
 `{"net": "+5V"}` for `nets`) or had to fight output size.
 
+### D59. Built-in full-wave solver: FDTD on the openEMS export's region and mesh, `sim.sparams` (2026-10-15)
+The 3D solver of the full-wave stretch goal is a finite-difference time-domain engine (`src/fdtd/`), written
+from Yee (1966) and Taflove & Hagness (*Computational Electrodynamics*, 3rd ed.: the integral form on graded
+grids, CPML after Roden & Gedney 2000, lumped elements after Piket-May, Taflove & Baron 1994); no code of
+openEMS, Meep, gprMax or other solvers was read. It reuses `openems::extract` (split out of `export.openems`):
+region, stack, copper, holes, ports and mesh are the export's, so the two describe the same model and the
+export can cross-check the solver. Voxelization: dielectrics per cell inside the board outline (σ = 2π f₀ ε₀ εr
+tan δ, as the export), E-edge coefficients from the area-weighted average of the four surrounding cells,
+perfect-conductor edges inside copper volumes or on sheets, vias as cylinders plus their nearest node column.
+CPML in the outer `pml_cells` cells (polynomial m = 3, κ = 1, small CFS α), PEC walls behind. Lumped ports are
+resistive voltage sources (the resistance folded into the edge conductivity, sampled exactly: V + z0 I = V_s);
+microstrip ports feed the same source on the line and measure V (line integral) and I (H circulation on both
+sides of the plane, interpolated) at their reference plane, which gets mesh lines (`port_planes`, off for the
+export). S = B A⁻¹ from the DFT power waves of all ports over all runs (one per port), written with the existing
+Touchstone writer. The thirds rule becomes an export option (`thirds`), on by default in `sim.sparams`: without
+it an FDTD strip is about a third of a cell too wide (Z₀ 3–10 % low in the tests), with it within 1 % at four
+cells across. Fields are f32, coefficients and DFTs f64; planes are split between threads of a pool sized one
+per 131072 nodes (waking 64 threads per update cost more than a small grid's update), every update reading
+only the other field and reductions summed per plane in order: bit-identical for any thread count. Guards:
+`max_cells` (4 M), `timesteps` per run (100 k), the energy end criterion (40 dB); progress every 32 steps and
+cancellation through the command context, like the router. Validated (tests/fdtd.rs) against the 2D field
+solver, the D52 loss model, cavity resonances and Q, energy conservation and the Courant limit; heavier cases
+are `#[ignore]` tests run in release.
+*Why:* FDTD rather than FEM because the openEMS export already produced exactly what FDTD needs (a graded
+rectilinear mesh with lines at metal edges and layer surfaces), one time-domain run covers the whole band per
+port, the update is explicit and needs no sparse solver or dependency, and its accuracy is understood from
+the textbooks (Courant limit, dispersion, staircasing). Reusing the extraction keeps one notion of "region"
+for agents and lets openEMS validate the built-in solver. A constant σ instead of a dispersive model keeps the
+stored data two decimals per dielectric (D52) and matches the export; perfect conductors keep the model
+small, conductor loss staying the per-length budget of D52. S = B A⁻¹ instead of b/a because a microstrip
+port's own source is not matched to the line it feeds; f32 fields halve memory and time, with sums kept in f64.
+
+
 ## Open questions
 
 

@@ -100,6 +100,17 @@ fn point(f: f64, c: Complex) -> Point {
     Point { freq: f, db: round(c.db().max(-999.0), 3), mag: round(c.abs(), 6), phase: round(c.arg_deg(), 2) }
 }
 
+/// Summary of S(i+1, j+1) of an `n`-port: band extremes and values at `at` (Hz, inside the
+/// band).
+pub(crate) fn summarize(freqs: &[f64], s: &[Vec<Complex>], i: usize, j: usize, n: usize, at: &[f64]) -> ParamSummary {
+    let idx = i * n + j;
+    let pts: Vec<Point> = freqs.iter().zip(s).map(|(&f, m)| point(f, m[idx])).collect();
+    let min = pts.iter().min_by(|a, b| a.mag.total_cmp(&b.mag)).unwrap().clone();
+    let max = pts.iter().max_by(|a, b| a.mag.total_cmp(&b.mag)).unwrap().clone();
+    let at = at.iter().filter_map(|&f| touchstone::interpolate(freqs, s, f, idx).map(|c| point(f, c))).collect();
+    ParamSummary { name: name(i, j, n), min, max, at }
+}
+
 /// `S21` → (1, 0); `S1,10` → (0, 9).
 fn param_index(s: &str, n: usize) -> Option<(usize, usize)> {
     let rest = s.trim().strip_prefix(['S', 's'])?;
@@ -180,20 +191,7 @@ impl Command for Summary {
             }
             freqs.push(f);
         }
-        let params = wanted
-            .iter()
-            .map(|&(i, j)| {
-                let idx = i * n + j;
-                let pts: Vec<Point> = ts.freqs.iter().zip(&s).map(|(&f, m)| point(f, m[idx])).collect();
-                let min = pts.iter().min_by(|a, b| a.mag.total_cmp(&b.mag)).unwrap().clone();
-                let max = pts.iter().max_by(|a, b| a.mag.total_cmp(&b.mag)).unwrap().clone();
-                let at = freqs
-                    .iter()
-                    .filter_map(|&f| touchstone::interpolate(&ts.freqs, &s, f, idx).map(|c| point(f, c)))
-                    .collect();
-                ParamSummary { name: name(i, j, n), min, max, at }
-            })
-            .collect();
+        let params = wanted.iter().map(|&(i, j)| summarize(&ts.freqs, &s, i, j, n, &freqs)).collect();
         Ok(TouchstoneSummary {
             path: path.display().to_string(),
             version: ts.version.clone(),
