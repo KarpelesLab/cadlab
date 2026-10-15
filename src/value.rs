@@ -42,6 +42,8 @@ pub enum Unit {
     Ppm,
     /// Decibel.
     Decibel,
+    /// Siemens (conductance; conductivity in S/m where the context says so).
+    Siemens,
 }
 
 impl Unit {
@@ -61,6 +63,7 @@ impl Unit {
             Unit::Percent => "%",
             Unit::Ppm => "ppm",
             Unit::Decibel => "dB",
+            Unit::Siemens => "S",
         }
     }
 
@@ -84,6 +87,7 @@ impl Unit {
             "%" => Unit::Percent,
             "ppm" => Unit::Ppm,
             "dB" | "db" => Unit::Decibel,
+            "S" => Unit::Siemens,
             _ => return None,
         })
     }
@@ -387,6 +391,36 @@ fn format_decimal(m: i64, e: i32) -> String {
     }
 }
 
+impl Quantity {
+    /// The value as a plain decimal without SI prefix, with the unit symbol: `0.02` rather than
+    /// `20m` (for dimensionless ratios such as a loss tangent).
+    pub fn plain(&self) -> String {
+        format!("{}{}", format_decimal(self.mantissa, self.exp as i32), self.unit.symbol())
+    }
+}
+
+/// Serde helpers writing an optional [`Quantity`] as [`Quantity::plain`] (`0.02`, not `20m`);
+/// reading accepts any quantity. Use with `#[serde(with = "crate::value::plain")]` and
+/// `#[schemars(with = "Option<Quantity>")]`.
+pub mod plain {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::Quantity;
+
+    /// Writes `Some` as a plain decimal.
+    pub fn serialize<S: Serializer>(q: &Option<Quantity>, s: S) -> Result<S::Ok, S::Error> {
+        match q {
+            Some(q) => s.serialize_some(&q.plain()),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// Reads an optional quantity.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Quantity>, D::Error> {
+        Option::<Quantity>::deserialize(d)
+    }
+}
+
 impl fmt::Display for Quantity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.display_bare(), self.unit.symbol())
@@ -458,6 +492,11 @@ mod tests {
         assert_eq!(q("10kΩ"), q("10kohm"));
         assert_eq!(q("-40°C"), Quantity::new(-4, 1, Unit::Celsius));
         assert_eq!(q("50ppm"), Quantity::new(5, 1, Unit::Ppm));
+        assert_eq!(q("58MS"), Quantity::new(58, 6, Unit::Siemens));
+        assert_eq!(q("2mS").to_string(), "2mS");
+        assert_eq!(q("0.02").plain(), "0.02");
+        assert_eq!(q("20m").plain(), "0.02");
+        assert_eq!(q("1.5k").plain(), "1500");
         assert_eq!(q(".1uF"), q("100nF"));
         assert_eq!(q("0"), Quantity::new(0, 0, Unit::None));
         assert!(Quantity::parse("abc").is_err());

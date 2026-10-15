@@ -28,10 +28,17 @@
 //! `Z` (`Zdiff = Z₁₁ − Z₁₂ − Z₂₁ + Z₂₂`, `Zcomm = (Z₁₁ + Z₁₂ + Z₂₁ + Z₂₂) / 4`), which
 //! reduce to `2 Z_odd` and `Z_even / 2` for a symmetric pair.
 //!
-//! All lengths are in one unit (millimeters by convention); only ratios matter.
+//! Losses ([`Structure::line_matrices`]): the conductance from the partial capacitances of the
+//! dielectric regions (derivatives of `C` in their permittivities), and the skin-effect
+//! resistance per surface resistance from the perturbation method, ∮|Jₛ|² of the quasi-TEM
+//! surface current (the vacuum surface charge, on the conductors and induced on the planes).
+//!
+//! All lengths are in one unit (millimeters by convention); only ratios matter, except for
+//! [`LineMatrices::r_over_rs`], which takes millimeters.
 
 use std::f64::consts::PI;
 
+use super::complex::C64;
 use super::impedance::{ETA0, Line, Model};
 
 /// Speed of light in vacuum, m/s.
@@ -214,23 +221,23 @@ impl Capacitance {
     }
 }
 
-type M2 = [[f64; 2]; 2];
+pub(crate) type M2 = [[f64; 2]; 2];
 
-fn mul2(a: M2, b: M2) -> M2 {
+pub(crate) fn mul2(a: M2, b: M2) -> M2 {
     [
         [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
         [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]],
     ]
 }
 
-fn inv2(a: M2) -> M2 {
+pub(crate) fn inv2(a: M2) -> M2 {
     let d = a[0][0] * a[1][1] - a[0][1] * a[1][0];
     [[a[1][1] / d, -a[0][1] / d], [-a[1][0] / d, a[0][0] / d]]
 }
 
 /// Principal square root of a 2×2 matrix with positive real eigenvalues:
 /// √M = (M + s I) / √(tr M + 2 s), s = √det M.
-fn sqrt2(m: M2) -> M2 {
+pub(crate) fn sqrt2(m: M2) -> M2 {
     let s = (m[0][0] * m[1][1] - m[0][1] * m[1][0]).sqrt();
     let t = (m[0][0] + m[1][1] + 2.0 * s).sqrt();
     [[(m[0][0] + s) / t, m[0][1] / t], [m[1][0] / t, (m[1][1] + s) / t]]
@@ -495,6 +502,8 @@ struct Prepared {
     envelope: Option<Vec<[f64; 2]>>,
     fine: f64,
     hmax: f64,
+    /// Where interfaces and coplanar grounds are truncated.
+    xmax: f64,
 }
 
 fn finite_or(x: f64, clip: f64) -> f64 {
@@ -871,7 +880,7 @@ fn prepare(cs: &CrossSection, acc: Accuracy) -> Result<Prepared, SolveError> {
         }
         env_pts = Some(e);
     }
-    Ok(Prepared { segs, corners, half, sym, plane_b, envelope: env_pts, fine, hmax })
+    Ok(Prepared { segs, corners, half, sym, plane_b, envelope: env_pts, fine, hmax, xmax })
 }
 
 impl Prepared {
@@ -1194,6 +1203,36 @@ type Charges = (Vec<Vec<f64>>, Vec<Vec<f64>>);
 /// weighted by the panels' permittivities, and by 1 (the vacuum charges, valid as such when
 /// there are no interface panels).
 fn solve_parity(ps: &[Panel], parity: f64, plane_b: Option<f64>, rhs_v: &[Vec<f64>]) -> Result<Charges, SolveError> {
+    let (rhs, sheet_rows) = densities(ps, parity, plane_b, rhs_v)?;
+    let nc = rhs_v.first().map_or(0, |v| v.len());
+    let (mut out, mut vac) = (Vec::new(), Vec::new());
+    for q in &rhs {
+        let (mut charge, mut charge0) = (vec![0.0; nc], vec![0.0; nc]);
+        for (k, p) in ps.iter().enumerate() {
+            if let Kind::Conductor { c, eps } = p.kind {
+                charge[c] += eps * q[k] * p.len;
+                charge0[c] += q[k] * p.len;
+            }
+        }
+        for (i, field) in &sheet_rows {
+            let p = &ps[*i];
+            let Kind::Sheet { c, neg, pos } = p.kind else { continue };
+            let e: f64 = field.iter().zip(q).map(|(f, x)| f * x).sum();
+            let qi = q[*i];
+            charge[c] += (neg * (0.5 * qi - e) + pos * (0.5 * qi + e)) * p.len;
+            charge0[c] += qi * p.len;
+        }
+        out.push(charge);
+        vac.push(charge0);
+    }
+    Ok((out, vac))
+}
+
+/// Panel charge densities for each right-hand side (conductor voltages of the half structure),
+/// of one parity, and the normal-field rows of sheet panels.
+type Densities = (Vec<Vec<f64>>, Vec<(usize, Vec<f64>)>);
+
+fn densities(ps: &[Panel], parity: f64, plane_b: Option<f64>, rhs_v: &[Vec<f64>]) -> Result<Densities, SolveError> {
     let n = ps.len();
     let mut a = vec![0.0; n * n];
     // Normal field rows of sheet panels (to split their charge between the two faces).
@@ -1237,28 +1276,7 @@ fn solve_parity(ps: &[Panel], parity: f64, plane_b: Option<f64>, rhs_v: &[Vec<f6
         })
         .collect();
     lu_solve(&mut a, n, &mut rhs)?;
-    let nc = rhs_v.first().map_or(0, |v| v.len());
-    let (mut out, mut vac) = (Vec::new(), Vec::new());
-    for q in &rhs {
-        let (mut charge, mut charge0) = (vec![0.0; nc], vec![0.0; nc]);
-        for (k, p) in ps.iter().enumerate() {
-            if let Kind::Conductor { c, eps } = p.kind {
-                charge[c] += eps * q[k] * p.len;
-                charge0[c] += q[k] * p.len;
-            }
-        }
-        for (i, field) in &sheet_rows {
-            let p = &ps[*i];
-            let Kind::Sheet { c, neg, pos } = p.kind else { continue };
-            let e: f64 = field.iter().zip(q).map(|(f, x)| f * x).sum();
-            let qi = q[*i];
-            charge[c] += (neg * (0.5 * qi - e) + pos * (0.5 * qi + e)) * p.len;
-            charge0[c] += qi * p.len;
-        }
-        out.push(charge);
-        vac.push(charge0);
-    }
-    Ok((out, vac))
+    Ok((rhs, sheet_rows))
 }
 
 /// Capacitance matrices of a cross-section.
@@ -1360,6 +1378,378 @@ pub fn solve(cs: &CrossSection, acc: Accuracy) -> Result<Capacitance, SolveError
     let c0 = c_out.pop().expect("vacuum");
     let c = c_out.pop().expect("dielectric");
     Ok(Capacitance { c, c0, panels: panels_used })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Losses
+//
+// Dielectric loss: G = ω Σᵣ tan δᵣ εᵣ ∂C/∂εᵣ over the dielectric regions r (the first-order
+// perturbation of C with complex permittivities εᵣ(1 − j tan δᵣ); εᵣ ∂C/∂εᵣ is the partial
+// capacitance of region r, i.e. its share of the electric energy). The derivatives are one-sided
+// second-order differences of the boundary element solution, one pair of extra solves per
+// distinct loss tangent.
+//
+// Conductor loss: the perturbation (power-loss) method, R = Rs ∮ |Jₛ|² dl / I², with the
+// surface current of the quasi-TEM mode. Its magnetic field is that of the vacuum structure,
+// so the surface current is proportional to the vacuum surface charge (Jₛ = c ρₛ): the charge
+// densities of the vacuum boundary element solution on the traces and coplanar grounds, and
+// the charge they induce on the ground planes (computed in closed form from the plane Green's
+// functions). Valid when the skin depth is small against the copper thickness; edges of
+// zero-thickness strips make the integral diverge, so traces must have a thickness.
+
+/// Loss tangents of a [`Structure`]'s dielectrics.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LossTangents {
+    /// The dielectric between the plane and the (lower) trace.
+    pub below: f64,
+    /// The dielectric around and above the (upper) trace (embedded microstrip, stripline).
+    pub above: f64,
+    /// Between the traces of a broadside pair.
+    pub broadside: f64,
+    /// Solder mask.
+    pub mask: f64,
+}
+
+/// Per-unit-length matrices of a line or a pair, in SI units, for the loss calculation
+/// (`[signal][signal]`; 1×1 for a single line). Lengths of the structure in millimeters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineMatrices {
+    /// Capacitance, F/m.
+    pub c: Vec<Vec<f64>>,
+    /// External inductance (perfect conductors), H/m.
+    pub l: Vec<Vec<f64>>,
+    /// Conductance divided by the angular frequency, F/m: Σ tan δ · ε ∂C/∂ε.
+    pub g_over_omega: Vec<Vec<f64>>,
+    /// Skin-effect resistance divided by the surface resistance Rs, 1/m: ∮ ĵᵢ ĵⱼ dl over all
+    /// conductor surfaces, the planes included, ĵ the surface current per unit current.
+    pub r_over_rs: Vec<Vec<f64>>,
+}
+
+fn invert(m: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, SolveError> {
+    match m.len() {
+        1 => Ok(vec![vec![1.0 / m[0][0]]]),
+        2 => {
+            let i = inv2([[m[0][0], m[0][1]], [m[1][0], m[1][1]]]);
+            Ok(vec![i[0].to_vec(), i[1].to_vec()])
+        }
+        n => Err(SolveError(format!("losses are computed for one or two signal conductors, not {n}"))),
+    }
+}
+
+fn scale(m: &[Vec<f64>], f: f64) -> Vec<Vec<f64>> {
+    m.iter().map(|r| r.iter().map(|x| x * f).collect()).collect()
+}
+
+impl Structure {
+    /// Loss tangents in the order of [`Structure::cross_section`]'s layers.
+    fn layer_loss_tangents(&self, t: &LossTangents) -> Vec<f64> {
+        let mut v = vec![t.below];
+        if self.broadside.is_some() {
+            v.push(t.broadside);
+        }
+        if self.model != Model::Microstrip {
+            v.push(t.above);
+        }
+        v
+    }
+
+    /// Per-unit-length matrices (C, L, G/ω, R/Rs) of the single trace (`pair` false; with a
+    /// broadside pair, the lower trace alone) or of the pair (edge-coupled with `gap`, or
+    /// broadside).
+    pub fn line_matrices(
+        &self,
+        w: f64,
+        gap: Option<f64>,
+        pair: bool,
+        tans: &LossTangents,
+        acc: Accuracy,
+    ) -> Result<LineMatrices, SolveError> {
+        if pair && !self.is_pair(gap) {
+            return Err(SolveError("a pair needs a gap or a broadside separation".into()));
+        }
+        let mut cs = self.cross_section(w, if pair { gap } else { None })?;
+        if !pair {
+            cs.conductors.retain(|c| c.role != Role::Signal(1));
+        }
+        let tl = self.layer_loss_tangents(tans);
+        let cap = solve(&cs, acc)?;
+        let g = dielectric_loss(&cs, &cap, &tl, tans.mask, acc)?;
+        let r = conductor_loss(&cs, acc)?;
+        let mu0 = 1.0 / (EPS0 * C0 * C0);
+        Ok(LineMatrices {
+            c: scale(&cap.c, EPS0),
+            l: scale(&invert(&cap.c0)?, mu0),
+            g_over_omega: scale(&g, EPS0),
+            // 1/mm to 1/m.
+            r_over_rs: scale(&r, 1000.0),
+        })
+    }
+}
+
+/// Corner refinement of the conductor loss solve relative to [`Accuracy::fine`].
+const LOSS_FINE: f64 = 1e-3;
+
+/// Relative step of the permittivity derivatives.
+const EPS_STEP: f64 = 1e-3;
+
+/// G/ω in units of ε₀ (`[signal][signal]`): Σ over distinct loss tangents of tan δ times the
+/// derivative of C when the permittivities of the regions with that loss tangent are scaled
+/// together (Euler: Σᵣ εᵣ ∂C/∂εᵣ over those regions). `base` is the solution at the nominal
+/// permittivities; `tans` follows `cs.layers`.
+pub fn dielectric_loss(
+    cs: &CrossSection,
+    base: &Capacitance,
+    tans: &[f64],
+    tan_mask: f64,
+    acc: Accuracy,
+) -> Result<Vec<Vec<f64>>, SolveError> {
+    let mut groups: Vec<f64> =
+        tans.iter().copied().chain(cs.mask.map(|_| tan_mask)).filter(|t| *t > 0.0 && t.is_finite()).collect();
+    groups.sort_by(f64::total_cmp);
+    groups.dedup();
+    let n = base.c.len();
+    let mut g = vec![vec![0.0; n]; n];
+    for tan in groups {
+        let scaled = |f: f64| {
+            let mut c = cs.clone();
+            for (l, t) in c.layers.iter_mut().zip(tans) {
+                if *t == tan {
+                    l.er *= 1.0 + f;
+                }
+            }
+            if let Some(m) = &mut c.mask
+                && tan_mask == tan
+            {
+                m.er *= 1.0 + f;
+            }
+            c
+        };
+        let c1 = solve(&scaled(EPS_STEP), acc)?.c;
+        let c2 = solve(&scaled(2.0 * EPS_STEP), acc)?.c;
+        for i in 0..n {
+            for j in 0..n {
+                let d = (-3.0 * base.c[i][j] + 4.0 * c1[i][j] - c2[i][j]) / (2.0 * EPS_STEP);
+                g[i][j] += tan * d;
+            }
+        }
+    }
+    Ok(g)
+}
+
+/// Charge density induced on the plane y = 0 at (x, 0) by a unit charge density (σ/ε₀ = 1)
+/// on segment a→b: the plane alone (its image), or with `plane_b` the lower plate of the
+/// parallel-plate pair. Closed-form integrals of −y′/(π((x′−x)² + y′²)) and of
+/// −sin θ / (2b (cosh u − cos θ)), u = π(x′−x)/b, θ = πy′/b, along the segment.
+fn plane_density(x: f64, a: [f64; 2], b: [f64; 2], plane_b: Option<f64>) -> f64 {
+    let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+    let e = C64::new((b[0] - a[0]) / len, (b[1] - a[1]) / len);
+    match plane_b {
+        None => {
+            // −(1/π) Im ∫ ds / conj(ζ), ζ = z′ − x (conj ζ stays in the lower half plane).
+            let za = C64::new(a[0] - x, -a[1]);
+            let zb = C64::new(b[0] - x, -b[1]);
+            -(e * (zb.ln() - za.ln())).im / PI
+        }
+        Some(bb) => {
+            // (1/π) Im[e^(−iφ) (Ln sinh(w_b/2) − Ln sinh(w_a/2))], w = π ζ / b (sinh(w/2)
+            // stays in the upper half plane).
+            let k = 0.5 * PI / bb;
+            let wa = C64::new(k * (a[0] - x), k * a[1]);
+            let wb = C64::new(k * (b[0] - x), k * b[1]);
+            (e.conj() * (wb.ln_sinh() - wa.ln_sinh())).im / PI
+        }
+    }
+}
+
+/// Integrates over the ground plane(s), x ≥ 0: calls `f(weight, densities)` at quadrature
+/// points with the plane charge density of each excitation `qs[k]` = (parity, panel densities),
+/// for each plane (the planes' contributions are separate calls).
+fn plane_quadrature(
+    cs: &CrossSection,
+    pr: &Prepared,
+    ps: &[Panel],
+    qs: &[(f64, Vec<f64>)],
+    mut f: impl FnMut(f64, &[f64]),
+) {
+    let xmax = pr.xmax;
+    let bottom = cs.conductors.iter().map(|c| c.y).fold(f64::INFINITY, f64::min);
+    let mut scale = bottom;
+    if let Some(b) = pr.plane_b {
+        scale = scale.min(b - cs.conductors.iter().map(|c| c.y + c.t).fold(0.0, f64::max));
+    }
+    let foot: Vec<(f64, f64)> = cs.conductors.iter().map(|c| (finite_or(c.x0, xmax), finite_or(c.x1, xmax))).collect();
+    let dist = |x: f64| {
+        foot.iter()
+            .map(|&(l, r)| if x >= l && x <= r { 0.0 } else { (x - l).abs().min((x - r).abs()) })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut bps: Vec<f64> = vec![0.0, xmax];
+    bps.extend(foot.iter().flat_map(|&(l, r)| [l, r]).filter(|&x| x > 0.0 && x < xmax));
+    bps.sort_by(f64::total_cmp);
+    bps.dedup_by(|a, b| (*a - *b).abs() <= 1e-12 * xmax);
+    let planes: Vec<Option<f64>> = match pr.plane_b {
+        None => vec![None],
+        Some(_) => vec![Some(0.0), Some(1.0)],
+    };
+    let mut sig = vec![0.0; qs.len()];
+    let (mut kd, mut km) = (vec![0.0; ps.len()], vec![0.0; ps.len()]);
+    for w in bps.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let mut x = a;
+        while x < b {
+            let s = 0.2 * scale.max(dist(x));
+            let mut nx = (x + s).min(b);
+            if b - nx < 0.2 * s {
+                nx = b;
+            }
+            for (gx, gw) in GAUSS4 {
+                let xp = x + (nx - x) * 0.5 * (1.0 + gx);
+                let wt = (nx - x) * 0.5 * gw;
+                for top in &planes {
+                    // The top plate is the bottom one of the mirrored structure y → b − y.
+                    let flip = |p: [f64; 2]| match (top, pr.plane_b) {
+                        (Some(t), Some(bb)) if *t > 0.5 => [p[0], bb - p[1]],
+                        _ => p,
+                    };
+                    for (j, p) in ps.iter().enumerate() {
+                        kd[j] = plane_density(xp, flip(p.a), flip(p.b), pr.plane_b);
+                        km[j] = plane_density(xp, flip([-p.b[0], p.b[1]]), flip([-p.a[0], p.a[1]]), pr.plane_b);
+                    }
+                    for (k, (parity, q)) in qs.iter().enumerate() {
+                        sig[k] = q.iter().enumerate().map(|(j, qj)| qj * (kd[j] + parity * km[j])).sum();
+                    }
+                    f(wt, &sig);
+                }
+            }
+            x = nx;
+        }
+    }
+}
+
+/// The vacuum solution's excitations for the loss calculation: (parity, panel densities) per
+/// excitation, and the full-structure signal charges `[signal][excitation]`.
+type Excitations = (Vec<(f64, Vec<f64>)>, Vec<Vec<f64>>);
+
+fn vacuum_excitations(cs: &CrossSection, pr: &Prepared, ps: &[Panel]) -> Result<Excitations, SolveError> {
+    let nsig = cs.conductors.iter().filter(|c| matches!(c.role, Role::Signal(_))).count();
+    let sig = |i: usize| match cs.conductors[i].role {
+        Role::Signal(n) => Some(n),
+        Role::Ground => None,
+    };
+    let nh = pr.half.len();
+    let (mut ev, mut ov) = (Vec::new(), Vec::new());
+    for (h, &i) in pr.half.iter().enumerate() {
+        if sig(i).is_none() {
+            continue;
+        }
+        let mut v = vec![0.0; nh];
+        v[h] = 1.0;
+        if matches!(pr.sym[i], Sym::Right(_)) {
+            ov.push(v.clone());
+        }
+        ev.push(v);
+    }
+    let mut qs: Vec<(f64, Vec<f64>)> = densities(ps, 1.0, pr.plane_b, &ev)?.0.into_iter().map(|q| (1.0, q)).collect();
+    if !ov.is_empty() {
+        qs.extend(densities(ps, -1.0, pr.plane_b, &ov)?.0.into_iter().map(|q| (-1.0, q)));
+    }
+    if qs.len() != nsig {
+        return Err(SolveError("unsupported conductor arrangement for the loss calculation".into()));
+    }
+    let pos = |i: usize| pr.half.iter().position(|&x| x == i).expect("half");
+    let mut charges = vec![vec![0.0; qs.len()]; nsig];
+    for (k, (parity, q)) in qs.iter().enumerate() {
+        let mut half_q = vec![0.0; nh];
+        for (j, p) in ps.iter().enumerate() {
+            if let Kind::Conductor { c, .. } = p.kind {
+                half_q[c] += q[j] * p.len;
+            }
+        }
+        for i in 0..cs.conductors.len() {
+            let Some(n) = sig(i) else { continue };
+            charges[n][k] = match pr.sym[i] {
+                Sym::Centered => 2.0 * half_q[pos(i)],
+                Sym::Right(_) => half_q[pos(i)],
+                Sym::Left(p) => parity * half_q[pos(p)],
+            };
+        }
+    }
+    Ok((qs, charges))
+}
+
+/// Skin-effect resistance per surface resistance, `[signal][signal]`, in 1/(length unit) (see
+/// [`LineMatrices::r_over_rs`]): ∮ σ̂ᵢ σ̂ⱼ dl over the conductors and the ground planes, σ̂ᵢ
+/// the vacuum surface charge density with a unit charge on signal i and none on the other
+/// signals, which is the surface current density per unit current on signal i.
+pub fn conductor_loss(cs: &CrossSection, acc: Accuracy) -> Result<Vec<Vec<f64>>, SolveError> {
+    if cs.conductors.iter().any(|c| c.t <= 0.0) {
+        return Err(SolveError(
+            "conductor loss needs a copper thickness (the current at the edges of a zero-thickness strip makes the loss \
+             diverge)"
+                .into(),
+        ));
+    }
+    // The current crowds at the corners (σ ~ r^(−1/3) at a right-angled edge), and a
+    // piecewise-constant density misses part of ∫σ² in the smallest panels (in proportion to
+    // their size^(1/3)): grade much further into the corners than the capacitance needs.
+    let acc = Accuracy { grading: acc.grading, fine: acc.fine * LOSS_FINE };
+    let pr = prepare(cs, acc)?;
+    let ps = panels(cs, &pr, acc, true);
+    if ps.len() > MAX_PANELS {
+        return Err(SolveError(format!("the cross-section needs {} unknowns (limit {MAX_PANELS})", ps.len())));
+    }
+    let (qs, charges) = vacuum_excitations(cs, &pr, &ps)?;
+    let m = qs.len();
+    // Gram matrix of the excitations' surface charges over the whole structure (both halves:
+    // twice the right half for equal parities, zero for opposite ones).
+    let mut s = vec![vec![0.0; m]; m];
+    for k in 0..m {
+        for l in 0..m {
+            if qs[k].0 != qs[l].0 {
+                continue;
+            }
+            s[k][l] = 2.0 * ps.iter().enumerate().map(|(j, p)| qs[k].1[j] * qs[l].1[j] * p.len).sum::<f64>();
+        }
+    }
+    plane_quadrature(cs, &pr, &ps, &qs, |w, sig| {
+        for k in 0..m {
+            for l in 0..m {
+                if qs[k].0 == qs[l].0 {
+                    s[k][l] += 2.0 * w * sig[k] * sig[l];
+                }
+            }
+        }
+    });
+    // Unit-charge distributions: σ̂ᵢ = Σₖ Aₖᵢ σₖ with A = Q⁻¹.
+    let a = invert(&charges)?;
+    let n = charges.len();
+    let mut r = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..m {
+                for l in 0..m {
+                    r[i][j] += a[k][i] * s[k][l] * a[l][j];
+                }
+            }
+        }
+    }
+    Ok(r)
+}
+
+/// Total charge induced on the ground plane(s) by each excitation of the vacuum solution, and
+/// the signal charges (tests: Gauss's law).
+#[cfg(test)]
+fn plane_charge(cs: &CrossSection, acc: Accuracy) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let pr = prepare(cs, acc).unwrap();
+    let ps = panels(cs, &pr, acc, true);
+    let (qs, charges) = vacuum_excitations(cs, &pr, &ps).unwrap();
+    let mut tot = vec![0.0; qs.len()];
+    plane_quadrature(cs, &pr, &ps, &qs, |w, sig| {
+        for (t, s) in tot.iter_mut().zip(sig) {
+            *t += 2.0 * w * s;
+        }
+    });
+    (tot, charges)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1597,6 +1987,67 @@ mod tests {
         let w = ms.solve_width(90.0, Some(0.15), 0.2, acc).unwrap().unwrap();
         assert!(close(ms.pair(w, Some(0.15), acc).unwrap().zdiff, 90.0, 1e-3), "{w}");
         assert_eq!(ms.solve_width(2000.0, None, 0.3, acc).unwrap(), None);
+    }
+
+    #[test]
+    fn plane_charge_balances() {
+        // Gauss: the planes carry minus the charge of the conductors (vacuum solution, even
+        // excitations), for one plane and for two.
+        let acc = Accuracy::default();
+        for st in [
+            strip(Model::Microstrip, 0.2, 0.0, 0.035, 4.4),
+            strip(Model::Stripline, 0.15, 0.25, 0.0175, 4.2),
+            Structure { coplanar_gap: Some(0.15), ..strip(Model::Microstrip, 0.2, 0.0, 0.035, 4.4) },
+        ] {
+            let mut cs = st.cross_section(0.3, None).unwrap();
+            let grounds = cs.conductors.iter().any(|c| c.role == Role::Ground);
+            let (plane, charges) = plane_charge(&cs, acc);
+            if grounds {
+                // Part of the return charge sits on the coplanar grounds.
+                assert!(plane[0] < 0.0 && -plane[0] < charges[0][0], "{plane:?} {charges:?}");
+                cs.conductors.retain(|c| c.role != Role::Ground);
+            }
+            let (plane, charges) = plane_charge(&cs, acc);
+            // A single plane's density decays as Q ȳ / (π x²): add the two tails beyond the
+            // truncation (ȳ: the trace's mid-height).
+            let tail = if cs.top_plane {
+                0.0
+            } else {
+                let xmax = prepare(&cs, acc).unwrap().xmax;
+                2.0 * charges[0][0] * (st.h + st.t / 2.0) / (PI * xmax)
+            };
+            assert!(close(tail - plane[0], charges[0][0], 1e-3), "{st:?}: {plane:?} {tail} {charges:?}");
+        }
+    }
+
+    #[test]
+    fn conductor_loss_converged() {
+        // The skin-effect resistance and the dielectric conductance at the default
+        // discretization against a finer one.
+        let acc = Accuracy::default();
+        let fine = Accuracy { grading: 0.12, fine: 0.0003 };
+        let mask = Some(Mask { thickness: 0.025, over_copper: 0.015, er: 3.8 });
+        let ms = strip(Model::Microstrip, 0.2, 0.0, 0.035, 4.4);
+        let split = Structure { er2: 3.6, ..strip(Model::Stripline, 0.15, 0.25, 0.0175, 4.2) };
+        for (st, gap) in [
+            (ms, None),
+            (Structure { mask, coplanar_gap: Some(0.15), etch: 0.008, ..ms }, Some(0.15)),
+            (split, Some(0.12)),
+        ] {
+            let cs = st.cross_section(0.2, gap).unwrap();
+            let (a, b) = (conductor_loss(&cs, acc).unwrap(), conductor_loss(&cs, fine).unwrap());
+            for i in 0..a.len() {
+                assert!(close(a[i][i], b[i][i], 0.01), "{st:?}: {a:?} {b:?}");
+            }
+        }
+        let cs = split.cross_section(0.2, Some(0.12)).unwrap();
+        let tans = [0.02, 0.015];
+        let g = |acc| dielectric_loss(&cs, &solve(&cs, acc).unwrap(), &tans, 0.0, acc).unwrap();
+        let (a, b) = (g(acc), g(fine));
+        assert!(close(a[0][0], b[0][0], 2e-3) && close(a[0][1], b[0][1], 5e-3), "{a:?} {b:?}");
+        // Zero thickness: no conductor loss model.
+        let thin = strip(Model::Microstrip, 0.2, 0.0, 0.0, 4.4);
+        assert!(thin.line_matrices(0.2, None, false, &LossTangents::default(), acc).is_err());
     }
 
     #[test]

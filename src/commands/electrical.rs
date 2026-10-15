@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::Diagnostic;
+use crate::electrical::fieldsolver::LineMatrices;
 use crate::electrical::fieldsolver::{self, Accuracy};
 use crate::electrical::{
-    self, Broadside, FieldOptions, GeometryError, LayerGeometry, MaskSpec, Model, Solver, current::Method,
+    self, Broadside, FieldOptions, GeometryError, LayerGeometry, MaskSpec, Model, Solver, current::Method, loss,
 };
 use crate::model::Project;
 use crate::model::circuit::NetClass;
@@ -21,6 +22,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<SetDielectric>()
         .register::<Calc>()
         .register::<Solve>()
+        .register::<NetLoss>()
         .register::<CurrentWidth>();
 }
 
@@ -34,6 +36,19 @@ pub(crate) fn expect_unit(q: Quantity, unit: Unit, field: &str) -> Result<Quanti
             format!("`{field}` is in {}, expected {}", u.symbol(), unit.symbol()),
         )),
     }
+}
+
+/// A loss tangent: dimensionless, 0 ≤ tan δ < 1.
+fn loss_tangent_arg(q: Quantity, field: &str) -> Result<Quantity, CommandError> {
+    let q = expect_unit(q, Unit::None, field)?;
+    let v = q.to_f64();
+    if !(0.0..1.0).contains(&v) {
+        return Err(CommandError::invalid_args(
+            "value.out_of_range",
+            format!("`{field}` (loss tangent) must be at least 0 and below 1, e.g. 0.02"),
+        ));
+    }
+    Ok(q)
 }
 
 fn positive(q: &Quantity, field: &str) -> Result<(), CommandError> {
@@ -95,6 +110,10 @@ pub struct DielectricInfo {
     /// Material.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
+    /// Loss tangent (tan δ), when set.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::value::plain")]
+    #[schemars(with = "Option<Quantity>")]
+    pub loss_tangent: Option<Quantity>,
 }
 
 /// The stackup, top to bottom.
@@ -133,6 +152,7 @@ fn stackup_info(p: &Project) -> StackupInfo {
             thickness: d.thickness,
             er: d.er,
             material: d.material.clone(),
+            loss_tangent: d.loss_tangent,
         })
         .collect();
     let layers_thickness =
@@ -174,10 +194,11 @@ fn stackup_text(o: &StackupInfo) -> String {
         lines.push(format!("{:<8} copper {}{}", c.name, c.thickness, model.unwrap_or_default()));
         if let Some(d) = o.dielectrics.get(i) {
             lines.push(format!(
-                "  gap {}  {} εr {}{}",
+                "  gap {}  {} εr {}{}{}",
                 d.gap,
                 d.thickness,
                 d.er,
+                d.loss_tangent.map(|t| format!(" tan δ {}", t.plain())).unwrap_or_default(),
                 d.material.as_ref().map(|m| format!("  {m}")).unwrap_or_default()
             ));
         }
@@ -216,8 +237,9 @@ impl Command for Stackup {
     }
 }
 
-/// Set the dielectric between two copper layers (thickness, relative permittivity, material),
-/// used by the impedance calculator. Unset dielectrics start from the assumed ones.
+/// Set the dielectric between two copper layers (thickness, relative permittivity, loss
+/// tangent, material), used by the impedance and loss calculations. Unset dielectrics start
+/// from the assumed ones.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetDielectric {
@@ -230,6 +252,9 @@ pub struct SetDielectric {
     /// Relative permittivity ("4.4").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er: Option<Quantity>,
+    /// Loss tangent (dissipation factor, tan δ) from the laminate datasheet ("0.02").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_tangent: Option<Quantity>,
     /// Material, for information ("FR-4 7628"); empty clears.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
@@ -240,7 +265,8 @@ pub struct SetDielectric {
 
 impl Command for SetDielectric {
     const NAME: &'static str = "board.dielectric";
-    const SUMMARY: &'static str = "Set a stackup dielectric (thickness, εr, material) for impedance calculations";
+    const SUMMARY: &'static str =
+        "Set a stackup dielectric (thickness, εr, loss tangent, material) for impedance and loss calculations";
     const KIND: CommandKind = CommandKind::Mutation;
     type Output = StackupInfo;
 
@@ -283,6 +309,7 @@ impl Command for SetDielectric {
                 }
                 None => None,
             };
+            let tan = self.loss_tangent.map(|t| loss_tangent_arg(t, "loss_tangent")).transpose()?;
             let (mut diel, _) = s.effective_dielectrics();
             for (i, d) in diel.iter_mut().enumerate() {
                 if self.gap.is_some_and(|g| g != i + 1) {
@@ -293,6 +320,9 @@ impl Command for SetDielectric {
                 }
                 if let Some(e) = er {
                     d.er = e;
+                }
+                if let Some(t) = tan {
+                    d.loss_tangent = Some(t);
                 }
                 if let Some(m) = &self.material {
                     d.material = (!m.is_empty()).then(|| m.clone());
@@ -397,6 +427,8 @@ struct GeoArgs<'a> {
     coplanar_gap: Option<Nm>,
     broadside: bool,
     broadside_gap: Option<Nm>,
+    loss_tangent: Option<Quantity>,
+    mask_loss_tangent: Option<Quantity>,
 }
 
 impl GeoArgs<'_> {
@@ -433,6 +465,7 @@ struct Resolved {
     method: Solver,
     opts: FieldOptions,
     mask_er_assumed: bool,
+    mask_tan_assumed: bool,
 }
 
 fn formula(r: &Resolved, diff: bool) -> String {
@@ -542,6 +575,9 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
         assumed: false,
         er_split: None,
         broadside: None,
+        tan_d: crate::model::board::DEFAULT_LOSS_TANGENT.to_f64(),
+        tan_d_split: None,
+        tan_d_assumed: true,
     });
     if let Some(m) = a.model {
         if m != g.model {
@@ -577,7 +613,7 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
                 "a broadside pair needs `broadside_gap` (or a `layer` whose next copper layer holds the second trace)",
             ));
         };
-        g.broadside = Some(Broadside { gap, er: g.er, layer: None });
+        g.broadside = Some(Broadside { gap, er: g.er, layer: None, tan_d: g.tan_d });
     }
     if let Some(e) = a.er2 {
         let e = permittivity(e, "er2")?;
@@ -589,6 +625,15 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
     }
     if let (Some(b), Some(gap)) = (&mut g.broadside, a.broadside_gap) {
         b.gap = gap;
+    }
+    if let Some(t) = a.loss_tangent {
+        let t = loss_tangent_arg(t, "loss_tangent")?.to_f64();
+        g.tan_d = t;
+        g.tan_d_split = None;
+        g.tan_d_assumed = false;
+        if let Some(b) = &mut g.broadside {
+            b.tan_d = t;
+        }
     }
     if g.h <= Nm::ZERO || g.t < Nm::ZERO || g.er < 1.0 {
         return Err(invalid_geometry(
@@ -620,8 +665,10 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
     if broadside && a.coplanar_gap.is_some() {
         return Err(invalid_geometry("coplanar grounds are not modeled with a broadside pair"));
     }
-    if (a.mask_copper.is_some() || a.mask_er.is_some()) && a.mask.is_none() {
-        return Err(invalid_geometry("`mask_copper` and `mask_er` need `mask` (the mask thickness)"));
+    if (a.mask_copper.is_some() || a.mask_er.is_some() || a.mask_loss_tangent.is_some()) && a.mask.is_none() {
+        return Err(invalid_geometry(
+            "`mask_copper`, `mask_er` and `mask_loss_tangent` need `mask` (the mask thickness)",
+        ));
     }
     let mask = match a.mask {
         Some(t) => {
@@ -633,12 +680,23 @@ fn resolve(p: &Project, a: &GeoArgs) -> Result<Resolved, CommandError> {
                 Some(e) => permittivity(e, "mask_er")?,
                 None => electrical::DEFAULT_MASK_ER,
             };
-            Some(MaskSpec { thickness: t, over_copper: a.mask_copper.unwrap_or(t), er })
+            let tan_d = match a.mask_loss_tangent {
+                Some(q) => loss_tangent_arg(q, "mask_loss_tangent")?.to_f64(),
+                None => electrical::DEFAULT_MASK_LOSS_TANGENT,
+            };
+            Some(MaskSpec { thickness: t, over_copper: a.mask_copper.unwrap_or(t), er, tan_d })
         }
         None => None,
     };
     let opts = FieldOptions { etch: a.etch.unwrap_or(Nm::ZERO), mask, coplanar_gap: a.coplanar_gap };
-    Ok(Resolved { layer, g, method, opts, mask_er_assumed: a.mask.is_some() && a.mask_er.is_none() })
+    Ok(Resolved {
+        layer,
+        g,
+        method,
+        opts,
+        mask_er_assumed: a.mask.is_some() && a.mask_er.is_none(),
+        mask_tan_assumed: a.mask.is_some() && a.mask_loss_tangent.is_none(),
+    })
 }
 
 fn quantity(v: f64, decimals: i8, unit: Unit) -> Quantity {
@@ -764,6 +822,9 @@ pub struct ImpedanceResult {
     pub l_per_m: Quantity,
     /// Geometry used.
     pub geometry: GeometryInfo,
+    /// Frequency-dependent losses (with `freq` or a sweep).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss: Option<LossResult>,
 }
 
 /// `v · 10^-exp` rounded to `decimals`, as a quantity of `v` (keeps small values exact).
@@ -809,7 +870,387 @@ fn calc(r: &Resolved, w: Nm, gap: Option<Nm>) -> Result<ImpedanceResult, Command
         c_per_m: scaled(root / (line.z0 * C), -12, 1, Unit::Farad),
         l_per_m: scaled(line.z0 * root / C, -9, 1, Unit::Henry),
         geometry: geometry_info(r, gap.is_some() || r.g.broadside.is_some()),
+        loss: None,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Losses
+
+/// Most frequencies in one calculation.
+const MAX_FREQS: usize = 1001;
+
+/// Frequency and conductor inputs of a loss calculation (shared by `impedance.calc` and
+/// `net.loss`).
+struct LossArgs<'a> {
+    freq: &'a [Quantity],
+    freq_from: Option<Quantity>,
+    freq_to: Option<Quantity>,
+    freq_points: Option<usize>,
+    conductivity: Option<Quantity>,
+    roughness: Option<Nm>,
+    huray_radius: Option<Nm>,
+    huray_ratio: Option<Quantity>,
+}
+
+/// Resolved loss inputs.
+struct LossParams {
+    freqs: Vec<Quantity>,
+    sigma: Quantity,
+    roughness: loss::Roughness,
+    rough_in: (Option<Nm>, Option<Nm>, Option<Quantity>),
+}
+
+/// `v` rounded to `digits` significant digits.
+fn sig(v: f64, digits: i32, unit: Unit) -> Quantity {
+    if v == 0.0 || !v.is_finite() {
+        return Quantity::int(0, unit);
+    }
+    let e = v.abs().log10().floor() as i32 - digits + 1;
+    scaled(v, e.clamp(-60, 60) as i8, 0, unit)
+}
+
+fn frequency(q: Quantity, field: &str) -> Result<Quantity, CommandError> {
+    let q = expect_unit(q, Unit::Hertz, field)?;
+    if q.to_f64() <= 0.0 {
+        return Err(CommandError::invalid_args("value.not_positive", format!("`{field}` must be positive")));
+    }
+    Ok(q)
+}
+
+/// The loss inputs; `None` when no frequency (and no loss option) is given.
+fn loss_params(a: &LossArgs) -> Result<Option<LossParams>, CommandError> {
+    let sweep = a.freq_from.is_some() || a.freq_to.is_some() || a.freq_points.is_some();
+    let options =
+        a.conductivity.is_some() || a.roughness.is_some() || a.huray_radius.is_some() || a.huray_ratio.is_some();
+    if a.freq.is_empty() && !sweep {
+        if options {
+            return Err(CommandError::invalid_args(
+                "impedance.no_frequency",
+                "conductor options (`conductivity`, `roughness`, `huray_*`) need a frequency",
+            )
+            .with_hint("give `freq` (one or more), or a sweep with `freq_from`, `freq_to` and `freq_points`"));
+        }
+        return Ok(None);
+    }
+    let mut freqs: Vec<Quantity> = a.freq.iter().map(|f| frequency(*f, "freq")).collect::<Result<_, _>>()?;
+    if sweep {
+        let (Some(from), Some(to)) = (a.freq_from, a.freq_to) else {
+            return Err(CommandError::invalid_args(
+                "impedance.invalid_sweep",
+                "a frequency sweep needs both `freq_from` and `freq_to`",
+            ));
+        };
+        let (from, to) = (frequency(from, "freq_from")?.to_f64(), frequency(to, "freq_to")?.to_f64());
+        let n = a.freq_points.unwrap_or(10);
+        if to <= from || !(2..=MAX_FREQS).contains(&n) {
+            return Err(CommandError::invalid_args(
+                "impedance.invalid_sweep",
+                format!("a sweep needs `freq_from` < `freq_to` and 2 to {MAX_FREQS} `freq_points`"),
+            ));
+        }
+        // Logarithmic spacing, each frequency rounded to 4 significant digits.
+        for i in 0..n {
+            let f = from * (to / from).powf(i as f64 / (n - 1) as f64);
+            freqs.push(sig(f, 4, Unit::Hertz));
+        }
+    }
+    freqs.sort_by(|x, y| x.cmp_value(y));
+    freqs.dedup_by(|x, y| x.cmp_value(y).is_eq());
+    if freqs.len() > MAX_FREQS {
+        return Err(CommandError::invalid_args(
+            "impedance.invalid_sweep",
+            format!("at most {MAX_FREQS} frequencies per calculation"),
+        ));
+    }
+    let sigma = match a.conductivity {
+        Some(q) => {
+            let q = match q.unit {
+                Unit::None | Unit::Siemens => q.with_unit(Unit::Siemens),
+                u => {
+                    return Err(CommandError::invalid_args(
+                        "value.wrong_unit",
+                        format!("`conductivity` is in {}, expected S/m (\"58M\" or \"58MS\")", u.symbol()),
+                    ));
+                }
+            };
+            positive(&q, "conductivity")?;
+            q
+        }
+        None => sig(loss::COPPER_CONDUCTIVITY, 3, Unit::Siemens),
+    };
+    let roughness = match (a.roughness, a.huray_radius, a.huray_ratio) {
+        (None, None, None) => loss::Roughness::Smooth,
+        (Some(r), None, None) => {
+            if r < Nm::ZERO {
+                return Err(CommandError::invalid_args("value.not_positive", "`roughness` must not be negative"));
+            }
+            loss::Roughness::HammerstadJensen { rms: r.to_f64(LengthUnit::Mm) * 1e-3 }
+        }
+        (None, Some(radius), Some(ratio)) => {
+            let ratio = expect_unit(ratio, Unit::None, "huray_ratio")?.to_f64();
+            if radius <= Nm::ZERO || ratio < 0.0 {
+                return Err(CommandError::invalid_args(
+                    "value.not_positive",
+                    "`huray_radius` must be positive and `huray_ratio` not negative",
+                ));
+            }
+            loss::Roughness::Huray { radius: radius.to_f64(LengthUnit::Mm) * 1e-3, ratio }
+        }
+        (None, _, _) => {
+            return Err(CommandError::invalid_args(
+                "impedance.invalid_roughness",
+                "Huray's model needs both `huray_radius` (snowball radius) and `huray_ratio` (snowball surface per flat \
+                 area)",
+            ));
+        }
+        (Some(_), _, _) => {
+            return Err(CommandError::invalid_args(
+                "impedance.invalid_roughness",
+                "give either `roughness` (Hammerstad-Jensen, RMS) or the Huray parameters, not both",
+            ));
+        }
+    };
+    Ok(Some(LossParams { freqs, sigma, roughness, rough_in: (a.roughness, a.huray_radius, a.huray_ratio) }))
+}
+
+/// Losses at one frequency.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LossPointInfo {
+    /// Frequency.
+    pub freq: Quantity,
+    /// Attenuation per meter (single line).
+    pub alpha_db_per_m: Quantity,
+    /// Attenuation per inch (single line).
+    pub alpha_db_per_in: Quantity,
+    /// Conductor part of the attenuation per meter, R / (2 Z0).
+    pub alpha_conductor_db_per_m: Quantity,
+    /// Dielectric part of the attenuation per meter, G Z0 / 2.
+    pub alpha_dielectric_db_per_m: Quantity,
+    /// Differential attenuation per meter of the pair (field solver).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha_diff_db_per_m: Option<Quantity>,
+    /// Differential attenuation per inch of the pair (field solver).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha_diff_db_per_in: Option<Quantity>,
+    /// Real part of the complex characteristic impedance.
+    pub z0_real: Quantity,
+    /// Imaginary part of the complex characteristic impedance.
+    pub z0_imag: Quantity,
+    /// Resistance per meter (skin effect and roughness, at least the DC resistance).
+    pub r_per_m: Quantity,
+    /// Inductance per meter (external plus internal).
+    pub l_per_m: Quantity,
+    /// Conductance per meter (dielectric loss).
+    pub g_per_m: Quantity,
+    /// Capacitance per meter.
+    pub c_per_m: Quantity,
+    /// Skin depth in the copper.
+    pub skin_depth: Nm,
+    /// Roughness loss multiplier (with `roughness` or the Huray parameters).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roughness_factor: Option<Quantity>,
+}
+
+/// Frequency-dependent losses of a line.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LossResult {
+    /// Copper conductivity (S/m).
+    pub conductivity: Quantity,
+    /// Loss tangent of the dielectric (below the trace; closed forms: the mean of a
+    /// stripline's two dielectrics, weighted by εr × thickness).
+    pub loss_tangent: String,
+    /// Field solver: loss tangent around and above the trace, when it differs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss_tangent2: Option<String>,
+    /// Solder mask loss tangent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask_loss_tangent: Option<String>,
+    /// RMS roughness (Hammerstad-Jensen).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<Nm>,
+    /// Huray snowball radius.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub huray_radius: Option<Nm>,
+    /// Huray surface ratio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub huray_ratio: Option<Quantity>,
+    /// How the conductor loss was computed.
+    pub conductor_method: String,
+    /// How the dielectric loss was computed.
+    pub dielectric_method: String,
+    /// Losses per frequency, ascending.
+    pub points: Vec<LossPointInfo>,
+}
+
+/// The frequency-independent loss description of a resolved line: the single trace's
+/// matrices, and the pair's (field solver) when there is one.
+fn loss_matrices(r: &Resolved, w: Nm, gap: Option<Nm>) -> Result<(LineMatrices, Option<LineMatrices>), CommandError> {
+    if r.g.t <= Nm::ZERO {
+        return Err(CommandError::invalid_args(
+            "impedance.loss_needs_copper",
+            "conductor loss needs a copper thickness (a zero-thickness strip has no skin-effect model)",
+        )
+        .with_hint("give `copper` (e.g. 35um), or use the stackup's copper"));
+    }
+    match r.method {
+        Solver::ClosedForm => {
+            let m = loss::closed_form(&r.g.geometry(), mm(w), r.g.tan_d).expect("thickness checked");
+            Ok((m, None))
+        }
+        Solver::FieldSolver => {
+            let st = r.g.structure(&r.opts);
+            let tans = r.g.loss_tangents(&r.opts);
+            let acc = Accuracy::default();
+            let line = st.line_matrices(mm(w), gap.map(mm), false, &tans, acc).map_err(solver_error)?;
+            let pair = if st.is_pair(gap.map(mm)) {
+                Some(st.line_matrices(mm(w), gap.map(mm), true, &tans, acc).map_err(solver_error)?)
+            } else {
+                None
+            };
+            Ok((line, pair))
+        }
+    }
+}
+
+/// DC resistance of one trace, Ω/m.
+fn dc_resistance(r: &Resolved, w: Nm, sigma: f64) -> f64 {
+    let area = (mm(w) - mm(r.opts.etch)).max(1e-9) * mm(r.g.t) * 1e-6;
+    1.0 / (sigma * area)
+}
+
+fn db(np: f64) -> f64 {
+    np * loss::DB_PER_NEPER
+}
+
+/// Evaluates the matrices at every frequency.
+fn loss_points(
+    line: &LineMatrices,
+    pair: Option<&LineMatrices>,
+    lp: &LossParams,
+    cond: &loss::Conductor,
+) -> Vec<LossPointInfo> {
+    const INCH: f64 = 0.0254;
+    let rough = !matches!(lp.roughness, loss::Roughness::Smooth);
+    lp.freqs
+        .iter()
+        .map(|fq| {
+            let f = fq.to_f64();
+            let p = loss::at(line, f, cond);
+            let d = pair.map(|m| loss::pair_at(m, f, cond));
+            LossPointInfo {
+                freq: *fq,
+                alpha_db_per_m: sig(db(p.alpha), 4, Unit::Decibel),
+                alpha_db_per_in: sig(db(p.alpha) * INCH, 4, Unit::Decibel),
+                alpha_conductor_db_per_m: sig(db(p.alpha_c), 4, Unit::Decibel),
+                alpha_dielectric_db_per_m: sig(db(p.alpha_d), 4, Unit::Decibel),
+                alpha_diff_db_per_m: d.map(|d| sig(db(d.alpha_diff), 4, Unit::Decibel)),
+                alpha_diff_db_per_in: d.map(|d| sig(db(d.alpha_diff) * INCH, 4, Unit::Decibel)),
+                z0_real: ohms(p.z0.re),
+                z0_imag: quantity(p.z0.im, 3, Unit::Ohm),
+                r_per_m: sig(p.r, 4, Unit::Ohm),
+                l_per_m: sig(p.l, 4, Unit::Henry),
+                g_per_m: sig(p.g, 4, Unit::Siemens),
+                c_per_m: sig(p.c, 4, Unit::Farad),
+                skin_depth: Nm((p.skin_depth * 1e9).round() as i64),
+                roughness_factor: rough.then(|| quantity(p.roughness, 3, Unit::None)),
+            }
+        })
+        .collect()
+}
+
+/// Losses of a resolved line at the requested frequencies, with their notes.
+fn losses(
+    ctx: &mut Context<'_>,
+    r: &Resolved,
+    w: Nm,
+    gap: Option<Nm>,
+    lp: &LossParams,
+) -> Result<LossResult, CommandError> {
+    let (line, pair) = loss_matrices(r, w, gap)?;
+    let sigma = lp.sigma.to_f64();
+    let cond = loss::Conductor { sigma, roughness: lp.roughness, r_dc: dc_resistance(r, w, sigma) };
+    let points = loss_points(&line, pair.as_ref(), lp, &cond);
+    report_loss_notes(ctx, r, lp, gap.is_some() && r.method == Solver::ClosedForm);
+    let field = r.method == Solver::FieldSolver;
+    let (tan, tan2) = match (field, r.g.tan_d_split) {
+        (true, Some((a, b))) => (a, (a != b).then_some(b)),
+        _ => (r.g.tan_d, None),
+    };
+    let tanq = |v: f64| sig(v, 4, Unit::None).plain();
+    Ok(LossResult {
+        conductivity: lp.sigma,
+        loss_tangent: tanq(tan),
+        loss_tangent2: tan2.map(tanq),
+        mask_loss_tangent: r.opts.mask.map(|m| tanq(m.tan_d)),
+        roughness: lp.rough_in.0,
+        huray_radius: lp.rough_in.1,
+        huray_ratio: lp.rough_in.2,
+        conductor_method: if field {
+            "perturbation: Rs ∮|Js|² of the quasi-TEM surface current (field solver), planes included".into()
+        } else {
+            "Wheeler's incremental inductance rule on the closed-form model".into()
+        },
+        dielectric_method: if field {
+            "partial capacitances: G = ω Σ tan δ · ε ∂C/∂ε (field solver)".into()
+        } else {
+            "G = ω C tan δ · (εr/εeff) ∂εeff/∂εr (closed-form εeff)".into()
+        },
+        points,
+    })
+}
+
+fn report_loss_notes(ctx: &mut Context<'_>, r: &Resolved, lp: &LossParams, closed_pair: bool) {
+    if r.g.tan_d_assumed {
+        let mut d = Diagnostic::warning(
+            "impedance.loss_tangent_assumed",
+            format!(
+                "the dielectric loss tangent is not specified: assuming {} (nominal FR-4)",
+                crate::model::board::DEFAULT_LOSS_TANGENT
+            ),
+        )
+        .with_hint("set it from the laminate datasheet with `board.dielectric --loss-tangent`, or give `loss_tangent`");
+        if let Some(l) = &r.layer {
+            d = d.with_subject(ObjectRef::Layer(l.to_string()));
+        }
+        ctx.report(d);
+    }
+    if r.mask_tan_assumed {
+        ctx.report(
+            Diagnostic::info(
+                "impedance.mask_loss_tangent_assumed",
+                format!("solder mask loss tangent not given: assuming {}", electrical::DEFAULT_MASK_LOSS_TANGENT),
+            )
+            .with_hint("give `mask_loss_tangent` from the mask's datasheet"),
+        );
+    }
+    // Skin depth against half the copper: below that frequency the skin-effect model is
+    // approximate (the DC resistance is its floor).
+    let half_t = mm(r.g.t) * 0.5e-3;
+    let sigma = lp.sigma.to_f64();
+    if let Some(f) = lp.freqs.iter().find(|f| loss::skin_depth(f.to_f64(), sigma) > half_t) {
+        ctx.report(
+            Diagnostic::info(
+                "impedance.skin_depth_large",
+                format!(
+                    "at {f} the skin depth ({}) exceeds half the copper thickness ({}): the conductor loss there is \
+                     approximate (between the DC and the skin-effect resistance)",
+                    Nm((loss::skin_depth(f.to_f64(), sigma) * 1e9).round() as i64),
+                    Nm(r.g.t.0 / 2)
+                ),
+            )
+            .with_hint("the skin-effect model is accurate where the skin depth is well below the copper thickness"),
+        );
+    }
+    if closed_pair {
+        ctx.report(
+            Diagnostic::info(
+                "impedance.loss_single_ended",
+                "the closed forms give the losses of one track: the differential attenuation needs the field solver",
+            )
+            .with_hint("add `method: field_solver` for `alpha_diff_db_per_m`"),
+        );
+    }
 }
 
 fn result_text(o: &ImpedanceResult) -> String {
@@ -844,6 +1285,22 @@ fn result_text(o: &ImpedanceResult) -> String {
     if o.method == Solver::FieldSolver {
         s += "  [field solver]";
     }
+    if let Some(l) = &o.loss {
+        for p in &l.points {
+            s += &format!(
+                "\n  {}: {}/m ({}/in; conductor {}/m, dielectric {}/m){}, Z0 {} {} j{}",
+                p.freq,
+                p.alpha_db_per_m,
+                p.alpha_db_per_in,
+                p.alpha_conductor_db_per_m,
+                p.alpha_dielectric_db_per_m,
+                p.alpha_diff_db_per_m.map(|d| format!(", differential {d}/m")).unwrap_or_default(),
+                p.z0_real,
+                if p.z0_imag.to_f64() < 0.0 { "-" } else { "+" },
+                p.z0_imag.with_unit(Unit::Ohm).to_string().trim_start_matches('-')
+            );
+        }
+    }
     s
 }
 
@@ -851,7 +1308,10 @@ fn result_text(o: &ImpedanceResult) -> String {
 /// broadside-coupled with `broadside`) on a copper layer, from the stackup: outer layers are
 /// microstrips, inner layers striplines. Explicit `height`/`height2`/`copper`/`er`/`model`
 /// override the stackup. `method: field_solver` (selected automatically by `etch`, `mask`,
-/// `coplanar_gap`, `broadside` and `er2`) solves the cross-section numerically.
+/// `coplanar_gap`, `broadside` and `er2`) solves the cross-section numerically. With `freq`
+/// (or a sweep `freq_from`/`freq_to`/`freq_points`), also the losses: attenuation (dB/m,
+/// dB/in; conductor with skin effect and optional roughness, dielectric from the loss
+/// tangent), complex Z0 and R, L, G, C per meter.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Calc {
@@ -911,11 +1371,43 @@ pub struct Calc {
     /// overriding the stackup (implies `broadside`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadside_gap: Option<Nm>,
+    /// Frequencies to compute the losses at ("1GHz"; one or more). Losses: attenuation,
+    /// complex Z0 and R, L, G, C per meter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub freq: Vec<Quantity>,
+    /// Frequency sweep: first frequency ("10MHz").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freq_from: Option<Quantity>,
+    /// Frequency sweep: last frequency ("10GHz").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freq_to: Option<Quantity>,
+    /// Frequency sweep: number of frequencies, logarithmically spaced (default 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freq_points: Option<usize>,
+    /// Loss tangent of the dielectric(s), overriding the stackup ("0.02").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_tangent: Option<Quantity>,
+    /// Field solver: solder mask loss tangent (default 0.025).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_loss_tangent: Option<Quantity>,
+    /// Copper conductivity in S/m (default 58M, annealed copper).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductivity: Option<Quantity>,
+    /// RMS surface roughness of the copper (Hammerstad-Jensen correction, "1um").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<Nm>,
+    /// Huray snowball model: sphere radius ("0.5um"), with `huray_ratio`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_radius: Option<Nm>,
+    /// Huray snowball model: total snowball surface per flat area (N·4πa²/A, e.g. "2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_ratio: Option<Quantity>,
 }
 
 impl Command for Calc {
     const NAME: &'static str = "impedance.calc";
-    const SUMMARY: &'static str = "Impedance of a track or differential pair on a layer, from the stackup";
+    const SUMMARY: &'static str =
+        "Impedance of a track or differential pair on a layer, from the stackup; losses at given frequencies";
     const KIND: CommandKind = CommandKind::Query;
     const POSITIONAL: &'static [&'static str] = &["width"];
     type Output = ImpedanceResult;
@@ -940,6 +1432,8 @@ impl Command for Calc {
             coplanar_gap: self.coplanar_gap,
             broadside: self.broadside,
             broadside_gap: self.broadside_gap,
+            loss_tangent: self.loss_tangent,
+            mask_loss_tangent: self.mask_loss_tangent,
         };
         if self.gap.is_some() && args.is_broadside() {
             return Err(CommandError::invalid_args(
@@ -947,9 +1441,22 @@ impl Command for Calc {
                 "a pair is either edge-coupled (`gap`) or broadside, not both",
             ));
         }
+        let lp = loss_params(&LossArgs {
+            freq: &self.freq,
+            freq_from: self.freq_from,
+            freq_to: self.freq_to,
+            freq_points: self.freq_points,
+            conductivity: self.conductivity,
+            roughness: self.roughness,
+            huray_radius: self.huray_radius,
+            huray_ratio: self.huray_ratio,
+        })?;
         let r = resolve(ctx.project()?, &args)?;
-        let o = calc(&r, self.width, self.gap)?;
+        let mut o = calc(&r, self.width, self.gap)?;
         report_geometry(ctx, &r, self.width, self.gap);
+        if let Some(lp) = lp {
+            o.loss = Some(losses(ctx, &r, self.width, self.gap, &lp)?);
+        }
         Ok(o)
     }
 
@@ -1076,6 +1583,8 @@ impl Command for Solve {
             coplanar_gap: self.coplanar_gap,
             broadside: self.broadside,
             broadside_gap: self.broadside_gap,
+            loss_tangent: None,
+            mask_loss_tangent: None,
         };
         let broadside = args.is_broadside();
         let p = ctx.project()?;
@@ -1159,6 +1668,209 @@ impl Command for Solve {
         let mut s = format!("{} -> width {}\n{}", o.target, o.result.width, result_text(&o.result));
         if let Some(c) = &o.netclass {
             s += &format!("\nnet class `{c}` updated");
+        }
+        s
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Net insertion loss
+
+/// Insertion loss of a routed net: the attenuation of its tracks on each layer and width
+/// (single-ended, from the stackup like `impedance.calc`) times their routed length, at given
+/// frequencies. Vias, pads and reflections are not included.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetLoss {
+    /// Net name.
+    pub net: String,
+    /// Frequencies ("1GHz"; one or more).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub freq: Vec<Quantity>,
+    /// Frequency sweep: first frequency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freq_from: Option<Quantity>,
+    /// Frequency sweep: last frequency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freq_to: Option<Quantity>,
+    /// Frequency sweep: number of frequencies, logarithmically spaced (default 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freq_points: Option<usize>,
+    /// `closed_form` (default) or `field_solver`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<Solver>,
+    /// Loss tangent, overriding the stackup's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_tangent: Option<Quantity>,
+    /// Copper conductivity in S/m (default 58M).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductivity: Option<Quantity>,
+    /// RMS surface roughness (Hammerstad-Jensen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<Nm>,
+    /// Huray snowball radius, with `huray_ratio`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_radius: Option<Nm>,
+    /// Huray surface ratio (N·4πa²/A).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_ratio: Option<Quantity>,
+}
+
+/// Tracks of a net on one layer at one width.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NetLossSegment {
+    /// Copper layer.
+    pub layer: String,
+    /// Track width.
+    pub width: Nm,
+    /// Routed length on this layer at this width.
+    pub length: Nm,
+    /// Line model of the layer.
+    pub model: Model,
+    /// Attenuation per meter at each frequency (in the order of `points`).
+    pub alpha_db_per_m: Vec<Quantity>,
+}
+
+/// Insertion loss at one frequency.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NetLossPoint {
+    /// Frequency.
+    pub freq: Quantity,
+    /// Total loss of the routed tracks.
+    pub loss: Quantity,
+}
+
+/// Result of `net.loss`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NetLossResult {
+    /// Net.
+    pub net: String,
+    /// How the attenuation was computed.
+    pub method: Solver,
+    /// Routed track length (all layers).
+    pub length: Nm,
+    /// Via length (through the stackup), not included in the loss.
+    pub via_length: Nm,
+    /// Tracks per layer and width.
+    pub segments: Vec<NetLossSegment>,
+    /// Loss per frequency.
+    pub points: Vec<NetLossPoint>,
+}
+
+impl Command for NetLoss {
+    const NAME: &'static str = "net.loss";
+    const SUMMARY: &'static str = "Insertion loss of a routed net's tracks at given frequencies (per layer and width)";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["net"];
+    type Output = NetLossResult;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<NetLossResult, CommandError> {
+        let p = ctx.project()?;
+        let net = super::net::net_name(p, &self.net)?;
+        let Some(lp) = loss_params(&LossArgs {
+            freq: &self.freq,
+            freq_from: self.freq_from,
+            freq_to: self.freq_to,
+            freq_points: self.freq_points,
+            conductivity: self.conductivity,
+            roughness: self.roughness,
+            huray_radius: self.huray_radius,
+            huray_ratio: self.huray_ratio,
+        })?
+        else {
+            return Err(CommandError::invalid_args("impedance.no_frequency", "`net.loss` needs a frequency")
+                .with_hint("give `freq` (one or more), or a sweep with `freq_from`, `freq_to` and `freq_points`"));
+        };
+        let mut by: std::collections::BTreeMap<(String, Nm), f64> = std::collections::BTreeMap::new();
+        for t in p.board().tracks.iter().filter(|t| t.net.as_deref() == Some(net.as_str())) {
+            *by.entry((t.layer.clone(), t.width)).or_default() += crate::board::track_length(t).0 as f64;
+        }
+        let via_length = crate::lengths::net_length(p, &net).vias;
+        if by.is_empty() {
+            ctx.report(
+                Diagnostic::warning("net.not_routed", format!("net `{net}` has no tracks: no loss to compute"))
+                    .with_subject(ObjectRef::Net(net.clone()))
+                    .with_hint("route it first (route.nets), then measure its loss"),
+            );
+        }
+        let sigma = lp.sigma.to_f64();
+        let mut segments = Vec::new();
+        let mut total = vec![0.0; lp.freqs.len()];
+        let mut length = 0.0;
+        let mut noted: Vec<String> = Vec::new();
+        for ((layer, width), len_nm) in by {
+            let args = GeoArgs {
+                layer: Some(layer.as_str()),
+                model: None,
+                height: None,
+                height2: None,
+                copper: None,
+                er: None,
+                method: self.method,
+                er2: None,
+                etch: None,
+                mask: None,
+                mask_copper: None,
+                mask_er: None,
+                coplanar_gap: None,
+                broadside: false,
+                broadside_gap: None,
+                loss_tangent: self.loss_tangent,
+                mask_loss_tangent: None,
+            };
+            let r = resolve(ctx.project()?, &args)?;
+            let (line, _) = loss_matrices(&r, width, None)?;
+            let cond = loss::Conductor { sigma, roughness: lp.roughness, r_dc: dc_resistance(&r, width, sigma) };
+            let meters = len_nm * 1e-9;
+            let mut alphas = Vec::new();
+            for (i, f) in lp.freqs.iter().enumerate() {
+                let a = db(loss::at(&line, f.to_f64(), &cond).alpha);
+                total[i] += a * meters;
+                alphas.push(sig(a, 4, Unit::Decibel));
+            }
+            length += len_nm;
+            if !noted.contains(&layer) {
+                if r.g.assumed {
+                    ctx.report(
+                        Diagnostic::warning(
+                            "impedance.stackup_assumed",
+                            "the stackup's dielectrics are not specified: the result uses an assumed stackup",
+                        )
+                        .with_subject(ObjectRef::Layer(layer.clone()))
+                        .with_hint("set the real dielectrics from your fab's stackup with `board.dielectric`"),
+                    );
+                }
+                report_loss_notes(ctx, &r, &lp, false);
+                noted.push(layer.clone());
+            }
+            segments.push(NetLossSegment {
+                layer,
+                width,
+                length: Nm(len_nm.round() as i64),
+                model: r.g.model,
+                alpha_db_per_m: alphas,
+            });
+        }
+        let points = lp
+            .freqs
+            .iter()
+            .zip(&total)
+            .map(|(f, l)| NetLossPoint { freq: *f, loss: quantity(*l, 3, Unit::Decibel) })
+            .collect();
+        Ok(NetLossResult {
+            net,
+            method: self.method.unwrap_or(Solver::ClosedForm),
+            length: Nm(length.round() as i64),
+            via_length,
+            segments,
+            points,
+        })
+    }
+
+    fn summarize(o: &NetLossResult) -> String {
+        let mut s = format!("net `{}`: {} of tracks (vias {} not included)", o.net, o.length, o.via_length);
+        for p in &o.points {
+            s += &format!("\n  {}: {}", p.freq, p.loss);
         }
         s
     }

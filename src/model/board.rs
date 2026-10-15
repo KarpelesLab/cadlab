@@ -69,11 +69,20 @@ pub struct Dielectric {
     /// Material or construction, for information (`FR-4 7628 prepreg`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
+    /// Loss tangent (dissipation factor, tan δ) at the frequency of interest, as an exact
+    /// decimal (`"0.02"`). Unset: [`DEFAULT_LOSS_TANGENT`] is assumed for loss calculations.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::value::plain")]
+    #[schemars(with = "Option<Quantity>")]
+    pub loss_tangent: Option<Quantity>,
 }
 
 /// Relative permittivity assumed when the stackup gives none: 4.5, a common nominal value for
 /// FR-4 around 1 GHz (laminate datasheets give 4.2 to 4.8). Not a fab value.
 pub const DEFAULT_ER: Quantity = Quantity::from_parts(45, -1, crate::value::Unit::None);
+
+/// Loss tangent assumed when a dielectric gives none: 0.02, a common nominal value for
+/// standard FR-4 around 1 GHz (laminate datasheets give about 0.015 to 0.025). Not a fab value.
+pub const DEFAULT_LOSS_TANGENT: Quantity = Quantity::from_parts(2, -2, crate::value::Unit::None);
 
 impl Default for Stackup {
     fn default() -> Self {
@@ -105,7 +114,7 @@ impl Stackup {
         }
         let copper = self.outer_copper.0 * 2.min(n) + self.inner_copper.0 * (n - 2).max(0);
         let each = Nm(((self.thickness.0 - copper).max(0)) / gaps as i64);
-        let d = Dielectric { thickness: each, er: DEFAULT_ER, material: None };
+        let d = Dielectric { thickness: each, er: DEFAULT_ER, material: None, loss_tangent: None };
         (vec![d; gaps], true)
     }
 

@@ -4,7 +4,7 @@ Calculations and checks that need more than connectivity and geometry: transmiss
 stackup, track width for a current, a SPICE netlist for simulation, and a design lint beyond ERC. Code:
 `src/electrical/` (impedance closed forms, 2D field solver, current, DRC checks), `src/spice.rs`,
 `src/lint.rs`; commands in `src/commands/electrical.rs`, `export.spice` and `circuit.lint`. Decisions:
-DECISIONS D29, D49 (field solver).
+DECISIONS D29, D49 (field solver), D52 (losses).
 
 Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md), "Differential pairs"
 and "Length tuning", D38); this document covers the numbers they route to. A pair (`diffpair.add`) routes at
@@ -20,7 +20,7 @@ reported (impedances to 0.01 Ω, widths to 1 µm).
 
 | Where | Field | Example | Set with |
 |---|---|---|---|
-| `board.json` stackup | `dielectrics`: one per gap between copper layers, top to bottom: `thickness`, `er`, optional `material` | `{"thickness": "0.2mm", "er": "4.4", "material": "7628 prepreg"}` | `board.dielectric` |
+| `board.json` stackup | `dielectrics`: one per gap between copper layers, top to bottom: `thickness`, `er`, optional `loss_tangent` (written as a plain decimal), optional `material` | `{"thickness": "0.2mm", "er": "4.4", "loss_tangent": "0.02", "material": "7628 prepreg"}` | `board.dielectric` |
 | `circuit.json` net | `voltage`, `current`, `temp_rise` | `"current": "2A"` | `net.set --voltage 3.3V --current 2A --temp-rise 20C` |
 | `circuit.json` net class | `impedance`, `diff_impedance` (targets) | `"impedance": "50Ω"` | `netclass.set`, `impedance.solve --netclass` |
 | part parameters | `spice_model`, `spice_lib`, `spice_pins` (text; a component property of the same name wins) | `spice_model=LM358` | `part.set --params`, `circuit.add --properties` |
@@ -32,7 +32,8 @@ These are optional fields: projects without them load and save unchanged, so no 
 ## Stackup
 
 `board.stackup` shows copper layers (thickness, line model) and dielectrics; `board.dielectric --gap N` sets
-one gap (1 = between `F.Cu` and the next layer), without `--gap` every gap. When the stackup has no dielectrics
+one gap (1 = between `F.Cu` and the next layer: thickness, εr, loss tangent, material), without `--gap` every
+gap. When the stackup has no dielectrics
 (or not one per gap), the calculator **assumes** one: the board thickness minus copper, split equally over the
 gaps, at εr 4.5 (a nominal FR-4 value near 1 GHz; laminate datasheets give 4.2–4.8). Results based on it come
 with an `impedance.stackup_assumed` warning. That assumption is a placeholder, not a fab value: real stackups
@@ -60,7 +61,8 @@ neighbouring layer is assumed to be a solid reference plane. Explicit `height`, 
 
 Not modeled by the closed forms: solder mask over outer layers (it typically lowers a microstrip by 1–3 Ω),
 etching trapezoid, coplanar ground, broadside coupling, a stripline's two dielectrics separately; the field
-solver below covers these. Not modeled at all: frequency dispersion, glass weave, losses. Inputs outside a
+solver below covers these. Not modeled at all: frequency dispersion of εr and tan δ, glass weave (losses: see
+"Losses" below). Inputs outside a
 formula's range give an `impedance.out_of_range` warning (its hint points to the field solver, which has no
 range limits).
 
@@ -74,7 +76,7 @@ into the class (created if needed): `track_width` + `impedance`, or `diff_pair_w
 Outputs: `method`, `z0`, `zdiff`, `er_eff`, `delay_per_mm` (√εeff / c), `c_per_m` and `l_per_m` (capacitance
 and inductance per meter of one track, √εeff / (Z₀c) and Z₀√εeff / c), and the geometry and formula used; the
 field solver adds, for pairs, `zcomm`, `z_odd` (= Zdiff/2), `z_even` (= 2 Zcomm), `er_eff_odd` and
-`er_eff_even`.
+`er_eff_even`. With frequencies, `loss` (see "Losses").
 
 Tests (`src/electrical/impedance.rs`, `tests/electrical.rs`): Pozar, *Microwave Engineering*, Example 3.7
 (microstrip, εr 2.2, 1.59 mm, W = 4.9 mm → 50 Ω, εe 1.87) and Example 3.5 (stripline, b = 3.2 mm, εr 2.2,
@@ -141,6 +143,88 @@ cover takes εeff to εr; widely spaced pairs give Zdiff = 2 Z₀ and Zcomm = Z�
 0.13 s. `impedance.solve` starts from the closed-form width, brackets on a logarithmic scale and refines by
 regula falsi, first at a coarser discretization and then at the default one (about 0.5 s for that pair).
 The DRC's `drc.impedance` check keeps the closed forms.
+
+### Losses (`impedance.calc --freq`, `net.loss`)
+
+With `freq` (one or more frequencies) or a sweep (`freq_from`, `freq_to`, `freq_points`, logarithmic, default
+10 points, each rounded to 4 significant digits), `impedance.calc` adds `loss`: per frequency the attenuation
+`alpha_db_per_m` / `alpha_db_per_in` (Re γ, γ = √((R + jωL)(G + jωC))), its conductor and dielectric parts
+(R / 2Z₀ and G Z₀ / 2 with the lossless Z₀), the complex characteristic impedance `z0_real` / `z0_imag`
+(√((R + jωL)/(G + jωC))), `r_per_m`, `l_per_m` (external plus internal), `g_per_m`, `c_per_m`, the skin depth,
+and for a pair with the field solver the differential attenuation `alpha_diff_db_per_m` / `_per_in`. Inputs:
+
+| Input | Default | Notes |
+|---|---|---|
+| dielectric `loss_tangent` | the stackup's (`board.dielectric --loss-tangent`), else 0.02 with an `impedance.loss_tangent_assumed` warning | `loss_tangent` overrides every laminate dielectric; tan δ is taken constant over frequency |
+| `mask_loss_tangent` | 0.025 (typical LPI; `impedance.mask_loss_tangent_assumed` note) | field solver with `mask` |
+| `conductivity` | 58 MS/m (annealed copper, IEC 60028) | S/m (`"58M"` or `"58MS"`) |
+| `roughness` | smooth | RMS roughness, Hammerstad–Jensen factor |
+| `huray_radius` + `huray_ratio` | smooth | Huray snowball radius a and surface ratio SR = N·4πa²/A_flat |
+
+**Conductor loss.** Rs = √(πfμ₀/σ), skin depth δ = 1/√(πfμ₀σ). R = K · Rs · (R/Rs), where R/Rs is a
+property of the cross-section:
+
+- closed forms: Wheeler's incremental inductance rule (H. A. Wheeler, "Formulas for the Skin Effect",
+  Proc. IRE 1942), R = (Rs/μ₀) ∂L/∂n, every conductor wall receding by n (the strip loses n on each face,
+  each plane moves n away), applied to the closed-form model's L = Z₀√εeff / c by a central difference;
+- field solver: the perturbation (power-loss) method R = Rs ∮|Jₛ|² dl / I², with the surface current of the
+  quasi-TEM mode: its magnetic field is the vacuum structure's, so Jₛ = c ρₛ, the surface charge of the vacuum
+  boundary element solution on traces and coplanar grounds, plus the charge it induces on the ground planes
+  (closed-form integrals of the plane Green's functions along each panel, integrated along the planes by
+  graded Gauss quadrature). The corners are refined 1000× further than for the capacitance (the current
+  crowds there, σ ~ r^(−1/3)). For a pair, R is the 2×2 matrix of the unit-current distributions.
+
+Roughness multiplies R: Hammerstad–Jensen K = 1 + (2/π) atan(1.4 (Δ/δ)²) (Hammerstad & Jensen 1980, the paper
+of the microstrip model), or Huray's snowball model K = 1 + (3/2) SR / (1 + δ/a + δ²/(2a²)) (P. G. Huray et al.,
+"Impact of Copper Surface Texture on Loss: A Model that Works", DesignCon 2010; the matte-to-flat area ratio
+is taken as 1); applied to every surface, planes included (conservative: plated tops are smoother). The
+internal inductance of the (smooth) skin-effect surface, R/ω, is added to L. Below the skin-effect range
+(δ above about half the copper thickness, `impedance.skin_depth_large` note) the result is approximate: R
+never drops below the trace's DC resistance 1/(σ · t · (W − etch)), which takes over at low frequencies (for a
+pair: each trace's DC resistance, return through the planes). Zero-thickness copper has no skin-effect model
+(`impedance.loss_needs_copper`).
+
+**Dielectric loss.** First-order perturbation with complex permittivities ε(1 − j tan δ):
+G = ω Σᵣ tan δᵣ · εᵣ ∂C/∂εᵣ over the dielectric regions (εᵣ ∂C/∂εᵣ is the region's partial capacitance, its
+share of the electric energy). Field solver: the derivative of the boundary element C when the permittivities
+of all regions with the same tan δ are scaled together (one-sided second-order difference, two extra solves
+per distinct loss tangent; masks, split stripline dielectrics and broadside separations keep their own tan δ).
+Closed forms: G = ωC tan δ · (εr/εeff) ∂εeff/∂εr from the closed-form εeff (a stripline is fully filled; with
+two dielectrics the closed forms use tan δ averaged with weights εr × thickness). D. M. Pozar, *Microwave
+Engineering*, gives αd = k₀ εr (εeff − 1) tan δ / (2√εeff (εr − 1)), the same with εeff taken linear in εr;
+it is about 1 % higher for FR-4 microstrip.
+
+**Pairs.** The differential attenuation is the power-loss formula α = (iᵀRi + vᵀGv) / (2 vᵀi) for v = (1, −1)
+and i = Z⁻¹v, Z the lossless characteristic impedance matrix (exactly the odd mode of a symmetric pair:
+(R₁₁ − R₁₂)/(2 Z_odd) + (G₁₁ − G₁₂) Z_odd / 2). The closed forms give only the single line
+(`impedance.loss_single_ended` note).
+
+**Accuracy** (tests in `src/electrical/loss.rs`, `src/electrical/fieldsolver.rs`, `tests/electrical.rs`):
+
+| Case | Reference | Agreement |
+|---|---|---|
+| stripline, b = 3.2 mm, εr 2.2, W = 2.66 mm, t = 10 µm, tan δ 0.001, 10 GHz | Pozar, Example 3.5: αd = 0.155 Np/m, αc = 0.122 Np/m (Pozar's closed form of Wheeler's rule) | αd < 1 %, αc < 3 % (closed forms), < 5 % (field solver) |
+| homogeneous dielectric, single line and odd mode | exact: αd = π f √εr tan δ / c | 1e-4 |
+| microstrip conductor loss, W/H 0.5, 1, 4 (H 0.5 mm, 35 µm) | R. A. Pucel, D. J. Massé, C. P. Hartwig, "Losses in Microstrip", IEEE MTT-16 (1968), as given by Gupta, Garg, Bahl, Bhartia, *Microstrip Lines and Slotlines* | Wheeler/Hammerstad–Jensen within 8 % (Pucel's formulas are themselves Wheeler's rule on older Z₀ approximations, discontinuous by ~10 % at W/H = 2); field solver within 1.5 % of Wheeler/Hammerstad–Jensen |
+| dielectric partial capacitance, microstrip W/H 1, εr 4.4 | (εr/εeff) ∂εeff/∂εr of Hammerstad–Jensen (0.2 % εeff) | < 0.4 % (Pozar's filling factor: < 1.5 %) |
+| wide microstrip, W/H = 50 | parallel plate: R = 2 Rs / W_eff, W_eff = h C₀/ε₀ | < 3 % |
+| plane currents | Gauss's law: induced plane charge = −Q (with the truncated 1/x² tail added) | < 0.1 % |
+| skin depth, copper at 1 GHz | 2.09 µm | 0.1 % |
+| field-solver R and G against a 2.5× finer discretization (thick lines, mask, CPWG, etch, split dielectrics, pairs) | | < 1 % (R), < 0.2 % (G) |
+
+Expect the conductor loss of real boards to be dominated by roughness and the copper's actual conductivity;
+the smooth-copper numbers are a lower bound. Not modeled: dispersion of εr and tan δ (a constant tan δ is not
+causal; use the datasheet values at the frequency of interest), conductor loss of a plane's far side,
+radiation, and the frequency dependence of the current distribution between DC and the skin-effect regime.
+
+**`net.loss`** gives the insertion loss of a routed net: its tracks grouped by layer and width (lengths along
+arcs, as in `diffpair`/length matching), each group's single-ended attenuation at its layer's stackup geometry
+(closed forms, or `method: field_solver`), times its length, summed per frequency. Vias, pads, reflections and
+coupling to other nets are not included (the via length is reported separately).
+
+**Speed** (release): closed forms instant; a field-solver single line about 10 ms with losses, a masked pair
+with coplanar grounds on 1.5 mm FR-4 about 0.7 s (pair and single line: the vacuum solve for the currents and
+two extra solves per distinct loss tangent). The matrices do not depend on frequency: a sweep costs no more than one frequency.
 
 ### DRC: `drc.impedance`
 

@@ -2,15 +2,17 @@
 //! IPC-2152 track widths for a current, plus the DRC checks built on them. See
 //! `docs/ELECTRICAL.md`.
 
+pub mod complex;
 pub mod current;
 pub mod fieldsolver;
 pub mod impedance;
+pub mod loss;
 
 use std::collections::BTreeMap;
 
 use crate::diag::Diagnostic;
 use crate::model::Project;
-use crate::model::board::Stackup;
+use crate::model::board::{DEFAULT_LOSS_TANGENT, Dielectric, Stackup};
 use crate::refs::ObjectRef;
 use crate::units::{LengthUnit, Nm};
 use crate::value::{Quantity, Unit};
@@ -50,6 +52,14 @@ pub struct LayerGeometry {
     pub er_split: Option<(f64, f64)>,
     /// Broadside-coupled pair: the second trace and the dielectric between the two.
     pub broadside: Option<Broadside>,
+    /// Loss tangent (a stripline between two dielectrics: their mean weighted by εr ×
+    /// thickness, used by the closed forms).
+    pub tan_d: f64,
+    /// Loss tangents below and above the trace when they differ (the field solver uses them
+    /// separately).
+    pub tan_d_split: Option<(f64, f64)>,
+    /// Whether a loss tangent was assumed ([`DEFAULT_LOSS_TANGENT`]: the stackup gives none).
+    pub tan_d_assumed: bool,
 }
 
 /// The second trace of a broadside-coupled pair, above the first.
@@ -61,12 +71,25 @@ pub struct Broadside {
     pub er: f64,
     /// Copper layer of the second trace (from the stackup).
     pub layer: Option<String>,
+    /// Loss tangent of the dielectric between the traces.
+    pub tan_d: f64,
 }
 
 impl LayerGeometry {
     /// The geometry for the formulas, in millimeters.
     pub fn geometry(&self) -> Geometry {
         Geometry { model: self.model, h: mm(self.h), h2: mm(self.h2), t: mm(self.t), er: self.er }
+    }
+
+    /// Loss tangents of the field solver's cross-section.
+    pub fn loss_tangents(&self, o: &FieldOptions) -> fieldsolver::LossTangents {
+        let (below, above) = self.tan_d_split.unwrap_or((self.tan_d, self.tan_d));
+        fieldsolver::LossTangents {
+            below,
+            above,
+            broadside: self.broadside.as_ref().map_or(0.0, |b| b.tan_d),
+            mask: o.mask.map_or(0.0, |m| m.tan_d),
+        }
     }
 
     /// The cross-section for the field solver, in millimeters.
@@ -115,7 +138,13 @@ pub struct MaskSpec {
     pub over_copper: Nm,
     /// Relative permittivity.
     pub er: f64,
+    /// Loss tangent.
+    pub tan_d: f64,
 }
+
+/// Loss tangent assumed for a solder mask when none is given: 0.025, a typical value for
+/// liquid photoimageable masks near 1 GHz (datasheets give about 0.015 to 0.035).
+pub const DEFAULT_MASK_LOSS_TANGENT: f64 = 0.025;
 
 /// Cross-section details only the field solver models.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -157,6 +186,7 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
     }
     let (diel, assumed) = stackup.effective_dielectrics();
     let er = |i: usize| diel[i].er.to_f64();
+    let tan = |i: usize| loss_tangent(&diel[i]);
     if k == 0 || k == n - 1 {
         let (gap, refl) = if k == 0 { (0, 1) } else { (n - 2, n - 2) };
         return Ok(LayerGeometry {
@@ -169,11 +199,16 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
             assumed,
             er_split: None,
             broadside: None,
+            tan_d: tan(gap),
+            tan_d_split: None,
+            tan_d_assumed: diel[gap].loss_tangent.is_none(),
         });
     }
     let (h1, h2) = (diel[k - 1].thickness, diel[k].thickness);
     let (a, b) = (mm(h1), mm(h2));
     let er_mean = if a + b > 0.0 { (er(k - 1) * a + er(k) * b) / (a + b) } else { er(k) };
+    let (wa, wb) = (er(k - 1) * a, er(k) * b);
+    let tan_mean = if wa + wb > 0.0 { (tan(k - 1) * wa + tan(k) * wb) / (wa + wb) } else { tan(k) };
     Ok(LayerGeometry {
         model: Model::Stripline,
         h: h1,
@@ -184,6 +219,9 @@ pub fn layer_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometry, G
         assumed,
         er_split: (er(k - 1) != er(k)).then(|| (er(k - 1), er(k))),
         broadside: None,
+        tan_d: tan_mean,
+        tan_d_split: (tan(k - 1) != tan(k)).then(|| (tan(k - 1), tan(k))),
+        tan_d_assumed: diel[k - 1].loss_tangent.is_none() || diel[k].loss_tangent.is_none(),
     })
 }
 
@@ -200,27 +238,22 @@ pub fn broadside_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometr
     }
     let (diel, assumed) = stackup.effective_dielectrics();
     let er = |i: usize| diel[i].er.to_f64();
+    let tan = |i: usize| loss_tangent(&diel[i]);
     let t = copper_thickness(stackup, layer).max(copper_thickness(stackup, &names[k + 1]));
     let above = k >= 1;
     let below = k + 2 < n;
     // Stackup order is top to bottom; the solver's is bottom (first plane) to top.
-    let (model, h, er_h, h2, er_h2, refs) = match (above, below) {
-        (true, true) => (
-            Model::Stripline,
-            diel[k + 1].thickness,
-            er(k + 1),
-            diel[k - 1].thickness,
-            er(k - 1),
-            vec![names[k - 1].clone(), names[k + 2].clone()],
-        ),
-        (false, true) => {
-            (Model::Microstrip, diel[k + 1].thickness, er(k + 1), Nm::ZERO, 1.0, vec![names[k + 2].clone()])
-        }
-        (true, false) => {
-            (Model::Microstrip, diel[k - 1].thickness, er(k - 1), Nm::ZERO, 1.0, vec![names[k - 1].clone()])
-        }
+    // Dielectric indices below the lower trace and above the upper one.
+    let (model, lo, hi, refs) = match (above, below) {
+        (true, true) => (Model::Stripline, k + 1, Some(k - 1), vec![names[k - 1].clone(), names[k + 2].clone()]),
+        (false, true) => (Model::Microstrip, k + 1, None, vec![names[k + 2].clone()]),
+        (true, false) => (Model::Microstrip, k - 1, None, vec![names[k - 1].clone()]),
         (false, false) => return Err(GeometryError::NoReference),
     };
+    let (h, er_h) = (diel[lo].thickness, er(lo));
+    let (h2, er_h2) = hi.map_or((Nm::ZERO, 1.0), |i| (diel[i].thickness, er(i)));
+    let (tan_h, tan_h2) = (tan(lo), hi.map_or(0.0, tan));
+    let used = [Some(lo), Some(k), hi];
     Ok(LayerGeometry {
         model,
         h,
@@ -230,8 +263,21 @@ pub fn broadside_geometry(stackup: &Stackup, layer: &str) -> Result<LayerGeometr
         references: refs,
         assumed,
         er_split: (model == Model::Stripline).then_some((er_h, er_h2)),
-        broadside: Some(Broadside { gap: diel[k].thickness, er: er(k), layer: Some(names[k + 1].clone()) }),
+        broadside: Some(Broadside {
+            gap: diel[k].thickness,
+            er: er(k),
+            layer: Some(names[k + 1].clone()),
+            tan_d: tan(k),
+        }),
+        tan_d: tan_h,
+        tan_d_split: (model == Model::Stripline).then_some((tan_h, tan_h2)),
+        tan_d_assumed: used.iter().flatten().any(|&i| diel[i].loss_tangent.is_none()),
     })
+}
+
+/// Loss tangent of a dielectric, [`DEFAULT_LOSS_TANGENT`] when unset.
+pub fn loss_tangent(d: &Dielectric) -> f64 {
+    d.loss_tangent.unwrap_or(DEFAULT_LOSS_TANGENT).to_f64()
 }
 
 /// Copper thickness of a layer.
@@ -366,8 +412,12 @@ mod tests {
 
     #[test]
     fn four_layer_geometry() {
-        let d =
-            |um, er: &str| Dielectric { thickness: Nm::from_um(um), er: Quantity::parse(er).unwrap(), material: None };
+        let d = |um, er: &str| Dielectric {
+            thickness: Nm::from_um(um),
+            er: Quantity::parse(er).unwrap(),
+            material: None,
+            loss_tangent: None,
+        };
         let s = Stackup {
             copper_layers: 4,
             dielectrics: vec![d(200, "4.4"), d(1065, "4.6"), d(200, "4.4")],

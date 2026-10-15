@@ -478,3 +478,139 @@ fn attiny_board_lint_clean() {
     let o = exec(&r, &mut s, "circuit.lint", json!({}));
     assert_eq!(o["summary"], "lint clean", "{:?}", o["diagnostics"]);
 }
+
+/// "1.234dB" → 1.234
+fn decibels(v: &Value) -> f64 {
+    v.as_str().unwrap().trim_end_matches("dB").parse().unwrap()
+}
+
+#[test]
+fn losses_and_net_loss() {
+    let r = Registry::with_builtins();
+    let (_dir, mut s) = new_project(&r, "loss");
+    exec(&r, &mut s, "board.setup", json!({"layers": 4}));
+    let o = exec(
+        &r,
+        &mut s,
+        "board.dielectric",
+        json!({"gap": 1, "thickness": "0.2mm", "er": "4.4", "loss_tangent": "0.02"}),
+    );
+    assert_eq!(o["output"]["dielectrics"][0]["loss_tangent"], "0.02");
+    assert!(o["output"]["dielectrics"][1].get("loss_tangent").is_none());
+    assert_eq!(fail(&r, &mut s, "board.dielectric", json!({"gap": 1, "loss_tangent": "1.5"})), "value.out_of_range");
+
+    // One frequency: attenuation in dB/m and dB/in, its two parts, complex Z0 and RLGC.
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "freq": ["1GHz"]}));
+    assert!(!codes(&o).contains(&"impedance.loss_tangent_assumed".to_string()), "{}", o["diagnostics"]);
+    let l = &o["output"]["loss"];
+    assert_eq!(l["loss_tangent"], "0.02");
+    assert_eq!(l["conductivity"], "58MS");
+    let p = &l["points"][0];
+    assert_eq!(p["freq"], "1GHz");
+    let a = decibels(&p["alpha_db_per_m"]);
+    let (ac, ad) = (decibels(&p["alpha_conductor_db_per_m"]), decibels(&p["alpha_dielectric_db_per_m"]));
+    // About 50 Ω on 0.2 mm FR-4 at 1 GHz: a few dB per meter, both parts of similar size.
+    assert!(a > 2.0 && a < 8.0 && (a - ac - ad).abs() < 0.01 * a, "{p}");
+    assert!((decibels(&p["alpha_db_per_in"]) - a * 0.0254).abs() < 1e-3 * a, "{p}");
+    assert!(ohms(&p["z0_real"]) > 40.0 && p["z0_imag"].as_str().unwrap().ends_with('Ω'), "{p}");
+    for k in ["r_per_m", "l_per_m", "g_per_m", "c_per_m", "skin_depth"] {
+        assert!(p[k].is_string(), "{k}: {p}");
+    }
+    assert_eq!(p["skin_depth"], "0.00209mm");
+
+    // A sweep (logarithmic), with a note where the skin depth exceeds half the copper.
+    let o = exec(
+        &r,
+        &mut s,
+        "impedance.calc",
+        json!({"width": "0.35mm", "freq_from": "10MHz", "freq_to": "10GHz", "freq_points": 4}),
+    );
+    let pts = o["output"]["loss"]["points"].as_array().unwrap();
+    let freqs: Vec<&str> = pts.iter().map(|p| p["freq"].as_str().unwrap()).collect();
+    assert_eq!(freqs, ["10MHz", "100MHz", "1GHz", "10GHz"]);
+    let alphas: Vec<f64> = pts.iter().map(|p| decibels(&p["alpha_db_per_m"])).collect();
+    assert!(alphas.windows(2).all(|w| w[0] < w[1]), "{alphas:?}");
+    assert!(codes(&o).contains(&"impedance.skin_depth_large".to_string()));
+
+    // Roughness adds conductor loss; the field solver agrees with the closed forms.
+    let rough = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "freq": ["1GHz"], "roughness": "1um"}));
+    let pr = &rough["output"]["loss"]["points"][0];
+    assert!(decibels(&pr["alpha_conductor_db_per_m"]) > 1.15 * ac, "{pr}");
+    assert!(pr["roughness_factor"].is_string());
+    let hu = exec(
+        &r,
+        &mut s,
+        "impedance.calc",
+        json!({"width": "0.35mm", "freq": ["1GHz"], "huray_radius": "0.5um", "huray_ratio": "2"}),
+    );
+    assert!(decibels(&hu["output"]["loss"]["points"][0]["alpha_conductor_db_per_m"]) > ac);
+    let fs = exec(&r, &mut s, "impedance.calc", json!({"width": "0.35mm", "freq": ["1GHz"], "method": "field_solver"}));
+    let af = decibels(&fs["output"]["loss"]["points"][0]["alpha_db_per_m"]);
+    assert!((af - a).abs() < 0.05 * a, "{af} {a}");
+
+    // A pair with the field solver: differential attenuation (the odd mode has less of its
+    // field in the laminate, more current crowding: near the single line's here).
+    let o = exec(
+        &r,
+        &mut s,
+        "impedance.calc",
+        json!({"width": "0.2mm", "gap": "0.15mm", "method": "field_solver", "freq": ["5GHz"]}),
+    );
+    let p = &o["output"]["loss"]["points"][0];
+    let (ad, a1) = (decibels(&p["alpha_diff_db_per_m"]), decibels(&p["alpha_db_per_m"]));
+    assert!(ad > 0.8 * a1 && ad < 1.2 * a1, "{p}");
+    // The closed forms give the single line and say so.
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.2mm", "gap": "0.15mm", "freq": ["5GHz"]}));
+    assert!(o["output"]["loss"]["points"][0].get("alpha_diff_db_per_m").is_none());
+    assert!(codes(&o).contains(&"impedance.loss_single_ended".to_string()));
+
+    // In1.Cu: gap 2 has no loss tangent, assumed and noted.
+    let o = exec(&r, &mut s, "impedance.calc", json!({"width": "0.15mm", "layer": "In1.Cu", "freq": ["1GHz"]}));
+    assert!(codes(&o).contains(&"impedance.loss_tangent_assumed".to_string()));
+    let o = exec(
+        &r,
+        &mut s,
+        "impedance.calc",
+        json!({"width": "0.15mm", "layer": "In1.Cu", "freq": ["1GHz"], "loss_tangent": "0.004"}),
+    );
+    assert!(!codes(&o).contains(&"impedance.loss_tangent_assumed".to_string()));
+    assert_eq!(o["output"]["loss"]["loss_tangent"], "0.004");
+
+    // Input errors.
+    let calc_err = |s: &mut Session, args: Value| fail(&r, s, "impedance.calc", args);
+    assert_eq!(calc_err(&mut s, json!({"width": "0.35mm", "conductivity": "40M"})), "impedance.no_frequency");
+    assert_eq!(
+        calc_err(&mut s, json!({"width": "0.35mm", "freq": ["1GHz"], "roughness": "1um", "huray_radius": "1um"})),
+        "impedance.invalid_roughness"
+    );
+    assert_eq!(calc_err(&mut s, json!({"width": "0.35mm", "freq": ["1V"]})), "value.wrong_unit");
+    assert_eq!(
+        calc_err(&mut s, json!({"width": "0.35mm", "freq_from": "1GHz", "freq_to": "1MHz"})),
+        "impedance.invalid_sweep"
+    );
+
+    // net.loss: the routed length times the attenuation of its layer and width.
+    let (_dir2, mut s2) = new_project(&r, "netloss");
+    two_resistor_board(&r, &mut s2);
+    exec(&r, &mut s2, "board.dielectric", json!({"er": "4.4", "loss_tangent": "0.02"}));
+    exec(
+        &r,
+        &mut s2,
+        "track.add",
+        json!({"layer": "F.Cu", "points": [["5mm", "12mm"], ["25mm", "12mm"]], "width": "0.5mm", "net": "SIG"}),
+    );
+    let o = exec(&r, &mut s2, "net.loss", json!({"net": "SIG", "freq": ["1GHz", "3GHz"]}));
+    let out = &o["output"];
+    assert_eq!(out["length"], "20mm");
+    assert_eq!(out["segments"][0]["layer"], "F.Cu");
+    let per_m = decibels(&out["segments"][0]["alpha_db_per_m"][0]);
+    let c = exec(&r, &mut s2, "impedance.calc", json!({"width": "0.5mm", "freq": ["1GHz"]}));
+    assert_eq!(out["segments"][0]["alpha_db_per_m"][0], c["output"]["loss"]["points"][0]["alpha_db_per_m"]);
+    let loss1 = decibels(&out["points"][0]["loss"]);
+    assert!((loss1 - per_m * 0.02).abs() < 2e-3, "{out}");
+    assert!(decibels(&out["points"][1]["loss"]) > loss1);
+    assert_eq!(fail(&r, &mut s2, "net.loss", json!({"net": "SIG"})), "impedance.no_frequency");
+    assert_eq!(fail(&r, &mut s2, "net.loss", json!({"net": "NOPE", "freq": ["1GHz"]})), "net.not_found");
+    let o = exec(&r, &mut s2, "net.loss", json!({"net": "GND", "freq": ["1GHz"]}));
+    assert!(codes(&o).contains(&"net.not_routed".to_string()));
+}

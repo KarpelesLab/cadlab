@@ -777,7 +777,7 @@ edge-coupled and broadside pairs (broadside: the layer and the next one down), g
 conformal solder mask, trapezoidal etch. A field-solver-only option (`etch`, `mask`, `coplanar_gap`,
 `broadside`, `er2`) selects the field solver when `method` is unset, and is refused with an explicit
 `closed_form` (`impedance.needs_field_solver`). Default mask εr 3.8 (typical LPI; noted as assumed). The DRC
-keeps the closed forms. Losses are not computed.
+keeps the closed forms. Losses are not computed (added by D52).
 *Why:* boundary elements fit layered PCB sections best: unknowns live only on boundaries (a few hundred
 instead of tens of thousands of grid nodes), open regions need no artificial box, edge singularities are
 resolved by grading panels rather than refining a 2D grid, and exact panel integrals give 0.02–0.1 % against
@@ -848,6 +848,35 @@ unnumbered pad by its footprint, as both UUID tables do.
 reports, not assumptions, decided which side to change (the silkscreen double margin and the dropped spokes
 were cadlab regressions; the clearance after a crossing and the board-level mask expansion are KiCad's
 behavior).
+
+### D52. Transmission line losses: loss tangent in the stackup, skin effect by perturbation, roughness factors, `net.loss` (2026-10-15)
+Stackup dielectrics gain an optional `loss_tangent` (exact decimal, written plainly as `"0.02"`; unset:
+0.02 assumed with a warning, like εr 4.5), set with `board.dielectric --loss-tangent`. `impedance.calc` takes
+`freq` (one or more) or a logarithmic sweep (`freq_from`, `freq_to`, `freq_points`) and reports per frequency
+R, L, G, C per meter, the complex Z₀, the attenuation in dB/m and dB/in with its conductor and dielectric
+parts, and with the field solver the differential attenuation of a pair; `net.loss` multiplies the
+single-ended attenuation of a routed net's tracks (per layer and width) by their length. **Dielectric:**
+first-order perturbation with complex permittivities, G = ω Σ tan δ · ε ∂C/∂ε; the field solver
+differentiates its C per group of regions sharing a loss tangent (two extra solves per group), the closed
+forms differentiate their εeff in εr (Pozar's linear filling factor is the same to ~1 %). **Conductor:**
+skin-effect surface resistance times a geometry factor R/Rs: the closed forms apply Wheeler's incremental
+inductance rule to their own Z₀ (finite difference of the receded geometry), the field solver integrates
+∮|Jₛ|² of the quasi-TEM current, which is c times the vacuum surface charge, on traces, coplanar grounds and,
+in closed form from the plane Green's functions, on the planes; corners are graded 1000× finer for it (the
+singular current converges as size^(1/3)). Roughness is a multiplier (Hammerstad–Jensen from an RMS value, or
+Huray's snowball model from radius and surface ratio) on every surface; internal inductance Rs/ω per unit R/Rs
+is added; R never falls below the trace's DC resistance, and a note says where δ exceeds half the copper.
+Conductivity defaults to 58 MS/m (IEC 60028). Results are rounded to 4 significant digits; `Unit::Siemens`
+was added for G and the conductivity.
+*Why:* the perturbation forms are the textbook methods (Pozar, Wheeler, Harrington-style BEM), need nothing
+beyond the quasi-static solutions already computed, and are accurate where PCB losses matter (above tens of
+MHz, δ well below the copper); roughness and the laminate's tan δ dominate real losses, so they are explicit
+inputs with stated defaults rather than hidden constants. The current method was preferred to Wheeler's rule
+on the BEM because finite differences of a re-meshed geometry are noisy, while the charge densities are already
+there. Frequency-independent εr and tan δ (no Djordjevic–Sarkar model) keep the stored data a pair of decimals
+per dielectric; the user gives the datasheet values at the frequency of interest. A net's loss ignores vias,
+discontinuities and pair coupling: it is a budget figure, not an S-parameter simulation (left to the 3D solver
+stretch goal).
 
 ## Open questions
 

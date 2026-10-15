@@ -92,6 +92,7 @@ expression: names
   "board.dielectric",
   "impedance.calc",
   "impedance.solve",
+  "net.loss",
   "current.width",
   "board.hole",
   "board.hole_remove",

@@ -252,7 +252,10 @@ Research-sized items beyond the milestones above; none blocks a release.
       closed forms in their accurate range and against published reference values. Done as a boundary
       element solver (`method: field_solver`, D49; ELECTRICAL.md "Field solver"): Z₀, εeff, Zdiff, Zcomm,
       odd/even modes, C and L; within 0.1 % of the exact stripline and coupled-stripline results. Losses
-      (skin effect, loss tangent) are not computed yet
+      (D52, ELECTRICAL.md "Losses"): loss tangent per dielectric, skin effect (perturbation current method in
+      the field solver, Wheeler's rule on the closed forms), Hammerstad–Jensen and Huray roughness, RLGC,
+      complex Z₀ and dB/m (differential for pairs) at frequencies or a sweep in `impedance.calc`, and `net.loss`
+      for a routed net
 - [ ] 3D full-wave EM solver (e.g. FDTD or FEM) for S-parameters of vias, transitions, connectors and short
       interconnects, and an export of the board geometry to an external solver (openEMS) as a first step
 
