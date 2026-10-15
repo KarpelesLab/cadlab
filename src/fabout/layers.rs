@@ -308,7 +308,9 @@ fn copper(ctx: &Ctx<'_>, i: usize, items: &[CopperItem]) -> OutFile {
         let f = match pp.pad.kind {
             PadKind::Smd if is_heatsink(&pp.pad) => "HeatsinkPad",
             PadKind::Smd => "SMDPad,CuDef",
-            _ => "ComponentPad",
+            // Copper around a non-plated hole, without electrical function.
+            PadKind::Npth { .. } => "WasherPad",
+            PadKind::Tht { .. } => "ComponentPad",
         };
         let d = g.aperture(&ap, Some(f));
         let mut attrs = vec![net_attr(&pp.net)];

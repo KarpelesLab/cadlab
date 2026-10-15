@@ -200,6 +200,10 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
   tolerances, courtyards in pieces and on the other side, rule areas sharing a name, renamed designators,
   copper-to-hole clearance (`hole_clearance`, fills and DRC), pad stacks in IPC-D-356, the IPC-2581 land
   pattern and the footprint preview, SMD pad stacks
+- [x] Pour residuals (D60): copper rings around non-plated holes (`npth` pads with `copper`: import, DRC,
+  fills, router, Gerber `WasherPad`, drill, IPC-D-356A, DSN, KiCad export, `footprint.create`), thermal spokes
+  joining a row of same-net pads, open connections paired by island in the corpus comparison; DRC
+  clearance tolerance kept at 2 µm (measured)
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
 

@@ -233,7 +233,8 @@ Allowances, each with its reason, on top of the cross-check's (`drc_compare::ALL
 - report granularity: KiCad reports silkscreen over copper per silkscreen segment, so extra KiCad findings on
   a pair cadlab reports are the same defect; an open connection names one item of each island, either
   tool's choice, so once exact matches are taken a KiCad `unconnected_items` and a cadlab `drc.unrouted`
-  sharing an item are the same defect; KiCad's report stops at 199 findings of most types, so cadlab
+  sharing an item are the same defect, and so are two that join the same two islands of cadlab's
+  connectivity through other items (a zone and a pad in KiCad, two pads in cadlab: D60); KiCad's report stops at 199 findings of most types, so cadlab
   findings of a type KiCad reported exactly 199 times are unverifiable and counted apart;
 - board-specific `known` entries in the manifest: side, rule, an exact maximum count, the comparison it
   applies to, and the reason; `gerber_known` entries for layers whose differences are explained. A known
@@ -292,7 +293,12 @@ courtyard overlaps under KiCad's 10 µm, courtyards in pieces and on the other s
 name, renamed designators, tented-only footprint vias, the copper-to-hole clearance in fills, the DRC and
 the router, and open connections paired by a shared end brought the manifest to 25 entries (215 findings
 at most, 118 of them corne-cherry's mask expansion) and 20 Gerber layers; pour connectivity differs on 2
-boards (four GND pads on `buspirate5-rev10`, one on `sweep-v2.2`).
+boards (four GND pads on `buspirate5-rev10`, one on `sweep-v2.2`). Both were then traced (D60):
+`buspirate5-rev10`'s were a fill gap (KiCad's fill keeps spokes running from pad to pad along a row of
+same-net resistor-array and 0402 pads, which cadlab dropped for not reaching the pour), `sweep-v2.2`'s none
+(both tools leave the two keyboard halves' GND apart, as only the cable joins them, and name other ends of
+the two islands); with copper rings around non-plated holes modeled (the power switches' pegs), the manifest
+has 23 entries (209 findings at most) and 18 Gerber layers, and no pour-connectivity entry.
 
 **Known issues** (recorded per board in the manifest; candidates for later work):
 
@@ -314,9 +320,8 @@ boards (four GND pads on `buspirate5-rev10`, one on `sweep-v2.2`).
   checks (`corne-cherry` 0.2 mm: 118 findings on the re-export; `cynthion` 0.05 mm); KiCad also does not
   report a logo's silkscreen over its own mask drawings (`sweep-v2.2`);
 - net-tie shorts of sense tracks crossing a tied pad are reported by KiCad unevenly (not paired);
-- connectivity through pours differs where cadlab's refill (its own algorithm) does not reach a pad KiCad's
-  fill reaches (`buspirate5-rev10`, `sweep-v2.2`); the copper-less NPTH case is fixed (D56: fills keep the
-  copper-to-hole clearance from them).
+- DRC clearance deficits between KiCad's 0.5 µm tolerance and cadlab's 2 µm are KiCad's alone: the router
+  keeps clearances to 1 µm, and tightening it changes routes beyond the benchmark's limits (D60).
 
 ### freerouting oracle (`tests/specctra.rs`)
 

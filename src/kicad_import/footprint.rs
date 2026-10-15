@@ -1030,24 +1030,17 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
                 skip("a hole without a drill", notes);
                 return None;
             };
-            if !matches!(pshape, PadShape::Circle { .. } | PadShape::Oval { .. }) || w != h {
+            // A copper pad larger than the hole all around (KiCad plots it): an unplated ring of
+            // the pad's shape on every copper layer.
+            let (hx, hy) = slot.unwrap_or((d, d));
+            let copper = layers.iter().any(|l| l.ends_with(".Cu")) && w > hx && h > hy;
+            if !copper && (!matches!(pshape, PadShape::Circle { .. } | PadShape::Oval { .. }) || w != h) {
                 pshape = PadShape::Circle { d };
             }
-            // A copper ring around a non-plated hole (KiCad plots it): cadlab's non-plated holes
-            // have no copper.
-            if layers.iter().any(|l| l.ends_with(".Cu")) && w.max(h) > d {
-                notes.agg(
-                    "import.npth_copper",
-                    "npth",
-                    Diagnostic::warning(
-                        "import.npth_copper",
-                        "non-plated holes with a copper pad larger than the hole: the copper around them is not kept",
-                    )
-                    .with_subject(pad_subject.clone())
-                    .with_hint("make the pad a plated through-hole pad without a net if the copper ring matters"),
-                );
+            if copper && !ctx.copper.iter().all(|l| has(l)) {
+                approx("copper of a non-plated pad on some copper layers only is put on every one".into(), notes);
             }
-            (PadKind::Npth { drill: d }, PadRole::Copper { paste: false })
+            (PadKind::Npth { drill: d, copper }, PadRole::Copper { paste: false })
         }
         "smd" | "connect" => {
             let cu = has(&format!("{front}Cu"));
@@ -1135,10 +1128,12 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
     // The hole stays at KiCad's pad position: relative to the copper center when the copper
     // moved (drill offset, custom pad recentered); a non-plated hole is its own pad.
     let drill_offset = match pkind {
-        PadKind::Tht { .. } if at != anchor => Some((anchor - at).rotated(-rotation)),
+        PadKind::Tht { .. } | PadKind::Npth { copper: true, .. } if at != anchor => {
+            Some((anchor - at).rotated(-rotation))
+        }
         _ => None,
     };
-    if matches!(pkind, PadKind::Npth { .. }) {
+    if matches!(pkind, PadKind::Npth { copper: false, .. }) {
         at = anchor;
     }
     // Mask openings: on the pad's side (both sides for a hole), one side, or none (tented).

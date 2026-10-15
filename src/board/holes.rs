@@ -15,7 +15,7 @@ use crate::model::footprint::{Pad, PadKind, PadShape};
 pub fn hole_pad(h: &Hole) -> Pad {
     let (number, kind, d) = match h.pad {
         Some(d) => ("1".to_string(), PadKind::Tht { drill: h.drill }, d),
-        None => (String::new(), PadKind::Npth { drill: h.drill }, h.drill),
+        None => (String::new(), PadKind::Npth { drill: h.drill, copper: false }, h.drill),
     };
     Pad {
         number,

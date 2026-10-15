@@ -1144,6 +1144,42 @@ stored data two decimals per dielectric (D52) and matches the export; perfect co
 small, conductor loss staying the per-length budget of D52. S = B A⁻¹ instead of b/a because a microstrip
 port's own source is not matched to the line it feeds; f32 fields halve memory and time, with sums kept in f64.
 
+### D60. Pour residuals: copper rings around non-plated holes, spokes along rows of same-net pads, open connections paired by island; DRC tolerance kept (2026-10-15)
+**Copper around non-plated holes.** KiCad `np_thru_hole` pads larger than their hole (sweep-v2.2's power
+switch pegs: 1 mm copper around 0.9 mm drills) lost their copper (`import.npth_copper`, two Gerber layers
+known to differ). `PadKind::Npth` gains `copper` (default false, so existing projects read unchanged): the
+pad's shape is then an unplated ring on every copper layer, on no net (a numbered one too: nothing plates it
+to a pin), one copper item per layer so nothing joins the layers through the hole. Every consumer follows from
+the placed pad: DRC clearances to every net (its own hole is not a hole clearance), fills keep clear, the
+router sees an obstacle, Gerber flashes it with the X2 aperture function `WasherPad` (the specification's
+pad around a non-plated hole without electrical function), the hole stays in the NPTH drill file,
+IPC-D-356A writes its `367` record with the ring's size, the DSN a keep-out circle around it, the KiCad
+export an `np_thru_hole` pad of its shape (offset kept); `footprint.create` takes `layers: npth_copper`.
+KiCad's layer list is not kept: copper on some copper layers only goes on all of them
+(`import.pad_approximated`). The sweep-v2.2 copper layers now match without pours.
+**Spokes along a row of pads.** buspirate5-rev10's four open GND connections were a fill gap: rendering both
+fills around them (KiCad's stored fill, cadlab's `render board --around`) showed KiCad keeping the spokes that
+run from one GND pad into the next along a resistor array or a pair of 0402s, where every pad lies in its
+neighbours' thermal gaps and the spokes across the row are blocked; cadlab dropped them for not reaching the
+pour. A whole spoke (in the allowed area) that reaches another thermal pad of the zone's net is now kept once
+either pad is joined to the pour by a spoke of its own or through such spokes (fixed point, in pad order, so
+deterministic). Spokes that join only pads cut off from the pour are still dropped (no copper the pour does
+not reach).
+**Open connections paired by island.** sweep-v2.2's remaining difference was not a fill difference: both
+tools leave the GND of the two keyboard halves apart (only the cable joins them) and name different ends
+(KiCad a right-half pad and the B.Cu zone, cadlab a left-half hole and a right-half pad). The comparison now
+also pairs a KiCad `unconnected_items` with a cadlab `drc.unrouted` when they join the same two islands of
+cadlab's connectivity (a zone stands for each of its fill islands). No pour-connectivity known entry is left.
+**DRC tolerance kept at 2 µm.** Measured with the router benchmark (`RAYON_NUM_THREADS=1`): with the DRC at
+KiCad's 0.5 µm and the router's 1 µm slack (`router::index::TOL`), qfp-qfn-4l and fine-4l leave 3 connections
+unrouted (ripped up by the final DRC); tightening the router's slack to 0.45 µm or 0.25 µm keeps every board
+complete but moves its grid legality and sampling margins, so routes change beyond the benchmark's limits
+(fine-4l +2.8 % length, bga144-4l +10 vias at 0.45 µm). The slack is spread through the router's grid,
+fanout and pair code that other work is changing, so it is left as it is: deficits between 0.5 and 2 µm stay
+KiCad's alone, far below any fab's resolution.
+*Why:* each residual was traced to a measured cause; the copper rings and the row spokes are design copper
+the fab makes, and the island pairing states what an open connection is (two islands), not which ends a tool
+prints.
 
 ## Open questions
 

@@ -656,7 +656,7 @@ fn write_pad(
     let stacked = pad.has_stack();
     let own = if stacked && f.pf.side == BoardSide::Bottom { pad.shape_on(StackLayer::Back) } else { &pad.shape };
     let ks = match pad.kind {
-        PadKind::Npth { drill } => {
+        PadKind::Npth { drill, copper: false } => {
             KShape { name: "circle", size: (drill, drill), rr: None, extra: String::new(), custom: None }
         }
         _ => kicad_shape(f, own),
@@ -671,8 +671,8 @@ fn write_pad(
     // A drill offset: KiCad's pad position is the hole, its offset moves the copper.
     let offset = pad.drill_offset.filter(|o| *o != Point::ORIGIN && !matches!(pad.kind, PadKind::Smd));
     let offset_text = match offset {
-        // A non-plated hole is written as a round pad on the hole (no copper to move).
-        Some(o) if !matches!(pad.kind, PadKind::Npth { .. }) => {
+        // A non-plated hole without copper is written as a round pad on the hole (nothing to move).
+        Some(o) if !matches!(pad.kind, PadKind::Npth { copper: false, .. }) => {
             let (x, y) = kxy(-o);
             format!(" (offset {} {})", mm(x), mm(y))
         }
@@ -691,7 +691,7 @@ fn write_pad(
         (PadKind::Tht { .. } | PadKind::Npth { .. }, Some((sx, sy))) => {
             let _ = write!(s, "(drill oval {} {}{offset_text}) ", mm(sx), mm(sy));
         }
-        (PadKind::Tht { drill } | PadKind::Npth { drill }, None) => {
+        (PadKind::Tht { drill } | PadKind::Npth { drill, .. }, None) => {
             let _ = write!(s, "(drill {}{offset_text}) ", mm(drill));
         }
         (PadKind::Smd, _) => {}

@@ -229,6 +229,36 @@ fn spokes_blocked_by_obstacles_are_dropped() {
     assert!(!inside(&fill, c + 650_000, c), "+x spoke dropped");
 }
 
+/// A row of same-net pads, each inside its neighbors' thermal gaps, whose spokes across the row
+/// are blocked (foreign tracks above and below): the inner pads are joined through the spokes
+/// running pad to pad from the outer pads, which reach the pour (resistor arrays, corpus
+/// `buspirate5-rev10`).
+#[test]
+fn spokes_between_pads_of_a_row_carry_the_connection() {
+    let outline = square(0, 0, 10 * MM, 10 * MM);
+    let c = 5 * MM;
+    let row: Vec<CopperItem> =
+        [-750_000, -250_000, 250_000, 750_000].iter().map(|dx| pad("GND", c + dx, c, 150_000, 250_000)).collect();
+    let mut items: Vec<(CopperItem, Nm)> = row.iter().map(|p| (p.clone(), Nm::ZERO)).collect();
+    items.push((track("A", (MM, c + 700_000), (9 * MM, c + 700_000), 200_000), Nm::ZERO));
+    items.push((track("A", (MM, c - 700_000), (9 * MM, c - 700_000), 200_000), Nm::ZERO));
+    let fill = run(&outline, &items, params(PadConnection::Thermal));
+    for p in &row {
+        assert!(poly::intersects(&fill, &p.shape), "{} joined", p.item);
+    }
+    assert!(inside(&fill, c, c), "copper between the inner pads");
+    for (t, _) in &items[4..] {
+        assert!(!poly::distance_less_than(&fill, &t.shape, 200_000));
+    }
+    // Without the outer pads' outward spokes (their ends blocked too), nothing joins the row.
+    items.push((track("A", (c - 1_300_000, MM), (c - 1_300_000, 9 * MM), 200_000), Nm::ZERO));
+    items.push((track("A", (c + 1_300_000, MM), (c + 1_300_000, 9 * MM), 200_000), Nm::ZERO));
+    let fill = run(&outline, &items, params(PadConnection::Thermal));
+    for p in &row {
+        assert!(!poly::intersects(&fill, &p.shape), "{} left alone", p.item);
+    }
+}
+
 #[test]
 fn isolated_islands_removed() {
     let outline = square(0, 0, 20 * MM, 10 * MM);

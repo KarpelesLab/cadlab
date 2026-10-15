@@ -31,7 +31,7 @@ Implemented from the Ucamco Gerber Layer Format Specification (rev. 2026.05) and
 
 | File | Content |
 |---|---|
-| `<project>-F_Cu.gbr`, `-In1_Cu.gbr`, ..., `-B_Cu.gbr` | `Copper,Ln,Top/Inr/Bot`: pads flashed (`C`/`R`/`O`, fixed macros for rounded or rotated pads, outline macros for polygon and trapezoid pads, an outline plus circle primitives for chamfered rectangles), tracks drawn (arcs with `G75`), pours, footprint copper drawings and board copper drawings and texts as fractured regions; `.N`/`.P`/`.C` object attributes, `.AperFunction` on every aperture |
+| `<project>-F_Cu.gbr`, `-In1_Cu.gbr`, ..., `-B_Cu.gbr` | `Copper,Ln,Top/Inr/Bot`: pads flashed (`C`/`R`/`O`, fixed macros for rounded or rotated pads, outline macros for polygon and trapezoid pads, an outline plus circle primitives for chamfered rectangles), tracks drawn (arcs with `G75`), pours, footprint copper drawings and board copper drawings and texts as fractured regions; `.N`/`.P`/`.C` object attributes, `.AperFunction` on every aperture (`WasherPad` for the copper ring of a non-plated pad) |
 | `-F_Mask.gbr`, `-B_Mask.gbr` | `Soldermask`, negative (the image is the openings): pads with an opening on that side (`mask`), grown by their mask margin (pad, footprint, else the export's `mask_expansion`, else the board's; an exact offset), footprint and board mask drawings; with a board `mask_min_web`, the closing of all openings as regions (openings closer than the web merge); vias tented |
 | `-F_Paste.gbr`, `-B_Paste.gbr` | SMD pads on that side (and through-hole pads with `paste: pad`), or the pad's paste windows (exposed pads), resized by the paste margin and ratio (pad, footprint, else board); footprint and board paste drawings |
 | `-F_SilkS.gbr`, `-B_SilkS.gbr` | `Legend`: footprint silk, designators (Hershey strokes, mirrored on the bottom), board graphics; clipped at mask openings |
@@ -39,7 +39,7 @@ Implemented from the Ucamco Gerber Layer Format Specification (rev. 2026.05) and
 | `-F_Component.gbr`, `-B_Component.gbr` | Gerber X3: `ComponentMain` flash with `.CRot/.CMfr/.CMPN/.CVal/.CMnt/.CFtp/.CPgN/.CHgt`, courtyard outline, pins; DNP excluded |
 | `-PTH.drl`, `-NPTH.drl` (`-PTH-L1-L2.drl` for blind/buried spans) | XNC: metric, decimal coordinates, one tool per (function, diameter), X2 attributes in `; #@!` comments; slots routed with their width as the tool (`G00` to one end, `M15`, `G01` to the other, `M16`, `G05`). `export.drill {gerber: true}` also writes `-PTH-drl.gbr` X2 drill files (slots as draws) |
 | `-pos.csv` | Designator, value, package, footprint, X/Y in mm from the outline's lower-left corner, rotation (placement, CCW from the IPC-7351 zero orientation), side; DNP excluded |
-| `.d356` | IPC-D-356A, `UNITS CUST 1`: `327` SMD pads, `317` plated holes and vias (mid-net `M`, tented `S3`), `367` non-plated holes; a pad stack with other outer lands gives a `317` record per side (`A01`, `ANN`) with that side's land |
+| `.d356` | IPC-D-356A, `UNITS CUST 1`: `327` SMD pads, `317` plated holes and vias (mid-net `M`, tented `S3`), `367` non-plated holes (with a copper ring, the ring's size); a pad stack with other outer lands gives a `317` record per side (`A01`, `ANN`) with that side's land |
 
 `export.all` also writes `<project>-ipc2581.xml` (below). Gerber, drill, IPC-D-356A and IPC-2581 files use
 board coordinates unchanged (`.SameCoordinates`). Fab-specific names,

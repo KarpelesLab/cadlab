@@ -521,6 +521,19 @@ fn footprint_create_from_a_pad_list() {
         o["diagnostics"].as_array().unwrap().iter().filter(|d| d["code"].as_str().unwrap().contains("silk")).collect();
     assert!(silk.is_empty(), "{silk:#?}");
 
+    // A non-plated hole with a copper ring (a switch peg): unnumbered, the ring larger than the
+    // hole.
+    let peg = json!({"name": "PEG", "pads": [{"at": ["0mm", "0mm"], "size": ["1mm", "1mm"], "drill": "0.9mm", "layers": "npth_copper"}]});
+    exec(&r, &mut s, "footprint.create", peg);
+    let fp = &s.project.as_ref().unwrap().library().footprints["PEG"];
+    assert_eq!(fp.pads[0].number, "");
+    assert_eq!(
+        fp.pads[0].kind,
+        cadlab::model::footprint::PadKind::Npth { drill: cadlab::Nm::from_um(900), copper: true }
+    );
+    let thin = json!({"name": "PEG2", "pads": [{"at": ["0mm", "0mm"], "size": ["0.9mm", "0.9mm"], "drill": "0.9mm", "layers": "npth_copper"}]});
+    assert_eq!(fail(&r, &mut s, "footprint.create", thin).error.diagnostic.code, "footprint.invalid_pad");
+
     // Same again: unchanged; different without `replace`: conflict.
     let same = json!({"name": "ONE", "pads": [{"number": "1", "at": ["0mm", "0mm"], "size": ["1mm", "1mm"]}]});
     exec(&r, &mut s, "footprint.create", same.clone());

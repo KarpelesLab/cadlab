@@ -281,11 +281,21 @@ pub fn export(p: &Project, name: &str, opts: &Options) -> DsnExport {
         let mut keepouts = Vec::new();
         for (k, pad) in fp.pads.iter().enumerate() {
             let Some(ps) = pad_padstack(pad, &copper) else {
-                if let PadKind::Npth { drill } = pad.kind {
+                if let PadKind::Npth { drill, copper } = pad.kind {
+                    // A copper ring keeps wiring away as the circle around it (centered on the
+                    // pad: the hole lies inside the copper).
+                    let (diameter, at) = match (copper, &pad.shape) {
+                        (false, _) => (drill, pad.hole_center()),
+                        (true, PadShape::Circle { d }) => (*d, pad.at),
+                        (true, s) => {
+                            let (w, h) = s.size();
+                            (Nm((w.0 as f64).hypot(h.0 as f64).ceil() as i64), pad.at)
+                        }
+                    };
                     keepouts.push(Keepout {
                         kind: KeepoutKind::All,
                         name: String::new(),
-                        shape: Shape::Circle { layer: ALL_SIGNAL.into(), diameter: drill, at: pad.hole_center() },
+                        shape: Shape::Circle { layer: ALL_SIGNAL.into(), diameter, at },
                     });
                 }
                 continue;

@@ -433,16 +433,57 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
             let b = s.bbox().expect("spoke");
             poly::contains(&near(&local_avail, &b), s) && poly::intersects(&near(&local_fill, &b), s)
         };
-        for (it, r) in &thermal {
+        // Pads joined to the pour by a spoke of their own, and spokes that only reach another
+        // same-net pad of the relief (a row of pads, each in the others' gaps): (pad, other
+        // pad, spoke).
+        let mut joined = vec![false; thermal.len()];
+        let mut pad_to_pad: Vec<(usize, usize, Polygon)> = Vec::new();
+        for (k, (it, r)) in thermal.iter().enumerate() {
             // A spoke whose end would cross another item's clearance is trimmed instead of
             // dropped when the rest still joins the pour (`trimmed_spoke`).
             for s in spokes(it, r) {
+                let b = s.bbox().expect("spoke");
                 if fits(&s) {
                     kept.push(s);
-                } else {
-                    let b = s.bbox().expect("spoke");
-                    kept.extend(trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?);
+                    joined[k] = true;
+                    continue;
                 }
+                let t = trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?;
+                if !t.is_empty() {
+                    kept.extend(t);
+                    joined[k] = true;
+                    continue;
+                }
+                if !poly::contains(&near(&local_avail, &b), &s) {
+                    continue;
+                }
+                let mut others = index.query(&b);
+                others.sort_unstable();
+                for o in others {
+                    let o = o as usize;
+                    if o != k && poly::intersects(&thermal[o].0.shape, &s) {
+                        pad_to_pad.push((k, o, s));
+                        break;
+                    }
+                }
+            }
+        }
+        // A spoke reaching a pad that the pour joins (directly or through such spokes) carries
+        // the connection on, as copper between the two pads: kept until nothing changes.
+        let mut used = vec![false; pad_to_pad.len()];
+        loop {
+            let mut changed = false;
+            for (i, (a, b, s)) in pad_to_pad.iter().enumerate() {
+                if !used[i] && (joined[*a] || joined[*b]) {
+                    used[i] = true;
+                    joined[*a] = true;
+                    joined[*b] = true;
+                    kept.push(s.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
     }

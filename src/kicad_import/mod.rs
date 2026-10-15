@@ -1768,7 +1768,7 @@ fn as_hole(c: &Converted, in_circuit: bool) -> Option<Hole> {
         _ => None,
     };
     let (drill, padd) = match (pad.kind, round) {
-        (PadKind::Npth { drill }, _) => (drill, None),
+        (PadKind::Npth { drill, copper: false }, _) => (drill, None),
         (PadKind::Tht { drill }, Some(d)) => (drill, Some(d)),
         _ => return None,
     };
@@ -1796,7 +1796,7 @@ fn board_only_holes(c: &Converted) -> Option<Vec<(Hole, Option<String>)>> {
             _ => None,
         };
         let (drill, padd) = match (pad.kind, round) {
-            (PadKind::Npth { drill }, _) => (drill, None),
+            (PadKind::Npth { drill, copper: false }, _) => (drill, None),
             (PadKind::Tht { drill }, Some(d)) if d > drill => (drill, Some(d)),
             _ => return None,
         };

@@ -90,6 +90,9 @@ For each zone and each of its layers, in priority order (higher first, ties in b
    would cross another item's clearance (a pad squeezed between other-net pads, a spoke running past the
    zone outline) is trimmed to the allowed area, keeping only its part within the pad's gap and the pour, and
    only when that part joins the pour over at least half the spoke width; otherwise it is dropped (D51).
+   A whole spoke (in the allowed area) that reaches no pour but another same-net thermal pad (a row of
+   pads, each inside its neighbours' gaps: resistor arrays) is kept once either pad is joined to the pour
+   by a spoke of its own or through such spokes, repeated until nothing changes (D60).
 6. Islands not touching a pad, via or track of the zone's net are removed (netless zones keep all islands and
    treat every item as an obstacle).
 
@@ -138,6 +141,7 @@ footprint follows; nothing in them names a fab (D12).
 | `back` | SMD pad | the pad's copper, mask and paste are on the other side of its footprint (card-edge fingers, heat sinks soldered from the back) |
 | `mask` | pad | openings on the pad's outer copper (default), on the footprint's side only (`front`) or the other side only (`back`) for holes, or none (`none`: tented thermal vias, covered heat spreaders) |
 | `slot` | through-hole and non-plated pads | an oval hole (size along the pad's X and Y); the drill is its width |
+| `copper` | non-plated pads | an unplated copper ring of the pad's shape around the hole on every copper layer (KiCad's `np_thru_hole` pads larger than their hole: switch pegs, mechanical anchors): on no net, one copper item per layer (nothing joins the layers) for the DRC (clearances to every net; its own hole is not a hole clearance), zone fills (kept clear) and the router (an obstacle); Gerber flashes it as `WasherPad`, the hole stays in the NPTH drill file, IPC-D-356A writes a `367` record of the ring's size, IPC-2581 its land, the DSN a keep-out around it, the KiCad export an `np_thru_hole` pad of its shape; `footprint.create` `layers: npth_copper` |
 | `drill_offset` | through-hole and non-plated pads | the hole center relative to the pad center, before the pad rotation (copper off center on its hole) |
 | `stack` | through-hole pads | per-layer copper shapes (a pad stack): `inner` (every inner layer), `back` (the outer layer on the other side of the footprint) and `layers` (single inner layers, numbered from the footprint's side, so a bottom-side footprint reverses them); the pad's `shape` is the footprint side's and every layer left out. Each shape is its own copper item on its layers (one island through the hole) for the DRC, zone fills and the router; Gerber, IPC-2581 (copper features and the package's `PadStackDef`) and DSN padstacks draw each layer's shape, IPC-D-356 writes a record per side when the outer lands differ, the footprint preview shows the other side's land, mask openings the outer shape of their side, the annular ring is the narrowest layer's |
 | `paste: pad` | through-hole pads | paste-in-hole on the footprint's side (SMD pads have paste unless `paste: none`) |
@@ -356,7 +360,7 @@ cannot use but that is annotated (`POWER SW`, not `REF**`) is replaced by its le
 Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
 notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
 (members are imported), footprint texts, 3D models, copper drawings on inner layers of footprints, zones
-inside footprints, per-layer pad stacks on non-plated holes (the front layer's shape is kept, `import.pad_approximated`), copper rings around non-plated holes (`import.npth_copper`), hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
+inside footprints, per-layer pad stacks on non-plated holes (the front layer's shape is kept, `import.pad_approximated`), copper of a non-plated pad on some copper layers only (put on every layer, `import.pad_approximated`; a pad larger than its hole becomes a `copper` ring), hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
 can be read against the imported project.
 
 ## Placement (`src/board/place.rs`)

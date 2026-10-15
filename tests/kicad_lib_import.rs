@@ -120,7 +120,7 @@ fn footprints_from_a_pretty_directory() {
     assert_eq!(pad("2").kind, PadKind::Tht { drill: mm("0.6") }, "the drill is the slot width");
     assert_eq!(pad("2").slot, Some((mm("0.6"), mm("1.6"))), "the oval hole is a slot");
     assert_eq!(pad("2").rotation, cadlab::units::Angle::parse("90").unwrap());
-    assert_eq!(pad("").kind, PadKind::Npth { drill: mm("1.2") });
+    assert_eq!(pad("").kind, PadKind::Npth { drill: mm("1.2"), copper: false });
     assert_eq!(
         pad("3").shape,
         PadShape::Polygon { points: vec![pt("-1", "0.4"), pt("1", "0.4"), pt("0", "-0.6")] },

@@ -323,7 +323,7 @@ impl Ctx<'_> {
         for pp in &pads {
             let (drill, plated) = match pp.pad.kind {
                 PadKind::Tht { drill } => (drill, true),
-                PadKind::Npth { drill } => (drill, false),
+                PadKind::Npth { drill, .. } => (drill, false),
                 PadKind::Smd => continue,
             };
             let label = if pp.number.is_empty() {

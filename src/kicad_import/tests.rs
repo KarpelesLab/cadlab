@@ -795,3 +795,90 @@ fn courtyard_pieces_shared_area_names_and_renamed_designators() {
         p.board().custom_rules.iter().map(|r| (r.name.as_str(), r.scope.in_area.as_deref())).collect();
     assert_eq!(names, [("in x", Some("X")), ("in x (X_2)", Some("X_2"))]);
 }
+
+/// A slide switch with copper around its two non-plated peg holes (sweep-v2.2's power
+/// switches), in a GND pour on both sides.
+const NPTH_COPPER: &str = r#"(kicad_pcb (version 20211014) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user))
+  (net 0 "") (net 1 "GND")
+  (footprint "Kailh:SPDT" (layer "B.Cu") (at 110 60 180)
+    (fp_text reference "SW1" (at 0 0.9) (layer "B.SilkS"))
+    (pad "" np_thru_hole circle (at -1.5 0 180) (size 1 1) (drill 0.9) (layers *.Cu *.Mask))
+    (pad "" np_thru_hole circle (at 1.5 0 180) (size 1 1) (drill 0.9) (layers *.Cu *.Mask))
+    (pad "" np_thru_hole circle (at 0 2 180) (size 0.8 0.8) (drill 0.8) (layers *.Cu *.Mask))
+    (pad "1" smd rect (at 0 -2 180) (size 0.9 1.25) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "GND")))
+  (gr_rect (start 100 50) (end 120 70) (stroke (width 0.1)) (fill none) (layer "Edge.Cuts"))
+  (zone (net 1) (net_name "GND") (layers "F&B.Cu") (hatch edge 0.5)
+    (connect_pads (clearance 0.3)) (min_thickness 0.2)
+    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon (pts (xy 100 50) (xy 120 50) (xy 120 70) (xy 100 70)))))"#;
+
+#[test]
+fn copper_rings_around_non_plated_holes() {
+    use crate::board::ItemRef;
+    use crate::geom::poly;
+    let mut p = Project::new("t");
+    let (_, d) = import(&mut p, NPTH_COPPER, &opts()).unwrap();
+    let c = codes(&d);
+    assert!(!c.contains(&"import.pad_approximated"), "{c:?}");
+    let sw = crate::board::footprint_for(&p, "SW1").unwrap().clone();
+    let rings: Vec<&crate::model::footprint::Pad> =
+        sw.pads.iter().filter(|x| matches!(x.kind, PadKind::Npth { copper: true, .. })).collect();
+    assert_eq!(rings.len(), 2, "{:?}", sw.pads);
+    assert!(
+        rings
+            .iter()
+            .all(|x| x.shape == PadShape::Circle { d: mmu(1) } && x.hole_size() == Some((Nm(900_000), Nm(900_000))))
+    );
+    assert!(
+        sw.pads.iter().any(|x| x.kind == PadKind::Npth { drill: Nm(800_000), copper: false }),
+        "a plain hole stays one"
+    );
+
+    // One netless copper item per layer and ring, the layers not joined through the hole.
+    let items = crate::board::copper_items(&p);
+    let ring_items: Vec<usize> = (0..items.len())
+        .filter(|&i| matches!(&items[i].item, ItemRef::Pad(r, n) if r == "SW1" && n.is_empty()))
+        .collect();
+    assert_eq!(ring_items.len(), 4);
+    assert!(ring_items.iter().all(|&i| items[i].net.is_none() && items[i].layers.len() == 1));
+    let isl = crate::board::islands(&items);
+    let (f, b): (Vec<usize>, Vec<usize>) = ring_items.iter().partition(|&&i| items[i].layers[0] == "F.Cu");
+    assert!(f.iter().all(|i| b.iter().all(|j| isl[*i] != isl[*j])), "unplated: no connection between layers");
+    // The pour keeps its clearance from the rings on both sides.
+    for z in items.iter().filter(|it| matches!(it.item, ItemRef::Zone(..))) {
+        for &i in &ring_items {
+            if items[i].layers == z.layers {
+                assert!(!poly::distance_less_than(&z.shape, &items[i].shape, 300_000 - 2_000), "{}", z.item);
+            }
+        }
+    }
+    // A ring is its hole's own copper: no hole clearance to it, though any other copper keeps one.
+    p.board_mut().rules.hole_clearance = Nm(250_000);
+    let drc = crate::drc::check(&p);
+    assert!(drc.iter().all(|d| d.code != "drc.hole_clearance"), "{drc:?}");
+
+    // Outputs: rings flashed as washer pads on both copper layers, holes non-plated, the
+    // IPC-D-356A record of the ring's size, the KiCad export keeps the copper.
+    let files = crate::fabout::all(&p, &Default::default());
+    let file = |f: &str| files.iter().find(|x| x.function.starts_with(f)).map(|x| x.content.clone()).unwrap();
+    for l in ["Copper,L1", "Copper,L2"] {
+        assert!(file(l).contains("WasherPad"), "{l}");
+    }
+    let holes = crate::fabout::holes(&p);
+    assert_eq!(holes.iter().filter(|h| !h.plated).count(), 3);
+    let ipc = files.iter().find(|x| x.name.ends_with(".d356")).unwrap();
+    assert_eq!(
+        ipc.content.lines().filter(|l| l.starts_with("367") && l.contains("X1000Y1000")).count(),
+        2,
+        "{}",
+        ipc.content
+    );
+    let out = crate::kicad_pcb::to_kicad_pcb(&p);
+    assert_eq!(out.matches("np_thru_hole circle").count(), 3, "{out}");
+    assert_eq!(out.matches("(size 1 1) (drill 0.9)").count(), 2, "{out}");
+    let mut q = Project::new("t");
+    import(&mut q, &out, &opts()).unwrap();
+    assert_eq!(crate::board::footprint_for(&q, "SW1").unwrap().pads, sw.pads);
+}

@@ -367,13 +367,19 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
             let (layers, hole) = match pad.kind {
                 PadKind::Smd => (vec![side_layer(ps, "F.Cu")], None),
                 PadKind::Tht { drill } => (copper.clone(), Some((drill, true))),
-                PadKind::Npth { drill } => (vec![], Some((drill, false))),
+                PadKind::Npth { drill, copper: true } => (copper.clone(), Some((drill, false))),
+                PadKind::Npth { drill, copper: false } => (vec![], Some((drill, false))),
             };
             let slot = if hole.is_some() { slot_ends(pad).map(|(a, b)| (tf(a), tf(b))) } else { None };
             out.push(PlacedPad {
                 refdes: refdes.clone(),
                 number: pad.number.clone(),
-                net: if pad.number.is_empty() { None } else { nets.get(&pad.number).cloned() },
+                // A non-plated pad's copper is on no net (nothing plates it to anything).
+                net: if pad.number.is_empty() || matches!(pad.kind, PadKind::Npth { .. }) {
+                    None
+                } else {
+                    nets.get(&pad.number).cloned()
+                },
                 center: tf(pad.at),
                 hole_at: tf(pad.hole_center()),
                 shape,
@@ -631,6 +637,13 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
                 }),
             },
         };
+        if matches!(pp.pad.kind, PadKind::Npth { .. }) {
+            // Unplated rings: one item per layer, nothing joins them.
+            for l in &pp.layers {
+                out.push(item(vec![l.clone()], &pp.shape, &pp.pad.shape, None));
+            }
+            continue;
+        }
         if pp.layer_shapes.is_empty() {
             out.push(item(pp.layers.clone(), &pp.shape, &pp.pad.shape, None));
             continue;

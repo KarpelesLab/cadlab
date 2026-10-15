@@ -249,11 +249,23 @@ pub enum PadKind {
         /// Finished hole diameter.
         drill: Nm,
     },
-    /// Non-plated hole, no copper.
+    /// Non-plated hole: no copper, or with `copper` a ring of the pad's shape around the hole on
+    /// every copper layer, unplated (so each layer's ring is its own island) and on no net.
     Npth {
         /// Hole diameter.
         drill: Nm,
+        /// Copper of the pad's shape around the hole (KiCad's non-plated pads larger than their
+        /// hole: switch pegs, mechanical anchors). The shape must be larger than the hole.
+        #[serde(default, skip_serializing_if = "is_false")]
+        copper: bool,
     },
+}
+
+impl PadKind {
+    /// Whether the pad has copper: SMD and plated pads, and non-plated holes with a copper ring.
+    pub fn has_copper(&self) -> bool {
+        !matches!(self, PadKind::Npth { copper: false, .. })
+    }
 }
 
 /// Solder paste for a pad, when it differs from the default (SMD pads: an opening equal to the
@@ -441,7 +453,7 @@ impl Pad {
     /// `(drill, drill)`. `None` for SMD pads.
     pub fn hole_size(&self) -> Option<(Nm, Nm)> {
         match self.kind {
-            PadKind::Tht { drill } | PadKind::Npth { drill } => Some(self.slot.unwrap_or((drill, drill))),
+            PadKind::Tht { drill } | PadKind::Npth { drill, .. } => Some(self.slot.unwrap_or((drill, drill))),
             PadKind::Smd => None,
         }
     }

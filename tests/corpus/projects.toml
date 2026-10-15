@@ -134,12 +134,6 @@ max = 1
 stage = "original"
 reason = "LOGO1 is a schematic symbol whose board footprint has no pads: the import makes its drawings board graphics (import.footprint_as_graphics), so the component stays unplaced"
 
-[[project.known]]
-side = "cadlab"
-rule = "drc.unrouted"
-max = 4
-reason = "connectivity through pours: cadlab refills the zones with its own algorithm, and four GND pads KiCad's fill reaches stay unconnected"
-
 [[project.gerber_known]]
 layer = "Edge.Cuts"
 reason = "KiCad plots the open Edge.Cuts arcs too; cadlab's profile is the closed outline (import.outline_open)"
@@ -209,18 +203,6 @@ stage = "original"
 reason = "silkscreen arcs of REF** footprints over the switches' holes: those footprints are made of holes and become board holes (import.footprint_as_holes), whose drawings are not kept"
 
 [[project.known]]
-side = "kicad"
-rule = "unconnected_items"
-max = 1
-reason = "connectivity through pours: KiCad's fill reaches the GND pad SW14.2 that cadlab's fill leaves alone (the vcc and raw opens, which only the cable between the halves closes, pair)"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.unrouted"
-max = 1
-reason = "connectivity through pours: the GND island cadlab's fill leaves (H75.1 to SW2.2 here) is a pad KiCad's fill joins (see unconnected_items)"
-
-[[project.known]]
 side = "cadlab"
 rule = "drc.courtyard_overlap"
 max = 2
@@ -232,14 +214,6 @@ side = "cadlab"
 rule = "drc.silk_over_mask_opening"
 max = 4
 reason = "the ferris_broom logo footprint has no pads, so its drawings become board graphics (import.footprint_as_graphics): its silkscreen art lies over its own F.Mask polygons by design (the fab clips it there); KiCad does not report silkscreen over mask drawings of the same footprint"
-
-[[project.gerber_known]]
-layer = "F.Cu"
-reason = "the power switches' non-plated holes have 1 mm copper pads around 0.9 mm drills, which KiCad plots; cadlab's non-plated holes have no copper (import.npth_copper)"
-
-[[project.gerber_known]]
-layer = "B.Cu"
-reason = "the power switches' non-plated holes have 1 mm copper pads around 0.9 mm drills, which KiCad plots; cadlab's non-plated holes have no copper (import.npth_copper)"
 
 [[project]]
 name = "corne-cherry"

@@ -312,7 +312,7 @@ pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
                 );
             }
         }
-        if let PadKind::Tht { drill: d } | PadKind::Npth { drill: d } = p.kind {
+        if let PadKind::Tht { drill: d } | PadKind::Npth { drill: d, .. } = p.kind {
             let hc = p.hole_center();
             s.circle((mm(hc.x), mm(hc.y)), mm(d) / 2.0, Some(drill), None);
         }

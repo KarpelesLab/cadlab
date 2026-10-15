@@ -219,6 +219,9 @@ pub enum PadLayers {
     All,
     /// Non-plated hole: no copper, no number needed.
     Npth,
+    /// Non-plated hole with an unplated copper ring of the pad's `size` on every copper layer
+    /// (switch pegs, mechanical anchors): no net, no number needed.
+    NpthCopper,
 }
 
 /// A pad (or a row of pads) of `footprint.create`.
@@ -251,7 +254,8 @@ pub struct PadSpec {
     /// Slotted hole `[x, y]` (before rotation) instead of a round one; `drill` is then optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<(Nm, Nm)>,
-    /// Layers: `top` (default without a drill), `bottom`, `all` (default with a drill), `npth`.
+    /// Layers: `top` (default without a drill), `bottom`, `all` (default with a drill), `npth`,
+    /// `npth_copper` (a non-plated hole with a copper ring of `size`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layers: Option<PadLayers>,
     /// Repeat the pad `count` times, each `pitch` further (a row of pins).
@@ -298,15 +302,20 @@ impl PadSpec {
                 ));
             }
             (PadLayers::All, Some(d)) => PadKind::Tht { drill: d },
-            (PadLayers::Npth, Some(d)) => PadKind::Npth { drill: d },
-            (PadLayers::All | PadLayers::Npth, None) => return Err(invalid_pad(n, "a hole needs `drill` or `slot`")),
+            (PadLayers::Npth, Some(d)) => PadKind::Npth { drill: d, copper: false },
+            (PadLayers::NpthCopper, Some(d)) => PadKind::Npth { drill: d, copper: true },
+            (PadLayers::All | PadLayers::Npth | PadLayers::NpthCopper, None) => {
+                return Err(invalid_pad(n, "a hole needs `drill` or `slot`"));
+            }
         };
         if hole.is_some_and(|d| d <= Nm::ZERO) {
             return Err(invalid_pad(n, "the drill must be positive"));
         }
         let (w, h) = match (self.size, kind) {
             (Some(s), _) => s,
-            (None, PadKind::Npth { .. }) => self.slot.unwrap_or((hole.unwrap_or_default(), hole.unwrap_or_default())),
+            (None, PadKind::Npth { copper: false, .. }) => {
+                self.slot.unwrap_or((hole.unwrap_or_default(), hole.unwrap_or_default()))
+            }
             (None, _) => return Err(invalid_pad(n, "`size` is missing")),
         };
         if w <= Nm::ZERO || h <= Nm::ZERO {
@@ -329,7 +338,7 @@ impl PadSpec {
             PadShapeKind::Circle => PadShape::Circle { d: w },
             PadShapeKind::Oval => PadShape::Oval { w, h },
         };
-        if let PadKind::Tht { .. } = kind {
+        if let PadKind::Tht { .. } | PadKind::Npth { copper: true, .. } = kind {
             let (sx, sy) = self.slot.unwrap_or((hole.unwrap_or_default(), hole.unwrap_or_default()));
             let (cw, ch) = shape.size();
             if sx >= cw || sy >= ch {
@@ -349,7 +358,11 @@ impl PadSpec {
         for k in 0..count {
             let k64 = i64::from(k);
             let at = Point::new(self.at.x + Nm(pitch.x.0 * k64), self.at.y + Nm(pitch.y.0 * k64));
-            let number = if layers == PadLayers::Npth && n.is_empty() { String::new() } else { nth_number(n, k) };
+            let number = if matches!(layers, PadLayers::Npth | PadLayers::NpthCopper) && n.is_empty() {
+                String::new()
+            } else {
+                nth_number(n, k)
+            };
             let mut pad = Pad::new(number, at, shape.clone(), kind);
             pad.rotation = self.rotation.unwrap_or(Angle::ZERO);
             pad.back = layers == PadLayers::Bottom;
@@ -595,7 +608,8 @@ impl Command for Show {
             let hole = match (p.kind, p.slot) {
                 (PadKind::Tht { .. } | PadKind::Npth { .. }, Some((x, y))) => format!(", slot {x} x {y}"),
                 (PadKind::Tht { drill }, None) => format!(", drill {drill}"),
-                (PadKind::Npth { drill }, None) => format!(", npth {drill}"),
+                (PadKind::Npth { drill, copper: false }, None) => format!(", npth {drill}"),
+                (PadKind::Npth { drill, copper: true }, None) => format!(", npth {drill} with copper"),
                 _ => String::new(),
             };
             s += &format!("\n  pad {:>3} at ({}, {}) {} x {}{hole}", p.number, p.at.x, p.at.y, w, h);
@@ -1002,7 +1016,7 @@ impl Command for FootprintSet {
                     pad.stack = Some(st.clone()).filter(|s| !s.is_empty());
                 }
                 if let Some((sx, sy)) = self.slot {
-                    let (PadKind::Tht { drill } | PadKind::Npth { drill }) = &mut pad.kind else {
+                    let (PadKind::Tht { drill } | PadKind::Npth { drill, .. }) = &mut pad.kind else {
                         return Err(bad(
                             "footprint.invalid_setting",
                             format!("pad {} has no hole to slot", pad.number),

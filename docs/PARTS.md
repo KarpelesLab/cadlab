@@ -160,7 +160,8 @@ cadlab footprint create USB_C_6P --pads @pads.json --body '{"width": "8.94mm", "
 
 Each pad: `number`, `at` (from the origin, Y up), `size` `[w, h]`, `shape` (`roundrect` by default for SMD
 pads, `circle`/`oval` with a drill; `rect`, `radius`), `rotation`, `drill` or `slot` (plated through-hole),
-`layers` (`top`, `bottom` for the other side, `all`, `npth` for a plain hole), and `count` + `pitch` for a
+`layers` (`top`, `bottom` for the other side, `all`, `npth` for a plain hole, `npth_copper` for a non-plated hole
+with an unplated copper ring of `size`), and `count` + `pitch` for a
 row (trailing digits of the number count up: `A1`, `A2`, ...). The silkscreen follows the body (centered on
 `body.at`, default the origin) or the pads' box, clipped clear of the pads like generated footprints; a pin-1
 dot marks pad `1` or `A1` (left of it, else above or below it, clear of every pad); the fab outline is the

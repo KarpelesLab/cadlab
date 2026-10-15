@@ -29,7 +29,8 @@ use crate::units::Nm;
 /// exact outlines where items have one ([`geo::exact`]), else on the polygons (two outward arc
 /// approximations of 1 µm). KiCad's own is 0.5 µm (probed with kicad-cli 10.0.7: a clearance
 /// 0.50 µm short passes, 0.55 µm is reported); the router keeps clearances to within 1 µm
-/// (`router::index::TOL`), so cadlab keeps the 2 µm and the deficits in between are KiCad's alone.
+/// (`router::index::TOL`; tightening it changes routes beyond the benchmark limits, DECISIONS D60), so
+/// cadlab keeps the 2 µm and the deficits in between are KiCad's alone.
 pub const TOLERANCE: Nm = Nm(2_000);
 
 /// Courtyards overlapping by less than this are touching: KiCad reports courtyard overlaps
@@ -603,7 +604,7 @@ fn pad_label(pp: &geo::PlacedPad) -> String {
 fn pad_holes(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     for pp in pads {
         let drill = match pp.pad.kind {
-            PadKind::Tht { drill } | PadKind::Npth { drill } => drill,
+            PadKind::Tht { drill } | PadKind::Npth { drill, .. } => drill,
             PadKind::Smd => continue,
         };
         if drill < ctx.rules.min_drill {

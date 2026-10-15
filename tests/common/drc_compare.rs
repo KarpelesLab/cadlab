@@ -341,6 +341,40 @@ fn same_open_connection(k: &Finding, c: &Finding) -> bool {
         && k.items.iter().any(|i| !i.starts_with('?') && c.items.contains(i))
 }
 
+/// cadlab's copper islands on `p` by finding label: the islands each pad, track, via, copper
+/// drawing and zone (`zone#3`, every island of its fill) belongs to.
+fn island_labels(p: &Project) -> BTreeMap<String, BTreeSet<usize>> {
+    let items = cadlab::board::copper_items(p);
+    let isl = cadlab::board::islands(&items);
+    let mut out: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for (it, k) in items.iter().zip(isl) {
+        let l = match &it.item {
+            cadlab::board::ItemRef::Zone(id, ..) => format!("zone#{}", id.0),
+            cadlab::board::ItemRef::Pad(r, n) if n.is_empty() => r.clone(),
+            i => i.to_string(),
+        };
+        out.entry(l).or_default().insert(k);
+    }
+    out
+}
+
+/// The pairs of distinct islands (lower first) an open connection can join: one island of each
+/// of its two items. Empty unless it names exactly two items that both have copper.
+fn island_pairs(f: &Finding, islands: &BTreeMap<String, BTreeSet<usize>>) -> BTreeSet<(usize, usize)> {
+    let named: Vec<&BTreeSet<usize>> = f.items.iter().filter_map(|l| islands.get(l)).collect();
+    let mut out = BTreeSet::new();
+    if let [a, b] = named[..] {
+        for &x in a {
+            for &y in b {
+                if x != y {
+                    out.insert((x.min(y), x.max(y)));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Whether a label names a footprint (`U1`) rather than a pad, track, via, zone, text...
 fn is_footprint_label(l: &str) -> bool {
     !l.contains(['.', '#', ':', '?']) && l != "edge"
@@ -482,6 +516,25 @@ pub fn compare(
     for (ki, k) in theirs.iter().enumerate() {
         if hits[ki].is_none() {
             hits[ki] = ours.iter().enumerate().position(|(i, c)| !taken[i] && same_open_connection(k, c));
+            if let Some(i) = hits[ki] {
+                taken[i] = true;
+            }
+        }
+    }
+    // Open connections naming other items of the same two islands (cadlab's connectivity): the
+    // ends of a split net are either tool's choice even when no end is shared (a zone and a pad
+    // in KiCad, two pads in cadlab).
+    let open = |k: &Finding| k.kicad_type.as_deref() == Some("unconnected_items");
+    if theirs.iter().zip(&hits).any(|(k, h)| h.is_none() && open(k)) {
+        let islands = island_labels(p);
+        for (ki, k) in theirs.iter().enumerate() {
+            if hits[ki].is_some() || !open(k) {
+                continue;
+            }
+            let pairs = island_pairs(k, &islands);
+            hits[ki] = ours.iter().enumerate().position(|(i, c)| {
+                !taken[i] && c.code == "drc.unrouted" && !pairs.is_disjoint(&island_pairs(c, &islands))
+            });
             if let Some(i) = hits[ki] {
                 taken[i] = true;
             }
