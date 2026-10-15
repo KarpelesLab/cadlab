@@ -35,6 +35,10 @@ pub mod oracle {
         /// xmllint: XML schema validation (optional, with IPC-2581 or IDX schemas the user
         /// supplies).
         Xmllint,
+        /// openEMS (optional): the `openEMS` executable marks an installation; the exported
+        /// driver runs with `python3` (`CADLAB_ORACLE_PYTHON`), which needs openEMS's Python
+        /// modules and numpy.
+        OpenEms,
     }
 
     impl Oracle {
@@ -47,6 +51,7 @@ pub mod oracle {
                 Oracle::Ngspice => ("ngspice", "CADLAB_ORACLE_NGSPICE"),
                 Oracle::FreeCad => ("freecadcmd", "CADLAB_ORACLE_FREECAD"),
                 Oracle::Xmllint => ("xmllint", "CADLAB_ORACLE_XMLLINT"),
+                Oracle::OpenEms => ("openEMS", "CADLAB_ORACLE_OPENEMS"),
             }
         }
     }

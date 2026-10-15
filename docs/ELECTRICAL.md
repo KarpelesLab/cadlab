@@ -1,10 +1,12 @@
 # Electrical (M8)
 
 Calculations and checks that need more than connectivity and geometry: transmission line impedance from the
-stackup, track width for a current, a SPICE netlist for simulation, and a design lint beyond ERC. Code:
-`src/electrical/` (impedance closed forms, 2D field solver, current, DRC checks), `src/spice.rs`,
-`src/lint.rs`; commands in `src/commands/electrical.rs`, `export.spice` and `circuit.lint`. Decisions:
-DECISIONS D29, D49 (field solver), D52 (losses).
+stackup, track width for a current, a SPICE netlist for simulation, a full-wave (openEMS) model of a board
+region with Touchstone results read back, and a design lint beyond ERC. Code: `src/electrical/` (impedance
+closed forms, 2D field solver, current, DRC checks), `src/spice.rs`, `src/openems/`, `src/touchstone.rs`,
+`src/lint.rs`; commands in `src/commands/electrical.rs`, `export.spice`, `export.openems`,
+`touchstone.summary` and `circuit.lint`. Decisions: DECISIONS D29, D49 (field solver), D52 (losses), D54 (openEMS export,
+Touchstone).
 
 Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md), "Differential pairs"
 and "Length tuning", D38); this document covers the numbers they route to. A pair (`diffpair.add`) routes at
@@ -20,7 +22,7 @@ reported (impedances to 0.01 Ω, widths to 1 µm).
 
 | Where | Field | Example | Set with |
 |---|---|---|---|
-| `board.json` stackup | `dielectrics`: one per gap between copper layers, top to bottom: `thickness`, `er`, optional `loss_tangent` (written as a plain decimal), optional `material` | `{"thickness": "0.2mm", "er": "4.4", "loss_tangent": "0.02", "material": "7628 prepreg"}` | `board.dielectric` |
+| `board.json` stackup | `dielectrics`: one per gap between copper layers, top to bottom: `thickness`, `er`, optional `loss_tangent` (written as a plain decimal; used by the loss calculations and `export.openems`), optional `material` | `{"thickness": "0.2mm", "er": "4.4", "loss_tangent": "0.02", "material": "7628 prepreg"}` | `board.dielectric` |
 | `circuit.json` net | `voltage`, `current`, `temp_rise` | `"current": "2A"` | `net.set --voltage 3.3V --current 2A --temp-rise 20C` |
 | `circuit.json` net class | `impedance`, `diff_impedance` (targets) | `"impedance": "50Ω"` | `netclass.set`, `impedance.solve --netclass` |
 | part parameters | `spice_model`, `spice_lib`, `spice_pins` (text; a component property of the same name wins) | `spice_model=LM358` | `part.set --params`, `circuit.add --properties` |
@@ -282,6 +284,103 @@ whose name gives one (`3V3`, `+5V`, `VCC_1V8`, `5V0`); a driven net without a vo
 `spice.supply_unknown`. `analysis` lines (`.op`, `.tran 1u 1m`) are written as-is, `control` lines inside
 `.control`/`.endc`. Output is deterministic (components in natural order, golden file
 `tests/golden/spice/divider.cir`); the ngspice oracle runs `ngspice -b` on it and checks v(out) = 2.5 V.
+
+## Full-wave export: openEMS (`export.openems`)
+
+The first step of full-wave analysis (S-parameters of vias, transitions, connectors and short interconnects):
+a region of the board exported as an [openEMS](https://openems.de) FDTD simulation. openEMS is an external
+tool (GPL): cadlab writes its documented input (the CSXCAD XML geometry format and its Python interface, as
+used in openEMS's tutorials), never links, bundles or reads its code. Code: `src/openems/` (DECISIONS D54).
+
+```
+cadlab export openems --f-max 10GHz --around via#12 \
+  --ports '[{"at": "J1.1"}, {"at": "track#40", "end": "end", "kind": "msl"}]'
+python3 out/openems/<name>.py              # needs openEMS with its Python modules, and numpy
+cadlab touchstone summary out/openems/<name>.s2p --frequencies 1GHz,5GHz
+```
+
+**Files** (default `out/openems/<project>.*`):
+
+- `<name>.xml`: an `<openEMS>` document holding the `<ContinuousStructure>`: properties with primitives, and
+  the `<RectilinearGrid>` (lengths in mm, `DeltaUnit` 1e-3, written exactly from the integer nanometers);
+- `<name>.py`: the driver. For each port in turn it builds an `openEMS` run (`SetGaussExcite`,
+  `SetBoundaryCond`), reads the geometry (`ContinuousStructure.ReadFromXML`), adds every port
+  (`AddLumpedPort`, `AddMSLPort`; the excited one with amplitude 1, the others as matched terminations),
+  runs it in `<name>_sim/portN/`, then computes the port waves (`CalcPort`) and S<sub>ij</sub> =
+  b<sub>i</sub> / a<sub>j</sub>, and writes `<name>.sNp` (Touchstone 1.1, RI, one reference impedance;
+  2.0 with `[Reference]` when the ports' impedances differ). `--postprocess` recomputes the file from earlier
+  runs.
+
+**Region.** `nets` (the pads, tracks and vias of those nets; pours are left out, or a GND net would span the
+board), `around` (footprints such as a connector, pads, `via#N` for a via transition, `track#N`, nets) and
+`window` (two corners) combine into one rectangle; `nets` and `around` grow by `margin` (default three stack
+heights, at least 1 mm). Copper of every net in the rectangle is clipped to it (`only_selected`: only the
+selected nets, the ground nets and the ports' nets). The dielectrics follow the board outline inside the
+rectangle (air beyond an edge), so edge launches are modeled.
+
+**Geometry.**
+
+| Item | Written as |
+|---|---|
+| Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. One `Material` per dielectric (`Epsilon` = εr; `Kappa` = 2π f₀ ε₀ εr tan δ when the dielectric has a `loss_tangent`, f₀ the excitation's center: losses are exact at f₀ and scale with frequency only approximately). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air (solder mask is not modeled) |
+| Copper | One `Metal` (perfect conductor) per net: the union of its pads, tracks, vias, drawings and zone fills on each layer, clipped to the region. `copper: solid` (default): extruded through the copper thickness (`LinPoly`, or `Box` for rectangles); `sheet`: zero-thickness `Polygon`s with the copper left out of the stack. Polygons with holes (planes around antipads) are cut into hole-free pieces by vertical lines through each hole |
+| Vias, plated holes | Metal `Cylinder`s of the drill diameter between the outer surfaces of their first and last layers (slots: the slot outline extruded) |
+| Non-plated holes | Air (εr 1) cylinders through the board, above everything else |
+
+**Mesh.** A rectilinear grid per axis: fixed lines at metal edges (the x of vertical and y of horizontal
+polygon edges, polygon extremes, hole extremes), the board outline, every copper and dielectric surface in z
+and the ports; metal lines closer than `min_cell` (default a twentieth of the largest cell) share one line;
+gaps are filled with cells of at most λ/N (`cells_per_wavelength`, default 20) at `f_max` in the highest εr of
+the stack (in air above and below: λ₀/N), at least four cells per dielectric, and neighbouring cells differ by
+at most the `grading` ratio (default 1.5), refined until the grading holds across fixed lines. `max_cell`
+replaces the wavelength rule. The output gives the line counts, the cell count, the smallest cells and the
+Courant timestep they imply (`openems.large_mesh` above 50 M cells). The thirds rule (lines at 1/3–2/3 around
+metal edges) is not applied.
+
+**Excitation and boundaries.** A Gaussian pulse covering `f_min` .. `f_max` (f₀ = (f_min + f_max) / 2, 20 dB
+half-bandwidth f_c = (f_max − f_min) / 2); `boundary: pml` (default, `PML_8` on all sides, `pml_cells`) or `mur`;
+air `air` above and below (default a quarter wavelength at `f_max`); end criterion `end_criteria` (40 dB energy
+decay), at most `timesteps` steps. The Touchstone file has `points` frequencies (default 201) from `f_min`, or
+1 % of `f_max` when `f_min` is 0 (port quantities are undefined at DC).
+
+**Ports** (numbered from 1 in the order given; `z0` default 50 Ω):
+
+| `kind` | At | Geometry |
+|---|---|---|
+| `lumped` (default) | a pad `J1.1` (its single copper layer, or `layer`, default the footprint side's outer layer), or a track end `track#N` + `end` | a resistive sheet of `z0` from the reference copper's surface to the signal copper's, across the line: as wide as the pad's narrower side (spanning that side) or the track (perpendicular to it), or `width` |
+| `msl` | a straight, axis-aligned track end | openEMS's microstrip port: `length` along the track (default the track, at most 20 widths), feed at a fifth of it, S-parameters referenced to its middle (`reference_plane` in the output) |
+
+The reference layer is `reference`, else the nearest copper layer (ties: the lower one) with copper of
+another net under the port's position; none is `openems.no_reference`. Ports must be in the region
+(`openems.port_outside`); one whose feed falls inside the PML cells is warned (`openems.port_in_pml`: grow the
+margin).
+
+**Not modeled:** solder mask and silkscreen, surface roughness and finite copper conductivity (copper is a
+perfect conductor), frequency-dependent εr / tan δ, components (pads are bare copper: add lumped elements in
+the driver if needed). openEMS is not installed on the development machines yet, so the files follow the
+documentation and the golden file `tests/golden/openems/via.{xml,py}` (a 4-layer via transition) pins them;
+the optional oracle (`CADLAB_ORACLES=1`, `openEMS` on the PATH or `CADLAB_ORACLE_OPENEMS`, the driver run by
+`python3` or `CADLAB_ORACLE_PYTHON`) runs the driver on that board and checks |S21| > −3 dB and |S11| < −6 dB
+at 1 GHz (`tests/openems.rs`).
+
+## Touchstone files (`touchstone.summary`)
+
+`src/touchstone.rs` reads Touchstone files, implemented from the IBIS Open Forum's published specifications
+(version 1.1 and 2.0): version 1.x option lines (`# GHz S MA R 50`, any order, defaults GHz S MA R 50), data
+wrapped over any lines, the 2-port N11 N21 N12 N22 order, 2-port noise data, Z and Y normalized to R; version 2
+keywords (`[Number of Ports]`, `[Two-Port Data Order]`, `[Number of Frequencies]`, `[Number of Noise
+Frequencies]`, `[Reference]` per port, `[Matrix Format] Full/Lower/Upper`, `[Network Data]`, `[Noise Data]`,
+`[Begin/End Information]`, `[End]`; Z and Y in ohms and siemens); S, Y, Z, H, G parameters; RI, MA, DB
+formats. Mixed-mode data is refused. Y and Z convert to S with the reference impedances
+(S = (z + I)⁻¹(z − I), z = R^−½ Z R^−½). A writer (RI, 1.1 or 2.0) gives round trips.
+
+`touchstone.summary <file>` (no project needed) reports, per S-parameter (`params`, e.g. `S21`, `S1,10` past
+nine ports; default all of up to four ports), the magnitude in dB, the magnitude and the phase at the
+requested `frequencies` (linear interpolation of real and imaginary parts between points) and the band's
+smallest and largest magnitudes with their frequencies: the loop an agent closes after a simulation (worst
+return loss = largest |S11|, worst insertion loss = smallest |S21|). The port count of a version 1 file comes
+from its extension (`.s2p`), else `ports`. Errors: `touchstone.syntax`, `touchstone.truncated`,
+`touchstone.count_mismatch`, `touchstone.no_ports`, `touchstone.bad_param`, `touchstone.out_of_band`, ...
 
 ## Design lint (`circuit.lint`, `circuit.erc --lint`)
 

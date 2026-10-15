@@ -21,6 +21,7 @@ pub mod placement;
 pub mod project;
 pub mod render;
 pub mod route;
+pub mod touchstone;
 mod util;
 pub mod zone;
 
@@ -48,6 +49,7 @@ pub fn register_all(r: &mut Registry) {
     kicad_pcb::register(r);
     kicad_lib::register(r);
     export::register(r);
+    touchstone::register(r);
     fab::register(r);
     history::register(r);
 }
@@ -79,7 +81,8 @@ pub const GROUP_SUMMARIES: &[(&str, &str)] = &[
     ("route", "Autorouter, interactive routing, fanout, length tuning, Specctra session import"),
     ("render", "Render schematic, board (2D/3D), symbols and footprints to PNG/SVG"),
     ("schematic", "Schematic placement overrides and KiCad schematic export"),
-    ("export", "Generic fab and MCAD outputs: Gerber, drill, pick-and-place, IPC, STEP, SPICE"),
+    ("export", "Generic fab and MCAD outputs: Gerber, drill, pick-and-place, IPC, STEP; simulation: SPICE, openEMS"),
+    ("touchstone", "Read Touchstone (.sNp) S-parameter files: summaries of simulation or measurement results"),
     ("fab", "Fab profiles: check, compare, export a fab's file bundle, substitutes"),
     ("history", "Undo/redo history (alone: list steps)"),
 ];

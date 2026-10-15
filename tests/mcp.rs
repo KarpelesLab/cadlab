@@ -111,6 +111,7 @@ fn mcp_session() {
             "render",
             "schematic",
             "export",
+            "touchstone",
             "fab",
             "history",
             "describe",

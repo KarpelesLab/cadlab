@@ -70,7 +70,8 @@ pub struct Dielectric {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
     /// Loss tangent (dissipation factor, tan δ) at the frequency of interest, as an exact
-    /// decimal (`"0.02"`). Unset: [`DEFAULT_LOSS_TANGENT`] is assumed for loss calculations.
+    /// decimal (`"0.02"`). Unset: [`DEFAULT_LOSS_TANGENT`] is assumed for loss calculations
+    /// and full-wave exports (`export.openems`).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::value::plain")]
     #[schemars(with = "Option<Quantity>")]
     pub loss_tangent: Option<Quantity>,

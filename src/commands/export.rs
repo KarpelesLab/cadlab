@@ -1,6 +1,6 @@
 //! `export.*`: generic manufacturing outputs (Gerber X2/X3, XNC drill, pick-and-place,
-//! IPC-D-356A, IPC-2581), mechanical CAD outputs (STEP, IDF, IDX) and the Specctra DSN design for
-//! external autorouters, and `place.import_idx` (answering IDX change messages). Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
+//! IPC-D-356A, IPC-2581), mechanical CAD outputs (STEP, IDF, IDX), the Specctra DSN design for
+//! external autorouters, simulation inputs (SPICE netlist, openEMS full-wave model), and `place.import_idx` (answering IDX change messages). Fab-specific bundles come with fab profiles (`export fab`, DECISIONS D12).
 
 use std::path::{Path, PathBuf};
 
@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::Diagnostic;
 use crate::fabout::{self, Options, OutFile};
-use crate::mcad;
+use crate::geom::Point;
 use crate::model::Project;
 use crate::refs::ObjectRef;
 use crate::units::Nm;
+use crate::value::{Quantity, Unit};
+use crate::{mcad, openems};
 
 pub(crate) fn register(r: &mut Registry) {
     r.register::<Gerber>()
@@ -28,7 +30,8 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<IdxChanges>()
         .register::<PlaceImportIdx>()
         .register::<ExportDsn>()
-        .register::<Spice>();
+        .register::<Spice>()
+        .register::<OpenEms>();
 }
 
 /// Default output directory, relative to the project.
@@ -1041,6 +1044,262 @@ impl Command for Spice {
             let v: Vec<String> = o.sources.iter().map(|(n, v)| format!("{n}={v}")).collect();
             s += &format!("\n  supplies: {}", v.join(", "));
         }
+        s
+    }
+}
+
+/// Export a region of the board to openEMS, a 3D full-wave (FDTD) solver: CSXCAD geometry
+/// (stackup dielectrics, copper, vias and holes) with a graded mesh, and a Python driver that
+/// adds the ports, the excitation and the boundaries, simulates each port and writes the
+/// S-parameters as a Touchstone file (summarize it with `touchstone.summary`).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEms {
+    /// Output directory (default out/openems, relative to the project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+    /// Base name of the files (default: the project's name): `<name>.xml`, `<name>.py`, and
+    /// `<name>.sNp` written by the driver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Highest frequency of interest ("10GHz"): the excitation's bandwidth and the mesh
+    /// resolution (λ/N in the dielectric).
+    pub f_max: Quantity,
+    /// Lowest frequency of interest (default 0: the pulse starts at DC, the Touchstone file at
+    /// 1 % of `f_max`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f_min: Option<Quantity>,
+    /// Region: the copper of these nets (pads, tracks, vias; not pours) plus `margin`, e.g. a
+    /// net's path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nets: Vec<String>,
+    /// Region: the extent of these items plus `margin`: footprints (`J1`, a connector), pads
+    /// (`J1.1`), vias (`via#3`, a via transition), tracks (`track#5`), nets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub around: Vec<String>,
+    /// Region: two corners on the board, used as given (combined with `nets` / `around`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<[Point; 2]>,
+    /// Margin around `nets` and `around` (default: three board stack heights, at least 1 mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<Nm>,
+    /// Keep only the copper of `nets`, the ground nets and the ports' nets (default: all
+    /// copper in the region).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_selected: bool,
+    /// Ground nets kept by `only_selected` (default: nets named like ground, `GND`, `AGND`...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ground: Vec<String>,
+    /// Ports, numbered from 1: `{"at": "J1.1"}` (lumped, at a pad) or
+    /// `{"at": "track#4", "end": "end", "kind": "msl"}`; `z0` (default 50 Ω), `reference`
+    /// layer (default: the nearest with copper under the port), `width`, `length`, `layer`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<openems::PortSpec>,
+    /// Frequency points in the Touchstone file (default 201).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<u32>,
+    /// Boundary condition on all sides: `pml` (default, 8 cells) or `mur`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<openems::Boundary>,
+    /// PML thickness in cells (default 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pml_cells: Option<u8>,
+    /// Air above and below the board (default: a quarter wavelength at `f_max`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub air: Option<Nm>,
+    /// Copper model: `solid` (default: extruded through its thickness) or `sheet`
+    /// (zero-thickness; the stack is the dielectrics only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copper: Option<openems::CopperModel>,
+    /// Mesh cells per wavelength in the material (default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cells_per_wavelength: Option<u32>,
+    /// Largest mesh cell, instead of the wavelength rule ("0.2mm").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cell: Option<Nm>,
+    /// Metal edges closer than this share a mesh line (default: a twentieth of the largest
+    /// cell).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_cell: Option<Nm>,
+    /// Largest size ratio between neighbouring cells (default 1.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grading: Option<Quantity>,
+    /// End criterion: stop when the energy has decayed by this much ("40dB", the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_criteria: Option<Quantity>,
+    /// Maximum number of timesteps per run (default 200000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timesteps: Option<u64>,
+}
+
+/// Gaussian excitation.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Excitation {
+    /// Center frequency.
+    pub f0: Quantity,
+    /// 20 dB half-bandwidth (the pulse covers f0 − fc .. f0 + fc).
+    pub fc: Quantity,
+}
+
+/// Result of `export.openems`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OpenEmsExported {
+    /// Files written.
+    pub files: Vec<WrittenFile>,
+    /// Touchstone file the driver writes.
+    pub touchstone: String,
+    /// How to run it.
+    pub run: String,
+    /// Board region simulated (two corners).
+    pub window: [Point; 2],
+    /// Domain bottom and top in z, with the air (z 0 = bottom of the bottom copper).
+    pub z_range: [Nm; 2],
+    /// Ports.
+    pub ports: Vec<openems::PortInfo>,
+    /// Mesh summary.
+    pub mesh: openems::MeshInfo,
+    /// Excitation.
+    pub excitation: Excitation,
+    /// Nets with copper in the region.
+    pub nets: Vec<String>,
+}
+
+fn hertz(q: Quantity, field: &str) -> Result<u64, CommandError> {
+    let q = crate::commands::electrical::expect_unit(q, Unit::Hertz, field)?;
+    let v = q.to_f64();
+    if !(0.0..1e15).contains(&v) {
+        return Err(CommandError::invalid_args("value.out_of_range", format!("`{field}` must be between 0 and 1 PHz")));
+    }
+    Ok(v.round() as u64)
+}
+
+impl Command for OpenEms {
+    const NAME: &'static str = "export.openems";
+    const SUMMARY: &'static str =
+        "Export a board region to openEMS (full-wave FDTD): geometry, mesh, ports and a driver writing Touchstone";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["dir"];
+    type Output = OpenEmsExported;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<OpenEmsExported, CommandError> {
+        let p = ctx.project()?;
+        let name = self.name.clone().unwrap_or_else(|| crate::model::part::slugify(&p.manifest().name));
+        if name.is_empty() || name.contains(['/', '\\']) {
+            return Err(CommandError::invalid_args("export.bad_name", "`name` must be a plain file name"));
+        }
+        let grading = match self.grading {
+            Some(g) => {
+                let g = crate::commands::electrical::expect_unit(g, Unit::None, "grading")?.to_f64();
+                if !(g > 1.0 && g <= 3.0) {
+                    return Err(CommandError::invalid_args(
+                        "value.out_of_range",
+                        "`grading` must be above 1 and at most 3 (1.5 is usual)",
+                    ));
+                }
+                (g * 1000.0).round() as u32
+            }
+            None => 1500,
+        };
+        let end = match self.end_criteria {
+            Some(e) if matches!(e.unit, Unit::Decibel | Unit::None) && e.to_f64() != 0.0 => {
+                e.to_f64().abs().round() as u32
+            }
+            Some(_) => {
+                return Err(CommandError::invalid_args(
+                    "value.wrong_unit",
+                    "`end_criteria` is an energy decay in dB, e.g. 40dB",
+                ));
+            }
+            None => 40,
+        };
+        let opts = openems::Options {
+            name: name.clone(),
+            title: p.manifest().name.clone(),
+            nets: self.nets.clone(),
+            around: self.around.clone(),
+            window: self.window.map(|[a, b]| (a, b)),
+            margin: self.margin,
+            only_selected: self.only_selected,
+            ground: self.ground.clone(),
+            ports: self.ports.clone(),
+            f_min_hz: self.f_min.map(|f| hertz(f, "f_min")).transpose()?.unwrap_or(0),
+            f_max_hz: hertz(self.f_max, "f_max")?,
+            points: self.points.unwrap_or(201),
+            boundary: self.boundary.unwrap_or_default(),
+            pml_cells: self.pml_cells.unwrap_or(8).max(1),
+            air: self.air,
+            copper: self.copper.unwrap_or_default(),
+            cells_per_wavelength: self.cells_per_wavelength.unwrap_or(20),
+            max_cell: self.max_cell,
+            min_cell: self.min_cell,
+            grading_permille: grading,
+            end_criteria_db: end,
+            timesteps: self.timesteps.unwrap_or(200_000),
+        };
+        let x = openems::export(p, &opts).map_err(|e| {
+            let base = if e.code.starts_with("openems.unknown") {
+                CommandError::not_found(e.code, e.message)
+            } else {
+                CommandError::invalid_args(e.code, e.message)
+            };
+            let mut c = base.with_hint(e.hint).with_suggestions(&e.suggestions);
+            for s in e.subjects {
+                c = c.with_subject(s);
+            }
+            c
+        })?;
+        let dir = resolve(ctx, self.dir.as_deref(), PathBuf::from("out/openems"));
+        let file = |ext: &str, function: &str, content: String| {
+            let name = format!("{name}.{ext}");
+            (dir.join(&name), OutFile { name, function: function.into(), content })
+        };
+        let files = write(vec![
+            file("xml", "openEMS geometry (CSXCAD XML) and mesh", x.xml),
+            file("py", "openEMS driver (Python)", x.script),
+        ])?;
+        for d in x.diagnostics {
+            ctx.report(d);
+        }
+        let hz = |v: u64| Quantity::int(v as i64, Unit::Hertz);
+        Ok(OpenEmsExported {
+            run: format!("python3 {}", dir.join(format!("{name}.py")).display()),
+            touchstone: dir.join(&x.touchstone).display().to_string(),
+            files: files.files,
+            window: [x.window.0, x.window.1],
+            z_range: [x.z_range.0, x.z_range.1],
+            ports: x.ports,
+            mesh: x.mesh,
+            excitation: Excitation { f0: hz(x.excitation.0), fc: hz(x.excitation.1) },
+            nets: x.nets,
+        })
+    }
+
+    fn summarize(o: &OpenEmsExported) -> String {
+        let mut s = format!(
+            "wrote {} file(s); mesh {}×{}×{} lines ({} cells, smallest {} / {} / {})",
+            o.files.len(),
+            o.mesh.lines[0],
+            o.mesh.lines[1],
+            o.mesh.lines[2],
+            o.mesh.cells,
+            o.mesh.min_cell[0],
+            o.mesh.min_cell[1],
+            o.mesh.min_cell[2]
+        );
+        for f in &o.files {
+            s.push_str(&format!("\n  {} ({})", f.path, f.function));
+        }
+        for p in &o.ports {
+            let kind = match p.kind {
+                openems::PortKind::Lumped => "lumped",
+                openems::PortKind::Msl => "microstrip",
+            };
+            s.push_str(&format!(
+                "\n  port {}: {} ({kind}, {}) on {} over {}",
+                p.number, p.at, p.z0, p.layer, p.reference
+            ));
+        }
+        s.push_str(&format!("\nrun: {}  (writes {})", o.run, o.touchstone));
         s
     }
 }

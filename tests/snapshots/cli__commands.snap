@@ -156,6 +156,8 @@ expression: names
   "place.import_idx",
   "export.dsn",
   "export.spice",
+  "export.openems",
+  "touchstone.summary",
   "fab.list",
   "fab.show",
   "fab.check",

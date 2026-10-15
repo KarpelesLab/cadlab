@@ -27,6 +27,7 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
 | **gerbv** (and/or other Gerber viewers) | our Gerbers parse cleanly and rasterize to the expected image |
 | **Clipper2** | differential testing of the polygon library |
 | **ngspice** | SPICE netlist export parses and simulates: `ngspice -b` on the divider golden file gives v(out) = 2.5 V (`tests/electrical.rs`, M8) |
+| **openEMS** (optional) | the exported full-wave model runs: the driver of a 4-layer via transition (`python3`, openEMS's Python modules) writes a Touchstone file whose \|S21\| > −3 dB and \|S11\| < −6 dB at 1 GHz (`tests/openems.rs`; skipped when `openEMS` is not installed) |
 | Fab online DFM checkers | manual, per release, on the demo boards for each supported fab profile |
 
 ### Comparison methods

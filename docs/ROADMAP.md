@@ -257,7 +257,12 @@ Research-sized items beyond the milestones above; none blocks a release.
       complex Z₀ and dB/m (differential for pairs) at frequencies or a sweep in `impedance.calc`, and `net.loss`
       for a routed net
 - [ ] 3D full-wave EM solver (e.g. FDTD or FEM) for S-parameters of vias, transitions, connectors and short
-      interconnects, and an export of the board geometry to an external solver (openEMS) as a first step
+      interconnects, and an export of the board geometry to an external solver (openEMS) as a first step.
+      First step done (D54; ELECTRICAL.md "Full-wave export"): `export.openems` writes a board region (nets,
+      items such as a via or connector, or a window) as CSXCAD geometry (stackup dielectrics with εr and loss
+      tangent, copper per layer and net, vias and holes), a graded λ/N mesh, and a Python driver with lumped or
+      microstrip ports, Gaussian excitation and PML/MUR boundaries that writes a Touchstone file; the Touchstone
+      1.1/2.0 reader and `touchstone.summary` read results back. Open: the built-in full-wave solver itself
 
 ---
 

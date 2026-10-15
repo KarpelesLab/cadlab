@@ -912,6 +912,36 @@ in the order (the lock), with the numbers coming from the fab's published data r
 and a buck converter, a USB-C receptacle and a D+ pull-up are ordinary parts of a USB device that each tripped a
 rule written for the simpler case.
 
+### D54. openEMS full-wave export: CSXCAD geometry plus a Python driver, Touchstone reader to read results back (2026-10-15)
+First step of the full-wave stretch goal. `export.openems` writes a board region (from `nets`, `around` items
+or a `window`, plus a margin) as two files: `<name>.xml`, an `<openEMS>` document holding only the CSXCAD
+`<ContinuousStructure>` (one `Material` per dielectric with εr and, from the new optional
+`Dielectric::loss_tangent`, a conductivity κ = 2π f₀ ε₀ εr tan δ at the excitation's center; one perfect-
+conductor `Metal` per net with each layer's copper union clipped to the region, extruded through the copper
+thickness or as zero-thickness sheets; vias and plated holes as metal cylinders; non-plated holes as air) and
+its `<RectilinearGrid>`; and `<name>.py`, a driver that reads that geometry and adds what belongs to a run:
+Gaussian excitation (f_min .. f_max), PML or MUR boundaries, and lumped (`AddLumpedPort`, resistive sheet from
+the reference copper to the signal copper) or microstrip (`AddMSLPort`) ports, one run per excited port, S-
+parameters from `CalcPort` written as Touchstone (1.1, or 2.0 when port impedances differ). The mesh is ours:
+fixed lines at metal edges, layer surfaces and ports (close metal lines merged), gaps filled with cells of at
+most λ/N in the stack's highest εr (λ₀/N in the air), four cells per dielectric, neighbours within a grading
+ratio. Polygons with holes are cut into hole-free pieces by vertical lines through each hole (CSXCAD polygons
+have no holes). Coordinates are written exactly in mm from the integer nanometers; output is deterministic
+(golden files). `src/touchstone.rs` reads (and writes) Touchstone 1.1 and 2.0 per the IBIS Open Forum
+specifications, converts Y/Z to S, and `touchstone.summary` reports |S| (dB), phase at frequencies and band
+extremes. openEMS is an optional oracle (`Oracle::OpenEms`): when installed, the test runs the driver.
+*Why:* openEMS is GPL, so only its documented formats and Python interface are used (no code read, linked or
+bundled), and it stays an external tool. Ports, excitation and boundaries go in the driver rather than the
+XML because openEMS's port post-processing (incident/reflected waves from voltage and current probes,
+microstrip feed and measurement planes) lives in its Python/Octave port classes: writing raw probes into the
+XML would mean re-implementing them from undocumented internals, while the documented calls are stable and
+are how openEMS's own tutorials build ports; the geometry and mesh, which are cadlab's knowledge of the board,
+stay in a file other openEMS tools (AppCSXCAD) can open. Python rather than Octave: it is openEMS's maintained
+interface, needs no licence and writes the Touchstone file with numpy alone. Perfect conductors and a
+loss tangent turned into a conductivity at one frequency keep the model small and standard; copper
+conductivity, roughness and solder mask are documented as not modeled. A Touchstone reader closes the loop
+for agents: they run the driver and read the numbers back through a command, with no plotting tool.
+
 ## Open questions
 
 
