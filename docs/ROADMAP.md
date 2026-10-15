@@ -303,4 +303,7 @@ Research-sized items beyond the milestones above; none blocks a release.
   fixed (D55: signal-path lengths with stubs reported, spread placement over the whole board, fab stackups
   listed). Session 4 done through the MCP server (KiCad migration of the lumenpnp ring light: netlist and
   board import, package swap, power LED, mounting hole, reroute, DRC with waivers, JLCPCB and PCBWay bundles,
-  KiCad re-export; D58), replayed by `tests/agent_session4.rs`.
+  KiCad re-export; D58), replayed by `tests/agent_session4.rs`; its open items fixed (D62: KiCad DRC
+  exclusions as waivers, keep-together hints, `place.near` over routing, `route.nets` shoving leftovers,
+  zone fills in the KiCad export, supplier part numbers from netlist fields; the schematic netlist reader
+  stays open).

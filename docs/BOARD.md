@@ -357,6 +357,16 @@ it). Rule areas sharing a name (KiCad's `enclosedByArea('X')` then means any of 
 cannot use but that is annotated (`POWER SW`, not `REF**`) is replaced by its letters and the next free number
 (`POWERSW1`, `import.refdes_renamed`), so its copper and nets stay.
 
+DRC exclusions (`.kicad_pro` `board.design_settings.drc_exclusions`, D62): each excluded KiCad finding
+(`type|x|y|uuid|uuid`, or a `[entry, comment]` pair) becomes a DRC waiver (`drc.waive`) when its type has a
+cadlab counterpart (`courtyards_overlap` → `drc.courtyard_overlap`, `clearance`, `shorting_items`,
+`copper_edge_clearance`, `hole_clearance`, `silk_over_copper`, ... — `kicad_import::exclusions::TYPE_CODES`),
+every item it names was imported (board edges left out) and cadlab's DRC of the imported board has a finding of
+that code naming those items; the waiver's subjects are the items, its reason the KiCad comment (or "KiCad DRC
+exclusion (type)"). The others are reported once per type and cause (`import.drc_exclusion`: no such cadlab
+check, items not imported, or no such cadlab finding); the output's `drc_exclusions` counts read, waived and
+not matched. The DRC runs only when the project has exclusions.
+
 Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
 notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
 (members are imported), footprint texts, 3D models, copper drawings on inner layers of footprints, zones
@@ -398,8 +408,15 @@ to a routed board, such as an imported one, land clear of its copper).
    (an indicator LED, a button) is placed like an anchor instead of next to a pin; swaps never exchange parts
    with different hints. When spreading, a connector that opens on one side (its courtyard center is off its
    pads' centroid by more than 0.1 mm: a receptacle drawn from its datasheet) faces its edge: those rotations
-   are tried first at every room size, and improvement never turns it away. Hints of locked parts do nothing
-   (`place.hint_locked` note); they follow `circuit.rename` and go with `circuit.remove`.
+   are tried first at every room size, and improvement never turns it away. A `near` hint (D62: `place.hint
+   R2 --near D9`, keep together) makes the named part the target of a passive (its pad of a shared net, signal
+   before power before ground; the named part's own chain no longer leads back), pulled 4 per unit of distance
+   (decoupling capacitors 4, other passives 2) and tethered at 4 during improvement (decoupling 2, others 0.5),
+   so its other nets' pull cannot take it away; an anchor with one is pulled to that pad at 4 and placed after
+   the anchor it names. Session 4's LED resistor, pulled to +5V, had landed 15 mm from its LED. Loops (`R2`
+   near `D9` near `R2`) and a part near itself are refused (`place.hint_near_loop`, `place.hint_near_self`).
+   Hints of locked parts do nothing (`place.hint_locked` note); they follow `circuit.rename` and go with
+   `circuit.remove` (a `near` naming a removed part goes too).
 3. Passives, group by group (decoupling capacitors first, then chains), on a 0.25 mm grid within 3 mm, then
    8 mm, of their target pin, all rotations: the score is the distance from their connecting pad to the
    target pin (weighted 4 for decoupling, 2 otherwise) plus the distance of their other pads to the nearest
@@ -443,8 +460,13 @@ placement errors.
 
 `place.near` puts the part just outside the target's courtyard (on `side`, default the side the pin faces),
 `distance` between courtyards (default 0.25 mm), with its pad of the target's net aligned with the pin; each
-rotation is tried and the part slides along the side, then away from it, until it fits; the rotation with the
-shortest link wins.
+rotation is tried and the part slides along the side, then away from it (up to 10 mm each way), until it
+fits; the rotation with the shortest link wins. The courtyard keeps clear of the tracks and vias already on
+the board first. When that leaves no room within reach (a routed board, session 4), the search runs again with
+the body allowed over other copper and only the pads checked against it: each pad keeps the board's (or its
+net class's) clearance from tracks and vias of other nets on its layers (D62). The result then says so
+(`place.over_routing`, info, naming the nets under the body and how to clear them: rip those nets and
+route them again).
 
 ## DRC (`src/drc.rs`, `drc.run`)
 
@@ -489,7 +511,8 @@ them: `J1`, `net:GND`, `graphic#208`) include all of the waiver's, is left out o
 counted in `waived`; a waiver matching nothing is reported (`drc.waiver_unused`, info) so stale ones get
 removed. `fab.check` and `fab.export` drop waived warnings too (reported as `fab.waived`); fab errors
 (capabilities) cannot be waived. Waivers are for deliberate departures (an edge connector over the edge,
-silkscreen the fab clips), each with its reason; KiCad's own DRC exclusions are not imported.
+silkscreen the fab clips), each with its reason; a KiCad project's DRC exclusions come in as waivers of the
+findings they match ("KiCad import").
 
 Candidate pairs come from a uniform grid over bounding boxes (no extra dependency), so a board with a few
 thousand items checks in well under a second in release builds (3000 tracks + 200 vias: about 75 ms). Zone

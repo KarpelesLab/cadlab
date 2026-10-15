@@ -217,7 +217,8 @@ cadlab lib import-kicad MyLib.kicad_sym --footprints MyLib.pretty [--library tea
   (`MPN`, `Manufacturer Part Number`, `Mfr. Part #`, ...) and manufacturer fields are kept; other fields become
   parameters (`Voltage Out` → `voltage_out`, typed when the key is known). Distributor and assembler fields
   (`LCSC`, `DigiKey_PN`, `Mouser`, ...) are dropped with `import.symbol_supplier_field`: projects stay
-  provider-agnostic (D12). `Sim.*` fields are dropped (`import.symbol_sim_field`).
+  provider-agnostic (D12). (Netlist imports keep such fields as component properties, as the schematic gave
+  them; they are read at export only, see "Supplier part numbers in component fields".) `Sim.*` fields are dropped (`import.symbol_sim_field`).
 - **Footprint field:** `MyLib:SOT23_X` attaches footprint `SOT23_X` when the target library has it (imported
   with `--footprints` in the same command, or before) and it has a pad for every pin; else
   `import.symbol_footprint_missing` / `import.symbol_pin_without_pad` and the part has no footprint.
@@ -388,6 +389,22 @@ repeated SKUs, are skipped with a `catalog.row_skipped` warning. An existing cat
 Offers are never written into the project (D12). The library never judges or summarizes datasheets: it exposes
 URLs and lets the agent read them.
 
+## Supplier part numbers in component fields (D62)
+
+Schematics often carry a supplier's own part number per symbol (`LCSC`, `JLCPCB`, `LCSC Part #`,
+`DigiKey_PN`, `Mouser`, ...). A netlist import keeps them as component properties, as the schematic gave
+them; nothing supplier-specific is resolved or stored by cadlab (D12). They are read at export:
+`supplier::SKU_FIELDS` maps field names to provider IDs (`lcsc`, `digikey`, `mouser`), and a BOM line carries
+the part number of each provider all its components agree on (`skus` in `bom.list`, shown as `[lcsc C25744]`).
+A fab whose `catalog` provider has one uses it for the BOM's part number column when no catalog lookup found a
+SKU (`fab.sku_from_fields`, `sku_from_fields` in the lock), and offers it first among the substitutes when the
+provider is configured (basis `field`; `fab.substitute` takes it by default). `Provider::lookup_sku` finds a
+part by a provider's own number (by default a keyword search kept to exact SKU matches).
+
+`bom.list` says what a line without an MPN is: `generic, no MPN yet` for a part made from a generic spec (`R
+10k 1% 0402`: any part meeting it will do), `placeholder: no footprint or MPN yet` for a part a netlist import
+could not resolve, `no MPN` otherwise.
+
 ## Substitutes (`src/substitute.rs`, DECISIONS D26)
 
 When a line cannot be ordered as designed (its MPNs are not found at the providers asked, are short of stock
@@ -396,12 +413,13 @@ fab, "the providers asked" are its `catalog` providers when configured (LCSC for
 DigiKey but not by LCSC needs a substitute at JLCPCB. The line's approved alternates are always tried first;
 they are part of the line, so a substitute is only proposed when none of them works.
 
-Candidates come from two sources, and nowhere else:
+Candidates come from three sources, and nowhere else:
 
 | Basis | Categories | Rule |
 |---|---|---|
 | `drop_in` | any | an MPN listed in a provider's cross-reference data (`Candidate::drop_in`) for one of the line's MPNs (looked up at every provider), offered by the providers asked, same package (normalized) and category when both are known |
 | `parametric` | resistor, capacitor, inductor, ferrite bead, LED, fuse | same category and package, same value and other parameters (`dielectric`, color, ...), tolerance at most and voltage/current/power ratings at least the part's: the `bom.resolve` query; parts without package or value parameters get none |
+| `field` | any | the part number the line's components carry for one of the fab's `catalog` providers (below), found at that provider by its own part number: the part the design's author chose there; always the first candidate (D62) |
 
 ICs, regulators, transistors, diodes, crystals, connectors and anything else get drop-ins only. cadlab never
 infers pin compatibility from MPN prefixes, descriptions or parameters; when no provider supplies

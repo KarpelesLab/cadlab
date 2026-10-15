@@ -258,7 +258,9 @@ fn export_is_deterministic_and_well_formed() {
     // Cross-check regressions (tests/gerber_crosscheck.rs, tests/drc_crosscheck.rs):
     // the zone carries the thermal settings cadlab fills with (gap = clearance 0.2 mm, spoke =
     // the GND class width 0.4 mm), not KiCad's 0.5 mm defaults;
-    assert!(a.pcb.contains("(fill (thermal_gap 0.2) (thermal_bridge_width 0.4))"), "zone thermal settings");
+    assert!(a.pcb.contains("(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.4))"), "zone thermal settings");
+    // the fill is written (one hole-free outline per island), so KiCad needs no refill;
+    assert!(a.pcb.contains("(filled_polygon (layer \"B.Cu\") (pts (xy "), "zone fill");
     // the reference sits where cadlab's legend prints it: upright, 0.3 mm above the courtyard
     // (U1: courtyard 1.71 mm above the origin, text 1 mm tall);
     assert!(a.pcb.contains("(property \"Reference\" \"U1\" (at 0 -2.51 0) (layer \"F.SilkS\")"), "U1 reference");
@@ -304,6 +306,44 @@ fn kicad_drc_clean_board() {
         .map(|(_, d)| d)
         .collect();
     assert!(unexpected.is_empty(), "KiCad DRC on the routed board:\n{}", unexpected.join("\n"));
+}
+
+/// The LDO board with its GND pads joined only by the bottom pour (each to a via, no bottom
+/// tracks): the export carries the fill, so KiCad's DRC without a refill sees GND connected.
+#[test]
+fn zone_fills_connect_pads_without_a_refill() {
+    let (_d, r, mut s) = ldo();
+    route_all(&r, &mut s);
+    {
+        let p = s.project.as_mut().unwrap();
+        let b = p.board_mut();
+        b.tracks.retain(|t| t.layer != "B.Cu");
+    }
+    let o = exec(&r, &mut s, "board.ratsnest", json!({}));
+    assert_eq!(o["output"]["lines"], json!([]), "the pour joins the GND vias");
+    let a = cadlab::kicad_pcb::export(s.project.as_ref().unwrap(), "pour");
+    // Every fill outline is closed and hole-free: one `filled_polygon` per island.
+    let n = a.pcb.matches("(filled_polygon (layer \"B.Cu\")").count();
+    let fills = cadlab::board::zones::fill_zones(
+        s.project.as_ref().unwrap(),
+        &cadlab::board::base_copper_items(s.project.as_ref().unwrap()),
+    );
+    assert_eq!(n, fills.iter().map(|f| f.fill.len()).sum::<usize>(), "{}", a.pcb);
+    let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
+    let pcb = export(&r, &mut s, "pour");
+    let out = pcb.with_extension("drc.json");
+    oracle::run(
+        &cli,
+        &["pcb", "drc", "--format", "json", "--severity-all", "-o", out.to_str().unwrap(), pcb.to_str().unwrap()],
+    );
+    let report: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    keep(&pcb, "pour");
+    assert_eq!(report["unconnected_items"], json!([]), "KiCad sees the pads the pour connects: {report}");
+    let bad: Vec<(String, String)> = violations(&report)
+        .into_iter()
+        .filter(|(ty, _)| matches!(ty.as_str(), "clearance" | "shorting_items" | "starved_thermal"))
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
 }
 
 #[test]

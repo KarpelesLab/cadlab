@@ -341,31 +341,79 @@ fn shape_options(
     Ok(())
 }
 
+/// Adds a router result's tracks and vias to the project and removes what it replaced.
+fn apply_result(ctx: &mut Context<'_>, result: &router::RouteResult) -> Result<(), CommandError> {
+    let pm = ctx.project_mut()?;
+    let board = pm.board_mut();
+    board.tracks.retain(|t| !result.removed_tracks.contains(&t.id));
+    board.vias.retain(|v| !result.removed_vias.contains(&v.id));
+    for t in &result.tracks {
+        let mut t = t.clone();
+        t.id = pm.alloc_id();
+        pm.board_mut().tracks.push(t);
+    }
+    for v in &result.vias {
+        let mut v = v.clone();
+        v.id = pm.alloc_id();
+        pm.board_mut().vias.push(v);
+    }
+    Ok(())
+}
+
+/// Whether a connection end is a pad `route.connection` takes (`U1.3`, not `via#4`).
+fn is_pad_label(label: &str) -> bool {
+    label.contains('.') && !label.contains('#')
+}
+
+/// What to do with connections a run leaves unrouted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leftovers {
+    /// Report them (with a hint naming `route.connection`, which can move other nets).
+    Report,
+    /// Report them as they are (`route.connection` with `shove` already tried).
+    Keep,
+    /// Give each one `route.connection`'s treatment first: push-and-shove, else rip up the
+    /// nets in the way, route it and route those nets again.
+    Shove,
+}
+
 /// Runs the router and applies its result to the project.
-fn run_router(ctx: &mut Context<'_>, scope: Scope, opts: RouteOptions) -> Result<Routed, CommandError> {
+fn run_router(
+    ctx: &mut Context<'_>,
+    scope: Scope,
+    opts: RouteOptions,
+    leftovers: Leftovers,
+) -> Result<Routed, CommandError> {
+    let start = std::time::Instant::now();
     let result = {
         let p = ctx.project()?;
         let progress = |done: u64, total: Option<u64>, msg: &str| ctx.progress(done, total, msg);
         let cancelled = || ctx.check_cancelled().is_err();
         router::route(p, &scope, &opts, &Hooks { progress: &progress, cancelled: &cancelled }).map_err(route_error)?
     };
-    let pm = ctx.project_mut()?;
-    let board = pm.board_mut();
-    board.tracks.retain(|t| !result.removed_tracks.contains(&t.id));
-    board.vias.retain(|v| !result.removed_vias.contains(&v.id));
-    for mut t in result.tracks {
-        t.id = pm.alloc_id();
-        pm.board_mut().tracks.push(t);
+    apply_result(ctx, &result)?;
+    let mut out =
+        Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted, pairs: result.pairs };
+    if leftovers == Leftovers::Shove {
+        shove_leftovers(ctx, &mut out, &opts, start)?;
     }
-    for mut v in result.vias {
-        v.id = pm.alloc_id();
-        pm.board_mut().vias.push(v);
+    for c in out.connections.iter_mut().filter(|c| c.status == ConnStatus::Failed) {
+        if leftovers == Leftovers::Report && is_pad_label(&c.from) && is_pad_label(&c.to) {
+            c.hints.insert(
+                0,
+                format!(
+                    "`route.connection {} {}` moves the unlocked routing of other nets out of the way \
+                     (push-and-shove, else rip up and reroute them)",
+                    c.from, c.to
+                ),
+            );
+        }
     }
-    let failed: Vec<&ConnectionReport> = result.connections.iter().filter(|c| c.status == ConnStatus::Failed).collect();
+    let failed: Vec<&ConnectionReport> = out.connections.iter().filter(|c| c.status == ConnStatus::Failed).collect();
     if !failed.is_empty() {
         let mut d = Diagnostic::warning(
             "route.incomplete",
-            format!("{} of {} connection(s) could not be routed", failed.len(), result.connections.len()),
+            format!("{} of {} connection(s) could not be routed", failed.len(), out.connections.len()),
         )
         .with_hint(
             failed
@@ -384,8 +432,77 @@ fn run_router(ctx: &mut Context<'_>, scope: Scope, opts: RouteOptions) -> Result
         }
         ctx.report(d);
     }
-    report_pairs(ctx, &result.pairs, false)?;
-    Ok(Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted, pairs: result.pairs })
+    report_pairs(ctx, &out.pairs, false)?;
+    Ok(out)
+}
+
+/// Each failed connection of `out`, in report order and within what is left of the budget, is
+/// routed as `route.connection` does: push-and-shove, else the nets in the way are ripped up,
+/// the connection routed and those nets routed again (kept only when they end up no less
+/// routed). Successes are applied to the project and recorded in `out`.
+fn shove_leftovers(
+    ctx: &mut Context<'_>,
+    out: &mut Routed,
+    opts: &RouteOptions,
+    start: std::time::Instant,
+) -> Result<(), CommandError> {
+    for i in 0..out.connections.len() {
+        if out.connections[i].status != ConnStatus::Failed {
+            continue;
+        }
+        let left = opts.budget.map(|b| b.saturating_sub(start.elapsed()));
+        if left.is_some_and(|l| l < Duration::from_millis(50)) {
+            break;
+        }
+        ctx.check_cancelled()?;
+        let (from, to) = (out.connections[i].from.clone(), out.connections[i].to.clone());
+        let sub = RouteOptions { budget: left, shove: true, pairs: Some(false), ..opts.clone() };
+        let r = {
+            let p = ctx.project()?;
+            let progress = |done: u64, total: Option<u64>, msg: &str| ctx.progress(done, total, msg);
+            let cancelled = || ctx.check_cancelled().is_err();
+            router::route(
+                p,
+                &Scope::Connection { from, to },
+                &sub,
+                &Hooks { progress: &progress, cancelled: &cancelled },
+            )
+        };
+        let r = match r {
+            Ok(r) => r,
+            Err(RouteError::Cancelled) => return Err(route_error(RouteError::Cancelled)),
+            // An end that is no longer a terminal (merged into another island): leave it.
+            Err(_) => continue,
+        };
+        if r.connections.iter().any(|c| c.status == ConnStatus::Failed) {
+            continue;
+        }
+        apply_result(ctx, &r)?;
+        let rep = &mut out.connections[i];
+        rep.status = ConnStatus::Routed;
+        rep.reason = None;
+        rep.at = None;
+        rep.layer = None;
+        rep.hints.clear();
+        rep.subjects.clear();
+        for n in r.rerouted {
+            if !out.rerouted.contains(&n) {
+                out.rerouted.push(n);
+            }
+        }
+        let st = &mut out.stats;
+        st.tracks += r.stats.tracks;
+        st.vias += r.stats.vias;
+        st.length += r.stats.length;
+    }
+    let st = &mut out.stats;
+    st.routed = out.connections.iter().filter(|c| c.status == ConnStatus::Routed).count();
+    st.failed = out.connections.iter().filter(|c| c.status == ConnStatus::Failed).count();
+    if st.connections > 0 {
+        st.completion = (st.routed as f64 * 1000.0 / st.connections as f64).round() / 10.0;
+    }
+    out.rerouted.sort();
+    Ok(())
 }
 
 /// Route every unrouted connection on the board.
@@ -456,7 +573,7 @@ impl Command for RouteAll {
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         opts.search = self.router;
         opts.neck = self.neck;
-        run_router(ctx, Scope::All, opts)
+        run_router(ctx, Scope::All, opts, Leftovers::Report)
     }
 
     fn summarize(o: &Routed) -> String {
@@ -517,6 +634,12 @@ pub struct RouteNets {
     /// true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairs: Option<bool>,
+    /// Connections left unrouted get `route.connection`'s treatment, within the budget: the
+    /// unlocked routing of other nets is pushed aside (push-and-shove), else ripped up and
+    /// routed again after this connection (kept only when those nets end up no less routed).
+    /// Locked items never move. Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shove: Option<bool>,
 }
 
 impl Command for RouteNets {
@@ -552,7 +675,12 @@ impl Command for RouteNets {
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         opts.search = self.router;
         opts.neck = self.neck;
-        run_router(ctx, Scope::Nets(nets), opts)
+        run_router(
+            ctx,
+            Scope::Nets(nets),
+            opts,
+            if self.shove.unwrap_or(true) { Leftovers::Shove } else { Leftovers::Report },
+        )
     }
 
     fn summarize(o: &Routed) -> String {
@@ -637,7 +765,8 @@ impl Command for RouteConnection {
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         opts.search = self.router;
         opts.neck = self.neck;
-        run_router(ctx, Scope::Connection { from, to }, opts)
+        let leftovers = if opts.shove { Leftovers::Keep } else { Leftovers::Report };
+        run_router(ctx, Scope::Connection { from, to }, opts, leftovers)
     }
 
     fn summarize(o: &Routed) -> String {

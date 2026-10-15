@@ -141,6 +141,10 @@ to call and a one-line `returns:` signature); `output_schema: true` adds the out
 - Argument type errors name the argument (`at[0]`: expected a string, got 1) and remind that lengths take units.
 - Long check results take filters: `drc.run` `severity`, `codes`, `limit`, `offset`, with counts per code in
   the output and the summary.
+- Paths in outputs are relative to the project directory when inside it (`fab.export` names its directory
+  once, then the files by name), so a result does not repeat a long absolute prefix per file.
+- A failure names the command that goes further when one exists (`route.nets` / `route.all` leftovers:
+  `route.connection A B`, which moves other nets' routing), before parameter changes.
 - Long-running tools (route, part search) send progress notifications and honor cancellation.
 
 ### Resources

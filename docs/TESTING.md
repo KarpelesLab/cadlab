@@ -57,6 +57,9 @@ since KiCad does not check net class widths by itself). `kicad-cli` then checks:
 - **DRC, clean board:** the LDO board, fully routed with tracks, vias and a bottom GND pour, has no KiCad DRC
   item (`--severity-all --refill-zones`, no schematic parity) except the allowlist: `lib_footprint_issues`
   (footprints are embedded; there is no `cadlab` KiCad library to configure, D7).
+- **Zone fills:** the LDO board with its GND pads joined only by the bottom pour: KiCad's DRC without a
+  refill finds no unconnected item, since the export carries cadlab's fill (removing the `filled_polygon`s
+  brings back two).
 - **DRC, deliberate violations:** KiCad reports `clearance`, `track_width` (net class rule),
   `copper_edge_clearance` and `unconnected_items` for the corresponding defects.
 - **Pad placement:** KiCad's IPC-D-356 export (relative to the auxiliary origin, which the export puts at cadlab's
@@ -622,4 +625,20 @@ What I would fix next (seen in the session, not fixed):
   re-export has no zone fills (KiCad reports every zone-connected pad unconnected until a refill).
 - Supplier part numbers in the netlist (`LCSC` fields) are kept as properties but not offered to
   `fab.substitute` for the JLCPCB BOM.
+
+Session 4 follow-up (D62): the open items above, except the schematic netlist reader, which stays open (D13).
+Each has a focused test in `tests/session4_followup.rs`, and the replay uses them where they remove a
+workaround:
+
+| Open item | Fix | Replay |
+|---|---|---|
+| KiCad DRC exclusions not imported | `board.import_kicad` turns the `.kicad_pro` `drc_exclusions` into waivers of the cadlab findings they match (type mapped, items through the UUID table, a finding naming them); the rest reported by cause (`import.drc_exclusion`). On the corpus's Cynthion: 8 of 13 become waivers (courtyard overlaps, copper to edge), 5 have no cadlab check (footprint library mismatch, holes in courtyards). The ring light's project has none | — (the ring light excludes nothing) |
+| `place.auto` put the LED's resistor 15 mm from the LED | `place.hint R2 --near D9` keeps a part next to another (target pad of the shared net, pull and tether stronger than any net) | both variants hint `R2` near the LED: under 3 mm |
+| `place.near` finds no room on a routed board | courtyards keep clear of tracks and vias first; when nothing is in reach, the body may cover other nets' copper while the pads keep their clearance, reported as `place.over_routing` with the nets | — (focused test) |
+| `route.nets` failed a connection `route.connection --shove` routed | `route.nets` gives leftovers `route.connection`'s treatment (push-and-shove, then rip up and reroute, `shove` on by default); failures elsewhere name `route.connection` first | — (focused test: a net walled off on F.Cu) |
+| `fab.export` printed 15 absolute paths | the directory once, file names wrapped at ~100 characters; paths relative to the project | summary lines under 120 characters, no absolute path |
+| `circuit.list` showed the part's footprint | the placement's (an imported board's) with the part's alongside | `placed_footprint` reads `circuit.list` alone |
+| the BOM called placeholders "generic" | `generic` lines, `placeholder` lines and others worded apart | — (focused test) |
+| the KiCad re-export had no zone fills | fills written (`filled_polygon`, fractured), `fill yes` | KiCad's DRC of the re-export runs without `--refill-zones`: no unconnected pads (both variants) |
+| `LCSC` fields not used | component fields with a supplier's part number fill the fab BOM's part number column and come first among substitutes (basis `field`) | the ring light's JLCPCB BOM carries its LCSC numbers |
 

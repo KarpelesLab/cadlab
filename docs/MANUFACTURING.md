@@ -321,10 +321,13 @@ neither fab publishes a table, so they are user data (see D21).
 process (`id`, layers, thickness, copper, the published `stackup` the board matches exactly when there is
 one — order with it —, chosen finish/colors), every file written with its SHA-256 and size
 (the archive included, the lock excluded), each populated BOM line with the chosen manufacturer/MPN, the fab SKU
-and provider when one of the profile's `catalog` providers offers it, its availability status and, for a
+and provider when one of the profile's `catalog` providers offers it — else the part number the components
+carry for such a provider in a field (an imported netlist's `LCSC` / `JLCPCB`, D62), marked
+`sku_from_fields` and reported once (`fab.sku_from_fields`) —, its availability status and, for a
 substituted line, the MPN it `replaces`, the rotation offsets applied per designator, and the `substitutions`
 chosen for this fab (`part`, `replaces`, `manufacturer`, `mpn`, `provider`, `sku`, `basis`: `drop_in`,
-`parametric` or `manual`), sorted by part. A lock written by `fab.substitute` before any export has only the
+`parametric`, `manual` or `field`: the part number in the components' fields, found at the fab's catalog
+provider, which is then the first substitute candidate), sorted by part. A lock written by `fab.substitute` before any export has only the
 header and the substitutions.
 
 Design rules can be derived from a profile with `board.rules --fab <id> --margin tightest|comfortable`
@@ -333,8 +336,12 @@ Design rules can be derived from a profile with `board.rules --fab <id> --margin
 Manifest `targets`: `drc.run` also runs the board and assembly part of `fab.check` for each target and reports
 its findings as warnings prefixed `[<fab>]` (never errors), plus `fab.unknown_target` for unknown IDs.
 
-`bom.export --format jlcpcb|pcbway` writes the BOM layout of that profile (without SKUs, which need a supplier
-lookup; `fab.export` fills them).
+`bom.export --format jlcpcb|pcbway` writes the BOM layout of that profile (SKUs only where the components carry
+one in a field; a supplier lookup is `fab.export`'s).
+
+`fab.export`'s text names the output directory once and the files by name, wrapped at about 100 characters;
+its output gives `dir` and each file's `path` relative to the project directory when they are inside it (session
+4: 15 absolute paths of ~180 characters).
 
 ## Provider-agnostic projects
 

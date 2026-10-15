@@ -156,6 +156,14 @@ impl Command for Remove {
             if p.board().placement_hints.contains_key(k) {
                 p.board_mut().placement_hints.remove(k);
             }
+            // "Keep next to" hints naming it go too.
+            if p.board().placement_hints.values().any(|h| h.near.as_ref() == Some(k)) {
+                let hints = &mut p.board_mut().placement_hints;
+                for h in hints.values_mut().filter(|h| h.near.as_ref() == Some(k)) {
+                    h.near = None;
+                }
+                hints.retain(|_, h| !h.is_empty());
+            }
         }
         // Forget block instances with no components left.
         let c = p.circuit_mut();
@@ -187,9 +195,13 @@ pub struct ComponentInfo {
     pub part: String,
     /// Value.
     pub value: String,
-    /// Footprint.
+    /// Footprint the component is placed with: the placement's own choice (an imported
+    /// board's footprint) when it has one, else the part's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footprint: Option<String>,
+    /// The part's footprint, when the placement uses another one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_footprint: Option<String>,
     /// Do not populate.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dnp: bool,
@@ -224,11 +236,18 @@ impl Command for List {
             .filter(|(_, c)| filter.as_ref().is_none_or(|f| *f == c.part))
             .map(|(r, c)| {
                 let part = p.library().parts.get(&c.part);
+                let own = part.and_then(|pt| pt.footprint()).map(|f| f.footprint.clone());
+                let placed = p.board().footprints.get(r).and_then(|f| f.footprint.clone());
+                let (footprint, part_footprint) = match placed {
+                    Some(f) if Some(&f) != own.as_ref() => (Some(f), own),
+                    _ => (own, None),
+                };
                 ComponentInfo {
                     refdes: r.clone(),
                     part: c.part.clone(),
                     value: part.map(|pt| pt.value()).unwrap_or_default(),
-                    footprint: part.and_then(|pt| pt.footprint()).map(|f| f.footprint.clone()),
+                    footprint,
+                    part_footprint,
                     dnp: p.bom().dnp.contains(r),
                     properties: c.properties.clone(),
                 }
@@ -250,7 +269,11 @@ impl Command for List {
                     c.refdes,
                     c.value,
                     c.part,
-                    c.footprint.as_ref().map(|f| format!("  ({f})")).unwrap_or_default(),
+                    match (&c.footprint, &c.part_footprint) {
+                        (Some(f), Some(own)) => format!("  ({f}; the part's: {own})"),
+                        (Some(f), None) => format!("  ({f})"),
+                        _ => String::new(),
+                    },
                     if c.dnp { "  DNP" } else { "" }
                 )
             })
@@ -300,6 +323,11 @@ impl Command for Rename {
             && let Some(h) = p.board_mut().placement_hints.remove(&from)
         {
             p.board_mut().placement_hints.insert(to.clone(), h);
+        }
+        if p.board().placement_hints.values().any(|h| h.near.as_ref() == Some(&from)) {
+            for h in p.board_mut().placement_hints.values_mut().filter(|h| h.near.as_ref() == Some(&from)) {
+                h.near = Some(to.clone());
+            }
         }
         if p.bom_mut().dnp.remove(&from) {
             p.bom_mut().dnp.insert(to.clone());

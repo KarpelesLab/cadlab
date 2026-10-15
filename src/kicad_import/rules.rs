@@ -26,6 +26,7 @@
 //! | `.kicad_dru` rules with geometric conditions ([`condition_scope`]: item type, layer, `memberOfFootprint`, `intersectsCourtyard`, `enclosedByArea`, `intersectsArea` / `insideArea`) with `clearance` / `track_width` minimums or `disallow` (`track`, `via`, `pad`, `zone`, `graphic`) | custom rules (`board.custom_rules`), in file order |
 //! | conditions on `B` (the other item of a pair, [`condition_scopes`]) | the custom rule's `with` scope (clearance only) |
 //! | rule `severity` (`error`, `warning`, `ignore`; `exclusion` as `ignore`) | the custom rule's `severity` (rules without a condition become custom rules to keep it) |
+//! | `board.design_settings.drc_exclusions` | DRC waivers of the findings they match, at board import ([`super::exclusions`]) |
 //!
 //! A zero KiCad minimum means "no minimum": the cadlab value is kept. Everything else is reported
 //! (`import.rule_unsupported`), never dropped silently.
@@ -61,6 +62,9 @@ pub struct KicadRules {
     pub text_variables: BTreeMap<String, String>,
     /// Custom rules with geometric conditions (`.kicad_dru`), in file order.
     pub custom: Vec<CustomRule>,
+    /// DRC findings the KiCad project excludes (`board.design_settings.drc_exclusions`), in
+    /// file order; the board import turns them into waivers ([`super::exclusions`]).
+    pub exclusions: Vec<super::exclusions::Exclusion>,
 }
 
 /// What a rules import changed.
@@ -117,6 +121,11 @@ fn parse_pro(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
         }
     }
     let ds = &pro["board"]["design_settings"];
+    for e in ds["drc_exclusions"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        if let Some(x) = super::exclusions::Exclusion::from_json(e) {
+            k.exclusions.push(x);
+        }
+    }
     let r = &ds["rules"];
     let mut set = |field: &str, v: Option<Nm>, kicad: &str, diags: &mut Vec<Diagnostic>| match v {
         Some(v) if v.0 > 0 => {

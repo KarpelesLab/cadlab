@@ -19,7 +19,10 @@
 //! Every call is a `tools/call` as the agent sent it, after the session's friction was fixed:
 //! the MCP-specific fixes (default actions, structured errors, hints with JSON arguments,
 //! argument paths in type errors, `describe` without output schemas, DRC filters) are checked
-//! along the way.
+//! along the way. The follow-up fixes (D62) replace the session's workarounds: the LED's
+//! resistor is kept next to it with a `near` hint, `circuit.list` names the placed footprint,
+//! `fab.export` prints relative names, and KiCad reads the re-export's zone fills without a
+//! refill; the ring light's LCSC fields reach the JLCPCB BOM.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -245,18 +248,27 @@ fn part_of(c: &mut Client, refdes: &str) -> String {
     comp["part"].as_str().unwrap().to_string()
 }
 
-/// The footprint `refdes` is placed with, from `place.list` (its own choice) or the part.
+/// The footprint `refdes` is placed with: `circuit.list` shows the placement's own choice (an
+/// imported board's footprint) when it has one, else the part's.
 fn placed_footprint(c: &mut Client, refdes: &str) -> String {
-    let l = c.ok("place", json!({"action": "list"}));
-    match l["output"]["placements"][refdes]["footprint"].as_str() {
-        Some(f) => f.to_string(),
-        None => {
-            let l = c.ok("circuit", json!({"action": "list"}));
-            let comp =
-                l["output"]["components"].as_array().unwrap().iter().find(|x| x["refdes"] == refdes).unwrap().clone();
-            comp["footprint"].as_str().unwrap().to_string()
-        }
-    }
+    let l = c.ok("circuit", json!({"action": "list"}));
+    let comp = l["output"]["components"].as_array().unwrap().iter().find(|x| x["refdes"] == refdes).unwrap().clone();
+    comp["footprint"].as_str().unwrap().to_string()
+}
+
+/// Center of the pad of `refdes` on `net`, read from the project the MCP server autosaves.
+fn pad_on(project: &Path, refdes: &str, net: &str) -> cadlab::geom::Point {
+    let p = cadlab::model::Project::load(project).unwrap();
+    cadlab::board::placed_pads(&p)
+        .into_iter()
+        .find(|x| x.refdes == refdes && x.net.as_deref() == Some(net))
+        .unwrap_or_else(|| panic!("no pad of {refdes} on {net}"))
+        .center
+}
+
+fn dist_mm(a: cadlab::geom::Point, b: cadlab::geom::Point) -> f64 {
+    let (dx, dy) = ((a.x.0 - b.x.0) as f64, (a.y.0 - b.y.0) as f64);
+    (dx * dx + dy * dy).sqrt() / 1e6
 }
 
 /// Swaps `refdes` to `spec` (another package), checks the warning about its routing and
@@ -295,16 +307,42 @@ fn finish_routing(c: &mut Client, nets: &[&str]) {
     assert_eq!(s["output"]["unrouted"], 0, "{s}");
 }
 
-/// Exports for two fabs and the KiCad re-export; checks the files.
+/// Exports for two fabs and the KiCad re-export; checks the files. The text names the
+/// directory once and the files by name, relative to the project.
 fn export_all(c: &mut Client, project: &Path, name: &str) {
     for fab in ["jlcpcb", "pcbway"] {
-        let r = c.ok("fab", json!({"action": "export", "args": {"fab": fab, "dir": format!("out/{fab}")}}));
+        let raw = c.call("fab", json!({"action": "export", "args": {"fab": fab, "dir": format!("out/{fab}")}}));
+        assert_eq!(raw["isError"], false, "{}", text(&raw));
+        let r = raw["structuredContent"].clone();
         let files = r["output"]["files"].as_array().unwrap();
         assert!(files.len() >= 10, "{fab}: {r}");
+        assert!(files.iter().all(|f| Path::new(f["path"].as_str().unwrap()).is_relative()), "{r}");
         assert!(project.join(format!("out/{fab}/fab-lock.json")).is_file());
+        let t = text(&raw);
+        let summary: Vec<&str> = t.lines().take_while(|l| !l.contains("[fab.") && !l.contains("[export.")).collect();
+        assert!(!t.contains(&project.display().to_string()) && summary.iter().all(|l| l.len() < 120), "{t}");
     }
     let r = c.ok("board", json!({"action": "export_kicad", "args": {"path": format!("out/kicad/{name}.kicad_pcb")}}));
-    assert!(project.join(format!("out/kicad/{name}.kicad_pcb")).is_file(), "{r}");
+    let pcb = project.join(format!("out/kicad/{name}.kicad_pcb"));
+    assert!(pcb.is_file(), "{r}");
+    // KiCad reads the re-export as written (its zone fills included, no refill): no unconnected
+    // pads, no shorts or clearance errors.
+    if let Some(cli) = common::oracle::optional(common::oracle::Oracle::KicadCli) {
+        let report = project.join("out/kicad/drc.json");
+        common::oracle::run(
+            &cli,
+            &["pcb", "drc", "--format", "json", "-o", report.to_str().unwrap(), pcb.to_str().unwrap()],
+        );
+        let r: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        assert_eq!(r["unconnected_items"].as_array().map_or(0, Vec::len), 0, "{r}");
+        let bad: Vec<&Value> = r["violations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|v| matches!(v["type"].as_str(), Some("clearance" | "shorting_items" | "hole_clearance")))
+            .collect();
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
 }
 
 #[test]
@@ -353,7 +391,12 @@ fn migration_of_a_cadlab_board() {
     let erc = c.ok("circuit", json!({"action": "erc", "args": {"lint": true}}));
     assert!(codes(&erc).iter().all(|c| !c.starts_with("erc.")), "{erc}");
     c.ok("board", json!({"action": "hole", "args": {"at": ["2.5mm", "2.5mm"], "drill": "2.2mm", "name": "MH1"}}));
+    // The resistor stays next to its LED, whatever pulls it to VBUS.
+    c.ok("place", json!({"action": "hint", "args": {"refdes": ["R2"], "near": "D2"}}));
     c.ok("place", json!({"action": "auto"}));
+    let project = dir.path().join("migrated");
+    let d = dist_mm(pad_on(&project, "R2", "PWR_LED"), pad_on(&project, "D2", "PWR_LED"));
+    assert!(d < 3.0, "R2 is {d:.2} mm from D2");
     let d =
         c.ok("drc", json!({"args": {"codes": ["drc.clearance", "drc.short", "drc.hole_clearance", "drc.courtyard"]}}));
     assert_eq!(d["output"]["listed"].as_u64().unwrap_or(0), 0, "new parts sit clear of the existing copper: {d}");
@@ -465,7 +508,12 @@ fn migration_of_the_lumenpnp_ring_light() {
         c.ok(&tool, json!({"action": action, "args": args}));
     }
     c.ok("board", json!({"action": "hole", "args": {"at": ["8.9mm", "24.6mm"], "drill": "2.2mm", "name": "MH1"}}));
+    // Keep the resistor with its LED (the session's place.auto put it 15 mm away, pulled to +5V).
+    c.ok("place", json!({"action": "hint", "args": {"refdes": ["R2"], "near": "D9"}}));
     c.ok("place", json!({"action": "auto"}));
+    let ring = dir.path().join("ring");
+    let d = dist_mm(pad_on(&ring, "R2", "PWR_LED"), pad_on(&ring, "D9", "PWR_LED"));
+    assert!(d < 3.0, "R2 is {d:.2} mm from D9");
     let d = c.ok("drc", json!({"args": {"codes": ["drc.clearance", "drc.short", "drc.hole_clearance"]}}));
     assert_eq!(d["output"]["listed"].as_u64().unwrap_or(0), 0, "new parts sit clear of the existing copper: {d}");
     finish_routing(&mut c, &["PWR_LED", "+5V", "GND"]);
@@ -500,31 +548,15 @@ fn migration_of_the_lumenpnp_ring_light() {
 
     let project = dir.path().join("ring");
     export_all(&mut c, &project, "ringlight");
-    // KiCad reads the re-export: no unconnected pads after refilling, no shorts or clearance
-    // errors.
-    if let Some(cli) = common::oracle::optional(common::oracle::Oracle::KicadCli) {
-        let report = project.join("out/kicad/drc.json");
-        common::oracle::run(
-            &cli,
-            &[
-                "pcb",
-                "drc",
-                "--refill-zones",
-                "--format",
-                "json",
-                "-o",
-                report.to_str().unwrap(),
-                project.join("out/kicad/ringlight.kicad_pcb").to_str().unwrap(),
-            ],
-        );
-        let r: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
-        assert_eq!(r["unconnected_items"].as_array().map_or(0, Vec::len), 0, "{r}");
-        let bad: Vec<&Value> = r["violations"]
-            .as_array()
-            .into_iter()
+    // The schematic's LCSC / JLCPCB fields fill the JLCPCB BOM's part number column.
+    if netlist.is_some() {
+        let bom = std::fs::read_dir(project.join("out/jlcpcb"))
+            .unwrap()
             .flatten()
-            .filter(|v| matches!(v["type"].as_str(), Some("clearance" | "shorting_items" | "hole_clearance")))
-            .collect();
-        assert!(bad.is_empty(), "{bad:#?}");
+            .map(|e| e.path())
+            .find(|p| p.file_name().unwrap().to_string_lossy().to_lowercase().contains("bom"))
+            .unwrap();
+        let csv = std::fs::read_to_string(bom).unwrap();
+        assert!(csv.contains("C114586"), "{csv}");
     }
 }

@@ -360,7 +360,14 @@ fn build_part(
 /// The allowed area of a board side for courtyards: outer contour shrunk by `edge`, minus
 /// cutouts grown by `edge`, footprint keep-outs, holes and the courtyards of footprints not
 /// in `moving`, grown by `gap`.
-fn free_area(p: &Project, side: BoardSide, gap: i64, edge: i64, moving: &BTreeSet<String>) -> Option<PolygonSet> {
+fn free_area(
+    p: &Project,
+    side: BoardSide,
+    gap: i64,
+    edge: i64,
+    moving: &BTreeSet<String>,
+    routing: bool,
+) -> Option<PolygonSet> {
     let b = p.board();
     let inside = ArcTol::new(1_000, Side::Inside);
     let outer: Ring = contour_ring(b.outline.contours.first()?, inside).into();
@@ -396,7 +403,7 @@ fn free_area(p: &Project, side: BoardSide, gap: i64, edge: i64, moving: &BTreeSe
     // Routing already on the board: a part dropped onto a track or via of its side shorts it
     // (pads of the moving parts keep the board's clearance from them).
     let clearance = b.rules.clearance.0.max(0);
-    for t in b.tracks.iter().filter(|t| t.layer == cu) {
+    for t in b.tracks.iter().filter(|t| routing && t.layer == cu) {
         let pts: Vec<polyclip::Point> =
             std::iter::once(t.start).chain(t.mid).chain(std::iter::once(t.end)).map(polyclip::Point::from).collect();
         let half = (t.width.0 / 2 + clearance).max(1);
@@ -406,7 +413,7 @@ fn free_area(p: &Project, side: BoardSide, gap: i64, edge: i64, moving: &BTreeSe
             obstacles.extend(s);
         }
     }
-    for v in &b.vias {
+    for v in b.vias.iter().filter(|_| routing) {
         let r = Circle { center: v.at.into(), radius: v.diameter.0 / 2 + clearance }.to_ring(COPPER_TOL);
         if let Ok(r) = r {
             obstacles.push(polyclip::Polygon::new(r, vec![]));
@@ -473,7 +480,7 @@ impl<'a> Engine<'a> {
         }
         let edge = b.rules.copper_to_edge.0.max(gap);
         let free = [BoardSide::Top, BoardSide::Bottom]
-            .map(|s| free_area(p, s, gap, edge, &moving_set).ok_or_else(PlaceError::no_outline));
+            .map(|s| free_area(p, s, gap, edge, &moving_set, true).ok_or_else(PlaceError::no_outline));
         let [top, bottom] = free;
         let (top, bottom) = (top?, bottom?);
         let fb = polyclip::Geometry::bbox(&top);
@@ -517,6 +524,18 @@ impl<'a> Engine<'a> {
             pair_end,
             spread: silk, // the same flag: spread placement also boxes silkscreen
         })
+    }
+
+    /// Lets courtyards cover the board's tracks and vias (pads are then checked against them
+    /// separately, [`PadCheck`]).
+    fn free_under_routing(&mut self) {
+        let edge = self.p.board().rules.copper_to_edge.0.max(self.gap);
+        let moving: BTreeSet<String> = self.index.keys().cloned().collect();
+        for (k, s) in [BoardSide::Top, BoardSide::Bottom].into_iter().enumerate() {
+            if let Some(f) = free_area(self.p, s, self.gap, edge, &moving, false) {
+                self.free[k] = f;
+            }
+        }
     }
 
     fn pin_pos(&self, pin: Pin) -> Option<Point> {
@@ -1125,11 +1144,47 @@ pub struct AutoOptions {
     pub density: Option<u32>,
     /// Edge hints by designator (`place.hint`): the part goes to that edge of the board.
     pub edges: BTreeMap<String, EdgeHint>,
+    /// "Keep next to" hints (`place.hint --near`): designator → the part it stays next to.
+    pub near: BTreeMap<String, String>,
 }
 
 impl Default for AutoOptions {
     fn default() -> Self {
-        AutoOptions { gap: DEFAULT_GAP, spread: true, density: None, edges: BTreeMap::new() }
+        AutoOptions { gap: DEFAULT_GAP, spread: true, density: None, edges: BTreeMap::new(), near: BTreeMap::new() }
+    }
+}
+
+/// Pull of a "keep next to" hint (`place.hint --near`) per unit of distance, against 1 for a
+/// net's ratsnest and 2 for a decoupling capacitor's tether: stronger than any net.
+const NEAR_PULL: f64 = 4.0;
+
+/// The pads joining part `i` to `other` (being placed or fixed): (own pad index, other's pad
+/// number) of a shared net, signal before power before ground; else the first pads. `None`
+/// when `other` has no pads on the board.
+fn near_pads(e: &Engine, nets: &NetInfo, i: usize, other: &str) -> Option<(usize, String)> {
+    let other_pads: Vec<(String, Option<usize>)> = match e.index.get(other) {
+        Some(&j) => e.parts[j].pads.clone(),
+        None => e.fixed.iter().filter(|((r, _), _)| r == other).map(|((_, n), (_, net))| (n.clone(), *net)).collect(),
+    };
+    let first = other_pads.first()?.0.clone();
+    let rank = |n: usize| u8::from(nets.power[n]) + 2 * u8::from(nets.ground[n]);
+    let mut best: Option<(u8, usize, String)> = None;
+    for (k, (_, n)) in e.parts[i].pads.iter().enumerate() {
+        let Some(n) = *n else { continue };
+        if let Some((pad, _)) = other_pads.iter().find(|x| x.1 == Some(n))
+            && best.as_ref().is_none_or(|b| rank(n) < b.0)
+        {
+            best = Some((rank(n), k, pad.clone()));
+        }
+    }
+    Some(best.map_or((0, first), |b| (b.1, b.2)))
+}
+
+/// The pin of `refdes`'s pad `pad` (being placed or fixed).
+fn pin_of(e: &Engine, refdes: &str, pad: &str) -> Option<Pin> {
+    match e.index.get(refdes) {
+        Some(&j) => e.parts[j].pads.iter().position(|(n, _)| n == pad).map(|k| Pin::Part(j, k)),
+        None => e.fixed.get(&(refdes.to_string(), pad.to_string())).map(|x| Pin::Fixed(x.0)),
     }
 }
 
@@ -1163,8 +1218,38 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
     let mut e = Engine::new(p, moving, o.gap.0.max(0), spread, &o.edges)?;
     let nets = net_info(&e);
     let ap = anchor_pads(&e);
-    let targets = assign(&e, &nets, &ap);
+    let mut targets = assign(&e, &nets, &ap);
     let n = e.parts.len();
+
+    // "Keep next to" hints: a passive's target becomes the pad of the part named (its chain
+    // no longer leads back to it); anchors are pulled to that pad.
+    let mut held: BTreeSet<usize> = BTreeSet::new();
+    let mut anchor_near: BTreeMap<usize, (usize, String, String)> = BTreeMap::new();
+    for (r, x) in &o.near {
+        let Some(&i) = e.index.get(r) else { continue };
+        if x == r {
+            continue;
+        }
+        let Some((own, pad)) = near_pads(&e, &nets, i, x) else { continue };
+        if e.parts[i].kind == Kind::Passive {
+            let mut cur = x.clone();
+            for _ in 0..=n {
+                let Some(&j) = e.index.get(&cur).filter(|&&j| e.parts[j].kind == Kind::Passive) else { break };
+                match targets.get(&j).map(|t| t.refdes.clone()) {
+                    Some(next) if next == *r => {
+                        targets.remove(&j);
+                        break;
+                    }
+                    Some(next) => cur = next,
+                    None => break,
+                }
+            }
+            targets.insert(i, Target { refdes: x.clone(), pad, own_pad: own, decap: false });
+            held.insert(i);
+        } else {
+            anchor_near.insert(i, (own, x.clone(), pad));
+        }
+    }
 
     // Satellites (when spreading): small ICs whose signal nets reach one larger IC only (a
     // crystal, a buffer next to an MCU). They share that IC's room instead of claiming their own.
@@ -1261,9 +1346,9 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
         };
         // Spreading: the largest IC first (it takes the center), and satellites after their IC.
         let waiting = |e: &Engine, i: usize| {
-            satellite.get(&e.parts[i].refdes).is_some_and(|m| {
-                e.index.get(m).is_some_and(|&j| e.poses[j].is_none() && anchors.contains(&j) && j != i)
-            })
+            let first =
+                |m: &String| e.index.get(m).is_some_and(|&j| e.poses[j].is_none() && anchors.contains(&j) && j != i);
+            satellite.get(&e.parts[i].refdes).is_some_and(first) || anchor_near.get(&i).is_some_and(|x| first(&x.1))
         };
         let k = if spread && halos.is_empty() && e.parts[anchors[0]].kind == Kind::Ic {
             0
@@ -1285,6 +1370,11 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
         let score = |e: &Engine, pose: &Pose| -> f64 {
             let r = e.parts[i].rect(pose);
             let mut s = e.attraction(i, pose);
+            if let Some((own, x, pad)) = anchor_near.get(&i)
+                && let Some(q) = e.pad_pos(x, pad)
+            {
+                s += NEAR_PULL * dist(e.parts[i].pad_at(pose, *own), q);
+            }
             match edge {
                 None => s += dist(r.center(), center) * if is_first { 1.0 } else { 0.25 },
                 Some(edge) => {
@@ -1390,7 +1480,7 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
             let mut s = e.attraction(i, pose);
             if let Some((q, own, decap)) = target {
                 let d = dist(e.parts[i].pad_at(pose, own), q);
-                s += d * if decap { 4.0 } else { 2.0 };
+                s += d * if decap || held.contains(&i) { 4.0 } else { 2.0 };
                 s += 0.05 * dist(e.parts[i].rect(pose).center(), q);
             }
             s
@@ -1419,12 +1509,20 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
 
     // 3. Local improvement of the total ratsnest length, passives tethered to their pins.
     for (&i, t) in &targets {
-        let target = match e.index.get(&t.refdes) {
-            Some(&j) => e.parts[j].pads.iter().position(|(n, _)| *n == t.pad).map(|k| Pin::Part(j, k)),
-            None => e.fixed.get(&(t.refdes.clone(), t.pad.clone())).map(|x| Pin::Fixed(x.0)),
-        };
-        if let Some(target) = target {
-            e.tethers.push((i, t.own_pad, target, if t.decap { 2.0 } else { 0.5 }));
+        if let Some(target) = pin_of(&e, &t.refdes, &t.pad) {
+            let w = if held.contains(&i) {
+                NEAR_PULL
+            } else if t.decap {
+                2.0
+            } else {
+                0.5
+            };
+            e.tethers.push((i, t.own_pad, target, w));
+        }
+    }
+    for (&i, (own, x, pad)) in &anchor_near {
+        if let Some(target) = pin_of(&e, x, pad) {
+            e.tethers.push((i, *own, target, NEAR_PULL));
         }
     }
     // Spreading: the groups' arrangement is stretched over the board, then groups move (as
@@ -1627,14 +1725,17 @@ pub enum NearTarget {
 /// (default: the side the pin faces, or the best side for a footprint), `distance` between
 /// courtyards, with its pad of the same net aligned with the target pin and facing it (the
 /// rotation that minimizes that connection), sliding along the side or away from it until
-/// the courtyard is clear of every other footprint and inside the board.
+/// the courtyard is clear of every other footprint and inside the board. The courtyard keeps
+/// clear of tracks and vias too; when the routing leaves no such room within reach, the body may
+/// cover other nets' copper while its pads keep their clearance from it
+/// ([`NearPlaced::over_routing`] names those nets).
 pub fn place_near(
     p: &Project,
     refdes: &str,
     target: &NearTarget,
     dir: Option<Direction>,
     distance: Nm,
-) -> Result<PlacedFootprint, PlaceError> {
+) -> Result<NearPlaced, PlaceError> {
     let tref = match target {
         NearTarget::Pad { refdes, .. } | NearTarget::Part(refdes) => refdes.as_str(),
     };
@@ -1702,59 +1803,177 @@ pub fn place_near(
         (None, NearTarget::Part(_)) => vec![Direction::Right, Direction::Left, Direction::Above, Direction::Below],
     };
     let dd = distance.0.max(0);
-    let mut best: Option<(f64, Pose)> = None;
-    for d in dirs {
-        for rot in 0..4u8 {
-            let probe = Pose { at: Point::ORIGIN, rot, side };
-            let rel = e.parts[i].rect(&probe);
-            let pc = own.map_or(rel.center(), |k| e.parts[i].pad_at(&probe, k));
-            let up = |v: i64| v.div_euclid(GRID) * GRID + if v.rem_euclid(GRID) == 0 { 0 } else { GRID };
-            let down = |v: i64| v.div_euclid(GRID) * GRID;
-            // Base origin and the outward/sliding unit vectors.
-            let (bx, by, out, slide) = match d {
-                Direction::Right => (up(trect.x1 + dd - rel.x0), snap(tpoint.y.0 - pc.y.0), (1, 0), (0, 1)),
-                Direction::Left => (down(trect.x0 - dd - rel.x1), snap(tpoint.y.0 - pc.y.0), (-1, 0), (0, 1)),
-                Direction::Above => (snap(tpoint.x.0 - pc.x.0), up(trect.y1 + dd - rel.y0), (0, 1), (1, 0)),
-                Direction::Below => (snap(tpoint.x.0 - pc.x.0), down(trect.y0 - dd - rel.y1), (0, -1), (1, 0)),
-            };
-            let mut cands: Vec<(i64, i64, i64)> = Vec::new();
-            for k in 0..=40i64 {
-                for s in -40..=40i64 {
-                    cands.push((s.abs() * 2 + k * 3, k, s));
+    // Positions in reach: out to 40 steps (10 mm) from the target, 40 steps either way along it.
+    let search = |e: &mut Engine, pads: Option<&PadCheck>| -> Option<(f64, Pose)> {
+        let mut best: Option<(f64, Pose)> = None;
+        for &d in &dirs {
+            for rot in 0..4u8 {
+                let probe = Pose { at: Point::ORIGIN, rot, side };
+                let rel = e.parts[i].rect(&probe);
+                let pc = own.map_or(rel.center(), |k| e.parts[i].pad_at(&probe, k));
+                let up = |v: i64| v.div_euclid(GRID) * GRID + if v.rem_euclid(GRID) == 0 { 0 } else { GRID };
+                let down = |v: i64| v.div_euclid(GRID) * GRID;
+                // Base origin and the outward/sliding unit vectors.
+                let (bx, by, out, slide) = match d {
+                    Direction::Right => (up(trect.x1 + dd - rel.x0), snap(tpoint.y.0 - pc.y.0), (1, 0), (0, 1)),
+                    Direction::Left => (down(trect.x0 - dd - rel.x1), snap(tpoint.y.0 - pc.y.0), (-1, 0), (0, 1)),
+                    Direction::Above => (snap(tpoint.x.0 - pc.x.0), up(trect.y1 + dd - rel.y0), (0, 1), (1, 0)),
+                    Direction::Below => (snap(tpoint.x.0 - pc.x.0), down(trect.y0 - dd - rel.y1), (0, -1), (1, 0)),
+                };
+                let mut cands: Vec<(i64, i64, i64)> = Vec::new();
+                for k in 0..=40i64 {
+                    for s in -40..=40i64 {
+                        cands.push((s.abs() * 2 + k * 3, k, s));
+                    }
+                }
+                cands.sort();
+                let found = cands.into_iter().find_map(|(_, k, s)| {
+                    let at = Point::new(
+                        Nm(bx + (out.0 * k + slide.0 * s) * STEP),
+                        Nm(by + (out.1 * k + slide.1 * s) * STEP),
+                    );
+                    let pose = Pose { at, rot, side };
+                    (e.valid(i, &pose) && pads.is_none_or(|c| c.clear(&pose))).then_some(pose)
+                });
+                let Some(pose) = found else { continue };
+                e.poses[i] = Some(pose);
+                let link = own.map_or_else(
+                    || dist(e.parts[i].rect(&pose).center(), tpoint),
+                    |k| dist(e.parts[i].pad_at(&pose, k), tpoint),
+                );
+                let score = link * 4.0 + e.attraction(i, &pose);
+                e.poses[i] = None;
+                if best.is_none_or(|b| score < b.0 - 1.0) {
+                    best = Some((score, pose));
                 }
             }
-            cands.sort();
-            let found = cands.into_iter().find_map(|(_, k, s)| {
-                let at =
-                    Point::new(Nm(bx + (out.0 * k + slide.0 * s) * STEP), Nm(by + (out.1 * k + slide.1 * s) * STEP));
-                let pose = Pose { at, rot, side };
-                e.valid(i, &pose).then_some(pose)
-            });
-            let Some(pose) = found else { continue };
-            e.poses[i] = Some(pose);
-            let link = own.map_or_else(
-                || dist(e.parts[i].rect(&pose).center(), tpoint),
-                |k| dist(e.parts[i].pad_at(&pose, k), tpoint),
-            );
-            let score = link * 4.0 + e.attraction(i, &pose);
-            e.poses[i] = None;
-            if best.is_none_or(|b| score < b.0 - 1.0) {
-                best = Some((score, pose));
+        }
+        best
+    };
+    let old = p.board().footprints.get(refdes).and_then(|f| f.footprint.clone());
+    // Clear of the routing first; on a routed board, the body may then cover other nets'
+    // tracks and vias as long as the pads keep their clearance from them.
+    let mut over_routing = Vec::new();
+    let pose = match search(&mut e, None) {
+        Some((_, pose)) => pose,
+        None => {
+            let b = p.board();
+            if b.tracks.iter().all(|t| t.layer != super::side_layer(side, "F.Cu")) && b.vias.is_empty() {
+                None
+            } else {
+                e.free_under_routing();
+                let check = PadCheck::new(p, refdes, old.clone());
+                search(&mut e, Some(&check)).map(|(_, pose)| {
+                    over_routing = check.covered(&e.parts[i].rect(&pose), side);
+                    pose
+                })
+            }
+            .ok_or_else(|| {
+                PlaceError::new(
+                    "place.no_room",
+                    format!("no room for {refdes} next to {tref}"),
+                    "the part needs room clear of courtyards and holes, and pads clear of the tracks and vias \
+                     already on the board (with the board's clearance) within 10 mm of the target: choose another \
+                     side or target, move nearby parts, let place.auto search the whole board, or place it with \
+                     place.set",
+                )
+            })?
+        }
+    };
+    let mut pf = pose.placed();
+    pf.footprint = old;
+    Ok(NearPlaced { placement: pf, over_routing })
+}
+
+/// Result of [`place_near`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NearPlaced {
+    /// The placement.
+    pub placement: PlacedFootprint,
+    /// Nets whose tracks or vias the part's body covers (its pads keep clear of them): set when
+    /// the board's routing left no room clear of it near the target.
+    pub over_routing: Vec<String>,
+}
+
+/// A pad of a part placed at the origin: net, copper layers, copper, the clearance its net
+/// needs.
+type OriginPad = (Option<String>, Vec<String>, polyclip::Polygon, i64);
+
+/// The pads of one part at any pose, checked against the tracks and vias of the board: each
+/// pad keeps the clearance (board and net class rules) from copper of other nets on its layers.
+struct PadCheck {
+    /// Per [side][quarter turn]: each pad, placed at the origin.
+    pads: [[Vec<OriginPad>; 4]; 2],
+    /// Tracks and vias: (net, layers, copper, clearance).
+    copper: Vec<(Option<String>, Vec<String>, PolygonSet, i64)>,
+}
+
+impl PadCheck {
+    fn new(p: &Project, refdes: &str, footprint: Option<String>) -> PadCheck {
+        let b = p.board();
+        let clearance = |net: Option<&str>| {
+            let c = b.rules.clearance.0;
+            super::zones::class_clearance(p, net).map_or(c, |k| k.0.max(c)).max(0)
+        };
+        let mut copper = Vec::new();
+        for t in &b.tracks {
+            copper.push((t.net.clone(), vec![t.layer.clone()], super::track_shape(t), clearance(t.net.as_deref())));
+        }
+        for v in &b.vias {
+            copper.push((
+                v.net.clone(),
+                super::via_layers(p, v),
+                vec![super::via_shape(v)],
+                clearance(v.net.as_deref()),
+            ));
+        }
+        let pads = [BoardSide::Top, BoardSide::Bottom].map(|side| {
+            [0u8, 1, 2, 3].map(|rot| {
+                let mut q = p.clone();
+                let mut pf = Pose { at: Point::ORIGIN, rot, side }.placed();
+                pf.footprint = footprint.clone();
+                q.board_mut().footprints.insert(refdes.to_string(), pf);
+                placed_pads(&q)
+                    .into_iter()
+                    .filter(|x| x.refdes == refdes && !x.layers.is_empty())
+                    .map(|x| {
+                        let c = clearance(x.net.as_deref());
+                        (x.net, x.layers, x.shape, c)
+                    })
+                    .collect()
+            })
+        });
+        PadCheck { pads, copper }
+    }
+
+    /// Whether every pad at `pose` keeps its clearance from other nets' tracks and vias.
+    fn clear(&self, pose: &Pose) -> bool {
+        let (dx, dy) = (pose.at.x.0, pose.at.y.0);
+        let shift = |r: &polyclip::Ring| -> polyclip::Ring {
+            r.0.iter().map(|q| polyclip::Point::new(q.x + dx, q.y + dy)).collect::<Vec<_>>().into()
+        };
+        self.pads[side_index(pose.side)][pose.rot as usize].iter().all(|(net, layers, shape, own)| {
+            let pad = polyclip::Polygon::new(shift(&shape.outer), shape.holes.iter().map(shift).collect());
+            self.copper.iter().all(|(n, ls, c, gap)| {
+                (net.is_some() && n == net)
+                    || !ls.iter().any(|l| layers.contains(l))
+                    || !polyclip::distance_less_than(&pad, c, (*gap).max(*own))
+            })
+        })
+    }
+
+    /// Nets whose tracks or vias on `side`'s outer layer reach under `rect`.
+    fn covered(&self, rect: &Rect, side: BoardSide) -> Vec<String> {
+        let layer = super::side_layer(side, "F.Cu");
+        let ring = rect.ring();
+        let mut nets: BTreeSet<String> = BTreeSet::new();
+        for (n, ls, c, _) in &self.copper {
+            if ls.contains(&layer) && polyclip::intersects(&ring, c) {
+                nets.insert(n.clone().unwrap_or_else(|| "(no net)".into()));
             }
         }
+        let mut v: Vec<String> = nets.into_iter().collect();
+        v.sort_by(|a, b| natural_cmp(a, b));
+        v
     }
-    let (_, pose) = best.ok_or_else(|| {
-        PlaceError::new(
-            "place.no_room",
-            format!("no room for {refdes} next to {tref}"),
-            "the part needs room clear of courtyards, holes and the tracks and vias already on the board (with the \
-             board's clearance): choose another side or target, move nearby parts, let place.auto search the whole \
-             board, or place it with place.set",
-        )
-    })?;
-    let mut pf = pose.placed();
-    if let Some(old) = p.board().footprints.get(refdes) {
-        pf.footprint = old.footprint.clone();
-    }
-    Ok(pf)
 }

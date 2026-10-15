@@ -42,6 +42,7 @@
 //! The user's own footprint and symbol libraries (`.kicad_mod`, `.pretty`, `.kicad_sym`) are
 //! read by [`library`] (DECISIONS D41), with the same footprint conversion.
 
+pub mod exclusions;
 mod footprint;
 pub mod library;
 pub mod rules;
@@ -174,6 +175,9 @@ pub struct BoardImportReport {
     pub rules: Option<rules::RulesReport>,
     /// Items not imported (each reported in the diagnostics).
     pub not_imported: usize,
+    /// The project's DRC exclusions: how many became waivers (`drc.waivers`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drc_exclusions: Option<exclusions::ExclusionReport>,
     /// KiCad UUID → the cadlab object it became (`track#4`, `via#2`, `U1.3`, `U1`, `zone#7`,
     /// `keepout:name`, `edge`, `text:U1/Reference`, `graphic#9`), to map KiCad reports onto the
     /// imported project. Not part of the command output.
@@ -911,6 +915,15 @@ pub fn import(
         }
     }
     normalize_zones(p);
+
+    // The project's DRC exclusions, as waivers of the findings they match.
+    if let Some(k) = opts.rules.as_ref().filter(|k| !k.exclusions.is_empty()) {
+        let (r, d) = exclusions::apply(p, &k.exclusions, &report.uuids);
+        report.drc_exclusions = Some(r);
+        for d in d {
+            notes.push(d);
+        }
+    }
 
     let b = p.board();
     report.tracks = b.tracks.len();

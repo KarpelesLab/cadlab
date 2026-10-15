@@ -299,6 +299,14 @@ fn run_check(
 }
 
 /// Output directory of a fab: `dir` (relative to the project), default `out/fab/<fab>`.
+/// `path` relative to the project directory when it lies inside it, else as given.
+pub(crate) fn project_relative(ctx: &Context<'_>, path: &Path) -> String {
+    match ctx.session.root().and_then(|root| path.strip_prefix(root).ok()) {
+        Some(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+        _ => path.display().to_string(),
+    }
+}
+
 pub(crate) fn out_dir(ctx: &Context<'_>, fab: &str, dir: Option<&Path>) -> PathBuf {
     let rel = dir.map(Path::to_path_buf).unwrap_or_else(|| Path::new("out/fab").join(fab));
     match ctx.session.root() {
@@ -515,7 +523,7 @@ impl Command for Compare {
 /// A written file.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WrittenFile {
-    /// Path written.
+    /// Path written, relative to the project directory when inside it.
     pub path: String,
     /// What it is.
     pub function: String,
@@ -530,6 +538,8 @@ pub struct FabExported {
     pub fab: String,
     /// Process used.
     pub process: String,
+    /// Output directory, relative to the project directory when inside it.
+    pub dir: String,
     /// Files written, the lock last.
     pub files: Vec<WrittenFile>,
     /// The fab's published stackup the board matches (order with impedance control).
@@ -646,7 +656,7 @@ impl Command for Export {
             let path = dir.join(&f.name);
             std::fs::write(&path, &f.content).map_err(|e| io(&path, e))?;
             written.push(WrittenFile {
-                path: path.display().to_string(),
+                path: project_relative(ctx, &path),
                 function: f.function,
                 sha256: crate::fab::sha256_hex(&f.content),
             });
@@ -654,6 +664,7 @@ impl Command for Export {
         Ok(FabExported {
             fab: p.id.clone(),
             process: process_id,
+            dir: project_relative(ctx, &dir),
             files: written,
             stackup,
             substitutes: parts.substitutes,
@@ -662,12 +673,26 @@ impl Command for Export {
     }
 
     fn summarize(o: &FabExported) -> String {
-        let mut s = format!("{} ({}): wrote {} file(s)", o.fab, o.process, o.files.len());
+        let mut s = format!("{} ({}): wrote {} file(s) to {}", o.fab, o.process, o.files.len(), o.dir);
         if let Some(st) = &o.stackup {
             s.push_str(&format!("\n  stackup: {st} (order with impedance control; recorded in fab-lock.json)"));
         }
+        // File names only, wrapped at about 100 characters: the directory is above, functions
+        // are in the output.
+        let mut line = String::new();
         for f in &o.files {
-            s.push_str(&format!("\n  {} ({})", f.path, f.function));
+            let name = Path::new(&f.path).file_name().and_then(|n| n.to_str()).unwrap_or(f.path.as_str());
+            if !line.is_empty() && line.len() + name.len() > 96 {
+                s.push_str(&format!("\n  {line},"));
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push_str(", ");
+            }
+            line.push_str(name);
+        }
+        if !line.is_empty() {
+            s.push_str(&format!("\n  {line}"));
         }
         for (part, mpn) in &o.substituted {
             s += &format!("\n  {part}: substituted by {mpn} (fab-lock.json)");
@@ -782,7 +807,16 @@ impl Command for Substitute {
             let mut errors = Vec::new();
             let s = crate::sourcing::source_line(&row, self.boards.max(1), suppliers, &only, &mut errors);
             let part = project.library().parts.get(&row.part);
-            let found = crate::substitute::for_line(&row, part, s.status, s.needed, suppliers, &only, 20, &mut errors);
+            let mut found =
+                crate::substitute::for_line(&row, part, s.status, s.needed, suppliers, &only, 20, &mut errors);
+            // The supplier part number in the components' fields (an imported netlist's `LCSC`)
+            // is the first candidate.
+            let catalog: Vec<String> = p.assembly.iter().flat_map(|a| a.catalog.iter().cloned()).collect();
+            if let Some(c) = crate::substitute::field_candidate(&row, &catalog, suppliers, &mut errors) {
+                found.candidates.retain(|x| !x.offer.mpn.eq_ignore_ascii_case(&c.offer.mpn));
+                found.candidates.insert(0, c);
+                found.note = None;
+            }
             let pick = match &self.mpn {
                 None => found.candidates.first().cloned(),
                 Some(m) => found.candidates.iter().find(|c| c.offer.mpn.eq_ignore_ascii_case(m)).cloned(),

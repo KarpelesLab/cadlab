@@ -125,6 +125,12 @@ impl Command for ImportKicad {
                 r.assigned
             );
         }
+        if let Some(x) = &o.drc_exclusions {
+            s += &format!(
+                "\nKiCad DRC exclusions: {} read, {} waiver(s) added (`drc.waivers`), {} without a cadlab finding",
+                x.read, x.waived, x.not_matched
+            );
+        }
         if o.not_imported > 0 {
             s += &format!("\n{} items not imported (see diagnostics)", o.not_imported);
         }

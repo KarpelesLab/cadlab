@@ -298,8 +298,9 @@ fn csv_line(out: &mut String, fields: impl IntoIterator<Item = String>) {
 }
 
 /// The BOM in the layout (RFC 4180, CRLF): populated lines only. `picks` (by part ID) supply the
-/// chosen MPN and SKU; lines without a pick use the BOM's own MPN.
-pub fn bom_csv(layout: &BomLayout, rows: &[BomRow], picks: &BTreeMap<String, LinePick>) -> String {
+/// chosen MPN and SKU; lines without a pick use the BOM's own MPN, and lines without a SKU the
+/// supplier part number their components carry for one of the `catalog` providers.
+pub fn bom_csv(layout: &BomLayout, catalog: &[String], rows: &[BomRow], picks: &BTreeMap<String, LinePick>) -> String {
     let mut s = String::new();
     csv_line(&mut s, layout.columns.iter().map(|c| c.header.clone()));
     for (i, r) in rows.iter().filter(|r| r.quantity > 0).enumerate() {
@@ -325,7 +326,10 @@ pub fn bom_csv(layout: &BomLayout, rows: &[BomRow], picks: &BTreeMap<String, Lin
                     Some(p) => o(&p.mpn),
                     None => own.map(|(_, m)| m).unwrap_or_default().to_string(),
                 },
-                BomField::Sku => pick.and_then(|p| p.sku.clone()).unwrap_or_default(),
+                BomField::Sku => pick
+                    .and_then(|p| p.sku.clone())
+                    .or_else(|| crate::substitute::design_sku(r, catalog).map(|(_, s)| s.to_string()))
+                    .unwrap_or_default(),
                 BomField::Mount => match r.mount {
                     Some(Mount::Smd) => layout.mount_names[0].clone(),
                     Some(Mount::Tht) => layout.mount_names[1].clone(),
@@ -441,7 +445,7 @@ pub fn bundle(p: &Project, input: &BundleInput<'_>) -> std::io::Result<(Vec<Bund
     let mut offsets = Vec::new();
     let picks: BTreeMap<String, LinePick> = input.picks.iter().map(|k| (k.part.clone(), k.clone())).collect();
     if let Some(a) = &profile.assembly {
-        let bom = bom_csv(&a.bom, &rows, &picks);
+        let bom = bom_csv(&a.bom, &a.catalog, &rows, &picks);
         rest.push(BundleFile {
             name: expand(&a.bom.file, &project, &profile.id, [0; 4]),
             function: "BOM".into(),
@@ -494,6 +498,7 @@ pub fn bundle(p: &Project, input: &BundleInput<'_>) -> std::io::Result<(Vec<Bund
                         manufacturer: own.and_then(|(m, _)| m.map(String::from)),
                         mpn: own.map(|(_, m)| m.to_string()),
                         sku: None,
+                        sku_from_fields: false,
                         provider: None,
                         status: None,
                         replaces: None,

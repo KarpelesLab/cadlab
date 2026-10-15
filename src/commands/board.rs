@@ -1306,8 +1306,10 @@ pub struct PlaceAuto {
 
 /// Set, clear or list automatic placement hints (persisted in the board, used by every later
 /// `place.auto`): `edge` sends a part to a board edge, e.g. the USB connector to the top
-/// (`place hint J1 --edge top`) or indicator LEDs to any edge (`place hint D2 D3 --edge any`).
-/// Without `edge` or `clear`, lists the hints.
+/// (`place hint J1 --edge top`) or indicator LEDs to any edge (`place hint D2 D3 --edge any`);
+/// `near` keeps parts next to another one whatever else pulls them, e.g. an LED's resistor
+/// next to the LED (`place hint R2 --near D9`). Without `edge`, `near` or `clear`, lists the
+/// hints.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceHint {
@@ -1317,6 +1319,10 @@ pub struct PlaceHint {
     /// Board edge the parts go to: `any` (nearest), `left`, `right`, `top` (largest Y) or `bottom`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<EdgeHint>,
+    /// Designator of the part these stay next to (`D9`): `place.auto` places them right by it,
+    /// facing its pad of a shared net, and keeps them there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<String>,
     /// Remove the hints of these parts (all hints when no designator is given).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear: bool,
@@ -1331,15 +1337,19 @@ pub struct PlacementHints {
 
 impl Command for PlaceHint {
     const NAME: &'static str = "place.hint";
-    const SUMMARY: &'static str = "Set, clear or list auto-placement hints (which board edge a part goes to)";
+    const SUMMARY: &'static str =
+        "Set, clear or list auto-placement hints (which board edge a part goes to, which part it stays next to)";
     const KIND: CommandKind = CommandKind::Mutation;
     const POSITIONAL: &'static [&'static str] = &["refdes"];
     type Output = PlacementHints;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<PlacementHints, CommandError> {
-        if self.clear && self.edge.is_some() {
-            return Err(CommandError::invalid_args("place.hint_conflict", "give either `edge` or `clear`, not both")
-                .with_hint("`place hint D2 --edge any` sets a hint, `place hint D2 --clear` removes it"));
+        if self.clear && (self.edge.is_some() || self.near.is_some()) {
+            return Err(CommandError::invalid_args(
+                "place.hint_conflict",
+                "give either `edge` / `near` or `clear`, not both",
+            )
+            .with_hint("`place hint D2 --edge any` sets a hint, `place hint D2 --clear` removes it"));
         }
         let mut keys = Vec::new();
         for r in self.refdes.iter().flat_map(|r| r.split(',')).map(str::trim).filter(|r| !r.is_empty()) {
@@ -1355,14 +1365,50 @@ impl Command for PlaceHint {
                     p.board_mut().placement_hints.remove(k);
                 }
             }
-        } else if let Some(edge) = self.edge {
+        } else if self.edge.is_some() || self.near.is_some() {
             if keys.is_empty() {
-                return Err(CommandError::invalid_args("place.hint_no_parts", "`edge` needs designators")
-                    .with_hint("name the parts: `place hint J1 --edge top`"));
+                return Err(CommandError::invalid_args("place.hint_no_parts", "`edge` and `near` need designators")
+                    .with_hint("name the parts: `place hint J1 --edge top`, `place hint R2 --near D9`"));
+            }
+            let near = match &self.near {
+                Some(n) => Some(util::refdes_key(ctx.project()?, n.trim())?),
+                None => None,
+            };
+            if let Some(n) = &near {
+                if keys.contains(n) {
+                    return Err(CommandError::invalid_args(
+                        "place.hint_near_self",
+                        format!("{n} cannot be kept next to itself"),
+                    )
+                    .with_hint("name another part: `place hint R2 --near D9`"));
+                }
+                // A loop (R2 near D9, D9 near R2) has no part to start from.
+                let hints = &ctx.project()?.board().placement_hints;
+                let mut cur = n.clone();
+                for _ in 0..=hints.len() {
+                    match hints.get(&cur).and_then(|h| h.near.clone()) {
+                        Some(next) if keys.contains(&next) => {
+                            return Err(CommandError::invalid_args(
+                                "place.hint_near_loop",
+                                format!("{cur} is already kept next to {next}: the hints would go round in a loop"),
+                            )
+                            .with_subject(crate::refs::ObjectRef::Name(cur.clone()))
+                            .with_hint(format!("clear that hint first: `place.hint {cur} --clear`")));
+                        }
+                        Some(next) => cur = next,
+                        None => break,
+                    }
+                }
             }
             let p = ctx.project_mut()?;
             for k in &keys {
-                p.board_mut().placement_hints.entry(k.clone()).or_default().edge = Some(edge);
+                let h = p.board_mut().placement_hints.entry(k.clone()).or_default();
+                if let Some(e) = self.edge {
+                    h.edge = Some(e);
+                }
+                if let Some(n) = &near {
+                    h.near = Some(n.clone());
+                }
             }
         }
         let locked: Vec<String> = {
@@ -1389,9 +1435,18 @@ impl Command for PlaceHint {
         }
         o.hints
             .iter()
-            .map(|(r, h)| match h.edge {
-                Some(e) => format!("{r}: edge {}", util::wire_name(&e)),
-                None => format!("{r}: -"),
+            .map(|(r, h)| {
+                let mut what = Vec::new();
+                if let Some(e) = h.edge {
+                    what.push(format!("edge {}", util::wire_name(&e)));
+                }
+                if let Some(n) = &h.near {
+                    what.push(format!("near {n}"));
+                }
+                if what.is_empty() {
+                    what.push("-".into());
+                }
+                format!("{r}: {}", what.join(", "))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1443,7 +1498,13 @@ impl Command for PlaceAuto {
                 }
                 let edges: BTreeMap<String, EdgeHint> =
                     p.board().placement_hints.iter().filter_map(|(r, h)| h.edge.map(|e| (r.clone(), e))).collect();
-                let opts = geo::place::AutoOptions { gap, spread: !self.compact, density: self.density, edges };
+                let near: BTreeMap<String, String> = p
+                    .board()
+                    .placement_hints
+                    .iter()
+                    .filter_map(|(r, h)| h.near.clone().map(|n| (r.clone(), n)))
+                    .collect();
+                let opts = geo::place::AutoOptions { gap, spread: !self.compact, density: self.density, edges, near };
                 let r = geo::place::auto_place(p, &moving, &opts)
                     .map_err(|e| CommandError::conflict(e.code, e.message).with_hint(e.hint))?;
                 (r.placements, r.unplaced)

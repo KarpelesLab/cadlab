@@ -19,7 +19,9 @@
 //!   read KiCad reports (the DRC cross-check, `tests/drc_crosscheck.rs`).
 //! - What KiCad recomputes is written as cadlab computes it, so both tools agree
 //!   (`tests/gerber_crosscheck.rs`): zones carry cadlab's effective fill settings (clearance,
-//!   minimum width, thermal gap and spoke with defaults resolved), and each footprint's
+//!   minimum width, thermal gap and spoke with defaults resolved) and cadlab's fill (one
+//!   `filled_polygon` per island, holes joined to the outline by zero-width cuts as the format
+//!   stores them, so KiCad sees what the pours connect without a refill), and each footprint's
 //!   Reference field sits where cadlab's legend prints the designator ([`crate::fabout::refdes_text`]).
 //!   The rules set no minimum via diameter: cadlab checks via drill and annular ring only.
 //! - Local settings (DECISIONS D40) are written in KiCad's terms: pad and footprint margins,
@@ -1031,6 +1033,9 @@ fn write_copper(w: &mut Writer<'_>) {
         );
         w.line(1, &s);
     }
+    // Zone fills as cadlab computes them, so KiCad sees the pads the pours connect without a
+    // refill (fractured outlines: one hole-free polygon per island, as the format stores them).
+    let fills = if board.zones.is_empty() { Vec::new() } else { geo::zones::fill_zones(p, &geo::base_copper_items(p)) };
     for z in &board.zones {
         let net = w.net(z.net.as_deref());
         let layers = z.layers.iter().filter(|l| board.is_copper(l)).map(|l| q(l)).collect::<Vec<_>>();
@@ -1063,12 +1068,30 @@ fn write_copper(w: &mut Writer<'_>) {
         };
         w.line(2, &format!("(connect_pads {connect}(clearance {clearance}))"));
         w.line(2, &format!("(min_thickness {}) (filled_areas_thickness no)", mm(prm.min_width)));
+        let mut filled: Vec<(String, Vec<crate::geom::poly::Ring>)> = Vec::new();
+        for f in fills.iter().filter(|f| f.zone == z.id && f.error.is_none() && !f.fill.is_empty()) {
+            match crate::geom::poly::fracture_set(&f.fill) {
+                Ok(rings) => filled.push((f.layer.clone(), rings)),
+                Err(e) => w.warnings.push(format!("zone `{}` on {}: fill not written ({e})", z.name, f.layer)),
+            }
+        }
         w.line(
             2,
-            &format!("(fill (thermal_gap {}) (thermal_bridge_width {}))", mm(prm.thermal_gap), mm(prm.thermal_spoke)),
+            &format!(
+                "(fill {}(thermal_gap {}) (thermal_bridge_width {}))",
+                if filled.is_empty() { "" } else { "yes " },
+                mm(prm.thermal_gap),
+                mm(prm.thermal_spoke)
+            ),
         );
         let pts: Vec<String> = z.outline.iter().map(|x| format!("(xy {})", w.xy(*x))).collect();
         w.line(2, &format!("(polygon (pts {}))", pts.join(" ")));
+        for (layer, rings) in &filled {
+            for r in rings {
+                let pts: Vec<String> = r.0.iter().map(|x| format!("(xy {})", w.xy(Point::from(*x)))).collect();
+                w.line(2, &format!("(filled_polygon (layer {}) (pts {}))", q(layer), pts.join(" ")));
+            }
+        }
         w.line(1, ")");
     }
     for k in &board.keepouts {

@@ -171,6 +171,61 @@ pub trait Provider: Send + Sync {
     fn search(&self, q: &SearchQuery) -> Result<Vec<Candidate>, ProviderError>;
     /// Exact lookup by manufacturer part number.
     fn lookup(&self, mpn: &str) -> Result<Vec<Candidate>, ProviderError>;
+    /// Exact lookup by this provider's own part number (SKU). The default searches with the
+    /// SKU as keywords and keeps exact SKU matches.
+    fn lookup_sku(&self, sku: &str) -> Result<Vec<Candidate>, ProviderError> {
+        let q = SearchQuery { text: sku.to_string(), include_obsolete: true, limit: 50, ..Default::default() };
+        Ok(self.search(&q)?.into_iter().filter(|c| c.sku.eq_ignore_ascii_case(sku)).collect())
+    }
+}
+
+/// Component fields that hold a supplier's own part number (netlist fields such as `LCSC`), by
+/// provider ID, lowercase. Read from imported designs only to fill fab BOMs and offer
+/// substitutes at export; the design keeps them as plain component properties (D12).
+pub const SKU_FIELDS: &[(&str, &[&str])] = &[
+    (
+        "lcsc",
+        &[
+            "lcsc",
+            "lcsc part",
+            "lcsc part #",
+            "lcsc part#",
+            "lcsc part number",
+            "lcsc pn",
+            "lcsc_pn",
+            "lcsc_part",
+            "lcsc#",
+            "jlcpcb part #",
+            "jlcpcb part#",
+            "jlcpcb part",
+            "jlcpcb pn",
+            "jlc part",
+            "jlc",
+            "jlcpcb",
+        ],
+    ),
+    (
+        "digikey",
+        &[
+            "digikey",
+            "digi-key",
+            "digikey part number",
+            "digi-key part number",
+            "digikey pn",
+            "digi-key pn",
+            "digikey_pn",
+            "digi-key_pn",
+            "digikey part #",
+            "digi-key part #",
+        ],
+    ),
+    ("mouser", &["mouser", "mouser part number", "mouser pn", "mouser_pn", "mouser part #", "mouser #"]),
+];
+
+/// The provider whose part number a component field holds (`LCSC Part #` → `lcsc`).
+pub fn sku_provider(field: &str) -> Option<&'static str> {
+    let f = field.trim().to_ascii_lowercase();
+    SKU_FIELDS.iter().find(|(_, names)| names.contains(&f.as_str())).map(|(p, _)| *p)
 }
 
 /// Results of querying several providers.
@@ -298,6 +353,21 @@ impl Suppliers {
         r.candidates.retain(|c| q.matches(c));
         q.rank(&mut r.candidates);
         r.candidates.truncate(q.limit);
+        r
+    }
+
+    /// Looks up a provider's own part number (SKU) at that provider, if it is configured.
+    pub fn lookup_sku(&self, provider: &str, sku: &str) -> Results {
+        let mut r = Results::default();
+        for p in self.providers.iter().filter(|p| p.id() == provider) {
+            match p.lookup_sku(sku) {
+                Ok(c) => r.candidates.extend(c.into_iter().map(|mut c| {
+                    c.provider = p.id().to_string();
+                    c
+                })),
+                Err(e) => r.errors.push(e.to_string()),
+            }
+        }
         r
     }
 

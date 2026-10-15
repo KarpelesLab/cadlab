@@ -425,8 +425,31 @@ impl Command for PlaceNear {
         if distance < Nm::ZERO {
             return Err(CommandError::invalid_args("place.invalid_distance", "the distance cannot be negative"));
         }
-        let pf = place::place_near(p, &r, &target, self.side, distance)
+        let near = place::place_near(p, &r, &target, self.side, distance)
             .map_err(|e| CommandError::conflict(e.code, e.message).with_hint(e.hint))?;
+        let pf = near.placement;
+        if !near.over_routing.is_empty() {
+            let mut d = crate::diag::Diagnostic::info(
+                "place.over_routing",
+                format!(
+                    "the routing left no room clear of it next to {}: {r}'s body covers tracks or vias of {} (its \
+                     pads keep the clearance)",
+                    self.target,
+                    near.over_routing.join(", ")
+                ),
+            )
+            .with_subject(crate::refs::ObjectRef::Name(r.clone()))
+            .at(pf.at)
+            .with_hint(format!(
+                "fine for most parts; to keep the copper out from under it, rip up those nets around it \
+                 (`route.rip {}`) and route them again after placing",
+                near.over_routing.join(" ")
+            ));
+            for n in &near.over_routing {
+                d = d.with_subject(crate::refs::ObjectRef::Net(n.clone()));
+            }
+            ctx.report(d);
+        }
         ctx.project_mut()?.board_mut().footprints.insert(r.clone(), pf.clone());
         Ok(Placed { placements: [(r, pf)].into(), unplaced: vec![], ratsnest_length: None })
     }

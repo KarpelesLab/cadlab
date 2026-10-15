@@ -529,12 +529,16 @@ pub struct PlacementHint {
     /// Board edge the part goes to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<EdgeHint>,
+    /// Designator of the part this one stays next to (an LED's resistor next to the LED),
+    /// whatever else pulls it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<String>,
 }
 
 impl PlacementHint {
     /// Whether the hint says nothing.
     pub fn is_empty(&self) -> bool {
-        self.edge.is_none()
+        self.edge.is_none() && self.near.is_none()
     }
 }
 

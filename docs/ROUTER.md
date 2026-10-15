@@ -329,6 +329,14 @@ passes the checks wins (arcs are left out of such a route). Otherwise the older 
 the failure report are ripped and routed again around the connection (up to 3 rounds), kept only when they end
 with no more unrouted connections than before. `route.all` and `route.nets` give every connection they leave
 unrouted one push-and-shove attempt on the routed board, within the time budget (this closed the last STM32 gap).
+`route.nets` (`shove`, on by default, D62) then gives what is still unrouted `route.connection`'s whole
+treatment, connection by connection within what is left of the budget: push-and-shove again, then the rip-up
+and reroute fallback (session 4: a GND connection `route.nets` failed and `route.connection` routed). This is
+the command layer calling the router once per leftover (`Scope::Connection` with `shove`), so the router's
+internals are unchanged; `route.all` does not do it (benchmarks keep their numbers). A connection a run leaves
+failed whose ends are pads gets a first hint naming the command that can move other nets' routing
+(`` `route.connection U1.3 C2.1` ``) wherever that was not tried yet (`route.all`, `route.nets` with `shove:
+false`), ahead of the router's own hints (move parts, smaller clearance).
 The result lists the nets moved (`rerouted`) and replaces their old copper.
 
 ### Differential pairs (`pairs`, M8)

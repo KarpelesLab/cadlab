@@ -5,6 +5,8 @@
 //! Fab-specific column layouts (JLCPCB, PCBWay) come from the fab profiles (`fab-profiles/*.toml`,
 //! [`crate::fab`]), where each layout records its source and verification date.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,15 @@ pub struct BomRow {
     /// Approved alternates (concrete parts) or candidates (generic parts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approved: Vec<ApprovedPart>,
+    /// The part is generated from a generic spec (`R 10k 1% 0402`): any part meeting the spec
+    /// will do.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generic: bool,
+    /// Supplier part numbers the components carry in fields (`LCSC` in an imported netlist), by
+    /// provider ID (`lcsc`); kept when all components of the line agree. Fab exports use them
+    /// for the fab's catalog column and offer them as substitutes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skus: BTreeMap<String, String>,
     /// Notes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -62,6 +73,28 @@ impl BomRow {
         }
         self.approved.first().map(|a| (a.manufacturer.as_deref(), a.mpn.as_str()))
     }
+}
+
+/// Supplier part numbers in the fields of the components using part `id`, by provider: a
+/// provider is kept when every component giving one gives the same (case-insensitively).
+pub fn line_skus(p: &Project, id: &str) -> BTreeMap<String, String> {
+    let mut seen: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for (_, c) in p.circuit().using_part(id) {
+        for (k, v) in &c.properties {
+            let (Some(provider), v) = (crate::supplier::sku_provider(k), v.trim()) else { continue };
+            if v.is_empty() {
+                continue;
+            }
+            seen.entry(provider.to_string())
+                .and_modify(|x| {
+                    if x.as_deref().is_some_and(|x| !x.eq_ignore_ascii_case(v)) {
+                        *x = None;
+                    }
+                })
+                .or_insert_with(|| Some(v.to_string()));
+        }
+    }
+    seen.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
 }
 
 /// Computes BOM lines, ordered by first reference designator.
@@ -99,6 +132,8 @@ pub fn rows(p: &Project) -> Vec<BomRow> {
             manufacturer: part.and_then(|pt| pt.manufacturer.clone()),
             mpn: part.and_then(|pt| pt.mpn.clone()),
             approved: line.map(|l| l.approved.clone()).unwrap_or_default(),
+            generic: part.is_some_and(|pt| pt.provenance.origin == crate::model::part::Origin::Generated),
+            skus: line_skus(p, id),
             notes: line.and_then(|l| l.notes.clone()),
         });
     }
@@ -197,7 +232,7 @@ pub fn to_csv(rows: &[BomRow], format: CsvFormat) -> String {
             let profiles = crate::fab::Profiles::builtin();
             let id = format.profile_id().unwrap_or_default();
             if let Some(a) = profiles.get(id).and_then(|p| p.assembly.as_ref()) {
-                out = crate::fab::export::bom_csv(&a.bom, rows, &Default::default());
+                out = crate::fab::export::bom_csv(&a.bom, &a.catalog, rows, &Default::default());
             }
         }
     }

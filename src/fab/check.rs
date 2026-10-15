@@ -555,6 +555,10 @@ pub struct LinePick {
     /// Fab catalog SKU, from one of the profile's `catalog` providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sku: Option<String>,
+    /// The SKU is the supplier part number the components carry in a field (an imported
+    /// netlist's `LCSC`), not one a catalog lookup found.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sku_from_fields: bool,
     /// Provider of the offer used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -629,6 +633,7 @@ pub fn parts(
     }
     let mut errors = Vec::new();
     let mut picks = Vec::new();
+    let mut from_fields: Vec<String> = Vec::new();
     let mut substitutes = Vec::new();
     for r in rows.iter().filter(|r| r.quantity > 0) {
         let what = format!("{} ({})", r.part, r.refdes.join(", "));
@@ -661,6 +666,7 @@ pub fn parts(
             manufacturer: own.and_then(|(m, _)| m.map(String::from)),
             mpn: own.map(|(_, m)| m.to_string()),
             sku: sub.filter(|s| s.provider.as_ref().is_some_and(|p| catalog.contains(p))).and_then(|s| s.sku.clone()),
+            sku_from_fields: false,
             provider: sub.and_then(|s| s.provider.clone()),
             status: None,
             replaces: sub.map(|_| r.order_mpn().map_or("generic".to_string(), |(_, m)| m.to_string())),
@@ -677,16 +683,17 @@ pub fn parts(
             let mut found = None;
             if s.status != Availability::Ok && sub.is_none() {
                 let part = p.library().parts.get(&r.part);
-                found = Some(crate::substitute::for_line(
-                    r,
-                    part,
-                    s.status,
-                    s.needed,
-                    suppliers,
-                    &only,
-                    limit,
-                    &mut errors,
-                ));
+                let mut f =
+                    crate::substitute::for_line(r, part, s.status, s.needed, suppliers, &only, limit, &mut errors);
+                // The part the design's author chose at the fab's catalog (an `LCSC` field)
+                // comes first.
+                if let Some(c) = crate::substitute::field_candidate(r, &catalog, suppliers, &mut errors) {
+                    f.candidates.retain(|x| !x.offer.mpn.eq_ignore_ascii_case(&c.offer.mpn));
+                    f.candidates.insert(0, c);
+                    f.candidates.truncate(limit.max(1));
+                    f.note = None;
+                }
+                found = Some(f);
             }
             let at = if only.is_empty() { String::new() } else { format!(" at {}", only.join("/")) };
             let d = match s.status {
@@ -732,7 +739,37 @@ pub fn parts(
             }
             substitutes.extend(found);
         }
+        // No catalog SKU found (or no catalog configured): the one the components carry.
+        if pick.sku.is_none()
+            && sub.is_none()
+            && let Some((provider, sku)) = crate::substitute::design_sku(r, &catalog)
+        {
+            pick.sku = Some(sku.to_string());
+            pick.sku_from_fields = true;
+            pick.provider.get_or_insert_with(|| provider.to_string());
+            from_fields.push(format!("{} {sku}", r.part));
+        }
         picks.push(pick);
+    }
+    if !from_fields.is_empty() {
+        let n = from_fields.len();
+        from_fields.truncate(8);
+        diags.push(
+            Diagnostic::info(
+                "fab.sku_from_fields",
+                format!(
+                    "{n} line(s) ordered at {} by the supplier part number in their components' fields: {}{}",
+                    profile.name,
+                    from_fields.join(", "),
+                    if n > 8 { ", ..." } else { "" }
+                ),
+            )
+            .with_hint(format!(
+                "the fab's BOM carries them as given (fab-lock.json records it); check them, or choose another \
+                 part for this fab with `fab.substitute {} <part> <mpn>`",
+                profile.id
+            )),
+        );
     }
     errors.sort();
     errors.dedup();

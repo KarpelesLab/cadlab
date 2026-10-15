@@ -37,7 +37,7 @@ pub struct BomList {
     pub lines: Vec<BomRow>,
     /// Total components to place.
     pub placements: usize,
-    /// Lines without an orderable MPN (generic parts with no approved candidate).
+    /// Lines without an orderable MPN (generic or placeholder parts with no approved candidate).
     pub unsourced: Vec<String>,
 }
 
@@ -65,10 +65,16 @@ impl Command for List {
         }
         let mut s = String::new();
         for l in &o.lines {
-            let order = match l.order_mpn() {
+            let mut order = match l.order_mpn() {
                 Some((m, p)) => format!("{}{p}", m.map(|m| format!("{m} ")).unwrap_or_default()),
-                None => "(generic, no MPN yet)".into(),
+                None if l.generic => "(generic, no MPN yet)".into(),
+                // A part the netlist import could not resolve.
+                None if l.footprint.is_none() => "(placeholder: no footprint or MPN yet)".into(),
+                None => "(no MPN)".into(),
             };
+            for (provider, sku) in &l.skus {
+                order += &format!(" [{provider} {sku}]");
+            }
             s += &format!("{:>3} x {:<10} {:<28} {}", l.quantity, l.value, l.refdes.join(","), order);
             if !l.dnp.is_empty() {
                 s += &format!("  DNP: {}", l.dnp.join(","));
@@ -388,9 +394,9 @@ impl Command for Export {
             .format
             .profile_id()
             .and_then(|id| profiles.as_ref()?.get(id)?.assembly.as_ref())
-            .map(|a| a.bom.clone());
+            .map(|a| (a.bom.clone(), a.catalog.clone()));
         let csv = match layout {
-            Some(l) => crate::fab::export::bom_csv(&l, &list.lines, &Default::default()),
+            Some((l, catalog)) => crate::fab::export::bom_csv(&l, &catalog, &list.lines, &Default::default()),
             None => bom::to_csv(&list.lines, self.format),
         };
         let path = match ctx.session.root() {

@@ -38,6 +38,35 @@ pub enum Basis {
     Parametric,
     /// Chosen by the user outside the candidates (`fab.substitute` with `force`).
     Manual,
+    /// The supplier part number the components carry in a field (an imported netlist's
+    /// `LCSC`), found at that supplier: the part the design's author chose there.
+    Field,
+}
+
+/// The line's supplier part number at one of `providers` (in their order), from the
+/// components' fields ([`BomRow::skus`]).
+pub fn design_sku<'a>(row: &'a BomRow, providers: &'a [String]) -> Option<(&'a str, &'a str)> {
+    providers.iter().find_map(|p| row.skus.get(p).map(|s| (p.as_str(), s.as_str())))
+}
+
+/// The offer for the line's supplier part number from its components' fields, at one of
+/// `providers` that is configured, as a substitute candidate (basis [`Basis::Field`]).
+/// Provider errors go to `errors`.
+pub fn field_candidate(
+    row: &BomRow,
+    providers: &[String],
+    suppliers: &Suppliers,
+    errors: &mut Vec<String>,
+) -> Option<Substitute> {
+    let (provider, sku) = design_sku(row, providers)?;
+    let r = suppliers.lookup_sku(provider, sku);
+    errors.extend(r.errors);
+    let offer = r.candidates.into_iter().next()?;
+    Some(Substitute {
+        basis: Basis::Field,
+        offer,
+        matches: vec![format!("{provider} {sku} in the components' fields")],
+    })
 }
 
 /// A substitute candidate.
@@ -269,6 +298,8 @@ mod tests {
             manufacturer: None,
             mpn: Some("OLD-LDO".into()),
             approved: vec![],
+            generic: false,
+            skus: Default::default(),
             notes: None,
         };
         let mut errors = Vec::new();

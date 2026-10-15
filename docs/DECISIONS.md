@@ -1219,6 +1219,56 @@ only under them), and a router that is more or less permissive than the DRC eith
 allows or has its work ripped up afterwards; a conservative band at boundaries plus splitting the output keeps the
 two in agreement without a geometric model of every rule term.
 
+### D62. Session 4 follow-up: KiCad DRC exclusions as waivers, keep-together hints, place.near over routing, route.nets shoving leftovers, KiCad zone fills, supplier part numbers from fields (2026-10-15)
+Session 4's open items (docs/TESTING.md), except the schematic netlist reader (D13 stands).
+**DRC exclusions.** D58 left them out because KiCad keys them on item UUIDs and marker positions; the board
+import already keeps a KiCad UUID → cadlab object table, so an exclusion (`type|x|y|uuid|uuid`, or a
+`[entry, comment]` pair) becomes a waiver when its type maps to cadlab codes, every item was imported (edges
+dropped) and cadlab's DRC of the imported board has a finding of such a code naming all the items. The
+waiver's subjects are the items, not the finding's full subject list, so it keeps matching what KiCad meant.
+Matching against a real finding (one DRC run at import, only when there are exclusions) avoids waivers that
+would sit unused; the rest is reported per type and cause (`import.drc_exclusion`). Positions are ignored:
+items identify a finding, and cadlab's markers are not KiCad's.
+**Keep together.** `place.hint --near X` (stored in the hint, follows rename, dropped with X's removal; loops
+refused). A passive's target becomes X's pad of a shared net (signal, then power, then ground), with the
+decoupling capacitor's pull (4) and a tether of 4 (above decoupling's 2): the hint says the author's intent,
+so it outweighs any net. An anchor is pulled to that pad and waits for X when X is an anchor being placed.
+An explicit hint rather than a heavier weight for shared signal nets: the LED itself has no anchor to sit at
+(its nets are PWR_LED and GND), so the pair drifts with whatever pulls the resistor, and only the author
+knows the two belong together. On the focused test's board (LED sent to an edge) the resistor went from 9.4 mm
+to 1.8 mm from the LED.
+**place.near on a routed board.** D58 made placement treat tracks and vias as obstacles for the whole
+courtyard, which leaves no room on a routed board. Copper under a part's body is legal (only pads must keep
+clearance), so place.near first keeps the courtyard clear (unchanged results where it fits), then searches
+again with the routing removed from the free area and each pad checked against tracks and vias of other nets
+(board or net class clearance, `distance_less_than`); the nets under the body are reported
+(`place.over_routing`). `place.auto` keeps the stricter rule: a new part placed by the whole-board search can
+always find a clear spot or say there is none, and keeping routing out from under new parts leaves the
+router room for their escapes.
+**route.nets leftovers.** The router gives `Scope::Nets` leftovers one push-and-shove attempt but not the
+rip-up fallback of `Scope::Connection`; adding it inside the router would touch the negotiation code another
+workstream is changing, so `route.nets` (option `shove`, default on) calls the router once per leftover
+connection with `Scope::Connection` and `shove`, applying each success, within the remaining budget. `route.all`
+is unchanged (benchmark numbers), but its failures, like `route.nets` with `shove: false`, carry a first hint
+naming `route.connection A B`, the command that can move other nets.
+**KiCad export fills.** Fills are derived data in cadlab, but KiCad treats the file's fills as the board's
+copper until refilled, so an export without them showed every zone-connected pad unconnected. The export
+writes cadlab's fill per zone layer as `filled_polygon`s (polyclip's `fracture_set`: one hole-free outline per
+island, as the format stores fills) and `fill yes`. Import still recomputes fills (`import.zone_fills`).
+**Supplier part numbers.** Netlist fields such as `LCSC` were already kept as component properties (the
+schematic's data). They stay there and are interpreted at export only, so the design stays provider-agnostic
+(D12): `supplier::SKU_FIELDS` maps field names to providers; a BOM line carries the numbers all its components
+agree on; a fab whose catalog provider has one uses it for the BOM's part number column when no catalog lookup
+found one (recorded as `sku_from_fields` in fab-lock.json) and offers it first as a substitute (basis `field`,
+found through `Provider::lookup_sku`, a default keyword search kept to exact SKU matches). KiCad symbol library
+imports still drop such fields (`import.symbol_supplier_field`): a library part is not one design's choice.
+**Output.** `fab.export` prints the directory once and file names wrapped at ~100 characters, with paths in
+its output relative to the project; `circuit.list` shows the footprint a placement uses (and the part's when
+different); `bom.list` words generic, placeholder and other MPN-less lines apart.
+*Why:* each item was a step where the session agent fought the tool or worked around it; the fixes keep the
+design data unchanged in meaning (waivers are recorded decisions, hints are intent, supplier numbers remain the
+schematic's fields) and keep router internals untouched.
+
 ## Open questions
 
 
