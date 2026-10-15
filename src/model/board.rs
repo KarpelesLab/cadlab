@@ -204,6 +204,13 @@ pub struct Rules {
     /// may go below `clearance` and net class values, never below this (0: no floor).
     #[serde(skip_serializing_if = "is_zero_nm")]
     pub min_clearance: Nm,
+    /// Minimum distance from copper to the edge of a drilled hole it does not belong to: every
+    /// non-plated hole, and plated holes of other nets (KiCad's copper-to-hole clearance; fabs
+    /// list it as NPTH to copper). Zone fills then keep this from non-plated holes instead of
+    /// their own clearance, a hole being no copper. 0: not checked, and fills keep their
+    /// clearance from non-plated holes.
+    #[serde(skip_serializing_if = "is_zero_nm")]
+    pub hole_clearance: Nm,
     /// Solder mask opening growth beyond pads on every side (negative shrinks), unless a pad or
     /// footprint sets its own margin. A design choice; `export.gerber --mask-expansion`
     /// overrides it for one export.
@@ -273,6 +280,7 @@ impl Default for Rules {
             zone_min_width: Nm::from_um(200),
             ipc_class: 2,
             min_clearance: Nm::ZERO,
+            hole_clearance: Nm::ZERO,
             mask_expansion: Nm::ZERO,
             mask_min_web: Nm::ZERO,
             paste_margin: Nm::ZERO,
@@ -333,6 +341,7 @@ impl Rules {
             "silk_to_pad" => &mut self.silk_to_pad,
             "min_silk_width" => &mut self.min_silk_width,
             "zone_min_width" => &mut self.zone_min_width,
+            "hole_clearance" => &mut self.hole_clearance,
             _ => return None,
         })
     }

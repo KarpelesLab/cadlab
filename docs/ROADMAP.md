@@ -194,6 +194,10 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] DRC and pour parity with KiCad (D46): silkscreen against solder mask openings (`silk_check`), thermal
   spoke angle/count and per-pad thermal settings (imported and exported), custom rule pairs (conditions on
   `B`), `disallow` and severities; corpus known differences re-measured with KiCad 10.0.7 (D51)
+- [x] Corpus residuals analyzed (D56): exact clearance gaps, KiCad-measured clearance and courtyard
+  tolerances, courtyards in pieces and on the other side, rule areas sharing a name, renamed designators,
+  copper-to-hole clearance (`hole_clearance`, fills and DRC), pad stacks in IPC-D-356, the IPC-2581 land
+  pattern and the footprint preview, SMD pad stacks
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
 

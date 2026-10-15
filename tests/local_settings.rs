@@ -669,6 +669,23 @@ fn pad_stacks_through_footprint_set() {
     let mine: Vec<_> = items.iter().filter(|it| it.item == ItemRef::Pad("J1".into(), "1".into())).collect();
     assert_eq!(mine.len(), 2);
     assert_eq!(mine[1].layers, ["B.Cu"]);
+    // IPC-D-356A: one record per side, each with its land.
+    let net = cadlab::fabout::ipc356::netlist(&p, &Default::default()).content;
+    let j1: Vec<&str> = net.lines().filter(|l| l.get(20..26).is_some_and(|f| f.trim() == "J1")).collect();
+    let pin1: Vec<&str> = j1.iter().copied().filter(|l| l[27..31].trim() == "1").collect();
+    assert_eq!(pin1.len(), 2, "{net}");
+    assert!(pin1[0][38..41] == *"A01" && pin1[1][38..41] == *"A02", "{pin1:?}");
+    assert_eq!(&pin1[1][57..67], "X2000Y2000", "the bottom land");
+    assert!(j1.iter().any(|l| l[27..31].trim() == "2" && &l[38..41] == "A00"), "{j1:?}");
+    // IPC-2581: the land pattern's pad refers to a pad stack definition with each layer's land.
+    let xml = cadlab::fabout::ipc2581::document(&p, &Default::default()).content;
+    assert!(xml.contains("<PadStackDef name=\"STACK_"), "{xml}");
+    assert!(xml.contains("<Pad padstackDefRef=\"STACK_"));
+    assert!(xml.find("<PadStackDef").unwrap() < xml.find("<Datum").unwrap(), "pad stacks come first in the step");
+    // The footprint preview draws the bottom land.
+    let o = exec(&r, &mut s, "render.footprint", json!({"name": hdr, "path": "fp.svg"}));
+    let svg = std::fs::read_to_string(o["output"]["path"].as_str().unwrap()).unwrap();
+    assert!(svg.contains("#4d7fc4"), "{svg}");
     // SMD pads have no pad stack; unset removes it.
     let ldo = footprint_name(&mut s, "U1");
     let err = fails(

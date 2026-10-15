@@ -6,7 +6,8 @@
 //! fill = zone outline ∩ board area (outline − cutouts, shrunk by copper-to-edge)
 //!        − other-net copper on the layer, inflated by max(zone clearance, the DRC clearance of
 //!          the item's net and of the zone's net: net class, else rules)
-//!        − NPTH holes, inflated by the zone clearance
+//!        − NPTH holes, inflated by the rules' hole clearance (copper to hole) when set, else
+//!          by the zone clearance; with a hole clearance, plated holes of other nets too
 //!        − higher-priority fills of other nets, inflated by the larger of both clearances
 //!        − keep-outs forbidding pours
 //!        − same-net pads per the pad connection (thermal: gap; none: clearance; solid: nothing)
@@ -483,7 +484,7 @@ struct MemoEntry {
     netclasses: BTreeMap<String, NetClass>,
     net_classes: Vec<(String, Option<String>)>,
     base: Vec<CopperItem>,
-    npth: Vec<NpthHole>,
+    npth: Vec<DrillHole>,
     /// The clearance each base item keeps (custom rules, local and class clearances: they
     /// depend on library footprints too, which the board does not hold).
     item_c: Vec<Nm>,
@@ -491,7 +492,7 @@ struct MemoEntry {
 }
 
 impl MemoEntry {
-    fn matches(&self, p: &Project, base: &[CopperItem], npth: &[NpthHole], item_c: &[Nm]) -> bool {
+    fn matches(&self, p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]) -> bool {
         let c = p.circuit();
         (Arc::ptr_eq(&self.board, p.board_arc()) || *self.board == *p.board())
             && self.netclasses == c.netclasses
@@ -515,7 +516,7 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     if p.board().zones.is_empty() {
         return vec![];
     }
-    let npth = npth_holes(p);
+    let npth = drill_holes(p);
     let item_c = item_clearances(p, base);
     if let Ok(m) = MEMO.lock()
         && let Some(e) = m.iter().find(|e| e.matches(p, base, &npth, &item_c))
@@ -552,7 +553,7 @@ pub fn clear_fill_cache() {
 
 /// [`fill_zones`] without the in-process reuse.
 pub fn fill_zones_uncached(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
-    fill_with(p, base, &npth_holes(p), &item_clearances(p, base))
+    fill_with(p, base, &drill_holes(p), &item_clearances(p, base))
 }
 
 /// The clearance the DRC requires around each base item: its custom rule's, else its local
@@ -563,20 +564,30 @@ fn item_clearances(p: &Project, base: &[CopperItem]) -> Vec<Nm> {
     (0..base.len()).map(|i| resolved.item(i)).collect()
 }
 
-/// A non-plated hole: the ends of its slot (equal for a round hole) and its radius.
-type NpthHole = (poly::Point, poly::Point, i64);
+/// A drilled hole fills keep away from: the ends of its slot (equal for a round hole), its
+/// radius, and for a plated hole its net (`Some`; `None` for a non-plated hole).
+type DrillHole = (poly::Point, poly::Point, i64, Option<Option<String>>);
 
-fn npth_holes(p: &Project) -> Vec<NpthHole> {
-    placed_pads(p)
+/// Non-plated holes, and with a hole clearance in the rules the plated ones (vias, through-hole
+/// pads) too.
+fn drill_holes(p: &Project) -> Vec<DrillHole> {
+    let plated_too = p.board().rules.hole_clearance > Nm::ZERO;
+    let mut out: Vec<DrillHole> = placed_pads(p)
         .into_iter()
         .filter_map(|pp| match pp.hole {
-            Some((d, false)) => {
+            Some((d, plated)) if !plated || plated_too => {
                 let (a, b) = pp.slot.unwrap_or((pp.hole_at, pp.hole_at));
-                Some((a.into(), b.into(), d.0 / 2))
+                Some((a.into(), b.into(), d.0 / 2, plated.then(|| pp.net.clone())))
             }
             _ => None,
         })
-        .collect()
+        .collect();
+    if plated_too {
+        for v in &p.board().vias {
+            out.push((v.at.into(), v.at.into(), v.drill.0 / 2, Some(v.net.clone())));
+        }
+    }
+    out
 }
 
 /// The farthest a thermal relief of any pad among `items` can reach beyond the pad's box (its
@@ -590,7 +601,7 @@ fn max_relief(items: &[(&CopperItem, Nm)], prm: &ZoneParams) -> i64 {
         .fold(zone, i64::max)
 }
 
-fn fill_with(p: &Project, base: &[CopperItem], npth: &[NpthHole], item_c: &[Nm]) -> Vec<ZoneFill> {
+fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]) -> Vec<ZoneFill> {
     let board = p.board();
     if board.zones.is_empty() {
         return vec![];
@@ -648,8 +659,16 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[NpthHole], item_c: &[Nm])
                     Err(e) => return Err(e.clone()),
                 };
                 let mut keepaway: Vec<Polygon> = Vec::new();
-                for &(a, b, r) in npth {
-                    let r = r + prm.clearance.0 + SAFETY;
+                for (a, b, r, plated) in npth {
+                    let (a, b) = (*a, *b);
+                    // A hole is no copper: the copper-to-hole clearance applies when set.
+                    let c = match plated {
+                        None if rules.hole_clearance > Nm::ZERO => rules.hole_clearance.0,
+                        None => prm.clearance.0,
+                        Some(n) if same_net(n.as_deref(), z.net.as_deref()) => continue,
+                        Some(_) => rules.hole_clearance.0,
+                    };
+                    let r = r + c + SAFETY;
                     if !near(&poly::Rect::new(a, a).union(&poly::Rect::new(b, b)), r) {
                         continue;
                     }

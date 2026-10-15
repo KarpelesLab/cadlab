@@ -427,14 +427,19 @@ pub struct RefdesText {
 }
 
 /// Where the legend prints a footprint's reference designator: upright (mirrored on the
-/// bottom side), centered above the placed courtyard's bounding box, or on the footprint
-/// origin without a courtyard. `None` when the footprint is not placed or unknown. The KiCad
+/// bottom side), centered above the placed courtyard's bounding box (else its courtyard
+/// drawings'), or on the footprint origin without any. `None` when the footprint is not placed or unknown. The KiCad
 /// export places its Reference field the same way, so both show the same legend.
 pub fn refdes_text(p: &Project, refdes: &str) -> Option<RefdesText> {
     let pf = p.board().footprints.get(refdes)?;
     let fp = footprint_for(p, refdes)?;
     let tf = board::transform(pf);
-    let cy: Vec<Point> = fp.courtyard.iter().map(|&q| tf(q)).collect();
+    let mut cy: Vec<Point> = fp.courtyard.iter().map(|&q| tf(q)).collect();
+    if cy.is_empty() {
+        // Only courtyard drawings (a footprint whose body is on its other side): around them.
+        cy =
+            board::placed_courtyards(p, refdes).iter().flat_map(|(r, _)| r.0.iter().map(|&q| Point::from(q))).collect();
+    }
     let at = match (cy.iter().map(|q| q.x).min(), cy.iter().map(|q| q.x).max(), cy.iter().map(|q| q.y).max()) {
         (Some(x0), Some(x1), Some(top)) => Point::new(Nm((x0.0 + x1.0) / 2), top + REFDES_GAP + Nm(REFDES_SIZE.0 / 2)),
         _ => pf.at,

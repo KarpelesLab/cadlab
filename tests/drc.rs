@@ -254,6 +254,55 @@ fn placement_rules() {
     assert!(!codes(&d).contains("drc.short"), "{}", text(&d));
 }
 
+/// Tolerances (DECISIONS, corpus residuals): clearances may be 2 µm short, measured on exact
+/// outlines (the circles' polygons would add up to 2 µm more); courtyards may overlap by less than
+/// 10 µm, as in KiCad; and the copper-to-hole clearance.
+#[test]
+fn tolerances_and_hole_clearance() {
+    let (_d, r, mut s) = routed();
+    // Two vias of other nets, 1.9 µm and 2.1 µm closer than the 0.2 mm clearance.
+    let a = add_via(&mut s, mm(2.0, 2.0), 0.3, 0.6, Some("GND"));
+    let b = add_via(&mut s, Point::new(Nm(2_000_000 + 800_000 - 1_900), Nm(2_000_000)), 0.3, 0.6, Some("VIN"));
+    let c = add_via(&mut s, mm(2.0, 13.0), 0.3, 0.6, Some("GND"));
+    let e = add_via(&mut s, Point::new(Nm(2_000_000 + 800_000 - 2_100), Nm(13_000_000)), 0.3, 0.6, Some("VIN"));
+    let d = drc(&s);
+    let near = |x: u64, y: u64| {
+        d.iter().any(|f| {
+            f.code == "drc.clearance"
+                && f.subjects.contains(&ObjectRef::parse(&format!("via#{x}")).unwrap())
+                && f.subjects.contains(&ObjectRef::parse(&format!("via#{y}")).unwrap())
+        })
+    };
+    assert!(!near(a, b), "{}", text(&d));
+    assert!(near(c, e), "{}", text(&d));
+    let f = d.iter().find(|f| f.code == "drc.clearance").unwrap();
+    assert!(f.message.contains("0.1979mm apart"), "the exact gap: {}", f.message);
+
+    // Courtyards overlapping by 9.9 µm touch; by 10.5 µm they overlap.
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 1uF 16V X5R 0402", "count": 4}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "C3", "at": ["3mm", "5mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "C5", "at": ["17mm", "5mm"]}));
+    let ring = cadlab::board::placed_courtyard(project(&mut s), "C3").unwrap();
+    let ys: Vec<i64> = ring.0.iter().map(|q| q.y).collect();
+    let h = ys.iter().max().unwrap() - ys.iter().min().unwrap();
+    let at = |x: f64, o: i64| json!([format!("{x}mm"), format!("{}nm", 5_000_000 + h - o)]);
+    exec(&r, &mut s, "place.set", json!({"refdes": "C4", "at": at(3.0, 9_900)}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "C6", "at": at(17.0, 10_500)}));
+    let d = drc(&s);
+    let ov: Vec<&Diagnostic> = d.iter().filter(|x| x.code == "drc.courtyard_overlap").collect();
+    assert_eq!(ov.len(), 1, "{}", text(&d));
+    assert!(ov[0].subjects.contains(&ObjectRef::Name("C5".into())), "{}", ov[0]);
+
+    // Copper to a non-plated hole: unchecked until the rules set it.
+    exec(&r, &mut s, "board.hole", json!({"at": ["10mm", "13mm"], "drill": "1mm", "name": "H1"}));
+    let t = add_track(&mut s, "F.Cu", mm(9.0, 13.65), mm(11.0, 13.65), 0.2, Some("GND"));
+    assert!(!codes(&drc(&s)).contains("drc.hole_clearance"));
+    exec(&r, &mut s, "board.rules", json!({"hole_clearance": "0.25mm"}));
+    let d = drc(&s);
+    let hc = find(&d, "drc.hole_clearance", &format!("track#{t}"));
+    assert!(hc.message.contains("0.05mm from the hole of H1"), "{}", hc.message);
+}
+
 #[test]
 fn silk_keepout_and_through_hole_rules() {
     let (_d, r, mut s) = routed();

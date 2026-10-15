@@ -338,8 +338,24 @@ fn points_polygon(x: &mut Xml, tag: &str, pts: &[Point]) {
 
 /// A pad element (board or package coordinates).
 fn pad(x: &mut Xml, d: &mut Dict, at: Point, shape: PadShape, rotation: Angle, pin: Option<(Option<&str>, &str)>) {
+    pad_with(x, d, at, shape, rotation, pin, None);
+}
+
+/// A pad element referring to a pad stack definition.
+fn pad_with(
+    x: &mut Xml,
+    d: &mut Dict,
+    at: Point,
+    shape: PadShape,
+    rotation: Angle,
+    pin: Option<(Option<&str>, &str)>,
+    stack: Option<String>,
+) {
     let Some(id) = d.prim(shape) else { return };
-    x.open("Pad", &[]);
+    match stack {
+        Some(name) => x.open("Pad", &[a("padstackDefRef", name)]),
+        None => x.open("Pad", &[]),
+    }
     let r = rotation.normalized();
     if r != Angle::ZERO {
         x.empty("Xform", &[a("rotation", deg(r))]);
@@ -717,6 +733,45 @@ fn pin_one_orientation(fp: &Footprint) -> &'static str {
     }
 }
 
+/// Name of the `PadStackDef` of a footprint's pad with a pad stack (by pad index, as numbers
+/// may repeat).
+fn stack_name(fp: &Footprint, i: usize) -> String {
+    format!("STACK_{}_{}", fp.name.replace(':', "_"), i + 1)
+}
+
+/// Pad stack definitions of the stacked through-hole pads of a package: the hole and each copper
+/// layer's land, in the package's frame (layers counted from its side, so the first copper layer
+/// is the footprint's side), relative to the pad center before its rotation.
+fn pad_stacks(x: &mut Xml, d: &mut Dict, fp: &Footprint, copper: &[String]) {
+    for (i, pad) in fp.pads.iter().enumerate().filter(|(_, p)| p.has_stack()) {
+        let PadKind::Tht { drill } = pad.kind else { continue };
+        x.open("PadStackDef", &[a("name", stack_name(fp, i))]);
+        let off = pad.drill_offset.unwrap_or_default();
+        let [hx, hy] = xy(off);
+        x.empty(
+            "PadstackHoleDef",
+            &[
+                a("name", format!("{}_HOLE", stack_name(fp, i))),
+                a("diameter", mm(drill.0)),
+                a("platingStatus", "PLATED"),
+                a("plusTol", "0"),
+                a("minusTol", "0"),
+                hx,
+                hy,
+            ],
+        );
+        for l in copper {
+            let shape = pad.shape_on(board::stack_layer(copper, l, BoardSide::Top)).clone();
+            let Some(id) = d.prim(shape) else { continue };
+            x.open("PadstackPadDef", &[a("layerRef", l.clone()), a("padUse", "REGULAR")]);
+            x.empty("Location", &[a("x", "0"), a("y", "0")]);
+            x.empty("StandardPrimitiveRef", &[a("id", id)]);
+            x.close("PadstackPadDef");
+        }
+        x.close("PadStackDef");
+    }
+}
+
 fn package(x: &mut Xml, d: &mut Dict, fp: &Footprint) {
     let mut attrs = vec![a("name", fp.name.clone()), a("type", "OTHER")];
     if fp.pads.iter().any(|p| p.number == "1") {
@@ -751,9 +806,12 @@ fn package(x: &mut Xml, d: &mut Dict, fp: &Footprint) {
     x.close("Outline");
     x.empty("PickupPoint", &[a("x", "0"), a("y", "0")]);
     x.open("LandPattern", &[]);
-    for p in &fp.pads {
+    for (i, p) in fp.pads.iter().enumerate() {
         let pin = (!p.number.is_empty()).then_some((None, p.number.as_str()));
-        pad(x, d, p.at, p.shape.clone(), p.rotation, pin);
+        // A stacked pad's land is the footprint side's, and its pad stack definition gives
+        // every layer's.
+        let stack = (p.has_stack() && matches!(p.kind, PadKind::Tht { .. })).then(|| stack_name(fp, i));
+        pad_with(x, d, p.at, p.shape.clone(), p.rotation, pin, stack);
     }
     x.close("LandPattern");
     if let Some(b) = fp.body {
@@ -859,6 +917,16 @@ pub fn document(p: &Project, o: &Options) -> OutFile {
     e.close("Stackup");
 
     e.open("Step", &[a("name", step.clone()), a("type", "BOARD")]);
+    // Packages: every footprint used by a component.
+    let mut fps: BTreeMap<String, &Footprint> = BTreeMap::new();
+    for refdes in p.circuit().components.keys() {
+        if let Some(fp) = footprint_for(p, refdes) {
+            fps.entry(fp.name.clone()).or_insert(fp);
+        }
+    }
+    for fp in fps.values() {
+        pad_stacks(&mut e, &mut d, fp, &ls.copper);
+    }
     e.empty("Datum", &[a("x", "0"), a("y", "0")]);
     if let Some((outer, cutouts)) = board_profile(p) {
         e.open("Profile", &[]);
@@ -867,13 +935,6 @@ pub fn document(p: &Project, o: &Options) -> OutFile {
             polygon(&mut e, "Cutout", cut);
         }
         e.close("Profile");
-    }
-    // Packages: every footprint used by a component.
-    let mut fps: BTreeMap<String, &Footprint> = BTreeMap::new();
-    for refdes in p.circuit().components.keys() {
-        if let Some(fp) = footprint_for(p, refdes) {
-            fps.entry(fp.name.clone()).or_insert(fp);
-        }
     }
     for fp in fps.values() {
         package(&mut e, &mut d, fp);

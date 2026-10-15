@@ -45,13 +45,6 @@ max = 2
 stage = "reexport"
 reason = "KiCad also keeps copper away from the drawing the project puts on the Margin layer (past the USB-C shield pads J1.S1); cadlab's board edge is Edge.Cuts only"
 
-[[project.known]]
-side = "cadlab"
-rule = "drc.courtyard_overlap"
-max = 1
-stage = "reexport"
-reason = "R8 and U3 have no courtyard in KiCad; the ones the import generates overlap by 6.6 um, which KiCad's courtyard test lets pass on the re-export"
-
 [[project.gerber_known]]
 layer = "B.Mask"
 reason = "with the 0.25 mm minimum web both tools write the merged openings as regions; KiCad's polygons for the round through-hole openings lie inside the true circles, 0.55 % less area than cadlab's (just over the 0.5 % tolerance)"
@@ -84,18 +77,21 @@ notes = "Bus Pirate 5 dual RS-232 adapter: 2-layer, KiCad 8 format; its schemati
 side = "cadlab"
 rule = "drc.short"
 max = 19
+stage = "original"
 reason = "schematic and board disagree (import.net_conflict, import.pad_missing): J4 is the DB9 COM2 in the schematic but a 1x10 pin socket on the board, J2's pins are swapped; cadlab's circuit comes from the schematic, KiCad's DRC from the board's own nets"
 
 [[project.known]]
 side = "cadlab"
 rule = "drc.clearance"
 max = 2
+stage = "original"
 reason = "schematic and board disagree (J2/J4, see drc.short): copper the board gives one net is another net in the circuit"
 
 [[project.known]]
 side = "cadlab"
 rule = "drc.unrouted"
 max = 13
+stage = "original"
 reason = "schematic and board disagree (J2/J4, see drc.short): the circuit's nets are not the ones the board routes"
 
 [[project.known]]
@@ -108,9 +104,9 @@ reason = "the DB9 J1 has two mounting pads numbered 0 on a one-pin unconnected-(
 [[project.known]]
 side = "kicad"
 rule = "unconnected_items"
-max = 16
+max = 3
 stage = "reexport"
-reason = "schematic and board disagree (J2/J4, see drc.short): the re-export carries the circuit's nets, so tracks join pads of different nets"
+reason = "schematic and board disagree (J2/J4, see drc.short): the re-export carries the circuit's nets, so tracks join pads of different nets; the opens that share an end with cadlab's pair, three do not"
 
 [[project]]
 name = "buspirate5-rev10"
@@ -208,27 +204,28 @@ notes = "Ferris Sweep split keyboard (reversible): 2-layer THT/SMD, no schematic
 [[project.known]]
 side = "kicad"
 rule = "silk_over_copper"
-max = 31
-reason = "the reversible TRRS jacks J1/J2 have slotted pads and silkscreen KiCad clips at their mask openings; not analyzed further"
+max = 4
+stage = "original"
+reason = "silkscreen arcs of REF** footprints over the switches' holes: those footprints are made of holes and become board holes (import.footprint_as_holes), whose drawings are not kept"
 
 [[project.known]]
 side = "kicad"
 rule = "unconnected_items"
-max = 3
-reason = "connectivity through pours: KiCad's fill reaches three GND pads that cadlab's fill leaves alone"
+max = 1
+reason = "connectivity through pours: KiCad's fill reaches the GND pad SW14.2 that cadlab's fill leaves alone (the vcc and raw opens, which only the cable between the halves closes, pair)"
 
 [[project.known]]
 side = "cadlab"
 rule = "drc.unrouted"
-max = 3
-reason = "the POWER SW switches have a designator cadlab cannot use (import.invalid_refdes) and are not imported, so the vcc net is split"
+max = 1
+reason = "connectivity through pours: the GND island cadlab's fill leaves (H75.1 to SW2.2 here) is a pad KiCad's fill joins (see unconnected_items)"
 
 [[project.known]]
 side = "cadlab"
 rule = "drc.courtyard_overlap"
 max = 2
 stage = "reexport"
-reason = "mouse-bite holes imported as board holes sit in switch courtyards; KiCad checks no holes against courtyards"
+reason = "mouse-bite holes (board holes) inside the courtyards of SW6 and SW17: cadlab's courtyard check reports a hole in a courtyard as an overlap, KiCad as pth/npth_inside_courtyard, rules the original project ignores and cadlab has no counterpart for"
 
 [[project.known]]
 side = "cadlab"
@@ -238,27 +235,11 @@ reason = "the ferris_broom logo footprint has no pads, so its drawings become bo
 
 [[project.gerber_known]]
 layer = "F.Cu"
-reason = "the POWER SW switches are not imported (import.invalid_refdes)"
+reason = "the power switches' non-plated holes have 1 mm copper pads around 0.9 mm drills, which KiCad plots; cadlab's non-plated holes have no copper (import.npth_copper)"
 
 [[project.gerber_known]]
 layer = "B.Cu"
-reason = "the POWER SW switches are not imported (import.invalid_refdes)"
-
-[[project.gerber_known]]
-layer = "F.Mask"
-reason = "the POWER SW switches are not imported (import.invalid_refdes)"
-
-[[project.gerber_known]]
-layer = "B.Mask"
-reason = "the POWER SW switches are not imported (import.invalid_refdes)"
-
-[[project.gerber_known]]
-layer = "B.Paste"
-reason = "the POWER SW switches are not imported (import.invalid_refdes)"
-
-[[project.gerber_known]]
-layer = "drill"
-reason = "the POWER SW switches' holes are not imported (import.invalid_refdes)"
+reason = "the power switches' non-plated holes have 1 mm copper pads around 0.9 mm drills, which KiCad plots; cadlab's non-plated holes have no copper (import.npth_copper)"
 
 [[project]]
 name = "corne-cherry"
@@ -271,25 +252,6 @@ license = "MIT"
 layers = 2
 kicad = 7
 notes = "Corne keyboard (hotswap): 2-layer, reversible footprints on both sides, hundreds of teardrop zones"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.clearance"
-max = 3
-reason = "not analyzed yet: three gaps of 0.188 mm (D+ tracks to a D- via, RU1.23 to a via) against the 0.19 mm net clearance that KiCad does not report"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.courtyard_overlap"
-max = 5
-stage = "original"
-reason = "not analyzed yet: reversible LED and switch footprints (REXLED/REXSW) whose courtyards cadlab finds overlapping, KiCad not"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.unrouted"
-max = 4
-reason = "connectivity through pours: cadlab refills the zones (teardrops included) with its own algorithm; e.g. REXSW1.S1's diagonal spokes reach KiCad's pour, which keeps 0.25 mm (the hole clearance) from the copper-less NPTH below the pad, where cadlab keeps the zone's 0.508 mm clearance"
 
 [[project.known]]
 side = "cadlab"
@@ -347,12 +309,6 @@ notes = "Glasgow revD1: 6-layer, BGA FPGA and RAM, KiCad 10 format (nets by name
 
 [[project.known]]
 side = "cadlab"
-rule = "drc.courtyard_overlap"
-max = 13
-reason = "the net ties NT3/NT9 and their neighbours: KiCad does not check the courtyards of net-tie footprints the same way; not analyzed further"
-
-[[project.known]]
-side = "cadlab"
 rule = "drc.unplaced"
 max = 1
 stage = "original"
@@ -374,6 +330,14 @@ notes = "Cynthion USB analyzer: ECP5 BGA, USB PHYs, Kelvin current-sense resisto
 side = "cadlab"
 rule = "drc.short"
 max = 4
+stage = "original"
+reason = "the Kelvin current-sense resistors R1, R2, R42, R59 are net ties whose sense tracks cross the power pad of the other net (a short in both tools); KiCad reports them unevenly, 4 of the 8 crossings on the original and 7 on the re-export, which pair with cadlab's"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.short"
+max = 1
+stage = "reexport"
 reason = "the Kelvin current-sense resistors R1, R2, R42, R59 are net ties whose sense tracks cross the power pad of the other net (a short in both tools); KiCad reports them unevenly, 4 of the 8 crossings on the original and 7 on the re-export, which pair with cadlab's"
 
 [[project.known]]
@@ -426,27 +390,6 @@ kicad = 9
 notes = "Tiny Tapeout demo board: 4-layer RP2350 board, custom design rules, stitching-via footprints, KiCad 9 format"
 
 [[project.known]]
-side = "cadlab"
-rule = "drc.clearance"
-max = 2
-stage = "original"
-reason = "not analyzed yet: a VBUS track 0.233 mm from a GND via (HiV class: 0.3 mm) and a GND track 0.219 mm from an mng1 track (0.25 mm) that KiCad accepts, presumably through a USB or neck-down rule scope cadlab matches differently"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.courtyard_overlap"
-max = 31
-stage = "original"
-reason = "the PMOD SIL headers overlap by design; the .kicad_dru rule excluding their courtyard clearance (hasComponentClass, severity exclusion) is not imported (import.rule_unsupported)"
-
-[[project.known]]
-side = "cadlab"
-rule = "drc.courtyard_overlap"
-max = 3
-stage = "reexport"
-reason = "not analyzed yet: three courtyard overlaps (R44/U7 and others) cadlab reports and KiCad's DRC of the re-export does not"
-
-[[project.known]]
 side = "kicad"
 rule = "items_not_allowed"
 max = 2
@@ -464,7 +407,7 @@ side = "kicad"
 rule = "track_width"
 max = 1
 stage = "reexport"
-reason = "not analyzed yet: KiCad does not apply the exported neck-down rule to one 0.16 mm GND track at the QFN-80 courtyard edge that cadlab's courtyard test includes, so the Power class width applies"
+reason = "a 0.16 mm GND track whose round end reaches 5.0 um into the carrier J5's courtyard: cadlab measures the end exactly and applies the neck-down rule (intersectsCourtyard); KiCad leaves the track out (its straight sides count from 1 um, probed: KiCad approximates the round end inside the arc) and checks the Power class width"
 
 [[project.gerber_known]]
 layer = "F.Paste"

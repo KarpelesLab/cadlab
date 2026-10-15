@@ -972,6 +972,75 @@ groups in the arrangement connectivity chose) while using an outline the designe
 stretching the arrangement keeps its topology, and a ratsnest budget bounds what using the board may cost. A
 question an agent asks ("which stackups?") should get an answer, not an error.
 
+### D56. Corpus residuals: exact clearance gaps, KiCad-measured tolerances, courtyard pieces and sides, copper-to-hole clearance, pad stacks in every output (2026-10-15)
+The corpus entries D51 left "not analyzed" were each traced to a cause; every cause but the stroke font was
+a cadlab gap, fixed here. Tolerances were measured with `kicad-cli` 10.0.7 on cross-check boards built for
+the purpose (probes run in the oracle job), not taken from KiCad's code.
+**Exact gaps.** A clearance finding between items with an exact outline (straight tracks, vias, pads other
+than chamfered rectangles with rounded corners: a point, segment or polygon grown by a radius,
+`board::exact`) is measured again on it; the polygons' outward arc approximation had added up to 2 µm to
+real deficits, so the documented 2 µm tolerance was sometimes none. corne-cherry's three "0.188 mm" gaps
+were 0.1895 mm (0.499 µm short of 0.19 mm). KiCad's own tolerance is 0.5 µm (a clearance 0.55 µm short is
+reported, 0.50 µm passes); cadlab keeps 2 µm because its router keeps clearances to within 1 µm
+(`router::index::TOL`; a 0.5 µm DRC tolerance made the router benchmark rip up two connections), so
+deficits between 0.5 and 2 µm are KiCad's alone, below any fab's resolution.
+**Courtyards.** KiCad reports courtyard overlaps from 10 µm (9.95 µm passes): overlaps narrower than
+`COURTYARD_TOLERANCE` = 10 µm are touching, which removed glasgow-revD1's 13 and tinytapeout-demo's 3
+library-slop overlaps (2.5–9.3 µm). A footprint's courtyard is now every closed courtyard drawing: on its
+side the largest piece is the courtyard and further pieces stay closed courtyard drawings, and drawings
+on the other side stay too, with `back` (a key switch's body above its hot-swap socket footprint on the
+bottom, corne-cherry). Before, several pieces became their bounding box (tinytapeout-demo's carrier J5,
+two rectangles 35 mm apart, then "overlapped" 30 parts and pulled tracks into a neck-down rule), and the
+other side's drawings were dropped (a 0.25 mm box around the pads was generated on the wrong side). The
+courtyard DRC, holes in courtyards, keep-outs and the export use every piece; `intersectsCourtyard` rules
+(`in_courtyard`) the pieces on the footprint's side. An item is in a courtyard or area when it reaches
+more than the 2 µm tolerance in, measured on its exact outline when it has one (KiCad takes a track whose
+straight side reaches 1 µm in; a round track end 1.4 µm in is outside in both tools, and one 5.0 µm in is
+in for cadlab but not for KiCad, whose arc approximation of the end lies inside it: tinytapeout-demo's
+remaining track width difference).
+**Rule areas sharing a name** (KiCad's `enclosedByArea('X')` then means any of them) keep unique names
+(`X`, `X_2`), and a custom rule naming one becomes one rule per area, in place (tinytapeout-demo's second
+`CARRIERBREAKOUT`, whose tracks lost their 0.16 mm clearance).
+**Designators** that cadlab cannot use but that are annotated (`POWER SW`) are renamed to their letters and
+the next free number (`POWERSW1`, `import.refdes_renamed`) when the circuit is built from the board, so
+their copper and nets are kept (sweep-v2.2's power switches: paste and drill now match); unannotated ones
+(`REF**`) are left out as before; with a circuit, the schematic decides.
+**Copper-to-hole clearance.** KiCad's pour keeps its copper-to-hole clearance (`min_hole_clearance`,
+0.25 mm on corne-cherry) from a copper-less NPTH, where cadlab kept the zone clearance (0.508 mm); a spoke
+reaching KiCad's pour found none in cadlab's. Decided by what the fab needs: a non-plated hole is no
+copper, so the electrical clearance between nets does not apply to it; what fabs specify is "NPTH to
+copper" (drill wander and the hole tolerance must not reach copper; Aisler 0.25 mm, NextPCB 8 mil in the
+fab profiles' notes), which is KiCad's documented copper-to-hole clearance. `board.rules` gains
+`hole_clearance` (unset by default: fills keep their own clearance from non-plated holes as before, the
+conservative choice for designs that never stated one); set, fills keep it from non-plated holes (and
+from plated holes of other nets), and the DRC checks copper to every hole it does not belong to
+(`drc.hole_clearance`: any copper to a non-plated hole, a mounting hole's own pads included; copper of
+other nets to a plated one, except net-tied copper and copper touching the pad, which is a short). The
+KiCad import reads `min_hole_clearance`, the export writes it (0 when unset: KiCad then checks none
+either), and the cross-check pairs KiCad's `hole_clearance` with it (glasgow-revD1's mounting hole H5,
+whose pad covers its own hole, in both tools). corne-cherry's pours now reach every pad KiCad's reach.
+**Pad stacks in every output** (D48's remaining consumers): IPC-D-356A writes a through-hole pad whose
+outer lands differ as one `317` record per side (`A01` with the top land, `ANN` with the bottom one), the
+record layout's access code being the only per-side field; IPC-2581 writes a `PadStackDef` per stacked
+pad of a package (hole and each copper layer's land in the package's frame, before `Datum` as the
+revision C schema orders the step) and the land pattern's pad refers to it; the footprint preview draws
+the other side's land under the footprint side's (blue) and inner lands as outlines (it also draws pads
+rotated now). A stack on an SMD pad gives the pad the stack's shape on its copper layer (no longer
+`import.pad_approximated`).
+**Smaller fixes.** Exported board holes hide their name (cadlab's legend prints none), and a footprint
+whose only courtyard is on its other side places its reference above that one; a board-only footprint
+with one plated hole on a net becomes a via only when its pad is tented (sweep-v2.2's exposed battery
+contacts `B+`/`B-` stay plated board holes with their mask openings); copper rings around non-plated holes,
+which cadlab does not model, are reported (`import.npth_copper`); the corpus comparison pairs open
+connections that share an end (an island's end is either tool's choice).
+**Not done: the stroke font.** Texts on copper differ in the Gerber copper layers and copper-to-edge
+(cynthion, lumenpnp-mobo) because cadlab draws the Hershey simplex font (public domain) and KiCad its own
+stroke font, whose glyph data lives only in KiCad's sources; matching it would mean copying KiCad's data,
+which the project rules exclude, and no published specification of its metrics exists. Recorded.
+*Why:* each residual was a measured cause, and only tolerances were taken from KiCad's observed behavior,
+where KiCad's choice is also the fab's (sub-micron clearance noise, courtyard drawing slop); the
+copper-to-hole rule follows the fab's specification rather than KiCad's, which happen to agree.
+
 ## Open questions
 
 

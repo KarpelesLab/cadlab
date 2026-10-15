@@ -137,7 +137,7 @@ footprint follows; nothing in them names a fab (D12).
 | `mask` | pad | openings on the pad's outer copper (default), on the footprint's side only (`front`) or the other side only (`back`) for holes, or none (`none`: tented thermal vias, covered heat spreaders) |
 | `slot` | through-hole and non-plated pads | an oval hole (size along the pad's X and Y); the drill is its width |
 | `drill_offset` | through-hole and non-plated pads | the hole center relative to the pad center, before the pad rotation (copper off center on its hole) |
-| `stack` | through-hole pads | per-layer copper shapes (a pad stack): `inner` (every inner layer), `back` (the outer layer on the other side of the footprint) and `layers` (single inner layers, numbered from the footprint's side, so a bottom-side footprint reverses them); the pad's `shape` is the footprint side's and every layer left out. Each shape is its own copper item on its layers (one island through the hole) for the DRC, zone fills and the router; Gerber, IPC-2581 and DSN padstacks draw each layer's shape, mask openings the outer shape of their side, the annular ring is the narrowest layer's |
+| `stack` | through-hole pads | per-layer copper shapes (a pad stack): `inner` (every inner layer), `back` (the outer layer on the other side of the footprint) and `layers` (single inner layers, numbered from the footprint's side, so a bottom-side footprint reverses them); the pad's `shape` is the footprint side's and every layer left out. Each shape is its own copper item on its layers (one island through the hole) for the DRC, zone fills and the router; Gerber, IPC-2581 (copper features and the package's `PadStackDef`) and DSN padstacks draw each layer's shape, IPC-D-356 writes a record per side when the outer lands differ, the footprint preview shows the other side's land, mask openings the outer shape of their side, the annular ring is the narrowest layer's |
 | `paste: pad` | through-hole pads | paste-in-hole on the footprint's side (SMD pads have paste unless `paste: none`) |
 | `net_ties` | footprint | groups of pad numbers whose nets the footprint joins on purpose |
 | copper, mask, paste drawings | footprint graphics (`back` for the other side) | copper: copper items (DRC, fills, Gerber, IPC-2581) on the net of the first pad they touch; mask, paste: openings on those layers |
@@ -186,7 +186,7 @@ change).
 
 | Group | Commands |
 |---|---|
-| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
+| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `hole_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
 | `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
@@ -209,6 +209,13 @@ derived from a fab profile (`fab`, `process`, `margin`), then the fields given e
 what changed and, for derived values, the profile field and the fab's own limit each comes from; a value the
 profile marks unverified gives a `board.rules_unverified` warning. Net classes whose values fall below the new
 minimums are reported (`drc.netclass_rule`). `--dry-run` previews a change.
+
+`hole_clearance` (unset by default) is copper to the edge of a drilled hole the copper does not belong to: fabs
+list it as NPTH to copper (drill wander and the hole's own tolerance must not reach copper). A hole is no
+copper, so with it set zone fills keep `hole_clearance` from non-plated holes instead of their zone clearance
+(and from plated holes of other nets), and the DRC checks it (`drc.hole_clearance`); unset, fills keep their
+own clearance from non-plated holes, the conservative former behaviour. The KiCad import takes it from
+`min_hole_clearance` (KiCad's copper-to-hole clearance, which its fills keep from copper-less holes).
 
 Net classes (`netclass.*`) override per net: track width, clearance, via drill and diameter, diff pair width and
 gap. Unset values are inherited from `board.rules`; `netclass.show` / `netclass.list` give the values in
@@ -286,16 +293,17 @@ the library stay).
 | pads: chamfered (`chamfer_ratio`, `chamfer` corners on `rect`/`roundrect`) | chamfered rectangles (`chamfered_rect`: chamfer = ratio × shorter side, the other corners rounded by `roundrect_rratio`) |
 | oval drill (slot) | a slotted hole (`slot`) |
 | drill `offset` | KiCad's pad position is the hole and the offset moves the copper: the cadlab pad is centered on the copper and its `drill_offset` points back to the hole (SMD pads: the copper moves) |
-| `padstack` (KiCad 9, modes `front_inner_back` and `custom`) | the pad's `stack`: KiCad keys it by board layer (the pad's own shape is `F.Cu`'s, `Inner` every inner layer, `In<k>.Cu` one, `B.Cu`), so on a bottom-side footprint `B.Cu`'s shape becomes the pad's and inner layers reverse; a layer's `offset` other than the pad's moves its shape (as a polygon); per-layer thermal and zone settings use the pad's; written back the same way (`custom` when single inner layers differ). A stack on an SMD pad keeps the front shape (`import.pad_approximated`) |
+| `padstack` (KiCad 9, modes `front_inner_back` and `custom`) | the pad's `stack`: KiCad keys it by board layer (the pad's own shape is `F.Cu`'s, `Inner` every inner layer, `In<k>.Cu` one, `B.Cu`), so on a bottom-side footprint `B.Cu`'s shape becomes the pad's and inner layers reverse; a layer's `offset` other than the pad's moves its shape (as a polygon); per-layer thermal and zone settings use the pad's; written back the same way (`custom` when single inner layers differ). A stack on an SMD pad gives the pad the stack's shape on its copper layer (`B.Cu`'s on a bottom-side footprint) |
 | SMD pad with copper only on the other side of its footprint | a pad on the back (`back`) |
 | pad layers without `*.Mask` / `F.Mask` / `B.Mask` | the pad's `mask`: none (tented), front or back only |
 | through-hole pad with `F.Paste` | paste-in-hole (`paste: pad`; paste on the other side only: `import.tht_paste`) |
 | paste-only apertures | paste windows of the copper pad they sit on (equal aligned rectangles); others (custom shapes, mixed sizes, off a pad) become paste drawings of the footprint (`import.paste_drawing`) |
 | mask-only apertures | mask drawings of the footprint |
 | copper, mask and paste drawings of either side (`fp_line`, `fp_poly`, ...) | footprint graphics on those layers (`back` for the other side); filled polygons and rectangles are areas, outlines closed polylines; inner-layer copper is not imported (`import.footprint_layer`) |
-| silkscreen, fab and courtyard drawings of the footprint's side | footprint graphics (arcs as polylines); the courtyard replaces the courtyard drawings: one closed polygon as is, a circle as a polygon around it, lines forming one loop, several closed shapes as their union when it is one polygon, else the bounding box; none: 0.25 mm around the pads (`import.courtyard_generated`, listing every footprint) |
+| silkscreen and fab drawings of the footprint's side | footprint graphics (arcs as polylines) |
+| courtyard drawings (either side) | per side, the closed shapes (polygons, circles as polygons around them, lines forming loops) united; on the footprint's side the largest piece becomes the courtyard, further pieces (a carrier board's two separate outlines) and the other side's (a key switch's body above a socket footprint on the bottom) stay closed courtyard drawings (`back` for the other side), which the courtyard DRC and `intersectsCourtyard` rules (own side) use too; drawings that close no loop: their bounding box; none on either side: 0.25 mm around the pads (`import.courtyard_generated`, listing every footprint) |
 | `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
-| board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad (`import.footprint_as_via`, `import.footprint_as_holes`) |
+| board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one tented plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad, plated ones keeping their net and mask opening (`import.footprint_as_via`, `import.footprint_as_holes`) |
 | `solder_mask_margin`, `solder_paste_margin`, `solder_paste_margin_ratio` / `solder_paste_ratio`, `clearance`, `zone_connect` (pad, footprint) | the pad's or footprint's settings (zero margins and clearances are KiCad's "not set" and stay unset; `zone_connect` 0 none, 1 thermal, 2 solid, 3 `tht_thermal`) |
 | `thermal_gap`, `thermal_width` / `thermal_bridge_width` (pad, footprint), `thermal_bridge_angle` (pad) | the pad's or footprint's thermal gap, spoke width and spoke angle (zero sizes stay unset; an angle equal to KiCad's default for the pad shape, 45° round, 90° others, which is cadlab's, stays unset). The export writes `thermal_width` and `thermal_gap` and hands a footprint's angle to its pads; a zone's `thermal_angle` and `thermal_spokes` have no KiCad counterpart (KiCad pads always have up to 4 spokes) and are not written |
 | setup `pad_to_mask_clearance`, `solder_mask_min_width`, `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | `board.rules` `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio` |
@@ -318,7 +326,8 @@ gives a size. Net names lose KiCad's root sheet `/`; single-pad `unconnected-(..
 footprint differing from the part's preferred one is placed through the placement's footprint override.
 
 Rules (`.kicad_pro`, `.kicad_dru` next to the board, or `board.import_kicad_rules`): board minimums and the
-Default class give `board.rules` (clearance = the larger of `min_clearance` and the Default class clearance),
+Default class give `board.rules` (clearance = the larger of `min_clearance` and the Default class clearance,
+`min_hole_clearance` the copper-to-hole `hole_clearance`),
 other classes become net classes (values equal to the board's are inherited), patterns and explicit
 assignments give nets their class, custom rules without condition tighten board minimums and `A.NetClass ==
 'X'` width and clearance rules tighten the class. Rules with geometric conditions become custom rules
@@ -337,12 +346,15 @@ with geometric ones or with a severity, other constraints in scoped rules (`cour
 `silk_clearance`, ...), track widths with conditions on `B`, and disallowed types without counterpart
 (`text`, `hole`, `footprint`, `micro_via`, ...). Zero minimums keep cadlab's value (`import.rule_zero`), except `min_silk_clearance`, which
 becomes `silk_to_pad` even at zero (silkscreen may then touch pads but not cover them, as KiCad checks
-it).
+it). Rule areas sharing a name (KiCad's `enclosedByArea('X')` then means any of them) get unique names (`X`,
+`X_2`) and a rule naming one becomes a rule per area, in place. Without a circuit, a designator cadlab
+cannot use but that is annotated (`POWER SW`, not `REF**`) is replaced by its letters and the next free number
+(`POWERSW1`, `import.refdes_renamed`), so its copper and nets stay.
 
 Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
 notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
 (members are imported), footprint texts, 3D models, copper drawings on inner layers of footprints, zones
-inside footprints, per-layer pad stacks (the front layer's shape is kept, `import.pad_approximated`), hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
+inside footprints, per-layer pad stacks on non-plated holes (the front layer's shape is kept, `import.pad_approximated`), copper rings around non-plated holes (`import.npth_copper`), hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
 can be read against the imported project.
 
 ## Placement (`src/board/place.rs`)
@@ -429,7 +441,10 @@ on errors). Each has the objects involved (pins `U1.3`, `track#12`, `via#4`, `ne
 location and a fix hint. Clearance and track width come from the net's class when it sets them, else from
 `board.rules`. Distances are exact between the shared polygon shapes; since arcs are approximated outward by up
 to 1 µm, distance rules accept a 2 µm deficit, and area rules (courtyard overlaps, keep-outs, holes in
-courtyards) count an overlap only where it is wider than 2 µm.
+courtyards) count an overlap only where it is wider than 2 µm. A clearance finding between items with an exact
+outline (straight tracks, vias, pads other than chamfered rectangles with rounded corners: a point, segment or
+polygon grown by a radius, `board::exact`) is measured again on it, so the arc approximation never eats into
+the 2 µm (KiCad accepts the same sub-micron deficits).
 
 | Code | Severity | Rule |
 |---|---|---|
@@ -443,9 +458,10 @@ courtyards) count an overlap only where it is wider than 2 µm.
 | `drc.via_drill`, `drc.pad_drill` | error | via or pad hole below `min_drill` |
 | `drc.via_annular_ring`, `drc.pad_annular_ring` | error | (pad size − hole) / 2 below `min_annular_ring` (vias, plated pads; slots per pad axis) |
 | `drc.hole_to_hole` | error | holes (vias, plated and non-plated pads, slots as stadiums) closer than `hole_to_hole`, edge to edge; holes of one pin (pads of a footprint sharing a number) are not checked against each other |
+| `drc.hole_clearance` | error | copper closer than `hole_clearance` (when set) to the edge of a hole it does not belong to: any copper to a non-plated hole (a mounting hole's own pads included), copper of other nets (not net-tied) to a plated one |
 | `drc.outside_board` | error | copper or a non-plated board hole not inside the outer contour, or overlapping a cutout |
 | `drc.copper_to_edge` | error | copper closer than `copper_to_edge` to any contour |
-| `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine), or a board hole is inside a courtyard (either side) |
+| `drc.courtyard_overlap` | error | courtyards of two footprints on the same side overlap (touching is fine), or a board hole is inside a courtyard (either side); every piece counts: the courtyard and the closed courtyard drawings, on the footprint's side or (`back`) the other one |
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout |
 | `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's exposed copper on that side, or (`silk_check: mask`) overlapping its solder mask opening (grown by its mask margin; non-plated holes included) |
 | `drc.silk_over_mask_opening` | warning | silkscreen overlapping a mask opening drawn by a footprint or on the board (`silk_check: mask`) |

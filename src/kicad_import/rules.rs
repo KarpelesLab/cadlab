@@ -15,6 +15,7 @@
 //! | `min_via_annular_width` | `min_annular_ring` |
 //! | `min_through_hole_diameter` | `min_drill` |
 //! | `min_hole_to_hole` | `hole_to_hole` |
+//! | `min_hole_clearance` | `hole_clearance` |
 //! | `min_copper_edge_clearance` | `copper_to_edge` |
 //! | `defaults.silk_line_width` | `min_silk_width` |
 //! | `min_silk_clearance` | `silk_to_pad` (zero included: overlaps only) |
@@ -135,6 +136,7 @@ fn parse_pro(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
     set("min_annular_ring", json_mm(r.get("min_via_annular_width")), "min_via_annular_width", diags);
     set("min_drill", json_mm(r.get("min_through_hole_diameter")), "min_through_hole_diameter", diags);
     set("hole_to_hole", json_mm(r.get("min_hole_to_hole")), "min_hole_to_hole", diags);
+    set("hole_clearance", json_mm(r.get("min_hole_clearance")), "min_hole_clearance", diags);
     set("copper_to_edge", json_mm(r.get("min_copper_edge_clearance")), "min_copper_edge_clearance", diags);
     set("min_silk_width", json_mm(ds["defaults"].get("silk_line_width")), "defaults.silk_line_width", diags);
     // Zero is a real value here: silkscreen may come up to pads but not over them (cadlab's

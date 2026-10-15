@@ -110,7 +110,7 @@ pub struct Case {
 }
 
 /// Adds a 2-pin 0402 capacitor `refdes` with its pins on `nets`, placed at `at`.
-fn add_cap(r: &Registry, s: &mut Session, refdes: &str, at: Value, nets: [&str; 2]) {
+pub fn add_cap(r: &Registry, s: &mut Session, refdes: &str, at: Value, nets: [&str; 2]) {
     exec(r, s, "circuit.add", json!({"part": "C 100nF 16V X7R 0402", "refdes": refdes}));
     for (i, n) in nets.iter().enumerate() {
         exec(r, s, "net.connect", json!({"net": n, "pins": [format!("{refdes}.{}", i + 1)]}));
@@ -369,6 +369,18 @@ pub fn cases() -> Vec<Case> {
                 // 0402 courtyards are ±0.44 mm tall: 0.8 mm apart they overlap by 0.08 mm, and
                 // the pads stay 0.23 mm apart.
                 add_cap(r, s, "C3", mm(15.0, 10.8), ["3V3", "GND"]);
+                track(r, s, "F.Cu", vec![json!("C3.1"), json!("C2.1")]);
+                track(r, s, "F.Cu", vec![json!("C3.2"), json!("C2.2")]);
+            },
+        },
+        Case {
+            name: "courtyard_touch",
+            what: "a third capacitor whose courtyard overlaps C2's by 9.9 µm (both tools: touching)",
+            expect: &[],
+            build: |r, s| {
+                route_all(r, s);
+                // KiCad reports courtyard overlaps from 10 µm (probed: 9.95 µm passes).
+                add_cap(r, s, "C3", mm(15.0, 10.8701), ["3V3", "GND"]);
                 track(r, s, "F.Cu", vec![json!("C3.1"), json!("C2.1")]);
                 track(r, s, "F.Cu", vec![json!("C3.2"), json!("C2.2")]);
             },

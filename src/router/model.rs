@@ -294,7 +294,13 @@ impl RouterBoard {
                         tracks: all,
                         vias: true,
                         net: None,
-                        clear: Clear::Net(rules.clearance.0 as f64),
+                        // The copper-to-hole clearance when the rules set one (the DRC checks it),
+                        // else the copper clearance; a net's larger clearance still applies.
+                        clear: Clear::Net(if rules.hole_clearance.0 > 0 {
+                            rules.hole_clearance.0 as f64
+                        } else {
+                            rules.clearance.0 as f64
+                        }),
                         kind: ObKind::Npth,
                         label: format!("hole of {}", pp.refdes),
                         owner: Some(pp.refdes.clone()),

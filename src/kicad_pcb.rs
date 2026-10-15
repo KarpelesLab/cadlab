@@ -568,7 +568,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
 }
 
 /// A board hole as a one-pad mounting hole footprint (no courtyard, excluded from BOM and
-/// position files).
+/// position files, its name hidden like in cadlab's legend).
 fn write_hole(w: &mut Writer<'_>, h: &crate::model::board::Hole) {
     let pf = PlacedFootprint { at: h.at, rotation: Angle::ZERO, side: BoardSide::Top, locked: false, footprint: None };
     let f = FpFrame::new(&pf);
@@ -584,7 +584,8 @@ fn write_hole(w: &mut Writer<'_>, h: &crate::model::board::Hole) {
         None => format!("MountingHole {}", mm(h.drill)),
     };
     let props = [
-        ("Reference", h.name.clone(), top, "F.SilkS", false),
+        // Hidden: cadlab's legend prints designators of footprints, not hole names.
+        ("Reference", h.name.clone(), top, "F.SilkS", true),
         ("Value", value, Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true),
         ("Footprint", format!("{LIB}:MountingHole"), Point::new(Nm::ZERO, Nm::ZERO), "F.Fab", true),
     ];
@@ -1167,7 +1168,8 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
                     "min_clearance": mmf(min_clearance(p)),
                     "min_connection": 0.0,
                     "min_copper_edge_clearance": mmf(r.copper_to_edge),
-                    "min_hole_clearance": mmf(r.clearance),
+                    // Zero (unset): KiCad checks no copper-to-hole clearance either.
+                    "min_hole_clearance": mmf(r.hole_clearance),
                     "min_hole_to_hole": mmf(r.hole_to_hole),
                     "min_microvia_diameter": 0.2,
                     "min_microvia_drill": 0.1,

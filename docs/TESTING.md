@@ -109,14 +109,15 @@ Both run on the boards of `tests/crosscheck/mod.rs`: the LDO board fully routed 
 through a thermal relief, 0402s at 30° and 135° (bottom) and an arc track (`features`), board and footprint mask and paste
 margins, a slotted pad, paste-in-hole, a solid pad zone connection and a pad keeping a 0.3 mm local
 clearance a track violates (`local_settings`, D40), and one board per deliberate violation: clearance track/track, track/pad, pad/via, short, net class width, minimum width, via
-annular ring, via drill, pad drill and annular ring, hole-to-hole, copper-to-edge, courtyard overlap, silk over
+annular ring, via drill, pad drill and annular ring, hole-to-hole, copper-to-edge, courtyard overlap (and a 9.9 µm
+overlap neither tool reports, `courtyard_touch`, D56), silk over
 pad, silk 0.08 mm from a pad (`silk_near_pad`), unrouted, keep-out (tracks), keep-out (footprints), and a netless track touching a net. Outputs are kept in
 `$CARGO_TARGET_TMPDIR/{drc,gerber}_crosscheck/<board>/` for inspection.
 
 **DRC** (`tests/drc_crosscheck.rs`): `drc::check` against `kicad-cli pcb drc --format json --severity-all
 --refill-zones` on the export. KiCad types map to cadlab codes in one table (`TYPE_MAP`: `clearance`,
 `shorting_items`/`tracks_crossing` → `drc.short`, `track_width`, `annular_width`, `drill_out_of_range`,
-`hole_to_hole`, `copper_edge_clearance`, `courtyards_overlap`, `items_not_allowed` → `drc.keepout`,
+`hole_to_hole`, `hole_clearance`, `copper_edge_clearance`, `courtyards_overlap`, `items_not_allowed` → `drc.keepout`,
 `silk_over_copper`, `unconnected_items` → `drc.unrouted`). Findings are matched one to one by:
 
 - rule (mapped code; severities may differ: cadlab's class width check is a warning, KiCad's `hole_to_hole` is);
@@ -222,15 +223,17 @@ Allowances, each with its reason, on top of the cross-check's (`drc_compare::ALL
 
 - rules only one tool has (`ONE_SIDED_RULES` in `tests/corpus.rs`): KiCad's `silk_edge_clearance`,
   `text_height`, `text_thickness`, `solder_mask_bridge`, `footprint_type_mismatch`, `starved_thermal`,
-  `copper_sliver`, `nonmirrored_text_on_back_layer`, `npth_inside_courtyard`, `pth_inside_courtyard`,
-  `hole_clearance`; cadlab's `drc.footprint_outside`;
+  `copper_sliver`, `nonmirrored_text_on_back_layer`, `npth_inside_courtyard`, `pth_inside_courtyard`;
+  cadlab's `drc.footprint_outside` (KiCad's `hole_clearance` pairs with `drc.hole_clearance` since D56);
 - KiCad `silk_over_copper` on board texts (cadlab checks silkscreen drawings, not texts);
 - original board only: `drc.track_width_class` (KiCad never checks net class widths; the export adds a
   `.kicad_dru` rule, so the re-export does); cadlab findings of rules the project sets to `ignore` in its
   `.kicad_pro`; courtyard overlaps involving a footprint whose courtyard the import generated;
 - re-export only: `drc.unplaced` (no schematic to check parity against);
 - report granularity: KiCad reports silkscreen over copper per silkscreen segment, so extra KiCad findings on
-  a pair cadlab reports are the same defect; KiCad's report stops at 199 findings of most types, so cadlab
+  a pair cadlab reports are the same defect; an open connection names one item of each island, either
+  tool's choice, so once exact matches are taken a KiCad `unconnected_items` and a cadlab `drc.unrouted`
+  sharing an item are the same defect; KiCad's report stops at 199 findings of most types, so cadlab
   findings of a type KiCad reported exactly 199 times are unverifiable and counted apart;
 - board-specific `known` entries in the manifest: side, rule, an exact maximum count, the comparison it
   applies to, and the reason; `gerber_known` entries for layers whose differences are explained. A known
@@ -254,10 +257,11 @@ CADLAB_CORPUS_DIR=$PWD/target/corpus CADLAB_ORACLES=1 \
   cargo test --release --test corpus -- --nocapture   # CADLAB_CORPUS_ONLY=name,name for a subset
 ```
 
-Results with KiCad 10.0.7 at the pins (re-measured 2026-10-14, D51; 10.0.6 gave the same corpus results
-before D44): every board imports; the board-level comparison has no unexplained difference; one board
-(`buspirate-flash-sop`) matches without any known entry. Routing everything again completes 71-100 % within
-30 s per board (`glasgow-revD1` 71 %, `tinytapeout-demo` 79 %: the router's weakest cases).
+Results with KiCad 10.0.7 at the pins (re-measured 2026-10-15, D56; 10.0.6 gave the same corpus results
+before D44): every board imports; the board-level comparison has no unexplained difference; two boards
+(`buspirate-flash-sop`, and `lumenpnp-ringlight` apart from one capacitor's Gerber layers) match without any
+DRC known entry. Routing everything again completes 61-100 % within
+30 s per board (`glasgow-revD1` 61 %, `tinytapeout-demo` 79 %: the router's weakest cases).
 
 **Fixed from the corpus** (each now covered by unit or round-trip tests): zone fills and their DRC disagreed
 when a zone's own clearance was below the net clearance (fills now keep the larger); bottom-side pads were
@@ -283,30 +287,36 @@ mask opening), thermal spokes trimmed at other items' clearances instead of drop
 had disconnected squeezed pads), and the import's UUID table covering KiCad 6/7 pad `tstamp`s and the
 drawings of pad-less footprints: 32 entries (320 findings at most, 118 of them one board's mask expansion,
 see below) and 23 Gerber layers; the pour-connectivity entries went from 6 boards (30 findings) to 3 (11).
+Every residual D51 left "not analyzed" was then traced (D56): clearance gaps measured on exact outlines,
+courtyard overlaps under KiCad's 10 µm, courtyards in pieces and on the other side, rule areas sharing a
+name, renamed designators, tented-only footprint vias, the copper-to-hole clearance in fills, the DRC and
+the router, and open connections paired by a shared end brought the manifest to 25 entries (215 findings
+at most, 118 of them corne-cherry's mask expansion) and 20 Gerber layers; pour connectivity differs on 2
+boards (four GND pads on `buspirate5-rev10`, one on `sweep-v2.2`).
 
 **Known issues** (recorded per board in the manifest; candidates for later work):
 
-- footprints with designators cadlab cannot use (`POWER SW`), logos with a schematic symbol (unplaced), and
-  board footprints missing from the schematic (fiducials, placeholders) are not imported;
-- pad stacks on SMD pads keep the front shape (`import.pad_approximated`), and per-layer thermal and zone
-  settings take the pad's (D48);
+- logos with a schematic symbol (unplaced), unannotated designators (`REF**`) and board footprints missing
+  from the schematic (fiducials, placeholders) are not imported (annotated designators cadlab cannot use,
+  `POWER SW`, are renamed when the circuit comes from the board, D56);
+- per-layer thermal and zone settings of pad stacks take the pad's (D48);
+- footprint drawings that are neither copper, mask, paste nor courtyard on the other side of the footprint
+  (silkscreen, fab), and the drawings of footprints that become board holes, are not kept;
 - custom DRC rules cadlab has no counterpart for (`hasComponentClass`, terms relating both items such as
   `A.Net == B.Net`, disallowed `text`/`hole`/`footprint`, track widths conditioned on `B`) and DRC
   exclusions stored in the project (layer-marker texts outside the outline, overlapping PMOD headers);
   `disallow`, conditions on `B` (a second scope, clearances) and rule severities are modeled since D46;
-- texts on copper layers are drawn in cadlab's stroke font, whose glyphs differ from KiCad's (Gerber
-  copper layers, copper-to-edge near the edge);
+- texts on copper layers are drawn in cadlab's stroke font (Hershey simplex, public domain), whose glyphs
+  differ from KiCad's own font (Gerber copper layers, copper-to-edge near the edge); KiCad's glyph data
+  exists only in its sources, so it is not matched (D56);
 - silkscreen over solder mask openings (D46, D51): KiCad's check grows pads by pad and footprint mask
   margins but not by the board-level expansion (`pad_to_mask_clearance`), which the fab applies and cadlab
   checks (`corne-cherry` 0.2 mm: 118 findings on the re-export; `cynthion` 0.05 mm); KiCad also does not
   report a logo's silkscreen over its own mask drawings (`sweep-v2.2`);
 - net-tie shorts of sense tracks crossing a tied pad are reported by KiCad unevenly (not paired);
 - connectivity through pours differs where cadlab's refill (its own algorithm) does not reach a pad KiCad's
-  fill reaches (`buspirate5-rev10`, `corne-cherry`, `sweep-v2.2`): e.g. KiCad keeps a pour only the hole
-  clearance from a copper-less NPTH, cadlab the zone clearance, so a spoke reaching KiCad's pour finds none;
-
-- not yet analyzed: a few residual differences on `corne-cherry`, `glasgow-revD1`, `sweep-v2.2` and `tinytapeout-demo` (marked so in the
-  manifest).
+  fill reaches (`buspirate5-rev10`, `sweep-v2.2`); the copper-less NPTH case is fixed (D56: fills keep the
+  copper-to-hole clearance from them).
 
 ### freerouting oracle (`tests/specctra.rs`)
 

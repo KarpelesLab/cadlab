@@ -567,7 +567,9 @@ const PAD_STACKS: &str = r#"(kicad_pcb (version 20241229) (generator pcbnew)
       (padstack (mode custom)
         (layer "In1.Cu" (shape circle) (size 1 1))
         (layer "In2.Cu" (shape circle) (size 1.4 1.4))
-        (layer "B.Cu" (shape circle) (size 1.7 1.7)))))
+        (layer "B.Cu" (shape circle) (size 1.7 1.7))))
+    (pad "3" smd rect (at 8 0) (size 1 1) (layers "F.Cu" "F.Mask")
+      (padstack (mode front_inner_back) (layer "B.Cu" (shape circle) (size 0.8 0.8)))))
   (footprint "Test:Stack" (layer "B.Cu") (at 120 60)
     (property "Reference" "J2")
     (pad "1" thru_hole oval (at 0 0) (size 2 1.5) (drill 0.8) (layers "*.Cu" "*.Mask")
@@ -578,7 +580,9 @@ const PAD_STACKS: &str = r#"(kicad_pcb (version 20241229) (generator pcbnew)
       (padstack (mode custom)
         (layer "In1.Cu" (shape circle) (size 1.4 1.4))
         (layer "In2.Cu" (shape circle) (size 1 1))
-        (layer "B.Cu" (shape circle) (size 1.7 1.7)))))
+        (layer "B.Cu" (shape circle) (size 1.7 1.7))))
+    (pad "3" smd circle (at -8 0) (size 0.8 0.8) (layers "B.Cu" "B.Mask")
+      (padstack (mode front_inner_back) (layer "B.Cu" (shape rect) (size 1 1)))))
   (segment (start 108 61) (end 111.5 61) (width 0.2) (layer "In1.Cu") (net 2) (uuid "t1"))
   (segment (start 108 61) (end 111.5 61) (width 0.2) (layer "F.Cu") (net 2) (uuid "t2"))
   (zone (net 0) (net_name "") (layers "In2.Cu") (uuid "z1") (name "pour") (hatch edge 0.5)
@@ -611,6 +615,9 @@ fn per_layer_pad_stacks() {
         assert_eq!(pad("2").stack.as_ref(), Some(&want2), "{r}");
         assert_eq!(pad("2").shape_on(StackLayer::Inner(2)), &circle(1.4));
         assert_eq!(pad("1").size(), (mmu(2), mmu(2)));
+        // An SMD pad takes its stack's entry for its own copper layer (`B.Cu` on the bottom).
+        assert_eq!(pad("3").shape, PadShape::Rect { w: mmu(1), h: mmu(1) }, "{r}");
+        assert!(pad("3").stack.is_none());
     }
     // Board copper per layer: J1 counts from the top, J2 from the bottom.
     let pads = crate::board::placed_pads(&p);
@@ -711,4 +718,77 @@ fn per_layer_pad_stacks() {
     let json = serde_json::to_string(f).unwrap();
     let back: crate::model::footprint::Footprint = serde_json::from_str(&json).unwrap();
     assert_eq!(&back, f);
+}
+
+/// Courtyards in pieces and on the other side, rule areas sharing a name, a designator with a
+/// space (corpus: tinytapeout-demo's carrier, corne-cherry's key switches, sweep's power switch).
+const PIECES: &str = r#"(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user) (46 "B.CrtYd" user) (47 "F.CrtYd" user))
+  (net 0 "") (net 1 "A") (net 2 "B")
+  (footprint "Test:Carrier" (layer "F.Cu") (at 110 60)
+    (property "Reference" "J5")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "A"))
+    (fp_rect (start -2 -3) (end 2 3) (stroke (width 0.12)) (fill no) (layer "F.CrtYd"))
+    (fp_rect (start 10 -1) (end 12 1) (stroke (width 0.12)) (fill no) (layer "F.CrtYd")))
+  (footprint "Test:Switch" (layer "B.Cu") (at 118 66)
+    (property "Reference" "SW1")
+    (pad "1" thru_hole circle (at 0 0) (size 1.5 1.5) (drill 1) (layers "*.Cu" "*.Mask") (net 2 "B"))
+    (fp_line (start -3 -3) (end 3 -3) (stroke (width 0.05)) (layer "F.CrtYd"))
+    (fp_line (start 3 -3) (end 3 3) (stroke (width 0.05)) (layer "F.CrtYd"))
+    (fp_line (start 3 3) (end -3 3) (stroke (width 0.05)) (layer "F.CrtYd"))
+    (fp_line (start -3 3) (end -3 -3) (stroke (width 0.05)) (layer "F.CrtYd")))
+  (footprint "Test:Diode" (layer "B.Cu") (at 118 64)
+    (property "Reference" "D1")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "B.Cu") (net 2 "B"))
+    (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05)) (fill no) (layer "B.CrtYd")))
+  (footprint "Test:Spdt" (layer "B.Cu") (at 104 54)
+    (property "Reference" "POWER SW")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "B.Cu") (net 1 "A"))
+    (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05)) (fill no) (layer "B.CrtYd")))
+  (zone (net 0) (net_name "") (layer "F.Cu") (name "X") (hatch edge 0.5)
+    (keepout (tracks allowed) (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+    (polygon (pts (xy 101 51) (xy 103 51) (xy 103 53) (xy 101 53))))
+  (zone (net 0) (net_name "") (layer "F.Cu") (name "X") (hatch edge 0.5)
+    (keepout (tracks allowed) (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+    (polygon (pts (xy 105 51) (xy 107 51) (xy 107 53) (xy 105 53))))
+  (gr_rect (start 100 50) (end 130 70) (stroke (width 0.1)) (fill none) (layer "Edge.Cuts"))
+)"#;
+
+#[test]
+fn courtyard_pieces_shared_area_names_and_renamed_designators() {
+    let dru = r#"(version 1)
+(rule "in x" (condition "A.enclosedByArea('X')") (constraint clearance (min 0.1mm)))"#;
+    let (k, _) = rules::parse(None, Some(dru)).unwrap();
+    let mut p = Project::new("t");
+    let (_, d) = import(&mut p, PIECES, &BoardImportOptions { rules: Some(k), ..opts() }).unwrap();
+    let c = codes(&d);
+    // Two separate courtyard rectangles: the larger is the courtyard, the other a piece.
+    let j5 = crate::board::footprint_for(&p, "J5").unwrap();
+    assert_eq!(j5.courtyard.len(), 4);
+    let xs: Vec<i64> = j5.courtyard.iter().map(|q| q.x.0).collect();
+    assert_eq!((xs.iter().min(), xs.iter().max()), (Some(&-2_000_000), Some(&2_000_000)));
+    let pieces = crate::board::placed_courtyards(&p, "J5");
+    assert_eq!(pieces.len(), 2);
+    assert!(pieces.iter().all(|(_, s)| *s == BoardSide::Top));
+    // A bottom footprint whose courtyard is on F.CrtYd: no generated courtyard, the drawing
+    // on the top side; the bottom diode inside it does not overlap it.
+    assert!(!c.contains(&"import.courtyard_generated"), "{c:?}");
+    let sw = crate::board::footprint_for(&p, "SW1").unwrap();
+    assert!(sw.courtyard.is_empty());
+    let sides: Vec<BoardSide> = crate::board::placed_courtyards(&p, "SW1").into_iter().map(|(_, s)| s).collect();
+    assert_eq!(sides, [BoardSide::Top]);
+    let overlaps: Vec<String> = crate::drc::check(&p)
+        .into_iter()
+        .filter(|d| d.code == "drc.courtyard_overlap")
+        .map(|d| d.message.to_string())
+        .collect();
+    assert!(overlaps.is_empty(), "{overlaps:?}");
+    // The designator with a space is kept under a usable one.
+    assert!(c.contains(&"import.refdes_renamed") && !c.contains(&"import.invalid_refdes"), "{c:?}");
+    assert!(p.board().footprints.contains_key("POWERSW1"));
+    // Both areas named X keep their rule.
+    let names: Vec<(&str, Option<&str>)> =
+        p.board().custom_rules.iter().map(|r| (r.name.as_str(), r.scope.in_area.as_deref())).collect();
+    assert_eq!(names, [("in x", Some("X")), ("in x (X_2)", Some("X_2"))]);
 }

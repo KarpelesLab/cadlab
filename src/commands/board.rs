@@ -404,6 +404,10 @@ pub struct SetRules {
     /// below it (0: no floor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_clearance: Option<Nm>,
+    /// Copper to the edge of a hole it does not belong to (non-plated holes, plated holes of
+    /// other nets); fills keep it from non-plated holes. 0: not checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hole_clearance: Option<Nm>,
     /// Solder mask opening growth beyond pads per side (negative shrinks), unless a pad or
     /// footprint sets its own margin (`footprint.set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,7 +532,11 @@ impl Command for SetRules {
             }
             r.ipc_class = c;
         }
-        for (field, v) in [("min_clearance", self.min_clearance), ("mask_min_web", self.mask_min_web)] {
+        for (field, v) in [
+            ("min_clearance", self.min_clearance),
+            ("mask_min_web", self.mask_min_web),
+            ("hole_clearance", self.hole_clearance),
+        ] {
             if v.is_some_and(|v| v < Nm::ZERO) {
                 return Err(CommandError::invalid_args("board.invalid_rule", format!("`{field}` cannot be negative")));
             }
@@ -541,6 +549,7 @@ impl Command for SetRules {
             .with_hint("e.g. -0.05 for 5 % smaller openings"));
         }
         r.min_clearance = self.min_clearance.unwrap_or(r.min_clearance);
+        r.hole_clearance = self.hole_clearance.unwrap_or(r.hole_clearance);
         r.mask_expansion = self.mask_expansion.unwrap_or(r.mask_expansion);
         r.mask_min_web = self.mask_min_web.unwrap_or(r.mask_min_web);
         r.paste_margin = self.paste_margin.unwrap_or(r.paste_margin);
@@ -559,6 +568,7 @@ impl Command for SetRules {
             .collect();
         for (field, a, b) in [
             ("min_clearance", before.min_clearance, r.min_clearance),
+            ("hole_clearance", before.hole_clearance, r.hole_clearance),
             ("mask_expansion", before.mask_expansion, r.mask_expansion),
             ("mask_min_web", before.mask_min_web, r.mask_min_web),
             ("paste_margin", before.paste_margin, r.paste_margin),

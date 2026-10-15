@@ -73,7 +73,7 @@ pub(super) struct Converted {
 }
 
 /// Footprint layer of a KiCad layer name, for a footprint on `side`, and whether it is on the
-/// footprint's other side (copper, mask and paste only; silkscreen, fab and courtyard drawings
+/// footprint's other side (copper, mask, paste and courtyard only; silkscreen and fab drawings
 /// are kept on the footprint's side).
 fn fp_layer(layer: &str, side: BoardSide) -> Option<(GraphicLayer, bool)> {
     let (own, other) = match side {
@@ -94,7 +94,7 @@ fn fp_layer(layer: &str, side: BoardSide) -> Option<(GraphicLayer, bool)> {
         "Paste" => GraphicLayer::Paste,
         _ => return None,
     };
-    let area = matches!(gl, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste);
+    let area = matches!(gl, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste | GraphicLayer::Courtyard);
     (!back || area).then_some((gl, back))
 }
 
@@ -411,7 +411,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                 layer,
                 Diagnostic::warning(
                     "import.footprint_layer",
-                    format!("footprint drawings on `{layer}` are not imported (cadlab footprints keep silkscreen, fab and courtyard of their own side, and copper, mask and paste of either side)"),
+                    format!("footprint drawings on `{layer}` are not imported (cadlab footprints keep silkscreen and fab drawings of their own side, and copper, mask, paste and courtyard of either side)"),
                 )
                 .with_subject(subject.clone())
                 .with_subject(ObjectRef::Layer(layer.to_string()))
@@ -480,8 +480,12 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
     } else {
         Mount::Tht
     };
+    // Only a courtyard on the other side (a key switch above a socket footprint on the bottom):
+    // nothing on the footprint's side.
+    let back_only = graphics.iter().any(|g| g.layer == GraphicLayer::Courtyard && g.back);
     let courtyard = match courtyard {
         Some(c) => c,
+        None if back_only => Vec::new(),
         None => {
             let c = pad_box(&pads);
             if !pads.is_empty() {
@@ -637,18 +641,64 @@ fn merge_paths(gs: Vec<Graphic>, uuids: Vec<Vec<String>>) -> (Vec<Graphic>, Vec<
 
 /// Takes the courtyard outline out of the courtyard drawings (a cadlab footprint has one
 /// courtyard polygon, and the drawings it replaces are removed so an export does not write the
-/// courtyard twice): a single closed polygon as is, a circle as a polygon around it, paths
-/// forming one closed loop; several closed shapes as their union when it is one polygon without
-/// holes; else the bounding box of all courtyard drawings.
+/// courtyard twice). On each side of the footprint, the closed shapes (polygons, circles as
+/// polygons around them, paths forming closed loops) are united: on the footprint's side the
+/// largest piece becomes the courtyard, and further pieces, and those on the other side (a key
+/// switch's body above a bottom-side socket footprint), stay as closed courtyard drawings
+/// (`back` for the other side). Drawings that close no loop: the bounding box of all courtyard
+/// drawings of that side.
 fn take_courtyard(gs: &mut Vec<Graphic>) -> Option<Vec<Point>> {
-    let crt: Vec<usize> = (0..gs.len()).filter(|&i| gs[i].layer == GraphicLayer::Courtyard).collect();
-    if crt.is_empty() {
-        return None;
+    let mut pieces = |back: bool| -> Vec<(Vec<Point>, Nm)> {
+        let crt: Vec<usize> =
+            (0..gs.len()).filter(|&i| gs[i].layer == GraphicLayer::Courtyard && gs[i].back == back).collect();
+        let mut taken: Vec<(GraphicGeometry, Nm)> =
+            crt.iter().rev().map(|&i| gs.remove(i)).map(|g| (g.geometry, g.width)).collect();
+        taken.reverse();
+        let width = taken.first().map(|t| t.1).unwrap_or(Nm::ZERO);
+        courtyard_pieces(taken.into_iter().map(|t| t.0).collect()).into_iter().map(|r| (r, width)).collect()
+    };
+    let mut front = pieces(false);
+    let back = pieces(true);
+    let area = |r: &Vec<Point>| -> i128 {
+        let n = r.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (r[i], r[(i + 1) % n]);
+                a.x.0 as i128 * b.y.0 as i128 - b.x.0 as i128 * a.y.0 as i128
+            })
+            .sum::<i128>()
+            .abs()
+    };
+    // The largest piece (first of equal ones) is the courtyard.
+    let main = (0..front.len()).max_by(|&i, &j| area(&front[i].0).cmp(&area(&front[j].0)).then(j.cmp(&i)));
+    let main = main.map(|i| front.remove(i).0);
+    for (ring, width) in front {
+        gs.push(Graphic {
+            layer: GraphicLayer::Courtyard,
+            width,
+            geometry: GraphicGeometry::Polygon { points: ring },
+            back: false,
+        });
     }
-    let mut taken: Vec<GraphicGeometry> = crt.iter().rev().map(|&i| gs.remove(i).geometry).collect();
-    taken.reverse();
+    for (ring, width) in back {
+        gs.push(Graphic {
+            layer: GraphicLayer::Courtyard,
+            width,
+            geometry: GraphicGeometry::Polygon { points: ring },
+            back: true,
+        });
+    }
+    main
+}
+
+/// Courtyard drawings of one side as closed outlines: their union when every drawing closes,
+/// else the bounding box of them all.
+fn courtyard_pieces(taken: Vec<GraphicGeometry>) -> Vec<Vec<Point>> {
+    if taken.is_empty() {
+        return vec![];
+    }
     if let [GraphicGeometry::Polygon { points }] = taken.as_slice() {
-        return Some(points.clone());
+        return vec![points.clone()];
     }
     // Closed rings: polygons, circles (polygons around them) and loops of paths.
     let mut rings: Vec<Vec<Point>> = Vec::new();
@@ -660,13 +710,13 @@ fn take_courtyard(gs: &mut Vec<Graphic>) -> Option<Vec<Point>> {
             GraphicGeometry::Path { points } => paths.push(points.clone()),
         }
     }
-    let loops_ok = paths.is_empty() || chain_loop(paths.clone()).map(|r| rings.push(r)).is_some();
+    let loops_ok = paths.is_empty() || chain_loops(paths).map(|r| rings.extend(r)).is_some();
     if loops_ok {
         if rings.len() == 1 {
-            return rings.pop();
+            return rings;
         }
-        if let Some(r) = union_ring(&rings) {
-            return Some(r);
+        if let Some(r) = union_rings(&rings) {
+            return r;
         }
     }
     // Fallback: bounding box of every courtyard drawing.
@@ -682,8 +732,8 @@ fn take_courtyard(gs: &mut Vec<Graphic>) -> Option<Vec<Point>> {
             }
         }
     }
-    let b = BBox::of_points(pts)?;
-    Some(vec![b.min, Point::new(b.max.x, b.min.y), b.max, Point::new(b.min.x, b.max.y)])
+    let Some(b) = BBox::of_points(pts) else { return vec![] };
+    vec![vec![b.min, Point::new(b.max.x, b.min.y), b.max, Point::new(b.min.x, b.max.y)]]
 }
 
 /// Arc tolerance of custom pad outlines: 1 µm, outside (copper is never smaller than drawn).
@@ -805,34 +855,41 @@ fn circle_ring(center: Point, radius: Nm) -> Vec<Point> {
     }
 }
 
-/// The union of closed rings when it is one polygon without holes.
-fn union_ring(rings: &[Vec<Point>]) -> Option<Vec<Point>> {
+/// The union of closed rings, when its pieces have no holes: their outlines (in the order the
+/// union gives them).
+fn union_rings(rings: &[Vec<Point>]) -> Option<Vec<Vec<Point>>> {
     use crate::geom::poly::{self, FillRule, Ring};
     let rs: Vec<Ring> =
         rings.iter().map(|r| Ring::from(r.iter().map(|&q| q.into()).collect::<Vec<poly::Point>>())).collect();
     let set = poly::union_all(&rs, FillRule::NonZero).ok()?;
-    match set.as_slice() {
-        [pg] if pg.holes.is_empty() => Some(pg.outer.0.iter().map(|&q| q.into()).collect()),
-        _ => None,
+    if set.is_empty() || set.iter().any(|pg| !pg.holes.is_empty()) {
+        return None;
     }
+    Some(set.iter().map(|pg| pg.outer.0.iter().map(|&q| q.into()).collect()).collect())
 }
 
-/// Polylines forming exactly one closed loop → its vertices (without repeating the first).
-fn chain_loop(mut paths: Vec<Vec<Point>>) -> Option<Vec<Point>> {
-    let mut ring = paths.remove(0);
+/// Polylines forming closed loops, each path used once → the loops' vertices (without repeating
+/// the first); `None` when a chain stays open.
+fn chain_loops(mut paths: Vec<Vec<Point>>) -> Option<Vec<Vec<Point>>> {
+    let mut out = Vec::new();
     while !paths.is_empty() {
-        let end = *ring.last()?;
-        let i = paths.iter().position(|p| p.first() == Some(&end) || p.last() == Some(&end))?;
-        let mut p = paths.remove(i);
-        if p.first() != Some(&end) {
-            p.reverse();
+        let mut ring = paths.remove(0);
+        while ring.len() < 2 || ring.first() != ring.last() {
+            let end = *ring.last()?;
+            let i = paths.iter().position(|p| p.first() == Some(&end) || p.last() == Some(&end))?;
+            let mut p = paths.remove(i);
+            if p.first() != Some(&end) {
+                p.reverse();
+            }
+            ring.extend(p.into_iter().skip(1));
         }
-        ring.extend(p.into_iter().skip(1));
-    }
-    (ring.len() >= 4 && ring.first() == ring.last()).then(|| {
+        if ring.len() < 4 {
+            return None;
+        }
         ring.pop();
-        ring
-    })
+        out.push(ring);
+    }
+    Some(out)
 }
 
 /// A box 0.25 mm around the pads (courtyard of footprints without one).
@@ -967,6 +1024,20 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
             if !matches!(pshape, PadShape::Circle { .. } | PadShape::Oval { .. }) || w != h {
                 pshape = PadShape::Circle { d };
             }
+            // A copper ring around a non-plated hole (KiCad plots it): cadlab's non-plated holes
+            // have no copper.
+            if layers.iter().any(|l| l.ends_with(".Cu")) && w.max(h) > d {
+                notes.agg(
+                    "import.npth_copper",
+                    "npth",
+                    Diagnostic::warning(
+                        "import.npth_copper",
+                        "non-plated holes with a copper pad larger than the hole: the copper around them is not kept",
+                    )
+                    .with_subject(pad_subject.clone())
+                    .with_hint("make the pad a plated through-hole pad without a net if the copper ring matters"),
+                );
+            }
             (PadKind::Npth { drill: d }, PadRole::Copper { paste: false })
         }
         "smd" | "connect" => {
@@ -1028,8 +1099,22 @@ fn convert_pad(c: &Sexpr, loc: &Local, ctx: &Ctx, subject: &ObjectRef, notes: &m
                 pshape = front;
                 stack = Some(st).filter(|s| !s.is_empty());
             }
+        } else if matches!(pkind, PadKind::Smd) {
+            // An SMD pad has copper on one layer: its shape there is the stack's entry for that
+            // layer (a footprint flipped to the bottom keeps its pad's shape under `B.Cu`).
+            let mut msgs = Vec::new();
+            let read = read_stack(ps, (pshape.clone(), copper_off), (w, h), loc, ctx.copper.len(), &mut msgs);
+            for m in msgs {
+                approx(m, notes);
+            }
+            if let Some((front, front_off, st)) = read {
+                pshape = if on_back { st.back.unwrap_or_else(|| front.clone()) } else { front };
+                if front_off != copper_off {
+                    at = anchor + loc.pad_offset(front_off).rotated(rotation);
+                }
+            }
         } else {
-            approx("a per-layer pad stack on a pad without a plated hole keeps its front layer's shape".into(), notes);
+            approx("a per-layer pad stack on a non-plated hole keeps its front layer's shape".into(), notes);
         }
     }
     let paste = match (&pkind, &role) {
@@ -1571,14 +1656,15 @@ mod tests {
     #[test]
     fn chains_loops() {
         let p = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
-        let ring = chain_loop(vec![
+        let rings = chain_loops(vec![
             vec![p(0, 0), p(10, 0)],
             vec![p(10, 10), p(10, 0)],
             vec![p(10, 10), p(0, 10)],
             vec![p(0, 10), p(0, 0)],
+            vec![p(20, 0), p(30, 0), p(30, 10), p(20, 0)],
         ])
         .unwrap();
-        assert_eq!(ring, vec![p(0, 0), p(10, 0), p(10, 10), p(0, 10)]);
-        assert!(chain_loop(vec![vec![p(0, 0), p(10, 0)], vec![p(10, 0), p(10, 10)]]).is_none());
+        assert_eq!(rings, vec![vec![p(0, 0), p(10, 0), p(10, 10), p(0, 10)], vec![p(20, 0), p(30, 0), p(30, 10)]]);
+        assert!(chain_loops(vec![vec![p(0, 0), p(10, 0)], vec![p(10, 0), p(10, 10)]]).is_none());
     }
 }

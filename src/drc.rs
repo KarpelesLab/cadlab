@@ -25,8 +25,17 @@ use crate::model::sections::natural_cmp;
 use crate::refs::ObjectRef;
 use crate::units::Nm;
 
-/// Measurement tolerance of distance rules (two outward arc approximations of 1 µm).
+/// Measurement tolerance of distance rules: a deficit up to this is accepted, measured on the
+/// exact outlines where items have one ([`geo::exact`]), else on the polygons (two outward arc
+/// approximations of 1 µm). KiCad's own is 0.5 µm (probed with kicad-cli 10.0.7: a clearance
+/// 0.50 µm short passes, 0.55 µm is reported); the router keeps clearances to within 1 µm
+/// (`router::index::TOL`), so cadlab keeps the 2 µm and the deficits in between are KiCad's alone.
 pub const TOLERANCE: Nm = Nm(2_000);
+
+/// Courtyards overlapping by less than this are touching: KiCad reports courtyard overlaps
+/// from 10 µm (probed with kicad-cli 10.0.7: 9.95 µm passes, 10 µm is reported), far below any
+/// placement accuracy, so drawing slop on library courtyards is not a finding.
+pub const COURTYARD_TOLERANCE: Nm = Nm(10_000);
 
 /// Runs every rule on the project's board.
 pub fn check(p: &Project) -> Vec<Diagnostic> {
@@ -40,6 +49,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     via_sizes(&ctx, &mut out);
     pad_holes(&ctx, &pads, &mut out);
     hole_to_hole(&ctx, &pads, &mut out);
+    hole_clearance(&ctx, &items, &pads, &mut out);
     let outline = BoardShape::of(p);
     match &outline {
         Some(o) => board_edges(&ctx, &items, o, &mut out),
@@ -160,6 +170,16 @@ where
     A: polyclip::RingSource + Geometry + ?Sized,
     B: polyclip::RingSource + Geometry + ?Sized,
 {
+    overlap_wider(a, b, TOLERANCE.0)
+}
+
+/// Overlap of two regions at least `width` wide somewhere (from 40 nm under it: it survives
+/// shrinking by half of it less 20 nm, so a strip exactly `width` wide is kept): its centroid.
+fn overlap_wider<A, B>(a: &A, b: &B, width: i64) -> Option<Point>
+where
+    A: polyclip::RingSource + Geometry + ?Sized,
+    B: polyclip::RingSource + Geometry + ?Sized,
+{
     if !polyclip::intersects(a, b) {
         return None;
     }
@@ -168,7 +188,8 @@ where
         return None;
     }
     let tol = polyclip::ArcTol::new(1_000, polyclip::Side::Outside);
-    let core = polyclip::offset(&inter, -(TOLERANCE.0 / 2), Join::Round, tol).ok()?;
+    let shrink = if width == TOLERANCE.0 { width / 2 } else { (width / 2 - 20).max(1) };
+    let core = polyclip::offset(&inter, -shrink, Join::Round, tol).ok()?;
     if core.is_empty() {
         return None;
     }
@@ -297,6 +318,8 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
         if !ba.expand(required).intersects(&bb) {
             continue;
         }
+        // The polygons lie outside the copper, so their gap is never larger than the true one:
+        // every violation is a candidate, and exact outlines decide below.
         let limit = (required - TOLERANCE.0).max(1);
         if !close(i, j, limit) {
             continue;
@@ -325,7 +348,19 @@ fn copper_pairs(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
                 continue;
             }
             let Some(sev) = rule_severity(rule) else { continue };
-            let (dist, at) = gap(&a.shape, &b.shape).unwrap_or((0.0, a.anchor));
+            let (mut dist, at) = gap(&a.shape, &b.shape).unwrap_or((0.0, a.anchor));
+            // The polygons' arcs lie outside the copper: where both items have an exact outline,
+            // the true gap decides (a deficit within the tolerance is accepted, not one the arc
+            // approximation adds to).
+            if let (Some(ca), Some(cb)) = (geo::exact::item_core(ctx.p, a), geo::exact::item_core(ctx.p, b)) {
+                let exact = geo::exact::distance(&ca, &cb);
+                if exact >= limit as f64 {
+                    continue;
+                }
+                if exact > 0.0 {
+                    dist = exact;
+                }
+            }
             let by = rule.map(|r| format!(" (custom rule `{}`)", r.name)).unwrap_or_default();
             let mut d = Diagnostic::new(
                 sev,
@@ -713,6 +748,139 @@ fn hole_to_hole(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
 }
 
 /// Distance between two segments (a point when both ends are equal) and the closest points.
+/// Copper to the edge of a drilled hole (`hole_clearance`, when set): every copper item to every
+/// non-plated hole, and to plated holes (vias, through-hole pads) of other nets; a hole's own pad
+/// or via is its copper. Drill wander must not reach copper the hole is not meant to plate.
+fn hole_clearance(ctx: &Ctx, items: &[CopperItem], pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
+    let min = ctx.rules.hole_clearance.0;
+    if min <= 0 {
+        return;
+    }
+    struct Hole {
+        at: Point,
+        end: Point,
+        r: i64,
+        plated: bool,
+        net: Option<String>,
+        /// The copper item the hole belongs to (its pad or via), with the pad's center.
+        owner: Option<(geo::ItemRef, Point)>,
+        label: String,
+        subjects: Vec<ObjectRef>,
+    }
+    let mut holes: Vec<Hole> = Vec::new();
+    for v in &ctx.p.board().vias {
+        holes.push(Hole {
+            at: v.at,
+            end: v.at,
+            r: v.drill.0 / 2,
+            plated: true,
+            net: v.net.clone(),
+            owner: Some((geo::ItemRef::Via(v.id), v.at)),
+            label: format!("via#{}", v.id.0),
+            subjects: vec![ObjectRef::Item { kind: "via".into(), index: v.id.0 }],
+        });
+    }
+    for pp in pads {
+        if let Some((d, plated)) = pp.hole {
+            let (at, end) = pp.slot.unwrap_or((pp.hole_at, pp.hole_at));
+            holes.push(Hole {
+                at,
+                end,
+                r: d.0 / 2,
+                plated,
+                net: pp.net.clone(),
+                owner: Some((geo::ItemRef::Pad(pp.refdes.clone(), pp.number.clone()), pp.center)),
+                label: pad_label(pp),
+                subjects: pad_subjects(pp),
+            });
+        }
+    }
+    let index = RTree::new(items.iter().map(|it| it.shape.bbox()));
+    let limit = (min - TOLERANCE.0).max(1);
+    // The copper item of each pad and via (the first of a pad stack's), for net ties.
+    let mut owners: BTreeMap<(String, Point), usize> = BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if matches!(it.item, geo::ItemRef::Pad(..) | geo::ItemRef::Via(_)) {
+            owners.entry((it.item.to_string(), it.anchor)).or_insert(i);
+        }
+    }
+    for h in &holes {
+        let hb = Rect::new(pt(h.at), pt(h.at)).union(&Rect::new(pt(h.end), pt(h.end))).expand(h.r + min);
+        let Ok(shape) = polyclip::offset_paths(
+            &vec![Path(vec![pt(h.at), pt(h.end)])],
+            h.r.max(1),
+            Join::Round,
+            EndCap::Round,
+            polyclip::ArcTol::new(1_000, polyclip::Side::Inside),
+        ) else {
+            continue;
+        };
+        let core = geo::exact::Core { points: vec![h.at, h.end], closed: false, radius: h.r as f64 };
+        let mut found: Vec<u32> = index.query(&hb);
+        found.sort_unstable();
+        for i in found {
+            let it = &items[i as usize];
+            if let Some((owner, center)) = &h.owner
+                && it.item == *owner
+                && (!matches!(owner, geo::ItemRef::Pad(..)) || it.anchor == *center)
+            {
+                continue;
+            }
+            if h.plated && h.net.is_some() && it.net == h.net {
+                continue;
+            }
+            // Copper joined to the hole's own pad or via by a net tie is that net's copper, and
+            // copper touching it is a short (`drc.short`), not a hole clearance.
+            if h.plated
+                && let Some((owner, center)) = &h.owner
+                && owners.get(&(owner.to_string(), *center)).is_some_and(|&k| {
+                    let o = &items[k];
+                    geo::tied(it, o)
+                        || (it.layers.iter().any(|l| o.layers.contains(l)) && polyclip::intersects(&o.shape, &it.shape))
+                })
+            {
+                continue;
+            }
+            // The hole's polygon lies inside the hole (1 µm): candidates within the clearance
+            // plus that, then the exact outline decides when the copper has one.
+            if !polyclip::distance_less_than(&shape, &it.shape, min + 1_000) {
+                continue;
+            }
+            let (mut dist, at) = gap(&shape, &it.shape).unwrap_or((0.0, h.at));
+            match geo::exact::item_core(ctx.p, it) {
+                Some(c) => {
+                    let exact = geo::exact::distance(&core, &c);
+                    if exact >= limit as f64 {
+                        continue;
+                    }
+                    dist = exact.max(0.0);
+                }
+                None if dist >= limit as f64 => continue,
+                None => {}
+            }
+            let label = it.item.to_string();
+            let mut d = Diagnostic::error(
+                "drc.hole_clearance",
+                format!(
+                    "{label} ({}) is {} from the hole of {}, hole clearance is {}",
+                    net_label(it.net.as_deref()),
+                    nm_f(dist),
+                    h.label,
+                    ctx.rules.hole_clearance
+                ),
+            )
+            .at(at)
+            .with_hint("move the copper away from the hole, or move the hole");
+            d = d.with_subject(item_ref(&label));
+            d.subjects.extend(h.subjects.iter().cloned());
+            if let Some(n) = &it.net {
+                d = d.with_subject(ObjectRef::Net(n.clone()));
+            }
+            out.push(d);
+        }
+    }
+}
+
 fn segment_distance(a: (Point, Point), b: (Point, Point)) -> (f64, (f64, f64), (f64, f64)) {
     let f = |p: Point| (p.x.0 as f64, p.y.0 as f64);
     let (p0, p1, q0, q1) = (f(a.0), f(a.1), f(b.0), f(b.1));
@@ -889,25 +1057,22 @@ fn board_edges(ctx: &Ctx, items: &[CopperItem], o: &BoardShape, out: &mut Vec<Di
     }
 }
 
-/// Placed courtyards by designator, with their side.
-fn courtyards(p: &Project) -> BTreeMap<String, (Ring, BoardSide)> {
+/// Placed courtyard pieces in designator order, with their side (`geo::placed_courtyards`).
+type Courtyards = Vec<(String, Ring, BoardSide)>;
+
+fn courtyards(p: &Project) -> Courtyards {
     let board = p.board();
     board
         .footprints
-        .iter()
-        .filter_map(|(r, pf)| geo::placed_courtyard(p, r).map(|c| (r.clone(), (c, pf.side))))
+        .keys()
+        .flat_map(|r| geo::placed_courtyards(p, r).into_iter().map(move |(c, s)| (r.clone(), c, s)))
         .collect()
 }
 
 /// Board holes (mounting holes): non-plated holes outside the board or in a cutout (plated
 /// ones are copper and checked with it), and any hole over a footprint courtyard (either side:
 /// the hole goes through the board).
-fn board_holes(
-    p: &Project,
-    cy: &BTreeMap<String, (Ring, BoardSide)>,
-    outline: Option<&BoardShape>,
-    out: &mut Vec<Diagnostic>,
-) {
+fn board_holes(p: &Project, cy: &Courtyards, outline: Option<&BoardShape>, out: &mut Vec<Diagnostic>) {
     for h in &p.board().holes {
         let Ok(ring) = (Circle { center: pt(h.at), radius: h.diameter().0 / 2 }).to_ring(COPPER_TOL) else { continue };
         let subject = || ObjectRef::Named { kind: "hole".into(), name: h.name.clone() };
@@ -925,8 +1090,13 @@ fn board_holes(
                 .with_hint("move it inside the board outline (board.hole_remove, then board.hole)"),
             );
         }
-        for (r, (c, _)) in cy {
+        let mut last: Option<&String> = None;
+        for (r, c, _) in cy {
+            if last == Some(r) {
+                continue;
+            }
             if let Some(at) = overlap(&ring, c) {
+                last = Some(r);
                 out.push(
                     Diagnostic::error(
                         "drc.courtyard_overlap",
@@ -943,15 +1113,19 @@ fn board_holes(
 }
 
 /// Courtyard overlaps on the same side, and footprints partly outside the board.
-fn courtyard_rules(cy: &BTreeMap<String, (Ring, BoardSide)>, outline: Option<&BoardShape>, out: &mut Vec<Diagnostic>) {
-    let list: Vec<(&String, &Ring, BoardSide)> = cy.iter().map(|(r, (c, s))| (r, c, *s)).collect();
+fn courtyard_rules(cy: &Courtyards, outline: Option<&BoardShape>, out: &mut Vec<Diagnostic>) {
+    let list: Vec<(&String, &Ring, BoardSide)> = cy.iter().map(|(r, c, s)| (r, c, *s)).collect();
     let boxes: Vec<Option<Rect>> = list.iter().map(|(_, c, _)| c.bbox()).collect();
+    // One finding per pair of footprints (the first overlapping pieces).
+    let mut seen: std::collections::BTreeSet<(&String, &String)> = std::collections::BTreeSet::new();
     for (i, j) in near_pairs(&boxes, 0) {
         let ((ra, ca, sa), (rb, cb, sb)) = (list[i], list[j]);
-        if sa != sb {
+        let key = if ra <= rb { (ra, rb) } else { (rb, ra) };
+        if sa != sb || ra == rb || seen.contains(&key) {
             continue;
         }
-        if let Some(at) = overlap(ca, cb) {
+        if let Some(at) = overlap_wider(ca, cb, COURTYARD_TOLERANCE.0) {
+            seen.insert(key);
             out.push(
                 Diagnostic::error("drc.courtyard_overlap", format!("courtyards of {ra} and {rb} overlap"))
                     .with_subject(ObjectRef::Name(ra.clone()))
@@ -962,8 +1136,13 @@ fn courtyard_rules(cy: &BTreeMap<String, (Ring, BoardSide)>, outline: Option<&Bo
         }
     }
     if let Some(o) = outline {
+        let mut last: Option<&String> = None;
         for (r, c, _) in &list {
+            if last == Some(*r) {
+                continue;
+            }
             if o.outside(*c) {
+                last = Some(*r);
                 let at = polyclip::centroid(*c).map(|q| from_f(q.x, q.y)).unwrap_or_default();
                 out.push(
                     Diagnostic::error("drc.footprint_outside", format!("{r} is partly outside the board"))
@@ -1195,7 +1374,7 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
 }
 
 /// Tracks, vias and footprints inside keep-outs that forbid them.
-fn keepouts(ctx: &Ctx, cy: &BTreeMap<String, (Ring, BoardSide)>, out: &mut Vec<Diagnostic>) {
+fn keepouts(ctx: &Ctx, cy: &Courtyards, out: &mut Vec<Diagnostic>) {
     let board = ctx.p.board();
     for k in &board.keepouts {
         let ring: Ring = k.outline.iter().map(|q| pt(*q)).collect();
@@ -1240,7 +1419,11 @@ fn keepouts(ctx: &Ctx, cy: &BTreeMap<String, (Ring, BoardSide)>, out: &mut Vec<D
             }
         }
         if k.no_footprints {
-            for (r, (c, side)) in cy {
+            let mut last: Option<&String> = None;
+            for (r, c, side) in cy {
+                if last == Some(r) {
+                    continue;
+                }
                 let layer = if *side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
                 if ctx.mask(&[layer.to_string()]) & kmask == 0 {
                     continue;
@@ -1248,6 +1431,7 @@ fn keepouts(ctx: &Ctx, cy: &BTreeMap<String, (Ring, BoardSide)>, out: &mut Vec<D
                 if c.bbox().is_some_and(|b| b.intersects(&kb))
                     && let Some(at) = overlap(&ring, c)
                 {
+                    last = Some(r);
                     push(r.clone(), ObjectRef::Name(r.clone()), at);
                 }
             }

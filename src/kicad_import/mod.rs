@@ -636,6 +636,9 @@ pub fn import(
     // Footprints: mounting holes, drawings only, components.
     let matched = !p.circuit().components.is_empty();
     report.circuit = if matched { CircuitSource::Matched } else { CircuitSource::Built };
+    if !matched {
+        rename_invalid_designators(&mut fps, &mut notes);
+    }
     let mut holes: Vec<(Hole, Option<String>, &Converted)> = Vec::new();
     let mut comps: Vec<&Converted> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -653,9 +656,11 @@ pub fn import(
             || !valid_refdes(&refdes)
             || (matched && !p.circuit().components.contains_key(&refdes));
         if board_only && let Some(hs) = board_only_holes(c) {
-            // One plated hole on a net: a stitching via footprint, so a via.
+            // One tented plated hole on a net: a stitching via footprint, so a via (vias have no
+            // mask opening; an exposed pad, such as a battery contact, stays a plated board hole).
             if let [(h, Some(net))] = hs.as_slice()
                 && let (Some(d), Some(first), Some(last)) = (h.pad, copper.first(), copper.last())
+                && c.fp.pads.iter().all(|p| p.mask == crate::model::footprint::MaskOpening::None)
             {
                 notes.agg(
                     "import.footprint_as_via",
@@ -832,6 +837,8 @@ pub fn import(
 
     // Copper and areas.
     let mut zone_names: BTreeSet<String> = BTreeSet::new();
+    // KiCad names of rule areas → the unique names they got here.
+    let mut area_names: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for r in raw {
         match r {
             RawItem::Track { mut t, net, uuid } => {
@@ -863,7 +870,11 @@ pub fn import(
             }
             RawItem::Keepout { mut k, uuid } => {
                 k.id = p.alloc_id();
+                let kicad_name = k.name.trim().to_string();
                 k.name = unique_name(&k.name, &mut zone_names, || "keepout".into());
+                if !kicad_name.is_empty() {
+                    area_names.entry(kicad_name).or_default().push(k.name.clone());
+                }
                 if let Some(u) = uuid {
                     report.uuids.insert(u, format!("keepout:{}", k.name));
                 }
@@ -871,6 +882,7 @@ pub fn import(
             }
         }
     }
+    split_area_rules(p, &area_names);
     for (mut g, uuids) in graphics {
         g.id = p.alloc_id();
         for u in uuids {
@@ -917,6 +929,104 @@ fn uuid_label(refdes: &str, what: &str) -> String {
         return format!("text:{refdes}/{k}");
     }
     refdes.to_string()
+}
+
+/// When the circuit is built from the board, components whose designator cadlab cannot use
+/// (`POWER SW`: not letters then a number) get one made of its letters and the next free number
+/// (`POWERSW1`), so their copper and nets are kept. Unannotated designators (`REF**`), board-only
+/// hole footprints and footprints without pads are left alone (they are not imported, or become
+/// holes, vias or drawings).
+fn rename_invalid_designators(fps: &mut [Converted], notes: &mut Notes) {
+    let mut taken: BTreeSet<String> = fps.iter().map(|c| c.refdes.trim().to_uppercase()).collect();
+    for c in fps.iter_mut() {
+        let refdes = c.refdes.trim().to_uppercase();
+        // `REF**`, `U?`: not annotated, left out as before.
+        if valid_refdes(&refdes) || refdes.contains(['*', '?']) || c.fp.pads.is_empty() || as_hole(c, false).is_some() {
+            continue;
+        }
+        if c.attrs.contains("board_only") || board_only_holes(c).is_some() {
+            continue;
+        }
+        let letters: String = refdes.chars().filter(|ch| ch.is_ascii_uppercase()).collect();
+        if letters.is_empty() {
+            continue;
+        }
+        let Some(new) = (1..).map(|n| format!("{letters}{n}")).find(|r| !taken.contains(r)) else { continue };
+        taken.insert(new.clone());
+        notes.push(
+            Diagnostic::warning(
+                "import.refdes_renamed",
+                format!(
+                    "footprint `{}` has designator `{}`, which is not letters then a number; imported as `{new}`",
+                    c.lib_id, c.refdes
+                ),
+            )
+            .with_subject(ObjectRef::Name(new.clone()))
+            .at(c.placement.at)
+            .with_hint("annotate the board in KiCad if another designator is wanted, and import again"),
+        );
+        c.refdes = new;
+    }
+}
+
+/// One of a rule's area names (`scope` or `with`, `in_area` or `touches_area`).
+type AreaField = fn(&mut crate::model::board::CustomRule) -> Option<&mut Option<String>>;
+
+/// KiCad rule areas may share a name (a rule's `insideArea('X')` then means any of them), while
+/// cadlab keeps area names unique (`X`, `X_2`, ...): a custom rule naming such an area becomes
+/// one rule per area, in place (same values, so "last rule wins" resolves as before).
+fn split_area_rules(p: &mut Project, area_names: &BTreeMap<String, Vec<String>>) {
+    let multi = |n: &Option<String>| n.as_ref().and_then(|n| area_names.get(n)).filter(|v| v.len() > 1);
+    let names = |s: &crate::model::board::RuleScope| [multi(&s.in_area), multi(&s.touches_area)];
+    let rules = &p.board().custom_rules;
+    let split = |r: &crate::model::board::CustomRule| {
+        names(&r.scope).iter().any(Option::is_some)
+            || r.with.as_ref().is_some_and(|w| names(w).iter().any(Option::is_some))
+    };
+    if !rules.iter().any(split) {
+        return;
+    }
+    let mut out = Vec::new();
+    for r in rules.clone() {
+        // Every combination of the areas the rule names (usually one area with a few copies).
+        let mut variants = vec![(r.clone(), Vec::<String>::new())];
+        let fields: [AreaField; 4] = [
+            |r| Some(&mut r.scope.in_area),
+            |r| Some(&mut r.scope.touches_area),
+            |r| r.with.as_mut().map(|w| &mut w.in_area),
+            |r| r.with.as_mut().map(|w| &mut w.touches_area),
+        ];
+        for field in fields {
+            let mut next = Vec::new();
+            for (mut v, tags) in variants {
+                let copies = field(&mut v).and_then(|f| multi(f).cloned());
+                match copies {
+                    Some(list) => {
+                        for (i, name) in list.iter().enumerate() {
+                            let mut c = v.clone();
+                            if let Some(f) = field(&mut c) {
+                                *f = Some(name.clone());
+                            }
+                            let mut t = tags.clone();
+                            if i > 0 {
+                                t.push(name.clone());
+                            }
+                            next.push((c, t));
+                        }
+                    }
+                    None => next.push((v, tags)),
+                }
+            }
+            variants = next;
+        }
+        for (mut v, tags) in variants {
+            if !tags.is_empty() {
+                v.name = format!("{} ({})", v.name, tags.join(", "));
+            }
+            out.push(v);
+        }
+    }
+    p.board_mut().custom_rules = out;
 }
 
 fn unique_name(name: &str, used: &mut BTreeSet<String>, fallback: impl FnOnce() -> String) -> String {

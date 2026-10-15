@@ -129,11 +129,6 @@ const ONE_SIDED_RULES: &[(Side, &str, &str)] = &[
     (Side::Kicad, "npth_inside_courtyard", "cadlab has no rule for holes inside courtyards"),
     (Side::Kicad, "pth_inside_courtyard", "cadlab has no rule for holes inside courtyards"),
     (
-        Side::Kicad,
-        "hole_clearance",
-        "cadlab has no hole-to-copper clearance rule (its clearance is copper to copper, hole_to_hole hole to hole)",
-    ),
-    (
         Side::Cadlab,
         "drc.footprint_outside",
         "KiCad has no rule for a courtyard extending beyond the board edge (edge connectors, castellated \

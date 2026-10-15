@@ -16,6 +16,9 @@
 //! | 68-71 | `R` + rotation in degrees |
 //! | 73-74 | `S` + mask: `0` none over the feature, `3` both sides (tented via) |
 //!
+//! A through-hole pad whose pad stack gives the two outer layers different lands has one record
+//! per side (`A01` with the top land, `ANN` with the bottom one) instead of one `A00` record.
+//!
 //! The standard itself is sold by IPC; this follows the published record layout as used across
 //! the industry. Coordinates are board coordinates, aligned with the Gerber files.
 
@@ -131,9 +134,10 @@ pub fn netlist(p: &Project, o: &Options) -> OutFile {
             PadKind::Tht { .. } => ("317", 0),
             PadKind::Npth { .. } => ("367", 0),
         };
-        records.push(record(&Feature {
+        let net = net_field(&pp.net);
+        let feature = |access: usize, size: (Nm, Nm)| Feature {
             op,
-            net: net_field(&pp.net),
+            net: net.clone(),
             refdes: &pp.refdes,
             pin: &pp.number,
             mid: false,
@@ -141,10 +145,19 @@ pub fn netlist(p: &Project, o: &Options) -> OutFile {
             access,
             // A hole's record is at the hole (off the copper center with a drill offset).
             at: if pp.hole.is_some() { pp.hole_at } else { pp.center },
-            size: pp.pad.shape.size(),
+            size,
             rotation: rot,
             mask: 0,
-        }));
+        };
+        // A pad stack with other outer lands: one record per side, each with its land (the
+        // access code says which side a probe reaches it from).
+        let (top, bottom) = (pp.pad_shape_on("F.Cu").size(), pp.pad_shape_on("B.Cu").size());
+        if matches!(pp.pad.kind, PadKind::Tht { .. }) && n > 1 && top != bottom {
+            records.push(record(&feature(1, top)));
+            records.push(record(&feature(n, bottom)));
+        } else {
+            records.push(record(&feature(access, pp.pad.shape.size())));
+        }
     }
     for v in &p.board().vias {
         let ls = via_layers(p, v);

@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 pub mod clearance;
+pub mod exact;
 pub mod holes;
 pub mod place;
 pub mod prepared;
@@ -1075,6 +1076,27 @@ pub fn placed_courtyard(p: &Project, refdes: &str) -> Option<polyclip::Ring> {
     }
     let tf = transform(pf);
     Some(fp.courtyard.iter().map(|q| pt(tf(*q))).collect())
+}
+
+/// Every courtyard piece of a placed footprint with the board side it is on: the courtyard on
+/// the footprint's side, then its closed courtyard drawings (further pieces; `back` ones on the
+/// other side, such as a key switch's body above a socket footprint on the bottom).
+pub fn placed_courtyards(p: &Project, refdes: &str) -> Vec<(polyclip::Ring, BoardSide)> {
+    let Some(pf) = p.board().footprints.get(refdes) else { return Vec::new() };
+    let Some(fp) = footprint_for(p, refdes) else { return Vec::new() };
+    let tf = transform(pf);
+    let mut out: Vec<(polyclip::Ring, BoardSide)> = Vec::new();
+    if fp.courtyard.len() >= 3 {
+        out.push((fp.courtyard.iter().map(|q| pt(tf(*q))).collect(), pf.side));
+    }
+    for g in fp.graphics.iter().filter(|g| g.layer == crate::model::footprint::GraphicLayer::Courtyard) {
+        if let crate::model::footprint::GraphicGeometry::Polygon { points } = &g.geometry
+            && points.len() >= 3
+        {
+            out.push((points.iter().map(|q| pt(tf(*q))).collect(), pad_side(pf.side, g.back)));
+        }
+    }
+    out
 }
 
 /// Outline contour as a polygon ring (arcs approximated).

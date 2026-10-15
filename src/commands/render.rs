@@ -244,6 +244,8 @@ fn mm(v: Nm) -> f64 {
 pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
     let mut s = Scene { background: Color::hex(0x101418), prims: Vec::new() };
     let copper = Color::hex(0xc83434);
+    let back_copper = Color::hex(0x4d7fc4);
+    let inner_copper = Color::hex(0xe0c040);
     let paste = Color::hex(0x8a8a8a).alpha(170);
     let drill = Color::hex(0x101418);
     for g in &f.graphics {
@@ -274,29 +276,25 @@ pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
     s.outline(f.courtyard.iter().map(|p| (mm(p.x), mm(p.y))).collect(), 0.05, Color::hex(0xd040d0));
     for p in &f.pads {
         let (cx, cy) = (mm(p.at.x), mm(p.at.y));
-        let rect = |w: f64, h: f64| {
-            vec![
-                (cx - w / 2.0, cy - h / 2.0),
-                (cx + w / 2.0, cy - h / 2.0),
-                (cx + w / 2.0, cy + h / 2.0),
-                (cx - w / 2.0, cy + h / 2.0),
-            ]
+        // The pad's outline (rounded corners as short chords), rotated and placed.
+        let outline = |shape: &PadShape| -> Vec<(f64, f64)> {
+            crate::board::pad_outline_local(shape)
+                .into_iter()
+                .map(|q| {
+                    let q = q.rotated(p.rotation) + p.at;
+                    (mm(q.x), mm(q.y))
+                })
+                .collect()
         };
-        match p.shape {
-            PadShape::Polygon { ref points } => {
-                s.fill(points.iter().map(|q| (cx + mm(q.x), cy + mm(q.y))).collect(), copper, None)
-            }
-            PadShape::Rect { w, h } => s.fill(rect(mm(w), mm(h)), copper, None),
-            PadShape::RoundRect { w, h, r } => s.fill(round_rect(cx, cy, mm(w), mm(h), mm(r)), copper, None),
-            PadShape::Oval { w, h } => {
-                let r = mm(w.min(h)) / 2.0;
-                s.fill(round_rect(cx, cy, mm(w), mm(h), r), copper, None);
-            }
-            PadShape::Circle { d } => s.circle((cx, cy), mm(d) / 2.0, Some(copper), None),
-            PadShape::Trapezoid { .. } | PadShape::ChamferedRect { .. } => {
-                let pts = p.shape.outline_points(Nm(1_000)).unwrap_or_default();
-                s.fill(pts.iter().map(|q| (cx + mm(q.x), cy + mm(q.y))).collect(), copper, None)
-            }
+        // A pad stack: the land on the other side of the footprint under the footprint side's,
+        // inner layers' lands outlined over it.
+        let stack = p.stack.as_ref().filter(|_| p.has_stack());
+        if let Some(b) = stack.and_then(|st| st.back.as_ref()) {
+            s.fill(outline(b), back_copper, None);
+        }
+        s.fill(outline(&p.shape), copper, None);
+        for inner in stack.iter().flat_map(|st| st.inner.iter().chain(st.layers.values())) {
+            s.outline(outline(inner), 0.03, inner_copper);
         }
         if let Some(crate::model::footprint::Paste::Windows { size, at }) = &p.paste {
             for w in at {
@@ -323,19 +321,6 @@ pub(crate) fn footprint_scene(f: &crate::model::footprint::Footprint) -> Scene {
         s.text(&p.number, (cx, cy), size, HAlign::Center, VAlign::Middle, 0, Color::hex(0xffffff));
     }
     s
-}
-
-fn round_rect(cx: f64, cy: f64, w: f64, h: f64, r: f64) -> Vec<(f64, f64)> {
-    let r = r.min(w / 2.0).min(h / 2.0);
-    let (hw, hh) = (w / 2.0 - r, h / 2.0 - r);
-    let mut pts = Vec::new();
-    for (k, (ox, oy)) in [(hw, hh), (-hw, hh), (-hw, -hh), (hw, -hh)].iter().enumerate() {
-        for i in 0..=6 {
-            let a = std::f64::consts::FRAC_PI_2 * (k as f64 + i as f64 / 6.0);
-            pts.push((cx + ox + r * a.cos(), cy + oy + r * a.sin()));
-        }
-    }
-    pts
 }
 
 impl Command for Footprint {

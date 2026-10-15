@@ -42,6 +42,7 @@ pub const TYPE_MAP: &[(&str, &[&str])] = &[
     ("drill_out_of_range", &["drc.via_drill", "drc.pad_drill"]),
     ("hole_to_hole", &["drc.hole_to_hole"]),
     ("holes_co_located", &["drc.hole_to_hole"]),
+    ("hole_clearance", &["drc.hole_clearance"]),
     ("missing_footprint", &["drc.unplaced"]),
     ("copper_edge_clearance", &["drc.copper_to_edge", "drc.outside_board"]),
     ("courtyards_overlap", &["drc.courtyard_overlap"]),
@@ -331,6 +332,15 @@ fn same(k: &Finding, c: &Finding) -> bool {
     codes.contains(&c.code.as_str()) && !k.items.is_empty() && k.items.is_subset(&c.items)
 }
 
+/// Whether a KiCad open connection and a cadlab one are the same defect named by other ends: an
+/// unconnected island has several pads and tracks either tool may pick as its end, so sharing
+/// one item (with its net) is enough once exact matches are taken.
+fn same_open_connection(k: &Finding, c: &Finding) -> bool {
+    k.kicad_type.as_deref() == Some("unconnected_items")
+        && c.code == "drc.unrouted"
+        && k.items.iter().any(|i| !i.starts_with('?') && c.items.contains(i))
+}
+
 /// Whether a label names a footprint (`U1`) rather than a pad, track, via, zone, text...
 fn is_footprint_label(l: &str) -> bool {
     !l.contains(['.', '#', ':', '?']) && l != "edge"
@@ -456,9 +466,28 @@ pub fn compare(
         if board_used[i] == 1 { format!("\n      because: {}", allow[i].reason) } else { String::new() }
     };
 
-    // One-to-one matching, KiCad findings first.
+    // One-to-one matching, KiCad findings first: exact matches, then open connections that
+    // share an end.
     let mut taken = vec![false; ours.len()];
-    for k in &theirs {
+    let mut hits: Vec<Option<usize>> = theirs
+        .iter()
+        .map(|k| {
+            let hit = ours.iter().enumerate().position(|(i, c)| !taken[i] && same(k, c));
+            if let Some(i) = hit {
+                taken[i] = true;
+            }
+            hit
+        })
+        .collect();
+    for (ki, k) in theirs.iter().enumerate() {
+        if hits[ki].is_none() {
+            hits[ki] = ours.iter().enumerate().position(|(i, c)| !taken[i] && same_open_connection(k, c));
+            if let Some(i) = hits[ki] {
+                taken[i] = true;
+            }
+        }
+    }
+    for (ki, k) in theirs.iter().enumerate() {
         for (label, at) in &k.anchors {
             let dist = |w: &Point| (w.x.0 - at.x.0).abs().max((w.y.0 - at.y.0).abs());
             if let Some(want) = anchor_of(p, &pads, label).into_iter().min_by_key(dist)
@@ -473,10 +502,8 @@ pub fn compare(
                 );
             }
         }
-        let hit = ours.iter().enumerate().position(|(i, c)| !taken[i] && same(k, c));
-        match hit {
+        match hits[ki] {
             Some(i) => {
-                taken[i] = true;
                 let c = &ours[i];
                 out.matched += 1;
                 *out.matched_by_rule.entry(k.rule(Side::Kicad).to_string()).or_default() += 1;

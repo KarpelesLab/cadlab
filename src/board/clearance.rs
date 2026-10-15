@@ -14,10 +14,36 @@
 
 use polyclip::{Geometry, Polygon, Ring};
 
-use super::{CopperItem, ItemRef, footprint_for, placed_courtyard};
+use super::{CopperItem, ItemRef, footprint_for, placed_courtyards};
 use crate::model::Project;
 use crate::model::board::{CustomRule, ItemKind, RuleScope};
 use crate::units::Nm;
+
+/// Whether an item reaches into an area (a courtyard, a rule area) by more than `tol`: copper
+/// merely touching the outline is outside, measured on the item's exact outline when it has one,
+/// else on the polygons (their overlap must survive shrinking by half of `tol`).
+fn reaches_into(p: &Project, area: &Polygon, it: &CopperItem, tol: i64) -> bool {
+    let item = &it.shape;
+    if !polyclip::intersects(area, item) {
+        return false;
+    }
+    if let Some(core) = super::exact::item_core(p, it) {
+        let outline =
+            super::exact::Core { points: area.outer.0.iter().map(|&q| q.into()).collect(), closed: true, radius: 0.0 };
+        return super::exact::reaches_into(&core, &outline, tol as f64);
+    }
+    let Ok(inter) = polyclip::boolean(polyclip::Op::Intersection, area, item, polyclip::FillRule::NonZero) else {
+        return true;
+    };
+    let arcs = polyclip::ArcTol::new(1_000, polyclip::Side::Outside);
+    polyclip::offset(&inter, -(tol / 2).max(1), polyclip::Join::Round, arcs).is_ok_and(|core| !core.is_empty())
+}
+
+/// How far copper must reach into a courtyard or a rule area to be in it: the DRC's measurement
+/// tolerance (KiCad's `intersectsCourtyard` takes a track whose straight side reaches 1 µm in,
+/// probed with kicad-cli 10.0.7; a round track end 1.4 µm in, measured on its exact outline, is
+/// outside in both tools).
+const REACH: i64 = crate::drc::TOLERANCE.0;
 
 /// `*` and `?` wildcard match (whole string).
 pub fn glob(pattern: &str, s: &str) -> bool {
@@ -58,6 +84,7 @@ pub fn item_kind(it: &ItemRef) -> ItemKind {
 
 /// A rule scope prepared against a board: the courtyards and areas it names.
 struct Scope<'a> {
+    p: &'a Project,
     scope: &'a RuleScope,
     /// Designators matching `footprint`.
     members: Vec<String>,
@@ -75,7 +102,7 @@ fn footprint_matches(p: &Project, pattern: &str, refdes: &str) -> bool {
 }
 
 impl<'a> Scope<'a> {
-    fn new(p: &Project, scope: &'a RuleScope) -> Scope<'a> {
+    fn new(p: &'a Project, scope: &'a RuleScope) -> Scope<'a> {
         let board = p.board();
         let members = match &scope.footprint {
             Some(pat) => board.footprints.keys().filter(|r| footprint_matches(p, pat, r)).cloned().collect(),
@@ -86,7 +113,12 @@ impl<'a> Scope<'a> {
                 .footprints
                 .keys()
                 .filter(|r| footprint_matches(p, pat, r))
-                .filter_map(|r| placed_courtyard(p, r))
+                // KiCad's `intersectsCourtyard`: the courtyard on the footprint's own side
+                // (every piece of it).
+                .flat_map(|r| {
+                    let side = board.footprints[r].side;
+                    placed_courtyards(p, r).into_iter().filter(move |(_, s)| *s == side).map(|(c, _)| c)
+                })
                 .map(|mut r| {
                     if !r.is_ccw() {
                         r.reverse_orientation();
@@ -117,7 +149,7 @@ impl<'a> Scope<'a> {
                 Polygon::new(r, vec![])
             })
             .collect();
-        Scope { scope, members, courtyards, areas, touched }
+        Scope { p, scope, members, courtyards, areas, touched }
     }
 
     fn holds(&self, it: &CopperItem) -> bool {
@@ -138,7 +170,7 @@ impl<'a> Scope<'a> {
             let hit = self
                 .courtyards
                 .iter()
-                .any(|c| c.bbox().zip(bb).is_some_and(|(a, b)| a.intersects(&b)) && polyclip::intersects(c, &it.shape));
+                .any(|c| c.bbox().zip(bb).is_some_and(|(a, b)| a.intersects(&b)) && reaches_into(self.p, c, it, REACH));
             if !hit {
                 return false;
             }
@@ -151,7 +183,7 @@ impl<'a> Scope<'a> {
             let hit = self
                 .touched
                 .iter()
-                .any(|a| a.bbox().zip(bb).is_some_and(|(x, y)| x.intersects(&y)) && polyclip::intersects(a, &it.shape));
+                .any(|a| a.bbox().zip(bb).is_some_and(|(x, y)| x.intersects(&y)) && reaches_into(self.p, a, it, REACH));
             if !hit {
                 return false;
             }
