@@ -162,6 +162,9 @@ Details in [ROUTER.md](ROUTER.md).
       (`cargo run --release --example route_bench`, results in ROUTER.md)
 - [x] Corpus completion pass: grid snapped to fine pad pitches, USB-C D+/D− crossover vias, failing searches
       skipped by exact reachability tests, capped present factor (corne-cherry 91.8 % → 99.1 %, DECISIONS D57)
+- [x] Escape planning per package (an assignment over candidate exits with ejection chains, necks for crowded
+      rows, boxed pads re-planned), exact stub conflicts, negotiation estimates the costs near its targets
+      (DECISIONS D64)
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 

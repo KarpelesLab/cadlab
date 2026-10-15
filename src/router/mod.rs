@@ -12,7 +12,8 @@
 //!    aligned with the most pad centers; static legality maps per rule profile, sampled at half
 //!    the pitch with an inflation margin that makes the sampling exact.
 //!    **Fanout** (`fanout`, on that grid, before routing): dog-bone vias for BGA balls,
-//!    staggered escapes for off-grid fine-pitch pads, planned exactly, then existing copper.
+//!    staggered escapes for off-grid fine-pitch pads (one exit per pad chosen for the whole
+//!    package at once), planned exactly, then existing copper.
 //! 3. **Search** (`engine`): A* with 8 directions, costs for length, bends (45° cheap, 90°
 //!    dearer, sharper forbidden), vias, wrong-way moves per layer (alternating horizontal /
 //!    vertical preference) and congestion; multi-source/multi-target so nets grow as trees.
@@ -34,7 +35,10 @@
 //!    validated exactly against all other copper.
 //! 6. **Verification**: `crate::drc::check` on the result; any routed item with a DRC error is
 //!    ripped up and reported, so the output never violates the rules silently.
-//! 7. **Push-and-shove** (`shove`) for what is left: connections that failed get one more try
+//! 7. **Re-planned escapes**: pads the escape planning left without an exit and whose
+//!    connections failed get their exits first in another run of their nets and their
+//!    neighbors' (kept when fewer fail).
+//! 8. **Push-and-shove** (`shove`) for what is left: connections that failed get one more try
 //!    with the unlocked copper of other nets pushed aside (walkaround, shove, spring-back);
 //!    [`place_track`] places a track along waypoints the same way.
 //!
@@ -428,7 +432,10 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
         }
     }
     let start = Instant::now();
-    let first = route_once(p, scope, opts, hooks, Soft::No)?;
+    let (mut first, missed) = route_run(p, scope, opts, hooks, Soft::No, &[])?;
+    if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
+        first = replan_boxed(p, scope, opts, hooks, first, &missed, start)?;
+    }
     if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
         return shove_leftovers(p, opts, hooks, first, start);
     }
@@ -439,6 +446,107 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
         return Ok(r);
     }
     shove(p, scope, opts, hooks, first)
+}
+
+/// Most connections of a net [`replan_boxed`] rips up and routes again.
+const REPLAN_MAX_CONNS: usize = 8;
+
+/// Pads of a fine-pitch package that the escape planning left without an exit and whose
+/// connections then failed (boxed in by their neighbors' escapes and routing) get their exits
+/// re-planned: the nets of those pads and of the package's pads around them (up to three
+/// pad pitches away, nets of at most [`REPLAN_MAX_CONNS`] connections) are ripped up and routed
+/// again with the boxed pads served first by the escape planning (their neighbors then take
+/// other exits, or none when the router can reach them without one). Kept when fewer of
+/// those nets' connections fail; otherwise `first` is returned unchanged. Needs a twentieth
+/// of the time budget left.
+fn replan_boxed(
+    p: &Project,
+    scope: &Scope,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+    first: RouteResult,
+    missed: &[String],
+    start: Instant,
+) -> Result<RouteResult, RouteError> {
+    let failed = |r: &RouteResult, nets: &BTreeSet<String>| {
+        r.connections.iter().filter(|c| c.status == ConnStatus::Failed && nets.contains(&c.net)).count()
+    };
+    let mut boxed: BTreeSet<String> = BTreeSet::new();
+    for c in first.connections.iter().filter(|c| c.status == ConnStatus::Failed) {
+        for end in [&c.from, &c.to] {
+            if missed.contains(end) {
+                boxed.insert(end.clone());
+            }
+        }
+    }
+    if boxed.is_empty() {
+        return Ok(first);
+    }
+    let left = opts.budget.map(|b| b.saturating_sub(start.elapsed()));
+    if let (Some(b), Some(l)) = (opts.budget, left)
+        && l < b / 20
+    {
+        return Ok(first);
+    }
+    // Connections per net (of this run) and the nets the scope may route.
+    let mut conns: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in &first.connections {
+        *conns.entry(c.net.as_str()).or_default() += 1;
+    }
+    let small = |n: &str| conns.get(n).is_some_and(|&k| k <= REPLAN_MAX_CONNS);
+    let pads = geo_board::placed_pads(p);
+    let mut group: BTreeSet<String> = BTreeSet::new();
+    let mut prio: Vec<String> = Vec::new();
+    for label in &boxed {
+        let Some((refdes, num)) = label.split_once('.') else { continue };
+        let Some(me) = pads.iter().find(|q| q.refdes == refdes && q.number == num) else { continue };
+        let Some(net) = me.net.as_deref().filter(|n| small(n)) else { continue };
+        let at = P::of(me.center);
+        let mine: Vec<&geo_board::PlacedPad> = pads.iter().filter(|q| q.refdes == refdes && q.number != num).collect();
+        let pitch = mine.iter().map(|q| P::of(q.center).dist(at)).fold(f64::MAX, f64::min);
+        if pitch == f64::MAX {
+            continue;
+        }
+        group.insert(net.to_string());
+        prio.push(label.clone());
+        for q in mine {
+            if P::of(q.center).dist(at) <= 3.0 * pitch + 1_000.0
+                && let Some(n) = q.net.as_deref().filter(|n| small(n))
+            {
+                group.insert(n.to_string());
+            }
+        }
+    }
+    if group.is_empty() {
+        return Ok(first);
+    }
+    if let Scope::Nets(list) = scope {
+        group.retain(|n| list.contains(n));
+    }
+    let before = failed(&first, &group);
+    if before == 0 {
+        return Ok(first);
+    }
+    // The board with everything but the group's routing.
+    let mut q = p.clone();
+    let mine = |n: &Option<String>| n.as_ref().is_some_and(|n| group.contains(n));
+    let keep_t: Vec<Track> = first.tracks.iter().filter(|t| !mine(&t.net)).cloned().collect();
+    let keep_v: Vec<Via> = first.vias.iter().filter(|v| !mine(&v.net)).cloned().collect();
+    apply_items(&mut q, &keep_t, &keep_v, &[], &[]);
+    let sub = RouteOptions { budget: left, ..opts.clone() };
+    let (again, _) = route_run(&q, &Scope::Nets(group.iter().cloned().collect()), &sub, hooks, Soft::No, &prio)?;
+    if failed(&again, &group) >= before {
+        return Ok(first);
+    }
+    let mut out = first;
+    out.tracks = keep_t;
+    out.tracks.extend(again.tracks);
+    out.vias = keep_v;
+    out.vias.extend(again.vias);
+    out.connections.retain(|c| !group.contains(&c.net));
+    out.connections.extend(again.connections);
+    restat(&mut out);
+    Ok(out)
 }
 
 /// The differential pairs a scope routes coupled: every pair for [`Scope::All`], the pairs
@@ -1232,14 +1340,27 @@ fn route_once(
     hooks: &Hooks<'_>,
     soft: Soft,
 ) -> Result<RouteResult, RouteError> {
+    Ok(route_run(p, scope, opts, hooks, soft, &[])?.0)
+}
+
+/// One routing run whose escape planning serves the pads `prio` (labels) first; also returns
+/// the fine-pitch pads its escape planning left without an exit.
+fn route_run(
+    p: &Project,
+    scope: &Scope,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+    soft: Soft,
+    prio: &[String],
+) -> Result<(RouteResult, Vec<String>), RouteError> {
     let start = Instant::now();
     let slots = routing_slots(p, &opts.layers)?;
     (hooks.progress)(0, None, "preparing");
     // Fanout: planned on the board as it is, then part of the board the router works on.
-    let fan = if opts.fanout != Some(false) && !matches!(scope, Scope::Connection { .. }) {
-        fanout_items(p, scope, &slots, opts, None)?
+    let (fan, missed) = if opts.fanout != Some(false) && !matches!(scope, Scope::Connection { .. }) {
+        fanout_items(p, scope, &slots, opts, None, prio)?
     } else {
-        vec![]
+        (vec![], vec![])
     };
     let with_fanout;
     // (track IDs, via ID) of each fanout.
@@ -1909,7 +2030,7 @@ fn route_once(
     stats.vias = out.vias.len();
     stats.length = tracks_length(&out.tracks);
     (hooks.progress)(1, Some(1), "done");
-    Ok(RouteResult {
+    let result = RouteResult {
         tracks: out.tracks,
         vias: out.vias,
         connections: reports,
@@ -1918,7 +2039,8 @@ fn route_once(
         removed_vias: vec![],
         rerouted: vec![],
         pairs: vec![],
-    })
+    };
+    Ok((result, missed))
 }
 
 /// Via cost of [`minimize_vias`] (grid steps; negotiation uses `Costs::via`).
@@ -2066,13 +2188,14 @@ fn fanout_items(
     slots: &[usize],
     opts: &RouteOptions,
     only: Option<&[String]>,
-) -> Result<Vec<FanItem>, RouteError> {
+    prio: &[String],
+) -> Result<(Vec<FanItem>, Vec<String>), RouteError> {
     let items = geo_board::copper_items(p);
     let isl = geo_board::islands(&items);
     let mut rb = RouterBoard::build(p, &items, &isl);
     let mut routes = plan(&rb, scope)?;
     if routes.is_empty() {
-        return Ok(vec![]);
+        return Ok((vec![], vec![]));
     }
     if opts.neck != Some(false) {
         apply_necks(&mut rb, &mut routes, slots);
@@ -2102,7 +2225,8 @@ fn fanout_items(
             .into_iter()
             .all(|(i, j)| i >= 0 && j >= 0 && i < grid.dw() && j < grid.dh() && grid::ok(map[grid.didx(i, j)], net))
     };
-    let mut escapes = fanout::escape(&rb, &routes, slots, &grid, &mut index, only, &open, &cross);
+    let mut missed = Vec::new();
+    let mut escapes = fanout::escape(&rb, &routes, slots, &grid, &mut index, only, &open, &cross, prio, &mut missed);
     escapes.splice(0..0, cross.exits);
     let (first, last) = (rb.layer_names[0].clone(), rb.layer_names[rb.layer_names.len() - 1].clone());
     // Split where the scoped rules change (see `RouterBoard::split_track`).
@@ -2151,7 +2275,7 @@ fn fanout_items(
         let tracks = e.pts.windows(2).flat_map(|w| track(e.net, e.layer, w[0], w[1])).collect();
         out.push(FanItem { tracks, via: None, label: e.label, escape: Some((e.layer, e.pts)), tracks_net: None });
     }
-    Ok(out)
+    Ok((out, missed))
 }
 
 /// A planned fanout or escape (IDs not allocated yet).
@@ -2174,7 +2298,7 @@ struct FanItem {
 pub fn fanout(p: &Project, components: &[String], layers: &[String]) -> Result<FanoutResult, RouteError> {
     let slots = routing_slots(p, layers)?;
     let only = (!components.is_empty()).then_some(components);
-    let items = fanout_items(p, &Scope::All, &slots, &RouteOptions::default(), only)?;
+    let (items, _) = fanout_items(p, &Scope::All, &slots, &RouteOptions::default(), only, &[])?;
     let mut alloc = p.clone();
     let mut out = FanoutResult { tracks: vec![], vias: vec![], pads: vec![] };
     for f in items {

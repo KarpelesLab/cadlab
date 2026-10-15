@@ -1317,6 +1317,52 @@ board-level residual (−9 % at 1.6 GHz to +5 % at 9 GHz) is the open-region lin
 The export does not write openEMS's dispersive materials or conducting sheets: their XML attributes are not
 documented well enough to write without reading openEMS's code.
 
+### D64. Router escapes planned per package as an assignment, re-planned for boxed pads; negotiation estimates costs near the targets (2026-10-15)
+**Escapes.** Fine-pitch escapes were planned greedily pad by pad (shallowest exit first, up to four attempts with
+the pads left over first), so in a tight row every other pad found its exits taken by its neighbors' (25 of the 75
+off-grid pads of tinytapeout-demo's 0.4 mm QFN-80, 6 of 28 on an RP2040 of corne-cherry). Now every pad of a
+package gets its candidate exits (up to 24, shallowest first, each legal against everything placed so far) and one
+exit per pad is chosen for the whole package before any is committed: pads in order take their best candidate free
+of the chosen ones, then each pad left without one tries its candidates, moving the chosen exits in its way (at most
+three) to other candidates of theirs, with chains of up to two further moves (ejection chains, as in local search
+for assignment problems), until no pad gains an exit; two candidates clash when their tracks break a clearance or one
+ends in the other's halo as the grid samples it. The count never drops and everything follows the data's order, so
+it is deterministic. QFN-80 50 → 65 exits, RP2040 22 → 27. **Neck-down for crowded rows:** a single-layer pad of a
+fine-pitch row whose class width gets out of the pad but cannot run beside its neighbor's track at the pad pitch
+with the clearance outside the part (tinytapeout's 0.22 mm Default class out of the QFN-80, 0.16 mm under the
+courtyard rule, 0.2 mm beyond it) is necked like a pad its width cannot leave (0.185 mm there), since otherwise no
+assignment gives every pad an exit. **Re-plan:** when a run leaves a pad that had candidates without an exit and
+its connection fails, the nets of that pad and of its package's pads within three pitches (nets of at most 8
+connections) are ripped up and routed again with the boxed pads served first; kept when fewer of their connections
+fail (needs a twentieth of the budget left). Pads without any candidate (USB-C pads walled in by the receptacle's
+own pads) are not re-planned. **Stub conflicts:** access stubs are off the grid, so the halos saw them only at grid
+samples and two stubs of different nets could pass too close (the DRC then removed a connection; it showed on
+corne-cherry once its escapes changed). Grid wires' stubs are now checked exactly against the other nets' off-grid
+copper (stubs, gridless wires) when conflicts are counted, and searches that may not share drop stubs that are not
+clear of any committed routing. Checking stubs against grid copper too counted conflicts the halos already hold, at
+other points, and changed negotiation (the LQFP-48 test lost a connection with the grid search alone).
+**Time (corne-cherry exhausted its budget since D61).** Profiling the corpus re-route (stack samples of the running
+router) put 92 % of corne-cherry's time in grid A* expansions, not in scoped-rule lookups: late in negotiation the
+history and present costs around a connection's targets are a cost every path pays and the distance heuristic does
+not see, so single connections flooded up to 350 000 nodes. A search still running after 10 000 expansions, from the
+sixth iteration on (present factor 5 or more), now settles the 5 000 nodes nearest its targets backwards (Dijkstra
+over the moves the search may make, on its costs without bends) and estimates every node by the larger of the
+distance and that cost, capped at the last cost settled, which bounds every node not settled (Dijkstra's order).
+Still a lower bound and consistent, so paths stay optimal; entries already queued keep smaller keys and only come out
+earlier. Same searches with and without it: 0.51× the time on corne-cherry, 0.32× on cynthion, 0.9× on
+glasgow-revD1. Applied from the first iteration or after fewer expansions it was also faster on corne, but changed
+the generated boards' negotiation more (stm32-2l 57 → 65 vias); gated as above the generated-board baseline moves
+within tolerance only (stm32-2l one via more, bga144-4l 0.3 % shorter; re-blessed). Tried and dropped: a weighted
+heuristic in negotiation (slower per iteration on corne: more re-expansions), node data interleaved in one array
+(no gain), rerouting only nets whose routing passes near an overused point instead of those whose box holds it
+(conflicts sit where everything passes; no smaller sets). Corpus (ROUTER.md): corne-cherry 97.2–97.4 % in 60 s
+(budget) → 97.7 % in 47 s, tinytapeout-demo 93.6 → 95.6–96.7 %, glasgow-revD1 93.2–93.4 → 93.7 %, lumenpnp-mobo
+99.1 → 99.3 %, cynthion converging inside the budget, buspirate5-rev10 26 → 9 s; zero DRC errors throughout.
+*Why:* exits are a shared resource of a package, so planning them one pad at a time decides the conflicts by pad
+order; an assignment with local repair serves the pads the geometry allows, and the re-plan lets the routing result
+say which pads mattered. The router's time went to searches whose costs the heuristic ignored, so the estimate, not
+the clearance bookkeeping, was the thing to fix.
+
 ## Open questions
 
 

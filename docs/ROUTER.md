@@ -109,11 +109,17 @@ falling back to the other diagonals. Vias never go in pads. *Fine-pitch escapes*
 room for a track between neighbors, and of which at least one pad is too far off the routing grid for a track along
 the nearest grid line to clear its neighbors, gets an escape for each off-grid pad: a straight track out along the
 pad's long axis, then 45° onto a grid cell from which the router can move outwards (checked on the static maps),
-the shallowest such cell first so that neighbors stagger. Escapes are planned greedily in pad order; pads left
-without one go first in another attempt (up to four), and the attempt with the most escapes is kept (on the STM32
-boards one LQFP-48 pad otherwise found every exit taken by its neighbors' escapes). Every stub and via is checked exactly against everything
-placed so far, including the router's own sampling margin between escapes, so the fanout is DRC-clean by
-construction. *Crossover vias*: in a row of fine-pitch single-layer pads, two nets whose pads interleave tightly
+the shallowest such cell first so that neighbors stagger. Escapes are planned for the whole package before any is
+committed (D64): every pad gets its candidate exits (up to 24, shallowest first, end cells at most two pitches
+beside the pad's axis, each legal against everything placed so far), and one exit per pad is chosen as an
+assignment over them: pads in order take their best candidate free of the exits chosen so far, then every pad
+left without one tries its candidates in turn, moving the chosen exits in its way (at most three) to other
+candidates of theirs, which may in turn move one more in their way, up to two levels (ejection chains), until no
+pad gains an exit. Two candidates clash when their tracks break a clearance or one ends in the other's halo as the
+router samples it. A greedy pass in pad order walls in every other pad of a tight row: the 0.4 mm QFN-80 of
+tinytapeout-demo got 50 exits for 75 pads, now 65; an RP2040 of corne-cherry 22 of 28, now 27. Every stub and via
+is checked exactly against everything placed so far, including the router's own sampling margin between escapes,
+so the fanout is DRC-clean by construction. *Crossover vias*: in a row of fine-pitch single-layer pads, two nets whose pads interleave tightly
 (`X Y X Y`, the D+/D− pairs of a USB-C receptacle) cannot both join their pads on that layer: whichever joins
 first walls in the other's inner pad. The inner pad of one of them gets a via straight out of the pad, the
 shallowest from which both its neighbors still leave the row (straight, then at 45° away from it, past it);
@@ -139,11 +145,28 @@ routes every net (shortest ratsnest first); then every overused point gets +0.5 
 ×1.6 (from 0.6, capped at 1000 as VPR's `max_pres_fac`: beyond it sharing is prohibitive anyway, and a
 higher factor only makes the searches of the few nets still in conflict visit ever more of the board), and the nets with overuse or near an overused point are ripped up and rerouted (order lightly
 shuffled by the seeded RNG) until nothing is shared, the iteration budget is spent (10 / 40 / 120 by effort) or
-the best iteration is 12 iterations old. The best iteration is kept. **Legalization**: nets still conflicting are
+the best iteration is 12 iterations old. *Costs near the targets* (D64): late in negotiation (present factor 5 or
+more, from the sixth iteration) the history and present costs around the targets are a cost every path pays,
+which the distance heuristic does not see, so the searches flood: a single connection of corne-cherry visited
+350 000 nodes. A search still running after 10 000 expansions settles the 5 000 nodes nearest its targets backwards
+(Dijkstra over the moves it may make, on its costs without bends) and from then on estimates each node by the
+larger of the distance and its settled cost, capped at the last cost settled (a lower bound for every node not
+settled). The estimate stays a lower bound and consistent, so paths stay optimal; entries already queued keep
+their smaller keys, which only brings them out earlier. It halves the negotiation search time on corne-cherry and
+cuts it to a third on cynthion (same searches, before and after). The best iteration is kept. **Legalization**: nets still conflicting are
 ripped (worst first) and rerouted with sharing forbidden. **Rip-up and retry**: for each connection still failing,
 a search with everything passable finds the routed nets in its way (their halos on its path); the failing net is
 routed first and those nets again around it, kept when fewer connections fail, or (four times per run) when as
 many fail but the failure moved to another net, which then gets its own retry (up to 8 nets, 6 rounds).
+*Stubs*: an access stub is off the grid, and the halos see it only at the grid's samples, so two stubs of different
+nets could come too close between samples (the DRC then removed one of the connections). Every grid wire's stubs
+are checked exactly against the other nets' off-grid copper (stubs, gridless wires) when conflicts are counted (grid
+copper is in the halos already; counting it again changed negotiation for nothing), and searches that may not share
+(legalization, retries) drop source and target stubs that are not clear of any committed routing (D64).
+*Re-planned escapes*: when a run leaves a fine-pitch pad without an exit and its connection fails, the nets of that
+pad and of its package's pads within three pitches (nets of at most 8 connections) are ripped up and routed again
+with the boxed pads served first by the escape planning; kept when fewer of their connections fail (D64; needs a
+twentieth of the time budget left).
 
 **Via minimization.** Negotiation keeps vias cheap (10 grid steps): dearer vias (15–30) cost completion on the
 STM32, QFP and BGA boards of the benchmark, since layer changes are how congestion resolves. Afterwards every net with vias is
@@ -244,7 +267,11 @@ pads and the static obstacles; typical of 0.4 mm QFNs and fine-pitch connectors 
 routed at the widest width that gets every such pad out, in 5 µm steps, not under the board's `min_track_width`,
 and at most the pad pitch minus the clearance so that two such tracks fit side by side out of neighboring pads
 (less the grid's sampling margin and the router's tolerances, so that two escapes ending on cells beside each
-other's tracks still clear them as the grid samples them).
+other's tracks still clear them as the grid samples them). A net whose class width does leave its pad is necked
+the same way when the pad is a single-layer pad of a fine-pitch row and two tracks of that width cannot run side
+by side out of the row at the pad pitch with the clearance outside the part (D64): on tinytapeout-demo the 0.22 mm
+Default class out of the 0.4 mm QFN-80 got out of its pads under the courtyard rule (0.16 mm) but walled in every
+other pad beyond it (0.2 mm), and now routes at 0.185 mm there.
 The net gets a profile of its own (its class profile with that width) for the whole run, so fanout, search and
 negotiation all work at it; at the end every straight segment of its new tracks is widened back to the class width
 wherever that keeps the clearance to everything else (exact checks, in route order). What stays narrower than the
@@ -509,7 +536,7 @@ its gap and skew. Results are identical for 1 and 4 threads.
   reroute to make room. Copper reaching a net only through a zone is not part of its graph.
 - Parallelism is per batch of nets with disjoint regions: compact boards, where most nets meet near the same
   parts, get little of it. Memory is a few bytes per double-grid point per layer and profile, plus one search
-  scratch (17 bytes per node) per thread.
+  scratch (33 bytes per node) per thread.
 
 ### Results (v1, release build, macOS development machine)
 
@@ -808,6 +835,31 @@ The ROUTER.md D57 numbers (corne-cherry 99.1 %, glasgow-revC3 97.3 %) came from 
 budget-bound boards end lower before and after alike. What is left: the QFN-80 pads without an escape on
 tinytapeout-demo (greedy escape planning, as corne-cherry's before D57), budget (glasgow, cynthion, corne), the
 split keyboard (sweep) and congestion near nrfmicro's receptacle.
+
+**Corpus re-route, D64** (escapes per package, crowded-row necks, re-planned boxed pads, exact stub conflicts, costs
+near the targets; same command, *before* the version before D64 (four runs of the budget-bound boards, two of the
+others) and *after* this one (two runs), back to back on the shared 64-core Linux machine; ranges where runs
+differed; DRC errors other than unrouted: 0 everywhere, before and after):
+
+| board | layers | connections | before | after | time before → after | main change |
+|---|---|---|---|---|---|---|
+| nrfmicro | 2 | 85 | 97.6% | 97.6% | 1.2 → 1.2 s | |
+| buspirate-flash-sop | 2 | 47 | 100% | 100% | 0.3 → 0.3 s | |
+| buspirate-rs232 | 2 | 43 | 100% | 100% | 0.3 → 0.3 s | |
+| buspirate5-rev10 | 4 | 473 | 100% | 100% | 24–26 → 9 s | costs near the targets; 7 vias fewer |
+| lumenpnp-ringlight | 2 | 37 | 100% | 100% | 0.1 → 0.1 s | |
+| lumenpnp-mobo | 4 | 461 | 99.1% | **99.3%** | 52 → 58–59 s | negotiation runs longer before converging |
+| sweep-v2.2 | 2 | 47 | 93.6% | 93.6% | 28–29 → 29–30 s | |
+| corne-cherry | 2 | 431 | 97.2–97.4% | **97.7%** | 60 s (budget) → 47 s | no longer budget-bound: negotiation searches take half the time; one more RP2040 pad escapes (27 of 28); 43–47 vias fewer |
+| glasgow-revC3 | 4 | 739 | 94.9% | 94.9% | budget | |
+| glasgow-revD1 | 6 | 1583 | 93.2–93.4% | **93.7%** | budget | searches ~10 % cheaper, more negotiation in the budget |
+| cynthion | 4 | 693 | 96.0% | 96.0–96.1% | 63 s (budget in 3 of 4) → 60–61 s | negotiation converges inside the budget (searches at a third of the time) |
+| tinytapeout-demo | 4 | 361 | 93.6% | **95.6–96.7%** | 62 → 61–62 s | QFN-80 exits 50 → 65 of 75 (assignment, 0.185 mm necks for the Default class); two pads left boxed in, re-planned when the time allows |
+
+What is left: tinytapeout-demo's last boxed QFN-80 pads and congestion around the QFN and J5 (its gridless rip-up
+and retry now takes 23 s, which leaves the re-plan too little time in some runs), the USB-C pads of corne-cherry
+that no exit leaves (their receptacles' own pads wall them in), budget on the glasgow boards, cynthion's BGA and
+resistor arrays, the split keyboard (sweep) and congestion near nrfmicro's receptacle.
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).

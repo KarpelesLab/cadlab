@@ -25,6 +25,7 @@ use super::geo::{BoxF, P, point_seg_d2};
 use super::grid::{Grid, delta};
 use super::index::{Checker, Index, Item, TOL};
 use super::model::RouterBoard;
+use super::scoped::St;
 
 /// A planned dog bone: stub on `layer` from the pad center to the via.
 #[derive(Clone, Debug)]
@@ -537,11 +538,14 @@ pub(crate) struct Escape {
 /// A component gets them when at least one such pad is too far off the routing grid for a track
 /// along the nearest grid line to clear its neighbors; then every off-grid fine-pitch pad of it
 /// gets one, so that neighbors stagger consistently. Without them the grid router could only
-/// reach such pads with slanted stubs that clip the neighbors. Each pad gets the shallowest end
-/// cell beyond the pad that is legal (checked exactly against everything placed so far, and
-/// clear of the other escapes' halos as the router rasterizes them) and from which the router
-/// can move outwards (`open(net, layer, cell, step)`). The pads of the crossovers already
-/// planned (`prior`) are left out, and the new escapes keep apart from their exits.
+/// reach such pads with slanted stubs that clip the neighbors. A pad's candidate exits end on
+/// cells beyond the pad that are legal (checked exactly against everything placed so far) and
+/// from which the router can move outwards (`open(net, layer, cell, step)`), shallowest first;
+/// one exit per pad is then chosen for the whole package at once ([`assign`]: no two chosen
+/// exits break a clearance or end in each other's halo as the router rasterizes it), the pads
+/// labeled in `prio` served first. Pads that had candidates but got no exit are added to
+/// `missed`. The pads of the crossovers already planned (`prior`) are left out, and the new
+/// escapes keep apart from their exits.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn escape(
     rb: &RouterBoard,
@@ -552,6 +556,8 @@ pub(crate) fn escape(
     only: Option<&[String]>,
     open: &dyn Fn(u32, usize, (i32, i32), (i32, i32)) -> bool,
     prior: &Crossovers,
+    prio: &[String],
+    missed: &mut Vec<String>,
 ) -> Vec<Escape> {
     let wanted = wanted(rb, routes);
     let mut by_comp: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
@@ -622,37 +628,28 @@ pub(crate) fn escape(
         if !needed {
             continue;
         }
-        // Greedy in pad order; pads left without an escape go first in another attempt (up to
-        // `ESCAPE_ATTEMPTS`), and the attempt with the most escapes is kept.
-        let mut order: Vec<usize> = (0..fine.len()).collect();
+        // Every pad's candidate exits (legal against everything placed so far), then one
+        // exit per pad chosen for the whole package at once (`assign`).
+        let cands: Vec<Vec<Vec<P>>> = fine
+            .iter()
+            .map(|&(t, layer, axis, half_len, lat)| {
+                escape_cands(rb, grid, index, open, &out, t, layer, axis, half_len, lat)
+            })
+            .collect();
+        let pads: Vec<(u32, usize)> = fine.iter().map(|&(t, layer, ..)| (rb.terminals[t].net, layer)).collect();
+        let first: Vec<bool> = fine.iter().map(|&(t, ..)| prio.contains(&rb.terminals[t].label)).collect();
+        let chosen = assign(rb, grid, &pads, &cands, &first);
         let mut best: Vec<Escape> = Vec::new();
-        for attempt in 0..ESCAPE_ATTEMPTS {
-            let mut mine: Vec<Escape> = Vec::new();
-            let mut ids: Vec<u32> = Vec::new();
-            let mut missed: Vec<usize> = Vec::new();
-            for &k in &order {
-                let (t, layer, axis, half_len, lat) = fine[k];
-                match escape_one(rb, grid, index, open, &out, &mine, t, layer, axis, half_len, lat) {
-                    Some(pts) => {
-                        let term = &rb.terminals[t];
-                        ids.extend(insert_escape(rb, index, term.net, layer, &pts));
-                        mine.push(Escape { net: term.net, layer, pts, label: term.label.clone() });
-                    }
-                    None => missed.push(k),
+        for (k, c) in chosen.into_iter().enumerate() {
+            let term = &rb.terminals[fine[k].0];
+            let Some(i) = c else {
+                // Boxed in by its neighbors' exits (it had candidates of its own).
+                if !cands[k].is_empty() {
+                    missed.push(term.label.clone());
                 }
-            }
-            for id in ids {
-                index.remove(id);
-            }
-            if attempt == 0 || mine.len() > best.len() {
-                best = mine;
-            }
-            if missed.is_empty() {
-                break;
-            }
-            let rest: Vec<usize> = order.iter().copied().filter(|k| !missed.contains(k)).collect();
-            order = missed;
-            order.extend(rest);
+                continue;
+            };
+            best.push(Escape { net: term.net, layer: fine[k].1, pts: cands[k][i].clone(), label: term.label.clone() });
         }
         for e in &best {
             insert_escape(rb, index, e.net, e.layer, &e.pts);
@@ -672,45 +669,51 @@ fn insert_escape(rb: &RouterBoard, index: &mut Index, net: u32, layer: usize, pt
         .collect()
 }
 
-/// Attempts per component in [`escape`].
-const ESCAPE_ATTEMPTS: usize = 4;
+/// Most candidate exits per pad in [`escape`].
+const ESCAPE_CANDS: usize = 24;
 
-/// The escape of one pad: the shallowest legal end cell (see [`escape`]), or `None`.
+/// Farthest an escape's end cell lies beside its pad's axis (grid pitches).
+const ESCAPE_SIDE: f64 = 2.0;
+
+/// The candidate exits of one pad, shallowest first (see [`escape`]): each legal against
+/// everything in `index`, apart from the escapes `done`, and ending on a cell from which the
+/// router can move outwards.
 #[allow(clippy::too_many_arguments)]
-fn escape_one(
+fn escape_cands(
     rb: &RouterBoard,
     grid: &Grid,
     index: &Index,
     open: &dyn Fn(u32, usize, (i32, i32), (i32, i32)) -> bool,
     done: &[Escape],
-    mine: &[Escape],
     t: usize,
     layer: usize,
     axis: P,
     half_len: f64,
     lat: P,
-) -> Option<Vec<P>> {
+) -> Vec<Vec<P>> {
     let g = grid.g;
     let term = &rb.terminals[t];
     // Candidate end cells beyond the pad, shallowest first.
     let area = BoxF::of2(term.at, term.at).expand(half_len + 8.0 * g);
-    let (x0, y0, x1, y1) = grid.crange(&area)?;
-    let mut cands: Vec<(i64, i64, i32, i32)> = Vec::new();
+    let Some((x0, y0, x1, y1)) = grid.crange(&area) else { return vec![] };
+    let mut cells: Vec<(i64, i64, i32, i32)> = Vec::new();
     for y in y0..=y1 {
         for x in x0..=x1 {
             let e = grid.cell(x, y);
             let d = P::new(e.x - term.at.x, e.y - term.at.y);
             let along = d.x * axis.x + d.y * axis.y;
             let side = d.x * lat.x + d.y * lat.y;
-            if side.abs() > 2.0 * g || along < half_len - g || along < side.abs() {
+            if side.abs() > ESCAPE_SIDE * g || along < half_len - g || along < side.abs() {
                 continue;
             }
-            cands.push(((along / 1_000.0).round() as i64, (side.abs() / 1_000.0).round() as i64, x, y));
+            cells.push(((along / 1_000.0).round() as i64, (side.abs() / 1_000.0).round() as i64, x, y));
         }
     }
-    cands.sort_unstable();
+    cells.sort_unstable();
     let ck = Checker { rb, index };
-    cands.into_iter().find_map(|(_, _, x, y)| {
+    let step = (axis.x as i32, axis.y as i32);
+    let mut out = Vec::new();
+    for (_, _, x, y) in cells {
         let e = grid.cell(x, y);
         let d = P::new(e.x - term.at.x, e.y - term.at.y);
         let side = (d.x * lat.x + d.y * lat.y).abs();
@@ -721,13 +724,220 @@ fn escape_one(
         }
         pts.push(e);
         pts.dedup_by(|a, b| a.dist(*b) < 1.0);
-        let step = (axis.x as i32, axis.y as i32);
         let ok = pts.len() > 1
             && open(term.net, layer, (x, y), step)
             && pts.windows(2).all(|s| ck.seg(layer, s[0], s[1], term.net).is_none())
-            && done.iter().chain(mine).all(|o: &Escape| apart(rb, grid, o, term.net, layer, &pts));
-        ok.then_some(pts)
+            && done.iter().all(|o: &Escape| apart(rb, grid, o, term.net, layer, &pts));
+        if ok {
+            out.push(pts);
+            if out.len() == ESCAPE_CANDS {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Whether two candidate exits (of pads `a`, `b`: net and layer) cannot both be used: their
+/// tracks come closer than the rules allow, or one ends in the other's halo as the router
+/// rasterizes it ([`apart`]).
+fn clash(rb: &RouterBoard, grid: &Grid, a: (u32, usize), pa: &[P], b: (u32, usize), pb: &[P]) -> bool {
+    if a.1 != b.1 || a.0 == b.0 {
+        return false;
+    }
+    let layer = a.1;
+    let o = Escape { net: b.0, layer, pts: pb.to_vec(), label: String::new() };
+    if !apart(rb, grid, &o, a.0, layer, pa) {
+        return true;
+    }
+    let (ra, rbp) = (rb.profile(a.0), rb.profile(b.0));
+    pa.windows(2).any(|s| {
+        let mine: Vec<(P, P, St)> =
+            if rb.scoped.on { rb.pieces(ra, layer, s[0], s[1], ra.hw) } else { vec![(s[0], s[1], St::default())] };
+        pb.windows(2).any(|q| rb.segs_conflict(ra, layer, &mine, 0.0, rbp, q[0], q[1], rbp.hw))
     })
+}
+
+/// Most chosen exits a pad without one may move out of its way in [`choose`].
+const EJECT: usize = 3;
+
+/// Levels of further moves an exit moved out of the way may make in [`choose`].
+const CHAIN: usize = 2;
+
+/// Candidate clashes of one package, computed once per pair of candidates of pads close
+/// enough to meet.
+struct Clashes<'a> {
+    /// Candidates per pad.
+    counts: &'a [usize],
+    /// Pads whose candidates may meet, per pad.
+    near: Vec<Vec<usize>>,
+    /// Whether candidate `i` of pad `k` and candidate `j` of pad `l` clash: `(k, i, l, j)`.
+    test: &'a mut dyn FnMut(usize, usize, usize, usize) -> bool,
+    memo: BTreeMap<(usize, usize, usize, usize), bool>,
+}
+
+impl Clashes<'_> {
+    fn get(&mut self, k: usize, i: usize, l: usize, j: usize) -> bool {
+        let key = if k < l { (k, i, l, j) } else { (l, j, k, i) };
+        if let Some(&v) = self.memo.get(&key) {
+            return v;
+        }
+        let v = (self.test)(key.0, key.1, key.2, key.3);
+        self.memo.insert(key, v);
+        v
+    }
+
+    /// The pads (other than those in `skip`) whose chosen exit clashes with candidate `i` of
+    /// pad `k`.
+    fn blockers(&mut self, k: usize, i: usize, skip: &[usize], chosen: &[Option<usize>]) -> Vec<usize> {
+        let near = std::mem::take(&mut self.near[k]);
+        let out = near
+            .iter()
+            .copied()
+            .filter(|&l| !skip.contains(&l) && chosen[l].is_some_and(|j| self.get(k, i, l, j)))
+            .collect();
+        self.near[k] = near;
+        out
+    }
+
+    /// Moves pad `q` to another candidate that clashes with no chosen exit (those of the pads
+    /// in `fixed` as given there), allowing `depth` more levels of such moves for one pad in
+    /// its way.
+    fn relocate(&mut self, q: usize, fixed: &[(usize, usize)], depth: usize, chosen: &mut Vec<Option<usize>>) -> bool {
+        let cur = chosen[q];
+        for j in 0..self.counts[q] {
+            if Some(j) == cur {
+                continue;
+            }
+            if fixed.iter().any(|&(f, fi)| self.near[q].contains(&f) && self.get(q, j, f, fi)) {
+                continue;
+            }
+            let skip: Vec<usize> = fixed.iter().map(|f| f.0).chain([q]).collect();
+            let bl = self.blockers(q, j, &skip, chosen);
+            if bl.is_empty() {
+                chosen[q] = Some(j);
+                return true;
+            }
+            if depth == 0 || bl.len() > 1 {
+                continue;
+            }
+            let saved = chosen.clone();
+            chosen[q] = Some(j);
+            let mut fx = fixed.to_vec();
+            fx.push((q, j));
+            if self.relocate(bl[0], &fx, depth - 1, chosen) {
+                return true;
+            }
+            *chosen = saved;
+        }
+        false
+    }
+}
+
+/// Chooses at most one candidate exit per pad of a package (`cands[k]`, best first) so that no
+/// two chosen exits clash ([`clash`]), for as many pads as possible ([`choose`]).
+fn assign(
+    rb: &RouterBoard,
+    grid: &Grid,
+    pads: &[(u32, usize)],
+    cands: &[Vec<Vec<P>>],
+    first: &[bool],
+) -> Vec<Option<usize>> {
+    let n = pads.len();
+    let boxes: Vec<BoxF> = cands
+        .iter()
+        .map(|cs| {
+            let mut bb = BoxF::EMPTY;
+            for q in cs.iter().flatten() {
+                bb.add(*q);
+            }
+            bb
+        })
+        .collect();
+    let width = rb.profiles.iter().map(|p| 2.0 * p.hw).fold(0.0, f64::max);
+    let reach = width + rb.max_clear() + 2.0 * grid.g;
+    let near: Vec<Vec<usize>> = (0..n)
+        .map(|k| {
+            (0..n)
+                .filter(|&l| {
+                    l != k
+                        && !boxes[k].is_empty()
+                        && !boxes[l].is_empty()
+                        && boxes[k].expand(reach).intersects(&boxes[l])
+                })
+                .collect()
+        })
+        .collect();
+    let counts: Vec<usize> = cands.iter().map(Vec::len).collect();
+    let mut test =
+        |k: usize, i: usize, l: usize, j: usize| clash(rb, grid, pads[k], &cands[k][i], pads[l], &cands[l][j]);
+    choose(&counts, near, first, &mut test)
+}
+
+/// The assignment of [`assign`]: pad `k` has `counts[k]` candidates (best first), `near[k]`
+/// lists the pads whose candidates may clash with its own, `test(k, i, l, j)` tells whether
+/// candidate `i` of pad `k` clashes with candidate `j` of pad `l`. The whole package is planned
+/// before any exit is committed. Pads marked `first` (boxed in on an earlier run) are served
+/// first, then pad order; each takes its best candidate free of the exits chosen so far. Then
+/// every pad left without one tries its candidates in turn, moving the chosen exits it clashes
+/// with (at most [`EJECT`]) to other candidates of theirs, which may in turn move one more
+/// exit in their way, up to [`CHAIN`] levels (ejection chains), and keeps the first candidate
+/// for which that works; repeated until no pad gains an exit. The number of pads with an exit
+/// never drops, and everything follows the data's order, so the result is deterministic.
+fn choose(
+    counts: &[usize],
+    near: Vec<Vec<usize>>,
+    first: &[bool],
+    test: &mut dyn FnMut(usize, usize, usize, usize) -> bool,
+) -> Vec<Option<usize>> {
+    let n = counts.len();
+    let mut cl = Clashes { counts, near, test, memo: BTreeMap::new() };
+    let mut chosen: Vec<Option<usize>> = vec![None; n];
+    let order: Vec<usize> = (0..n).filter(|&k| first[k]).chain((0..n).filter(|&k| !first[k])).collect();
+    for &k in &order {
+        chosen[k] = (0..counts[k]).find(|&i| cl.blockers(k, i, &[], &chosen).is_empty());
+    }
+    loop {
+        let mut gained = false;
+        for &k in &order {
+            if chosen[k].is_some() {
+                continue;
+            }
+            for i in 0..counts[k] {
+                let bl = cl.blockers(k, i, &[], &chosen);
+                if bl.len() > EJECT {
+                    continue;
+                }
+                let saved = chosen.clone();
+                chosen[k] = Some(i);
+                let mut fixed = vec![(k, i)];
+                let mut ok = true;
+                for &q in &bl {
+                    if !cl.relocate(q, &fixed, CHAIN, &mut chosen) {
+                        ok = false;
+                        break;
+                    }
+                    fixed.push((q, chosen[q].expect("moved")));
+                }
+                // Every moved exit clear of every chosen one (a chain may have moved a pad
+                // checked before it).
+                ok = ok
+                    && (0..n).filter(|&q| chosen[q] != saved[q]).all(|q| {
+                        let j = chosen[q].expect("chosen");
+                        cl.blockers(q, j, &[q], &chosen).is_empty()
+                    });
+                if ok {
+                    gained = true;
+                    break;
+                }
+                chosen = saved;
+            }
+        }
+        if !gained {
+            break;
+        }
+    }
+    chosen
 }
 
 /// Whether a new escape `pts` of `net` keeps clear of escape `o` with the router's margins:
@@ -842,9 +1052,6 @@ pub(crate) fn necks(rb: &RouterBoard, index: &Index, slots: &[usize], nets: &[u3
                     .iter()
                     .any(|&l| exits.iter().any(|&e| ck.seg_margin(l, at, e, term.net, w / 2.0 - pr.hw).is_none()))
             };
-            if fits(2.0 * pr.hw) {
-                continue;
-            }
             // Room for a neighbor's neck beside this one.
             let pitch = terms
                 .iter()
@@ -856,6 +1063,20 @@ pub(crate) fn necks(rb: &RouterBoard, index: &Index, slots: &[usize], nets: &[u3
             // the finest grid such a width can give (pitch (w + c) / 2 ≤ half the pad pitch)
             // and the router's tolerances.
             let margin = delta(pitch, pitch * std::f64::consts::SQRT_2 / 4.0) + 3.0 * TOL;
+            // A single-layer pad of a fine-pitch row (no track between it and its neighbor)
+            // whose class width gets out of the pad but cannot run beside its neighbor's track
+            // out of the row at the pad pitch: every pad of the row can have an exit only at a
+            // width that can.
+            let crowded = || {
+                let lat = (b.max.x - b.min.x).min(b.max.y - b.min.y);
+                term.layers.count_ones() == 1
+                    && pitch < f64::MAX
+                    && pitch - lat < 2.0 * pr.hw + 2.0 * rb.c_pad_near(t)
+                    && 2.0 * pr.hw + rb.c_tracks_near(t) + 2.0 * TOL + margin > pitch
+            };
+            if fits(2.0 * pr.hw) && !crowded() {
+                continue;
+            }
             // The narrowest width the rules allow here (custom track width rules too).
             let min_w = min_w.max(rb.min_width_near(t));
             let cap = (pitch - rb.c_tracks_near(t) - 2.0 * TOL - margin).min(2.0 * pr.hw).max(min_w);
@@ -888,4 +1109,36 @@ fn small_via(rb: &RouterBoard, net: u32) -> Option<(Nm, Nm)> {
     let drill = rb.rules.min_drill.max(Nm(1_000));
     let dia = Nm(drill.0 + 2 * rb.rules.min_annular_ring.0);
     (dia < key.via_dia && drill <= key.via_drill).then_some((dia, drill))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pads in a row, each candidate clashing with listed candidates of other pads.
+    /// (pad, candidate).
+    type Cand = (usize, usize);
+
+    fn run(counts: &[usize], clashes: &[(Cand, Cand)], first: &[bool]) -> Vec<Option<usize>> {
+        let n = counts.len();
+        let near: Vec<Vec<usize>> = (0..n).map(|k| (0..n).filter(|&l| l != k).collect()).collect();
+        let mut test = |k: usize, i: usize, l: usize, j: usize| {
+            clashes.iter().any(|&(a, b)| (a == (k, i) && b == (l, j)) || (a == (l, j) && b == (k, i)))
+        };
+        choose(counts, near, first, &mut test)
+    }
+
+    #[test]
+    fn exits_move_aside_for_a_boxed_pad() {
+        // Pad 0's best exit takes pad 1's only one; pad 0 has another.
+        let c = [((0, 0), (1, 0))];
+        assert_eq!(run(&[2, 1], &c, &[false, false]), [Some(1), Some(0)]);
+        // A chain: pad 0's other exit clashes with pad 2's best, which has another.
+        let c = [((0, 0), (1, 0)), ((0, 1), (2, 0))];
+        assert_eq!(run(&[2, 1, 2], &c, &[false; 3]), [Some(1), Some(0), Some(1)]);
+        // No room for both: the pad served first keeps its exit.
+        let c = [((0, 0), (1, 0))];
+        assert_eq!(run(&[1, 1], &c, &[false, false]), [Some(0), None]);
+        assert_eq!(run(&[1, 1], &c, &[false, true]), [None, Some(0)]);
+    }
 }

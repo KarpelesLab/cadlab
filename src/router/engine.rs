@@ -22,6 +22,14 @@ pub(crate) const DIRS: [(i32, i32); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 
 /// No direction (start, after a via).
 pub(crate) const NONE: u8 = 8;
 
+/// Nodes settled backwards from the targets of a long negotiation search
+/// (`Engine::near_costs`); searches get them after twice as many expansions.
+const NEAR_COSTS: usize = 5000;
+/// Present-congestion factor from which negotiation searches use `Engine::near_costs`
+/// (from the sixth iteration on): earlier, the costs around the targets are still close to
+/// the distance and the searches rarely flood.
+const NEAR_COSTS_PRES: f32 = 5.0;
+
 /// Most nodes `Engine::pocket` visits before deciding the targets are not walled in.
 const POCKET: usize = 50_000;
 
@@ -239,6 +247,9 @@ pub(crate) struct Engine<'a> {
     /// Static obstacles and the committed routing (wire segments and vias of every net), for
     /// the gridless search and its exact conflict checks.
     pub dynamic: super::index::Index,
+    /// Whether each item of `dynamic` (by id) is off the grid: a stub, or a segment or via of a
+    /// gridless wire. The halos see such copper only at the grid's samples.
+    offgrid: Vec<bool>,
     /// Clearance regions of the static obstacles (gridless search).
     pub grown: super::rooms::Grown,
     /// Any-angle segments in gridless paths (else 0°/45°/90° where they fit).
@@ -267,6 +278,19 @@ pub(crate) struct Scratch {
     rstamp: u32,
     /// The A* queue.
     heap: Queue,
+    /// Costs to the targets near them (`Engine::near_costs`).
+    lb: NearCosts,
+}
+
+/// Exact costs to the targets of a search from the nodes nearest to them (a backward
+/// Dijkstra on the search's own costs without bends), by stamp, and the cost below which
+/// every node was settled.
+#[derive(Default)]
+struct NearCosts {
+    dist: Vec<f32>,
+    seen: Vec<u32>,
+    stamp: u32,
+    heap: Queue,
 }
 
 impl Scratch {
@@ -285,6 +309,7 @@ impl Scratch {
             rsrc: vec![0; nodes],
             rstamp: 0,
             heap: Queue::default(),
+            lb: NearCosts { dist: vec![0.0; nodes], seen: vec![0; nodes], stamp: 0, heap: Queue::default() },
         }
     }
 }
@@ -399,6 +424,7 @@ impl<'a> Engine<'a> {
             gridless: false,
             search: super::SearchKind::Grid,
             dynamic,
+            offgrid: Vec::new(),
             grown: super::rooms::Grown::new(rb),
             any_angle: false,
             comps: super::components::Components::new(rb.profiles.len()),
@@ -679,12 +705,16 @@ impl<'a> Engine<'a> {
                 bbox.add(*a);
                 bbox.add(*b);
                 let item = super::index::Item::Seg { net: nr.net, layer: self.slots[*s] as u8, a: *a, b: *b };
-                nr.dyn_ids.push(self.dynamic.insert(item, BoxF::of2(*a, *b).expand(hw)));
+                let id = self.dynamic.insert(item, BoxF::of2(*a, *b).expand(hw));
+                self.mark(id, off);
+                nr.dyn_ids.push(id);
             }
             for at in vias {
                 self.raster_via(nr.net, at, geo, &mut keys);
                 let item = super::index::Item::Via { net: nr.net, at };
-                nr.dyn_ids.push(self.dynamic.insert(item, BoxF::of2(at, at).expand(rv)));
+                let id = self.dynamic.insert(item, BoxF::of2(at, at).expand(rv));
+                self.mark(id, geo);
+                nr.dyn_ids.push(id);
             }
             if w.nodes.len() == 1 {
                 // A single access cell joining two stubs: claim the cell itself.
@@ -707,6 +737,15 @@ impl<'a> Engine<'a> {
         }
         nr.keys = keys;
         nr.bbox = bbox;
+    }
+
+    /// Records whether item `id` of `dynamic` is off the grid.
+    fn mark(&mut self, id: u32, off: bool) {
+        let i = id as usize;
+        if self.offgrid.len() <= i {
+            self.offgrid.resize(i + 1, false);
+        }
+        self.offgrid[i] = off;
     }
 
     /// Releases a net's halo.
@@ -736,6 +775,25 @@ impl<'a> Engine<'a> {
             if w.geo.is_some() {
                 self.geo_conflicts(nr.net, w, &mut out);
                 continue;
+            }
+            // Stubs are off the grid: the halos see them only at the grid's samples, so a stub
+            // can come too close to another net's stub (or gridless wire) between samples.
+            // Checked exactly against those; grid copper is in the halos already.
+            if w.start.is_some() || w.end.is_some() {
+                let (segs, _) = self.wire_geometry(w);
+                let n_start = w.start.as_ref().map_or(0, Vec::len);
+                let n_end = w.end.as_ref().map_or(0, Vec::len);
+                let stubs: Vec<(usize, P, P)> = segs
+                    .iter()
+                    .enumerate()
+                    .filter(|&(k, _)| k < n_start || k + n_end >= segs.len())
+                    .map(|(_, s)| *s)
+                    .collect();
+                self.hits(nr.net, &stubs, &[], true, &mut |slot, p, _| {
+                    if let Some(s) = slot {
+                        out.push((Some(s), self.near_dpt(p)));
+                    }
+                });
             }
             for (k, &n) in w.nodes.iter().enumerate() {
                 let (s, x, y) = self.unpack(n);
@@ -770,12 +828,7 @@ impl<'a> Engine<'a> {
     /// Exact conflicts of a gridless wire with the committed routing of other nets: the
     /// double-grid point (or via cell) nearest to each place where it comes too close.
     fn geo_conflicts(&self, net: u32, w: &Wire, out: &mut Vec<Conflict>) {
-        let near_d = |q: P| -> usize {
-            let h = self.grid.g / 2.0;
-            let i = (((q.x - self.grid.ox) / h).round() as i32).clamp(0, self.grid.dw() - 1);
-            let j = (((q.y - self.grid.oy) / h).round() as i32).clamp(0, self.grid.dh() - 1);
-            self.grid.didx(i, j)
-        };
+        let near_d = |q: P| self.near_dpt(q);
         let near_c = |q: P| -> usize {
             let g = self.grid.g;
             let x = (((q.x - self.grid.ox) / g).round() as i32).clamp(0, self.grid.w - 1);
@@ -786,6 +839,29 @@ impl<'a> Engine<'a> {
             Some(s) => out.push((Some(s), near_d(p))),
             None => out.push((None, near_c(p))),
         });
+    }
+
+    /// Index of the double-grid point nearest to `q`.
+    fn near_dpt(&self, q: P) -> usize {
+        let h = self.grid.g / 2.0;
+        let i = (((q.x - self.grid.ox) / h).round() as i32).clamp(0, self.grid.dw() - 1);
+        let j = (((q.y - self.grid.oy) / h).round() as i32).clamp(0, self.grid.dh() - 1);
+        self.grid.didx(i, j)
+    }
+
+    /// Whether the stub `stub` from grid node `node` of `net` keeps clear of the committed
+    /// routing of other nets (exact).
+    fn stub_clear(&self, net: u32, node: u32, stub: &[P]) -> bool {
+        let (s, _, _) = self.unpack(node);
+        let mut prev = self.node_pos(node);
+        let mut segs = Vec::new();
+        for &q in stub {
+            segs.push((s, prev, q));
+            prev = q;
+        }
+        let mut clear = true;
+        self.hits(net, &segs, &[], false, &mut |_, _, _| clear = false);
+        clear
     }
 
     /// The nets whose committed routing a gridless wire of `net` comes too close to.
@@ -801,15 +877,34 @@ impl<'a> Engine<'a> {
     /// wire `w` of `net` comes closer to the committed routing of another net than the rules
     /// allow (exact).
     fn geo_hits(&self, net: u32, w: &Wire, f: &mut dyn FnMut(Option<usize>, P, u32)) {
+        let (segs, vias) = self.wire_geometry(w);
+        self.hits(net, &segs, &vias, false, f);
+    }
+
+    /// Calls `f(slot or None for a via, where, other net)` for every place where the
+    /// segments `segs` (slot, from, to) and vias `vias` of `net` come closer to the committed
+    /// routing of another net than the rules allow (exact; only its off-grid copper with
+    /// `offgrid`).
+    fn hits(
+        &self,
+        net: u32,
+        segs: &[(usize, P, P)],
+        vias: &[P],
+        offgrid: bool,
+        f: &mut dyn FnMut(Option<usize>, P, u32),
+    ) {
+        let skip = |id: u32| offgrid && !self.offgrid.get(id as usize).copied().unwrap_or(false);
         use super::index::Item;
         let rb = self.rb;
         let pr = rb.profile(net);
-        let (segs, vias) = self.wire_geometry(w);
-        for (s, a, b) in segs {
+        for &(s, a, b) in segs {
             let layer = self.slots[s];
             let mine = if rb.scoped.on { rb.pieces(pr, layer, a, b, pr.hw) } else { vec![(a, b, St::default())] };
             let q = BoxF::of2(a, b).expand(pr.hw + self.dynamic.reach);
-            for (_, it) in self.dynamic.query(&q) {
+            for (id, it) in self.dynamic.query(&q) {
+                if skip(id) {
+                    continue;
+                }
                 let hit = match it {
                     Item::Seg { net: m, layer: l, a: c, b: d } if m != net && l as usize == layer => {
                         let po = rb.profile(m);
@@ -826,10 +921,13 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        for at in vias {
+        for &at in vias {
             let st = rb.st_via(pr, at, 0.0);
             let q = BoxF::of2(at, at).expand(pr.rv + self.dynamic.reach);
-            for (_, it) in self.dynamic.query(&q) {
+            for (id, it) in self.dynamic.query(&q) {
+                if skip(id) {
+                    continue;
+                }
                 let hit = match it {
                     Item::Seg { net: m, layer, a, b } if m != net => {
                         let po = rb.profile(m);
@@ -967,11 +1065,23 @@ impl<'a> Engine<'a> {
             Mode::Explain => 0.0,
         };
         let w = self.costs.weight;
-        let heur = |x: i32, y: i32| -> f32 {
+        // In negotiation the congestion near the targets is a cost every path pays, which
+        // the distance alone does not see: costs to the targets settled backwards around them
+        // raise the estimate (`near_costs`).
+        let mut lb = std::mem::take(&mut sc.lb);
+        // Set once the search has run long enough to be worth it (`near_costs`).
+        let mut floor = 0.0f32;
+        let heur = |lb: &NearCosts, floor: f32, n: usize, x: i32, y: i32| -> f32 {
             let dx = (tb.0 - x).max(x - tb.2).max(0) as f32;
             let dy = (tb.1 - y).max(y - tb.3).max(0) as f32;
             let (a, b) = if dx > dy { (dx, dy) } else { (dy, dx) };
-            (a + (std::f32::consts::SQRT_2 - 1.0) * b) * w
+            let h = (a + (std::f32::consts::SQRT_2 - 1.0) * b) * w;
+            if floor > 0.0 {
+                let d = if lb.seen[n] == lb.stamp { lb.dist[n].min(floor) } else { floor };
+                h.max(d)
+            } else {
+                h
+            }
         };
         sc.heap.clear();
         for &(n, c0) in sources {
@@ -990,7 +1100,7 @@ impl<'a> Engine<'a> {
             sc.gc[i] = c;
             sc.parent[i] = u32::MAX;
             sc.dir[i] = NONE;
-            sc.heap.push(c + heur(x, y), n);
+            sc.heap.push(c + heur(&lb, floor, i, x, y), n);
         }
         let cells = self.cells();
         let ns = self.slots.len();
@@ -1021,7 +1131,7 @@ impl<'a> Engine<'a> {
             let ui = u as usize;
             let (s, x, y) = self.unpack(u);
             let gu = sc.gc[ui];
-            if f > gu + heur(x, y) + 1e-3 {
+            if f > gu + heur(&lb, floor, ui, x, y) + 1e-3 {
                 continue; // stale
             }
             if sc.tgt[ui] == stamp {
@@ -1032,14 +1142,23 @@ impl<'a> Engine<'a> {
                     path.push(c);
                 }
                 path.reverse();
+                sc.lb = lb;
                 return Ok(Some(path));
             }
             pops += 1;
             if pops & 4095 == 0 && (self.stop)() {
+                sc.lb = lb;
                 return Err(Stop);
             }
             if pops > self.max_expansions {
+                sc.lb = lb;
                 return Ok(None);
+            }
+            // A long search late in negotiation: raise the estimate by the costs around the
+            // targets. Entries already queued keep their lower keys, which only makes them come
+            // out earlier; a node found cheaper later is expanded again, so paths stay optimal.
+            if pops == 2 * NEAR_COSTS && pres >= NEAR_COSTS_PRES && mode != Mode::Hard {
+                floor = self.near_costs(&mut lb, net, prof, targets, pres, NEAR_COSTS);
             }
             let du = sc.dir[ui];
             let tmap = &self.st.track[prof][s][..];
@@ -1088,7 +1207,7 @@ impl<'a> Engine<'a> {
                 sc.gc[vi] = c;
                 sc.parent[vi] = u;
                 sc.dir[vi] = nd as u8;
-                sc.heap.push(c + heur(x + dx, y + dy), vi as u32);
+                sc.heap.push(c + heur(&lb, floor, vi, x + dx, y + dy), vi as u32);
             }
             if self.vias_allowed {
                 let cell = self.grid.cidx(x, y);
@@ -1135,11 +1254,109 @@ impl<'a> Engine<'a> {
                     sc.gc[vi] = c0;
                     sc.parent[vi] = u;
                     sc.dir[vi] = NONE;
-                    sc.heap.push(c0 + heur(x, y), v);
+                    sc.heap.push(c0 + heur(&lb, floor, vi, x, y), v);
                 }
             }
         }
+        sc.lb = lb;
         Ok(None)
+    }
+
+    /// Costs to `targets` of a negotiation search (present factor `pres`) from the nodes
+    /// around them: a backward Dijkstra over the moves the search may make, on its costs
+    /// without bends (so never more than what the search pays), settling up to `limit` nodes.
+    /// Returns the cost of the last node settled: every node not settled costs at least that
+    /// much to reach a target. The exact costs are left in `lb` (by stamp); the search's
+    /// estimate at a node is the larger of the distance and the cost found (capped at the
+    /// returned floor), still a lower bound and consistent.
+    fn near_costs(&self, lb: &mut NearCosts, net: u32, prof: usize, targets: &[u32], pres: f32, limit: usize) -> f32 {
+        lb.stamp = lb.stamp.wrapping_add(1);
+        if lb.stamp == 0 {
+            lb.seen.iter_mut().for_each(|v| *v = 0);
+            lb.stamp = 1;
+        }
+        let stamp = lb.stamp;
+        let ai = self.act[prof];
+        let cells = self.cells();
+        let ns = self.slots.len();
+        let (gw, gh) = (self.grid.w, self.grid.h);
+        lb.heap.clear();
+        for &t in targets {
+            let i = t as usize;
+            if lb.seen[i] != stamp {
+                lb.seen[i] = stamp;
+                lb.dist[i] = 0.0;
+                lb.heap.push(0.0, t);
+            }
+        }
+        let base = |s: usize, dx: i32, dy: i32| -> f32 {
+            if dx != 0 && dy != 0 {
+                std::f32::consts::SQRT_2 * self.costs.diag
+            } else if (self.pref[s] == 0 && dy != 0) || (self.pref[s] == 1 && dx != 0) {
+                self.costs.wrong_way
+            } else {
+                1.0
+            }
+        };
+        let mut settled = 0usize;
+        while let Some((d, v)) = lb.heap.pop() {
+            let vi = v as usize;
+            if d > lb.dist[vi] {
+                continue;
+            }
+            settled += 1;
+            if settled >= limit {
+                return d;
+            }
+            let (s, x, y) = self.unpack(v);
+            let tmap = &self.st.track[prof][s];
+            let occ_s = &self.occ_t[ai][s];
+            let hist_s = &self.hist_t[s];
+            let kq = self.grid.didx(2 * x, 2 * y);
+            if !ok(tmap[kq], net) {
+                continue;
+            }
+            // Moves u -> v along the layer: u = v - (dx, dy), midpoint between them.
+            for &(dx, dy) in DIRS.iter() {
+                let (ux, uy) = (x - dx, y - dy);
+                if ux < 0 || uy < 0 || ux >= gw || uy >= gh {
+                    continue;
+                }
+                let km = self.grid.didx(2 * x - dx, 2 * y - dy);
+                if !ok(tmap[km], net) {
+                    continue;
+                }
+                let occ = (occ_s[km] + occ_s[kq]) as f32;
+                let c = d + (base(s, dx, dy) + hist_s[km] + hist_s[kq]) * (1.0 + pres * occ);
+                let ui = s * cells + self.grid.cidx(ux, uy);
+                if lb.seen[ui] == stamp && lb.dist[ui] <= c {
+                    continue;
+                }
+                lb.seen[ui] = stamp;
+                lb.dist[ui] = c;
+                lb.heap.push(c, ui as u32);
+            }
+            // Vias u (another slot, same cell) -> v.
+            if self.vias_allowed {
+                let cell = self.grid.cidx(x, y);
+                if !ok(self.st.via[prof][cell], net) {
+                    continue;
+                }
+                let occ = self.occ_v[ai][cell] as f32;
+                let c = d + (self.costs.via + self.hist_v[cell]) * (1.0 + pres * occ);
+                for s2 in (0..ns).filter(|&s2| s2 != s) {
+                    let ui = s2 * cells + cell;
+                    if lb.seen[ui] == stamp && lb.dist[ui] <= c {
+                        continue;
+                    }
+                    lb.seen[ui] = stamp;
+                    lb.dist[ui] = c;
+                    lb.heap.push(c, ui as u32);
+                }
+            }
+        }
+        // Everything reachable was settled: nodes not seen cannot reach a target at all.
+        f32::INFINITY
     }
 
     /// Whether the targets of a `Mode::Hard` search lie in a small pocket that no source
@@ -1306,8 +1523,15 @@ impl<'a> Engine<'a> {
             for &t in &tree[rb] {
                 dst.insert(t, None);
             }
+            // Searches that may not share keep their stubs clear of other nets' routing too
+            // (the halos see a stub only at the grid's samples).
+            let had = !src.is_empty() && !dst.is_empty();
+            if mode == Mode::Hard {
+                src.retain(|&n, (_, st)| st.is_none_or(|st| self.stub_clear(nr.net, n, st)));
+                dst.retain(|&n, st| st.is_none_or(|st| self.stub_clear(nr.net, n, st)));
+            }
             if src.is_empty() || dst.is_empty() {
-                nr.failed[ci] = Some(FailKind::NoAccess);
+                nr.failed[ci] = Some(if had { FailKind::Congestion } else { FailKind::NoAccess });
                 continue;
             }
             let sources: Vec<(u32, f32)> = src.iter().map(|(k, v)| (*k, v.0)).collect();
