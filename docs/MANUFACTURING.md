@@ -18,7 +18,7 @@ published specifications.
 | Intelligent fab data | ODB++ | — | not implemented: Siemens' terms do not permit it (below, D37) |
 | Routing exchange | **Specctra DSN / SES** | DSN export, SES import (DSN reader as library) | M5, done (`export.dsn`, `route.import_ses`; [ROUTER.md](ROUTER.md)) |
 | Mechanical CAD exchange | **IDF 3.0**, **IDX** (ProSTEP EDMD) | export | M9, done (`export.idf`; `export.idx` baseline, `export.idx_changes` change messages, `place.import_idx` responses) |
-| 3D | **STEP** AP214/AP242 (export), 3D models (import) | both | M9: AP214 export done (`export.step`); models via oxideav-mesh3d (STL, OBJ, glTF/GLB, USDZ now; STEP/VRML decoders pending upstream, D36) |
+| 3D | **STEP** AP214/AP242 (export), 3D models (import) | both | M9: AP214 export done (`export.step`); models via oxideav-mesh3d (STL, OBJ, glTF/GLB, USDZ, STEP, VRML; D36) |
 | Simulation | SPICE netlist (ngspice dialect) | export | M8 |
 | Documentation | SVG, PNG, PDF | export | M3/M4 |
 | KiCad | `.kicad_pcb`, `.kicad_sch`, `.kicad_sym`, `.kicad_mod`, netlist | import + export | M2–M7, see below |
@@ -211,8 +211,8 @@ cannot pass to the users and forks of an MIT crate is not compatible with cadlab
 format from observed files (KiCad's exporter, for instance) would sidestep the same terms. IPC-2581 (an open
 IPC standard, `export.ipc2581`) covers the same intelligent-fab-data need. See DECISIONS D37.
 
-Not yet: STEP/VRML model files (they arrive with the oxideav STEP/VRML decoders, D36), writing a STEP model's
-exact B-rep through (models are meshes), AP242, IDF height-limited placement keep-outs (cadlab keep-outs have
+Not yet: writing a STEP model's exact B-rep through (STEP models are read through `oxideav-step`, which
+tessellates them, so they are written back as faceted solids), AP242, IDF height-limited placement keep-outs (cadlab keep-outs have
 no height), IDX changes beyond component placements (board outline, holes, keep-outs: a new baseline carries
 them), applying MCAD-proposed new or deleted components, IDX clearance messages and `RequestForInformation`.
 

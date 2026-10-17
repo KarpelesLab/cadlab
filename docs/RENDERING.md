@@ -112,5 +112,5 @@ encodes the PNG).
   dark vertical gradient. `highlight U1,R3` paints those parts orange.
 - **Speed**: the STM32 test board (60 × 45 mm, 40 parts) renders at 1600 px in well under 0.1 s (release).
 
-STEP and VRML model files come with the oxideav STEP/VRML decoders (the STEP decoder tessellates the B-rep into
-a `Scene3D`); cadlab only registers the crate (see `src/models3d.rs`).
+STEP and VRML model files are read by `oxideav-step` (which tessellates the B-rep into a `Scene3D`) and
+`oxideav-vrml`; cadlab only registers the crates (see `src/models3d.rs`).

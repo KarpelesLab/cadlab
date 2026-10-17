@@ -418,9 +418,8 @@ its `Mesh3DDecoder` trait and `Mesh3DRegistry`, and the format crates `oxideav-s
 3D parsers of its own: `cadlab::models3d` builds the registry (`build_registry`, the single place a format crate
 is registered), decodes by file extension, and walks the decoded scene (`world_node_transforms` /
 `world_mesh_with`, `triangle_indices`, material base colors) into placed triangles for the renderer and the
-exporters. STEP and VRML decoders are being added to the family; they plug in with one dependency line and one
-`register` call, nothing else changes. Until then `.step`/`.wrl` give `model.unsupported_format` with the
-formats available now.
+exporters. STEP (`oxideav-step`) and VRML (`oxideav-vrml`) joined the family later and plugged in exactly that
+way, one dependency line and one `register` call each (2026-10-17).
 Models attach to footprints, or to a part's footprint reference (an override for that part). The stored
 reference is exact (offset in `Nm`, rotations in millidegrees about X, Y, Z, per-axis scale in ppm, optional
 unit and up-axis overrides); the model file is project data, copied as-is into `library/models/` (D19: projects

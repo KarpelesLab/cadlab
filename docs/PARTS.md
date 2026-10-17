@@ -240,13 +240,18 @@ A footprint can carry a 3D model used by `render.board3d`, `export.step` and `ex
 generated from its package dimensions; a part can carry its own model for one of its footprints (an LED and a
 resistor on the same `0603` land pattern), which wins over the footprint's. Models are files decoded by the
 **oxideav-mesh3d** crate family (DECISIONS D36): STL, Wavefront OBJ, glTF 2.0 (`.gltf` with embedded buffers,
-`.glb`) and USDZ today; STEP and VRML once the oxideav STEP/VRML decoders are published. cadlab has no mesh
-parser of its own.
+`.glb`), USDZ, STEP (AP203/AP214/AP242, the B-rep tessellated by `oxideav-step`) and VRML97 (`.wrl`,
+`.wrz`, `oxideav-vrml`). cadlab has no mesh parser of its own. VRML files declare no unit or up axis (VRML97:
+meters, Y up), while models made for EDA tools are usually in tenths of an inch with Z up: attach them with
+`--unit 0.1in --up z`. When a model's size is far from the package body, `model.size_mismatch` names the unit
+that would fit.
 
 ```sh
 cadlab footprint model-set SOT95P280X145-5N models/sot23-5.stl
 cadlab footprint model-set LEDC1608X80N led.glb --part LED_red_0603 --rotation 0,0,90
 cadlab footprint model-set CONN_USB_C usb-c.obj --unit mm --up z --offset 0mm,-1.2mm,0mm --scale 1
+cadlab footprint model-set QFN50P500X500X80-33N qfn32.step
+cadlab footprint model-set SOIC127P600X175-8N soic8.wrl --unit 0.1in --up z
 cadlab footprint model-list                  # files, users, triangles, extents, readable formats
 cadlab footprint model-clear SOT95P280X145-5N
 ```

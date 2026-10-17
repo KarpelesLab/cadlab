@@ -1090,7 +1090,7 @@ impl Command for FootprintSet {
 
 /// Attach a 3D model to a footprint (or to one part's use of it) for 3D renders and STEP/IDF
 /// exports. The file is copied into the project library (`library/models/`); formats: STL,
-/// OBJ, glTF/GLB, USDZ (STEP and VRML once the oxideav decoders are published).
+/// OBJ, glTF/GLB, USDZ, STEP and VRML (EDA-made VRML is usually `unit: 0.1in`, `up: z`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSet {
@@ -1361,6 +1361,7 @@ impl Command for ModelSet {
             let size = (b[0] - a[0]).0.max((b[1] - a[1]).0);
             let want = body.width.0.max(body.length.0);
             if size > 0 && want > 0 && !(0.1..=10.0).contains(&(size as f64 / want as f64)) {
+                let fit = models3d::unit_nm(p, &model).and_then(|u| models3d::fitting_unit(u, size, want));
                 ctx.report(
                     crate::Diagnostic::warning(
                         "model.size_mismatch",
@@ -1371,7 +1372,14 @@ impl Command for ModelSet {
                             body.length
                         ),
                     )
-                    .with_hint("set `unit` (mm, in, m, ...) or `scale` so the model matches the package"),
+                    .with_hint(match fit {
+                        Some(u) => format!(
+                            "the model is probably in {}: attach it again with `unit: {}` (or set `scale`)",
+                            u.label(),
+                            u.label()
+                        ),
+                        None => "set `unit` (mm, 0.1in, in, m, ...) or `scale` so the model matches the package".into(),
+                    }),
                 );
             }
         }
@@ -1474,8 +1482,6 @@ pub struct ModelListing {
     pub uses: Vec<ModelUse>,
     /// Formats this build decodes.
     pub formats: Vec<models3d::FormatInfo>,
-    /// Formats announced upstream (oxideav) but not available yet.
-    pub pending: Vec<String>,
 }
 
 impl Command for ModelList {
@@ -1513,9 +1519,7 @@ impl Command for ModelList {
                 ModelFileInfo { name: name.clone(), facts: ModelFacts::of(p, &m), used_by: lib.model_users(name) }
             })
             .collect();
-        let pending =
-            models3d::PENDING_FORMATS.iter().map(|(f, exts)| format!("{f} (.{})", exts.join(", ."))).collect();
-        Ok(ModelListing { files, uses, formats: models3d::formats(), pending })
+        Ok(ModelListing { files, uses, formats: models3d::formats() })
     }
 
     fn summarize(o: &ModelListing) -> String {
@@ -1532,9 +1536,8 @@ impl Command for ModelList {
         }
         let fmts: Vec<String> = o.formats.iter().flat_map(|f| f.extensions.iter().map(|e| format!(".{e}"))).collect();
         lines.push(format!(
-            "readable: {}; pending upstream: {}",
-            if fmts.is_empty() { "none (feature `models3d` off)".to_string() } else { fmts.join(", ") },
-            o.pending.join(", ")
+            "readable: {}",
+            if fmts.is_empty() { "none (feature `models3d` off)".to_string() } else { fmts.join(", ") }
         ));
         lines.join("\n")
     }

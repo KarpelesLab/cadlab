@@ -37,6 +37,9 @@ pub enum ModelUnit {
     /// Feet.
     #[serde(rename = "ft")]
     Ft,
+    /// Tenths of an inch (2.54 mm): the unit of many VRML models made for EDA tools.
+    #[serde(rename = "0.1in")]
+    TenthIn,
 }
 
 impl ModelUnit {
@@ -49,6 +52,7 @@ impl ModelUnit {
             ModelUnit::In => 25_400_000,
             ModelUnit::Mil => 25_400,
             ModelUnit::Ft => 304_800_000,
+            ModelUnit::TenthIn => 2_540_000,
         }
     }
 
@@ -61,8 +65,13 @@ impl ModelUnit {
             ModelUnit::In => "in",
             ModelUnit::Mil => "mil",
             ModelUnit::Ft => "ft",
+            ModelUnit::TenthIn => "0.1in",
         }
     }
+
+    /// Every unit, smallest first.
+    pub const ALL: [ModelUnit; 7] =
+        [ModelUnit::Mil, ModelUnit::Mm, ModelUnit::TenthIn, ModelUnit::Cm, ModelUnit::In, ModelUnit::Ft, ModelUnit::M];
 }
 
 /// Which model axis points up, away from the board.

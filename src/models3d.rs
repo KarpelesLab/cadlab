@@ -7,22 +7,22 @@
 //! coordinates following a [`Model3d`] reference ([`facets`], [`load`]), for the 3D renderer
 //! (`render::board3d`) and the MCAD exporters (`mcad`).
 //!
-//! Formats available now: STL (`oxideav-stl`), Wavefront OBJ (`oxideav-obj`), glTF 2.0 /
-//! GLB (`oxideav-gltf`) and USDZ (`oxideav-usdz`). STEP and VRML decoders are being added to
-//! the oxideav-mesh3d family; once published they plug in through the same registry: add the
-//! crate to the `models3d` feature in `Cargo.toml` and one `register` call in
+//! Formats: STL (`oxideav-stl`), Wavefront OBJ (`oxideav-obj`), glTF 2.0 / GLB
+//! (`oxideav-gltf`), USDZ (`oxideav-usdz`), STEP AP203/AP214/AP242 (`oxideav-step`, B-rep
+//! tessellated on read) and VRML97 (`oxideav-vrml`). A new format crate plugs in through the
+//! same registry: add it to the `models3d` feature in `Cargo.toml` and one `register` call in
 //! `build_registry` below. Nothing else in cadlab changes — commands, the renderer and the
 //! exporters only see the registry and the decoded `Scene3D`.
+//!
+//! VRML files declare no length unit (VRML97 says meters); models made for EDA tools often use
+//! 1 unit = 0.1 inch (`unit: 0.1in`) or millimeters. `footprint.model_set` warns when a model's
+//! size is far from the package body and names the unit that would fit.
 //!
 //! Without the `models3d` cargo feature, model references and files are still stored, listed
 //! and copied, but nothing is decoded: renders and exports fall back to generated bodies.
 
 use crate::model::Project;
 use crate::model::model3d::Model3d;
-
-/// Formats expected from upstream oxideav crates that are not available yet: (format,
-/// extensions).
-pub const PENDING_FORMATS: &[(&str, &[&str])] = &[("step", &["step", "stp"]), ("vrml", &["wrl", "vrml"])];
 
 /// A decodable model format.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -87,17 +87,8 @@ impl ModelError3d {
     /// How to fix it.
     pub fn hint(&self) -> String {
         match self {
-            ModelError3d::Unsupported { ext, .. } => {
-                let pending = PENDING_FORMATS.iter().any(|(_, exts)| exts.contains(&ext.as_str()));
-                let mut h = format!("formats available now: {}", available_text());
-                if pending {
-                    h.push_str(
-                        "; STEP and VRML arrive with the oxideav STEP/VRML decoder crates (not published yet): convert the model to glTF/GLB or STL meanwhile",
-                    );
-                } else {
-                    h.push_str("; STEP (.step/.stp) and VRML (.wrl) will follow with the oxideav STEP/VRML crates");
-                }
-                h
+            ModelError3d::Unsupported { .. } => {
+                format!("formats available now: {}; convert the model to one of them", available_text())
             }
             ModelError3d::Disabled { .. } => "build cadlab with the `models3d` feature (on by default)".into(),
             ModelError3d::Invalid { .. } => {
@@ -159,14 +150,15 @@ pub fn format_of(file: &str) -> Option<String> {
 }
 
 /// Checks that `file` has a decodable extension. Without the feature, any extension of a
-/// known or pending format is accepted (the model is stored; nothing is decoded).
+/// format the feature reads is accepted (the model is stored; nothing is decoded).
 pub fn check_format(file: &str) -> Result<(), ModelError3d> {
     let ext = extension(file);
     if cfg!(feature = "models3d") {
         if format_of(file).is_some() {
             return Ok(());
         }
-    } else if ["stl", "obj", "gltf", "glb", "usdz"].contains(&ext.as_str()) {
+    } else if ["stl", "obj", "gltf", "glb", "usdz", "step", "stp", "p21", "wrl", "wrz", "vrml"].contains(&ext.as_str())
+    {
         return Ok(());
     }
     Err(ModelError3d::Unsupported { file: file.to_string(), ext })
@@ -179,8 +171,8 @@ pub fn registry() -> &'static oxideav_mesh3d::Mesh3DRegistry {
     R.get_or_init(build_registry)
 }
 
-/// The plug-in point for format crates. A new oxideav-mesh3d format crate (STEP, VRML, ...)
-/// is added here with its `register` function and to the `models3d` feature in `Cargo.toml`.
+/// The plug-in point for format crates. A new oxideav-mesh3d format crate is added here with
+/// its `register` function and to the `models3d` feature in `Cargo.toml`.
 #[cfg(feature = "models3d")]
 fn build_registry() -> oxideav_mesh3d::Mesh3DRegistry {
     let mut r = oxideav_mesh3d::Mesh3DRegistry::new();
@@ -188,7 +180,54 @@ fn build_registry() -> oxideav_mesh3d::Mesh3DRegistry {
     oxideav_obj::register(&mut r);
     oxideav_gltf::register(&mut r);
     oxideav_usdz::register(&mut r);
+    oxideav_step::register_mesh3d(&mut r);
+    oxideav_vrml::register(&mut r);
     r
+}
+
+/// One unit of the scene's declared length unit, in nanometers.
+#[cfg(feature = "models3d")]
+fn scene_unit_nm(scene: &oxideav_mesh3d::Scene3D) -> i64 {
+    use oxideav_mesh3d::Unit;
+    match scene.unit {
+        Unit::Metres => 1_000_000_000,
+        Unit::Centimetres => 10_000_000,
+        Unit::Millimetres => 1_000_000,
+        Unit::Inches => 25_400_000,
+        Unit::Feet => 304_800_000,
+        Unit::Yards => 914_400_000,
+    }
+}
+
+/// One unit of the model's coordinates in nanometers: the reference's `unit`, else what the file
+/// declares (`None` when the file cannot be decoded).
+pub fn unit_nm(p: &Project, m: &Model3d) -> Option<i64> {
+    if let Some(u) = m.unit {
+        return Some(u.nm());
+    }
+    #[cfg(feature = "models3d")]
+    {
+        let data = p.library().models.get(&m.file)?;
+        decode(&m.file, data.bytes()).ok().map(|scene| scene_unit_nm(&scene))
+    }
+    #[cfg(not(feature = "models3d"))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+/// The unit that brings a model spanning `size` closest to a package spanning `want` (both in
+/// the same length), given the unit in effect: `None` when the current unit is already the best
+/// fit or none lands within 10×.
+pub fn fitting_unit(current_nm: i64, size: i64, want: i64) -> Option<crate::model::model3d::ModelUnit> {
+    use crate::model::model3d::ModelUnit;
+    if current_nm <= 0 || size <= 0 || want <= 0 {
+        return None;
+    }
+    let off = |nm: i64| ((size as f64 * nm as f64 / current_nm as f64) / want as f64).ln().abs();
+    let best = ModelUnit::ALL.into_iter().min_by(|a, b| off(a.nm()).total_cmp(&off(b.nm())))?;
+    (best.nm() != current_nm && off(best.nm()) < 10f64.ln() && off(best.nm()) < off(current_nm)).then_some(best)
 }
 
 /// Decodes a model file into an oxideav-mesh3d scene, choosing the decoder by extension.
@@ -306,15 +345,8 @@ pub fn placement_matrix(m: &Model3d, file_unit_nm: i64, file_up_z: bool) -> [[f6
 /// placed as they are.
 #[cfg(feature = "models3d")]
 pub fn facets(scene: &oxideav_mesh3d::Scene3D, m: &Model3d) -> Facets {
-    use oxideav_mesh3d::{Axis, Mesh, NodeId, Unit};
-    let unit_nm = match scene.unit {
-        Unit::Metres => 1_000_000_000,
-        Unit::Centimetres => 10_000_000,
-        Unit::Millimetres => 1_000_000,
-        Unit::Inches => 25_400_000,
-        Unit::Feet => 304_800_000,
-        Unit::Yards => 914_400_000,
-    };
+    use oxideav_mesh3d::{Axis, Mesh, NodeId};
+    let unit_nm = scene_unit_nm(scene);
     let up_z = matches!(scene.up_axis, Axis::PosZ);
     let a = placement_matrix(m, unit_nm, up_z);
     let place = |p: [f32; 3]| -> [f64; 3] {
@@ -455,16 +487,22 @@ mod tests {
     #[test]
     fn format_checks() {
         assert_eq!(extension("A.B.GLB"), "glb");
-        let e = check_format("part.step").unwrap_err();
+        let e = check_format("part.3mf").unwrap_err();
         assert_eq!(e.code(), "model.unsupported_format");
-        assert!(e.hint().contains("STEP and VRML arrive with the oxideav"), "{}", e.hint());
-        assert!(check_format("part.wrl").is_err());
-        assert!(check_format("part.stl").is_ok());
+        for ok in ["part.stl", "part.STEP", "part.stp", "part.wrl"] {
+            assert!(check_format(ok).is_ok(), "{ok}");
+        }
         #[cfg(feature = "models3d")]
         {
-            assert!(e.hint().contains(".stl") && e.hint().contains(".glb"), "{}", e.hint());
+            assert!(
+                e.hint().contains(".stl") && e.hint().contains(".step") && e.hint().contains(".wrl"),
+                "{}",
+                e.hint()
+            );
             let f: Vec<String> = formats().into_iter().map(|f| f.format).collect();
-            assert!(f.contains(&"stl".to_string()) && f.contains(&"gltf".to_string()), "{f:?}");
+            for id in ["stl", "gltf", "step", "vrml"] {
+                assert!(f.contains(&id.to_string()), "{f:?}");
+            }
             assert!(!f.contains(&"mtl".to_string()));
             assert_eq!(format_of("x.GLB").as_deref(), Some("gltf"));
         }

@@ -231,8 +231,7 @@ fn attach_formats_and_listing() {
     assert_eq!(uses[1]["part"], part);
     let fmts: Vec<&str> =
         l["output"]["formats"].as_array().unwrap().iter().map(|f| f["format"].as_str().unwrap()).collect();
-    assert_eq!(fmts, ["gltf", "obj", "stl", "usdz"]);
-    assert!(l["output"]["pending"].to_string().contains("step"));
+    assert_eq!(fmts, ["gltf", "obj", "step", "stl", "usdz", "vrml"]);
     assert_eq!(cadlab::models3d::model_for(project(&s), "R1").unwrap().file, "red.gltf");
     assert!(cadlab::models3d::model_for(project(&s), "C1").is_none());
 
@@ -249,14 +248,13 @@ fn attach_formats_and_listing() {
 fn errors_and_unsupported_formats() {
     let (_d, r, mut s) = ldo_board();
     let u1 = fp_of(&s, "U1");
-    // STEP and VRML: reported before any file access, with the formats available now.
-    for file in ["models/U1.step", "models/U1.wrl"] {
+    // Unknown formats: reported before any file access, with the formats available now.
+    for file in ["models/U1.3mf", "models/U1.iges"] {
         let f = fail(&r, &mut s, "footprint.model_set", json!({"footprint": u1, "file": file}));
         let d = &f.error.diagnostic;
         assert_eq!(d.code, "model.unsupported_format", "{file}");
         let hint = d.hint.as_deref().unwrap();
-        assert!(hint.contains(".stl") && hint.contains(".glb"), "{hint}");
-        assert!(hint.contains("STEP and VRML arrive with the oxideav"), "{hint}");
+        assert!(hint.contains(".stl") && hint.contains(".step") && hint.contains(".wrl"), "{hint}");
     }
     let f = fail(&r, &mut s, "footprint.model_set", json!({"footprint": u1, "file": "models/nope.stl"}));
     assert_eq!(f.error.diagnostic.code, "model.file_not_found");
@@ -559,4 +557,67 @@ fn library_publish_and_import_carry_models() {
     // The library refuses to remove a model a footprint still uses.
     let f = fail(&r, &mut s, "lib.remove", json!({"name": "tall.stl", "kind": "model"}));
     assert_eq!(f.error.diagnostic.code, "lib.in_use");
+}
+
+/// A VRML97 box made the EDA way: 0.1 inch units and Z up (VRML97 itself is meters, Y up);
+/// `x`, `y`, `z` in tenths of an inch.
+fn vrml_box(x: f64, y: f64, z: f64) -> String {
+    let p = [
+        (0.0, 0.0, 0.0),
+        (x, 0.0, 0.0),
+        (x, y, 0.0),
+        (0.0, y, 0.0),
+        (0.0, 0.0, z),
+        (x, 0.0, z),
+        (x, y, z),
+        (0.0, y, z),
+    ];
+    let pts: Vec<String> = p.iter().map(|(a, b, c)| format!("{} {} {}", a - x / 2.0, b - y / 2.0, c)).collect();
+    format!(
+        "#VRML V2.0 utf8\nShape {{\n  appearance Appearance {{ material Material {{ diffuseColor 0.1 0.1 0.1 }} }}\n  \
+         geometry IndexedFaceSet {{\n    coord Coordinate {{ point [ {} ] }}\n    \
+         coordIndex [ 0 3 2 1 -1 4 5 6 7 -1 0 1 5 4 -1 1 2 6 5 -1 2 3 7 6 -1 3 0 4 7 -1 ]\n  }}\n}}\n",
+        pts.join(", ")
+    )
+}
+
+#[test]
+fn step_and_vrml_models() {
+    let (dir, r, mut s) = ldo_board();
+    let models = dir.path().join("p").join("models");
+
+    // VRML: declares no unit (VRML97: meters). A body of 1.2 x 1.2 x 0.4 tenths of an inch is
+    // 1.2 m wide read as meters; the warning names the unit that fits.
+    std::fs::write(models.join("sot.wrl"), vrml_box(1.2, 1.2, 0.4)).unwrap();
+    let u1 = fp_of(&s, "U1");
+    let o = exec(&r, &mut s, "footprint.model_set", json!({"footprint": u1, "file": "models/sot.wrl"}));
+    assert_eq!(o["output"]["facts"]["format"], "vrml");
+    let d = o["diagnostics"].as_array().unwrap();
+    let w = d.iter().find(|d| d["code"] == "model.size_mismatch").expect("size warning");
+    assert!(w["hint"].as_str().unwrap().contains("unit: 0.1in"), "{w}");
+    // Attached again in 0.1 inch units, Z up: 3.048 x 3.048 x 1.016 mm, no warning.
+    let o = exec(
+        &r,
+        &mut s,
+        "footprint.model_set",
+        json!({"footprint": u1, "file": "sot.wrl", "unit": "0.1in", "up": "z"}),
+    );
+    assert!(o["diagnostics"].as_array().is_none_or(|d| d.iter().all(|d| d["code"] != "model.size_mismatch")), "{o}");
+    let f = cadlab::models3d::load(project(&s), cadlab::models3d::model_for(project(&s), "U1").unwrap()).unwrap();
+    for (got, want) in f.max.iter().zip([1.524, 1.524, 1.016]) {
+        assert!((got - want).abs() < 1e-6, "{:?}", f.max);
+    }
+
+    // STEP: cadlab's own export of the 20 x 15 x 1.6 mm board is an exact B-rep (planes, a
+    // rounded outline, drilled holes); read back through oxideav-step it spans the board.
+    exec(&r, &mut s, "export.step", json!({"path": models.join("board.step"), "components": false}));
+    let c1 = fp_of(&s, "C1");
+    let o = exec(&r, &mut s, "footprint.model_set", json!({"footprint": c1, "file": "models/board.step"}));
+    assert_eq!(o["output"]["facts"]["format"], "step");
+    let m = cadlab::models3d::model_for(project(&s), "C1").unwrap();
+    let f = cadlab::models3d::load(project(&s), m).unwrap();
+    let span = [f.max[0] - f.min[0], f.max[1] - f.min[1], f.max[2] - f.min[2]];
+    for (got, want) in span.iter().zip([20.0, 15.0, 1.6]) {
+        assert!((got - want).abs() < 1e-3, "{span:?}");
+    }
 }

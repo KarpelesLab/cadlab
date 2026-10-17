@@ -231,8 +231,8 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] 3D model import for accurate bodies via oxideav-mesh3d (D36): `footprint.model_set / model_clear /
       model_list`, models on footprints or a part's footprint, stored in `library/models/`, carried by shared
       libraries; used by `render.board3d` (mesh instead of the generated body), `export.step` (faceted B-rep) and
-      `export.idf` (model extent). STL, OBJ, glTF/GLB and USDZ now; **STEP/VRML decoders pending upstream** (oxideav
-      STEP/VRML crates; they plug into the registry in `src/models3d.rs`)
+      `export.idf` (model extent). STL, OBJ, glTF/GLB, USDZ, STEP (`oxideav-step`) and VRML (`oxideav-vrml`),
+      with a `0.1in` unit for EDA-made VRML and the fitting unit named when a model's size is off
 - [x] STEP export of the assembled board (`export.step`: AP214, exact B-rep board with cutouts and holes, box
       bodies from package dimensions as an assembly; FreeCAD oracle; D31)
 - [x] STEP bodies generated like the 3D view's (`cadlab::body3d`, shared with `render.board3d`): chamfered
