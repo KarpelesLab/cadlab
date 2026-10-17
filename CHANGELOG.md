@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/KarpelesLab/cadlab/compare/v0.0.2...v0.0.3) - 2026-10-17
+
+### Other
+
+- zip 9.0: clear RUSTSEC-2026-0367 and two other extraction advisories
+- 3D models: STEP and VRML through oxideav-step and oxideav-vrml (D36)
+- Fix master CI: fab paths with / on every OS; KiCad export timing baseline includes its zone fill
+- escapes planned per package, boxed pads re-planned; negotiation estimates costs near targets (D64)
+- FDTD losses: surface impedance on conductor loops, Djordjevic–Sarkar dielectrics, solder mask (D63)
+- Session 4 follow-up (D62): KiCad DRC exclusions as waivers, keep-together hints, place.near over routing, route.nets shoving leftovers, KiCad zone fills, supplier part numbers from fields
+- scoped custom rules, local and hole clearances; flow-through pair parts in series (D61)
+- Pour residuals (D60): copper rings around non-plated holes, spokes along rows of same-net pads, open connections paired by island
+- Built-in 3D FDTD solver: sim.sparams on the openEMS export's region and mesh (D59)
+- Agent session 4 through MCP: KiCad migration, hints with JSON args, DRC filters and waivers (D58)
+- BGA fanout routing gets a budget slow CI runners cannot exhaust
+- corpus completion pass (D57)
+- Corpus residuals (D56): exact clearance gaps, KiCad-measured tolerances, courtyard pieces and sides, copper-to-hole clearance, pad stacks in every output
+- Update rustls to 0.23.46 (RUSTSEC-2026-0346, RUSTSEC-2026-0347 and the brotli advisory fail cargo-deny)
+- Signal-path lengths with stubs, spread placement over the board, fab stackup listing (D55)
+- openEMS export assumes the same loss tangent as the loss calculations
+- board region to openEMS (CSXCAD geometry, graded mesh, Python driver); Touchstone reader and touchstone.summary (D54)
+- Agent session 3: offset bodies, placement hints, fab stackups, buck-aware ERC/lint (D53)
+- frequency-dependent losses (loss tangent, skin effect, roughness), sweeps and net.loss (D52)
+- Corpus re-measured with KiCad 10.0.7 after D44-D48; reference fill trims spokes; docs (D51)
+- KiCad import: map KiCad 6/7 pad tstamps in the UUID table
+- Zone fills: trim thermal spokes at other items' clearances instead of dropping them
+- minimum to pad copper, overlaps only for mask openings; map pad-less footprint drawings in the import UUID table
+- KiCad 10.0.7 drops a clearance next to a crossing; probe silk clearance near a pad
+- Agent session 2: spread auto-placement, unrouted DRC summary, nested enums in describe, KiCad footprint names, footprint.create (D50)
+- Impedance field solver: 2D boundary element method for lines and pairs (D49)
+- Per-layer pad stacks: modeled, imported from KiCad 9 padstack, exported, in every consumer (D48)
+- MCAD exchange: generated STEP bodies, IDF outlines/keep-outs, IDX change and response messages (D47)
+- DRC/pour parity with KiCad: silk vs mask openings, thermal spoke angle/count, rule pairs, disallow, severities (D46)
+- Agent session 1: CLI shortcuts and argument forms, ERC drivers, silk margins, hints (D45)
+- Trapezoid and chamfered pads, drill offsets: modeled, imported, exported, in every output (D44)
+- router regression and large-board timings checked against committed baselines (D43)
+- 2D and 3D field solvers as stretch goals
+- Schematic layout: 7.3 s → 0.3 s on the synthetic board, sheets identical
+- polyclip 0.0.6: zone fill ~6× faster, outputs byte-identical
+- netlist golden file no longer depends on the crate version
+
 ## [0.0.2](https://github.com/KarpelesLab/cadlab/compare/v0.0.1...v0.0.2) - 2026-10-04
 
 ### Other
