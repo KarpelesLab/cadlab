@@ -344,10 +344,11 @@ fn export_bundle_deterministic_zip_and_lock() {
     let mut in_zip = Vec::new();
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
+        let name = f.name().unwrap().to_string();
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).unwrap();
-        assert_eq!(&buf, &a[f.name()], "{}", f.name());
-        in_zip.push(f.name().to_string());
+        assert_eq!(&buf, &a[name.as_str()], "{name}");
+        in_zip.push(name);
     }
     in_zip.sort();
     let mut fab_files: Vec<String> =
