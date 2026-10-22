@@ -42,11 +42,14 @@ const SPREAD_MARGIN: f64 = 0.125;
 /// How much longer than before the stretch spread placement lets the ratsnest grow, at the
 /// default density (it scales with the density): the largest stretch within it is kept.
 const SPREAD_RATSNEST: f64 = 0.25;
-/// Windows per grid of the evenness measure of spread placement (`spread::Windows`).
+/// Share of a window's free area the crowding of `placement_stats` lets it hold whatever the
+/// density: on a sparse board, the density's share of a window is less than one part.
+const CROWD_FLOOR: f64 = 0.25;
+/// Windows per grid of the density measure of spread placement (`spread::Windows`).
 const SPREAD_WINDOWS: f64 = 12.0;
-/// Weight of the evenness when groups are moved after the stretch, per unit of the board's
-/// width plus height: a group moves into emptier windows when the ratsnest it adds is less
-/// than this times the unevenness removed.
+/// Weight of the crowding when groups are moved after the stretch, per unit of the board's
+/// width plus height: a group moves out of a crowded window when the ratsnest it adds is less
+/// than this times the crowding removed (D67; D55's two-sided unevenness before).
 const SPREAD_EVEN: f64 = 5.0;
 
 /// A placement failure, with a stable code and a fix hint.
@@ -131,7 +134,9 @@ impl Rect {
 
 mod mst;
 mod spread;
+mod stats;
 use mst::dist;
+pub use stats::{PlacementStats, placement_stats};
 
 fn snap(v: i64) -> i64 {
     (v as f64 / GRID as f64).round() as i64 * GRID
@@ -747,6 +752,19 @@ impl<'a> Engine<'a> {
             EdgeHint::Top => oy,
         };
         2.0 * n as f64 * (len - out)
+    }
+
+    /// How far connector `i` at `pose` lies across its edge rather than along it (the long
+    /// side's excess over the short one when it is the one facing the edge). Zero unless
+    /// spreading, and for other parts.
+    fn lie(&self, i: usize, pose: &Pose) -> f64 {
+        let part = &self.parts[i];
+        let Some(edge) = part.edge_target().filter(|_| self.spread && part.kind == Kind::Connector) else {
+            return 0.0;
+        };
+        let r = part.rect(pose);
+        let (_, vertical) = self.edge_distance(&r, edge);
+        (if vertical { r.w() - r.h() } else { r.h() - r.w() }).max(0) as f64
     }
 
     /// Penalty of connector `i` at `pose` for crowding other connectors (placed ones being
@@ -1591,10 +1609,18 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
                 groups[k].push(i);
             }
         }
-        let win = spread::Windows::new(&e, parts_area, SPREAD_WINDOWS);
+        let win = spread::Windows::new(&e, parts_area, SPREAD_WINDOWS, density);
         let weight = SPREAD_EVEN * (e.board.w() + e.board.h()) as f64;
-        // The central IC (placed first, at the center) stays.
-        let pivot = groups.first().filter(|g| g.first().is_some_and(|&i| e.parts[i].kind == Kind::Ic)).map(|_| 0);
+        // The central IC (placed first, at the center) stays when it dominates the board (half
+        // as many pins again as any other IC); among peers, every group may move.
+        let dominant = |i: usize| {
+            let others = (0..n).filter(|&j| j != i && e.parts[j].kind == Kind::Ic).map(|j| e.parts[j].pins).max();
+            2 * e.parts[i].pins >= 3 * others.unwrap_or(0)
+        };
+        let pivot = groups
+            .first()
+            .filter(|g| g.first().is_some_and(|&i| e.parts[i].kind == Kind::Ic && dominant(i)))
+            .map(|_| 0);
         let pinned: Vec<bool> = groups
             .iter()
             .enumerate()
@@ -1607,7 +1633,7 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
         for fill in [1.0, 0.75, 0.5, 0.25, 0.0] {
             (e.poses, e.rooms, e.pair_zones) = start.clone();
             spread::stretch_groups(&mut e, &groups, &pinned, pivot, margin, fill);
-            spread::relax_groups(&mut e, &groups, &pinned, pivot, &win, weight, 24);
+            spread::relax_groups(&mut e, &groups, &pinned, pivot, &win, weight, budget, 24);
             if e.total() <= budget {
                 kept = true;
                 break;
@@ -1660,7 +1686,12 @@ fn improve(e: &mut Engine, passes: usize) {
             if let Some(edge) = e.parts[i].edge_target() {
                 let d0 = e.edge_distance(&e.parts[i].rect(&cur), edge).0;
                 let f0 = e.facing(i, &cur, edge);
-                moves.retain(|m| e.edge_distance(&e.parts[i].rect(m), edge).0 <= d0 && e.facing(i, m, edge) <= f0);
+                let l0 = e.lie(i, &cur);
+                moves.retain(|m| {
+                    e.edge_distance(&e.parts[i].rect(m), edge).0 <= d0
+                        && e.facing(i, m, edge) <= f0
+                        && e.lie(i, m) <= l0
+                });
             }
             // Spread anchors stay in their room.
             if let Some(room) = e.rooms[i] {

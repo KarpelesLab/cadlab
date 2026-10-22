@@ -965,6 +965,12 @@ pub struct Placed {
     /// centers), for automatic placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ratsnest_length: Option<Nm>,
+    /// How the placement uses the board, for automatic placement: about 16 windows over the
+    /// free area, those nearly empty, the crowding (share of courtyard area beyond what a
+    /// window holds at the default 60 % density), the unevenness (variation of the windows'
+    /// shares; 0 is even), the largest empty square and the extent of all parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_use: Option<geo::place::PlacementStats>,
 }
 
 pub(super) fn placed_text(o: &Placed) -> String {
@@ -988,6 +994,12 @@ pub(super) fn placed_text(o: &Placed) -> String {
     }
     if let Some(l) = o.ratsnest_length {
         lines.push(format!("ratsnest length: {l}"));
+    }
+    if let Some(u) = &o.board_use {
+        lines.push(format!(
+            "board use: {} of {} windows nearly empty, crowding {:.2}, unevenness {:.2}, largest empty square {}",
+            u.empty_windows, u.windows, u.crowding, u.unevenness, u.largest_empty
+        ));
     }
     lines.join("\n")
 }
@@ -1110,7 +1122,7 @@ impl Command for PlaceSet {
         if moved {
             routing_left_behind(ctx, std::slice::from_ref(&r), before, self.rip)?;
         }
-        Ok(Placed { placements: [(r, fp)].into(), unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: [(r, fp)].into(), unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -1151,7 +1163,7 @@ impl Command for PlaceMove {
             out.insert(r, fp.clone());
         }
         routing_left_behind(ctx, &keys, before, self.rip)?;
-        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -1197,7 +1209,7 @@ impl Command for PlaceRotate {
             out.insert(r, fp.clone());
         }
         routing_left_behind(ctx, &keys, before, self.rip)?;
-        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -1236,7 +1248,7 @@ impl Command for PlaceFlip {
             out.insert(r, fp.clone());
         }
         routing_left_behind(ctx, &keys, before, self.rip)?;
-        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -1279,7 +1291,7 @@ impl Command for PlaceLock {
             fp.locked = self.locked;
             out.insert(r, fp.clone());
         }
-        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -1312,7 +1324,7 @@ impl Command for PlaceRemove {
             ctx.project_mut()?.board_mut().footprints.remove(&k);
         }
         let p = ctx.project()?;
-        Ok(Placed { placements: BTreeMap::new(), unplaced: info(p).unplaced, ratsnest_length: None })
+        Ok(Placed { placements: BTreeMap::new(), unplaced: info(p).unplaced, ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -1333,7 +1345,12 @@ impl Command for PlaceList {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Placed, CommandError> {
         let p = ctx.project()?;
-        Ok(Placed { placements: p.board().footprints.clone(), unplaced: info(p).unplaced, ratsnest_length: None })
+        Ok(Placed {
+            placements: p.board().footprints.clone(),
+            unplaced: info(p).unplaced,
+            ratsnest_length: None,
+            board_use: None,
+        })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -1356,7 +1373,9 @@ pub enum Strategy {
 
 /// Place footprints automatically inside the board outline (a starting point to refine).
 /// Locked footprints, and placed ones unless `replace`, stay put and are obstacles; cutouts,
-/// footprint keep-outs and holes are avoided.
+/// footprint keep-outs and holes are avoided. The result reports the ratsnest length and how
+/// the placement uses the board (`board_use`: nearly empty windows, crowding, largest empty
+/// square).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceAuto {
@@ -1373,10 +1392,12 @@ pub struct PlaceAuto {
     /// board (connectors still go to edges).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact: bool,
-    /// Groups: how much of the free board area the groups' rooms take, in percent (default 60;
-    /// lower keeps groups closer together, 100 uses the whole board). The groups' arrangement is
-    /// then stretched where it leaves an empty band along an edge wider than 12.5 % of the
-    /// board at 60 (wider at lower densities). Not with `compact`.
+    /// Groups: how much of the free board area the parts spread over, in percent (default 60;
+    /// lower keeps groups closer together, 100 uses the whole board). It sizes each group's
+    /// room, stretches the groups' arrangement where it leaves an empty band along an edge
+    /// wider than 12.5 % of the board at 60 (wider at lower densities), and moves groups apart
+    /// where a part of the board holds more than its even share divided by the density. Not
+    /// with `compact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub density: Option<u32>,
 }
@@ -1670,7 +1691,8 @@ impl Command for PlaceAuto {
             );
         }
         let length = geo::place::ratsnest_length(ctx.project()?);
-        Ok(Placed { placements: out, unplaced: outside, ratsnest_length: Some(length) })
+        let board_use = geo::place::placement_stats(ctx.project()?);
+        Ok(Placed { placements: out, unplaced: outside, ratsnest_length: Some(length), board_use })
     }
 
     fn summarize(o: &Placed) -> String {

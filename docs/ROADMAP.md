@@ -105,6 +105,10 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Ratsnest (MST between copper islands per net), initial auto-placement (rows inside the outline)
 - [x] "Place near", decoupling caps next to pins, placement by schematic groups (`place.near`,
       `place.auto` strategy `groups`, `src/board/place.rs`)
+- [x] Placement quality on roomy boards: density-aware group spreading (windows may hold their share over the
+      density), groups jumping to where their connections pull them, connectors filling empty stretches of
+      their edge, every group move within the ratsnest budget; how a placement uses the board measured
+      (`board::place::placement_stats`, `board_use` in `place.auto`; `tests/placement_quality.rs`; D67)
 - [x] Manual routing commands: tracks through coordinates or pins (net inferred, shorts refused), vias; net
       class widths and via sizes
 - [x] Copper zones with fill (thermal reliefs, clearances, islands removal, priorities, keep-outs)

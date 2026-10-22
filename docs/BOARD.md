@@ -193,7 +193,7 @@ change).
 | Group | Commands |
 |---|---|
 | `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `hole_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
-| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
+| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`; reports `ratsnest_length` and `board_use`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
@@ -433,24 +433,37 @@ to a routed board, such as an imported one, land clear of its copper).
    input, and a passive without a signal net goes to the smallest power net it shares with an anchor (a
    buck's inductor to its switch pin, not to the largest IC on the output rail). `compact` is the placement
    as before D50 (the router benchmark boards use it).
-4. **Spreading the groups** (spread placement only, D55; `src/board/place/spread.rs`). Connectivity pulls
-   every group towards the first ones placed, so a board larger than its parts kept a side empty (session
-   3's right third). Groups (an anchor with its passives and satellites) now move as rigid blocks: first a
-   *stretch* — where the box around all groups leaves an empty band along a side of the free area wider than
-   an eighth of the board (at density 60; `0.125 × 60 / density` of it otherwise), the groups on that side of
-   the central IC are spread towards it, each keeping its relative place in the slack along each axis, so
-   groups that were apart stay apart and the arrangement (the ratsnest's topology) is unchanged; then a
-   *relaxation* — moves of 1 to 8 mm in eight directions and to the group's mirror image across the central
-   IC, accepted where the ratsnest (with tethers and connector crowding) plus 5 × (width + height) times the
-   board's unevenness drops. Unevenness: two staggered grids of about twelve windows each; per window, the
-   squared difference between the courtyard area it holds and its share of the parts' area if they were
-   spread evenly over the free area, relative to a fully free window's share. The full stretch is tried
-   first, then three quarters, half, a quarter and none; the first whose ratsnest stays within 25 % (scaled
-   by the density) of the ratsnest before is kept, else the groups stay where they were. The central IC's
-   group and the groups holding ends of differential pairs (a part with pads of both nets) do not move in
-   these group moves: the arrangement of a pair's ends (an ESD array between the receptacle and the MCU)
-   stays the one the constructive placement chose. Groups at an edge stay at it, facing it no worse; a move
-   that does not fit is shortened or not made.
+4. **Spreading the groups** (spread placement only, D55, D67; `src/board/place/spread.rs`). Connectivity
+   pulls every group towards the first ones placed, so a board larger than its parts kept a side empty
+   (session 3's right third). Groups (an anchor with its passives and satellites) move as rigid blocks: first
+   a *stretch* — where the box around all groups leaves an empty band along a side of the free area wider
+   than an eighth of the board (at density 60; `0.125 × 60 / density` of it otherwise), the groups on that
+   side of the central IC are spread towards it, each keeping its relative place in the slack along each
+   axis, so groups that were apart stay apart and the arrangement (the ratsnest's topology) is unchanged;
+   then a *relaxation* — each group tries shifts of 1 to 8 mm in eight directions, its mirror image across
+   the central IC, a jump of its center to each window's center, and a jump to where its connections pull
+   it (the mean of the pins outside the group on its signal nets, nets of more than eight pins and ground
+   left out, and eight points 4 mm around it); a group bound to an edge (a connector, a part with an edge
+   hint) jumps only along its edge, and a lone connector may also turn, seated back at its distance from the
+   edge. The best move is taken where the ratsnest (with tethers, connector crowding and how far a
+   connector lies across its edge) plus 5 × (width + height) times the board's *crowding* drops, and only
+   while the board's total ratsnest stays within its budget (25 % over the ratsnest before, scaled by the
+   density; a move that shortens it is always allowed). Crowding: two staggered grids of about twelve
+   windows each; per window, the squared excess of the courtyard area it holds over its share of the parts'
+   area spread evenly over the free area divided by the density (1.67 times the share at 60: the parts
+   must spread over at least that much of the board), relative to a fully free window's share; for groups
+   bound to an edge the shortfall below the share counts too, so connectors fill empty stretches of their
+   edge (where a connector sits along its edge is free, and its group follows its nets), while an interior
+   group is never pulled into an empty window away from its connections. The full stretch is tried first,
+   then three quarters, half, a quarter and none; the first whose ratsnest stays within the budget is kept.
+   The central IC (when it dominates: half as many pins again as any other IC; among peers, such as four
+   identical channels, every group moves) and the groups holding ends of differential pairs (a part with
+   pads of both nets) do not move in these group moves: the arrangement of a pair's ends (an ESD array
+   between the receptacle and the MCU) stays the one the constructive placement chose. Groups at an edge
+   stay at it, facing it no worse; a move that does not fit is shortened or not made. Before D67 the
+   relaxation pulled every window towards its even share and was all or nothing: on a sparse board its
+   ratsnest overshot the budget and every group move was undone, and it pulled groups into empty windows
+   away from their connectors.
 5. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
    and swaps of identical footprints, accepting the best valid move that lowers the ratsnest (MST per net over
    pad centers) plus tethers keeping passives at their target pins; connectors never move away from the edge.
@@ -461,6 +474,34 @@ to a routed board, such as an imported one, land clear of its copper).
 On the ATtiny85 test board (10 parts, 40 × 30 mm) this gives a ratsnest of about 97 mm against 175 mm for
 `rows`, the 3V3 decoupling capacitor pad 1.6 mm from the MCU's VCC pad (C1 1.75 mm from the LDO input), no DRC
 placement errors.
+
+**How a placement uses the board** (`board::place::placement_stats`, D67; `place.auto` reports it as
+`board_use`): the free area is rasterized (about 40 000 cells; a cell is covered when its center lies in a
+courtyard box, either side) and cut into about 16 near-square windows (those at least a quarter free count);
+`empty_windows` hold less than a quarter of the board's average covered share, `crowding` is the share of
+the courtyard area beyond what a window holds at the default density (1 / 0.6 times the average share, at
+least a quarter of the window: on a sparse board one part is no crowd), `unevenness` the coefficient of
+variation of the windows' covered shares (weighted by free area), `largest_empty` the side of the largest
+free square clear of courtyards, `extent` the share of the free area's box covered by the box around all
+courtyards, `fill` the covered share of the free area. `tests/placement_quality.rs` measures spread and
+compact placement on six boards (`placement_quality_report`, ignored: `cargo test --release --test
+placement_quality -- --ignored --nocapture`, `CADLAB_PLACE_ROUTE=<ms>` also routes them) and checks the roomy
+ones. D55 → D67 (spread placement; `route.all` 30 s on two layers):
+
+| board | ratsnest mm | unevenness | empty windows | largest empty mm | routed | vias |
+|---|---|---|---|---|---|---|
+| ATtiny 40 × 30 mm | 116 → 112 | 1.53 → 1.62 | 9 → 10 of 15 | 14.0 → 16.3 | 22/22 → 22/22 | 5 → 4 |
+| ATtiny 80 × 60 mm | 230 → 244 | 2.20 → 1.91 | 11 → 11 of 15 | 35.7 → 34.0 | 22/22 → 22/22 | 9 → 6 |
+| STM32 60 × 45 mm | 895 → 893 | 0.78 → 0.73 | 1 → 1 of 15 | 13.4 → 17.2 | 106/109 → 108/109 | 84 → 73 |
+| STM32 100 × 75 mm | 1558 → 1387 | 1.27 → 1.17 | 6 → 5 of 15 | 28.8 → 33.5 | 108/109 → 107/109 | 93 → 76 |
+| 4 channels 60 × 45 mm | 506 → 394 | 0.82 → 0.67 | 4 → 1 of 15 | 21.1 → 18.7 | 64/64 → 64/64 | 18 → 16 |
+| 4 channels 100 × 80 mm | 716 → 529 | 1.27 → 1.32 | 6 → 8 of 16 | 42.6 → 51.5 | 64/64 → 64/64 | 18 → 16 |
+
+On the channel boards each op-amp now sits at its connector (on 100 × 80 mm with less ratsnest than the
+packed placement's 625 mm; the middle of the board stays free, which the window counts score as empty); the
+ATtiny board on 80 × 60 mm keeps its group moves (D55 undid them all), the regulator between the power
+connector and the MCU. The STM32 board's unrouted connections are at the MCU's pins, a group the spreading
+does not move; its variation is the router's, the MCU group being the same. Compact placement is unchanged.
 
 `place.near` puts the part just outside the target's courtyard (on `side`, default the side the pin faces),
 `distance` between courtyards (default 0.25 mm), with its pad of the target's net aligned with the pin; each

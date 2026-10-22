@@ -451,7 +451,7 @@ impl Command for PlaceNear {
             ctx.report(d);
         }
         ctx.project_mut()?.board_mut().footprints.insert(r.clone(), pf.clone());
-        Ok(Placed { placements: [(r, pf)].into(), unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: [(r, pf)].into(), unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -543,7 +543,7 @@ impl Command for PlaceAlign {
             f.at = with_coord(f.at, self.axis, to);
             out.insert(r, f.clone());
         }
-        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {
@@ -612,7 +612,7 @@ impl Command for PlaceDistribute {
             next = hi + delta + gap;
             out.insert(r, f.clone());
         }
-        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
+        Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 
     fn summarize(o: &Placed) -> String {

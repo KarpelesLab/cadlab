@@ -1430,6 +1430,51 @@ nothing checked the split) or produced wrong outputs (a floating AGND in SPICE, 
 file); the fixes keep the design data's meaning (a net tie is still a footprint property, regions are hints like
 edges).
 
+### D67. Spread placement: crowding over the density, jumps to where connections pull, a ratsnest budget per move, placement stats (2026-10-22)
+Spread placement still left parts of roomy boards empty, and measuring it (new `board::place::placement_stats`,
+reported by `place.auto` as `board_use`: about 16 windows over the free area, those nearly empty, the crowding,
+the unevenness, the largest empty square, the extent; `tests/placement_quality.rs`) showed why. **All or
+nothing:** D55's relaxation pulled every window towards its even share; on a sparse board (the ATtiny board on
+80 × 60 mm, four op-amp channels on 100 × 80 mm) its ratsnest overshot the 25 % budget at every stretch, and the
+fallback undid every group move. Each move is now checked against the budget (a move that shortens the ratsnest
+is always allowed), so the moves that fit stay. **Density, one-sided for groups:** the window term is now the
+excess of a window's courtyard area over its share divided by the density (1.67× at 60 %: the parts must
+spread over at least that share of the board), so crowded groups move apart and nothing pulls a group away
+from its connections into an empty window (with the jumps below, the two-sided term sent the ATtiny's
+regulator to an empty corner, 30 mm from its connector). Groups bound to an edge (connectors, edge hints) keep the shortfall term:
+where a connector sits along its edge is free, and filling an empty stretch of edge brings its group's
+connections with it (session 3's board still uses every third of its width).
+**Moves:** besides the 1–8 mm shifts and mirror images, a group may jump to any window's center or to where
+its connections pull it (mean of the outside pins of its signal nets, rails of more than eight pins and
+ground left out, and a 4 mm ring around it); edge-bound groups only along their edge, and a lone connector may
+turn, seated back at its distance from the edge, paying for lying across it (also in the improvement, which
+no longer turns a connector across its edge). **Pivot:** the central IC stays only when it dominates (half as
+many pins again as any other IC); among peers every group moves (the four channels had clumped around the
+first op-amp). Results (D55 → D67, spread): STM32 board on 100 × 75 mm ratsnest 1558 → 1387 mm, empty windows
+6 → 5, vias 93 → 76 with routing 108 → 107 of 109 (failures at the MCU's pins, a group not moved); channels
+on 100 × 80 mm 716 → 529 mm (each op-amp at its connector, less than the packed 625 mm), on 60 × 45 mm
+506 → 394 mm, empty windows 4 → 1; STM32 on 60 × 45 mm routing 106 → 108 of 109; the ATtiny boards ±5 %
+ratsnest; the 528-part synthetic board (`big_board_spread_timing`) places in 47 s instead of 59 s (the
+budget-limited relaxation stops earlier) with a 0.7 % shorter ratsnest. `compact` (the router benchmarks'
+placement) is unchanged.
+Tried and dropped (grid over the variants on six boards and session 3): the crowding term in the per-part
+improvement (spread passives and anchors a little, +10–20 % ratsnest on small boards), a floor letting any
+window hold a quarter of its area (on sparse boards the shortfall term then sent connectors away from their
+groups: channels 529 → 706 mm), the shortfall scaled by the board's fill, connectors' lying across weighted per
+pad or ranked before cost (both turned headers at a large ratsnest cost: STM32 100 × 75 mm 1387 → 1540–1620 mm),
+and a stronger across penalty in the constructive placement. The stats keep that floor: crowding counts only
+beyond a quarter of a window.
+*Why:* an analytical placer's model — wirelength subject to a density limit — is the one whose optimum is a
+sensible board: groups apart where they would crowd, next to what they connect to otherwise; the density
+option already said how much of the board to use, so it sets the limit. Judging moves one by one against the
+ratsnest budget keeps the budget's meaning (how much using the board may cost) without discarding everything
+when one stretch overshoots. Jumps to where connections pull fix what small shifts could not reach: a group
+with its connector across the board. A number that says how the board is used lets agents and tests judge a
+placement without a picture. Remaining: long headers can still end up across their edge (three on the
+STM32 100 × 75 mm board, as before), large pinned groups (the MCU with its satellites and passives) stay dense
+since only whole groups move, and on sparse boards the middle stays empty when every group sits by its
+connector.
+
 ## Open questions
 
 
