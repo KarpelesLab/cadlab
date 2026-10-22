@@ -83,6 +83,69 @@ jobs:
           path: target/tmp/
           if-no-files-found: ignore
 
+  openems:
+    name: openEMS oracle (full-wave export against sim.sparams)
+    runs-on: ubuntu-24.04
+    # Informative, like the other oracle jobs: openEMS is built from source (no Ubuntu package or
+    # Linux wheel), pinned to an openEMS-Project commit and cached (docs/TESTING.md).
+    continue-on-error: true
+    timeout-minutes: 60
+    env:
+      OPENEMS_PROJECT_REV: 1c6e5c11017a24a0a821aaaa18f7628ebc7540e2
+      OPENEMS_PREFIX: ${{ github.workspace }}/../openEMS
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: openems
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential cmake git libhdf5-dev \
+            libboost-all-dev libtinyxml-dev zlib1g-dev libcgal-dev python3-pip python3-venv \
+            python3-setuptools python3-setuptools-scm python3-numpy python3-matplotlib python3-h5py cython3
+      - name: Cache openEMS
+        id: cache-openems
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OPENEMS_PREFIX }}
+          key: openems-${{ env.OPENEMS_PROJECT_REV }}-ubuntu-24.04
+      - name: Build openEMS (headless, Python modules)
+        if: steps.cache-openems.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive https://github.com/thliebig/openEMS-Project.git "$RUNNER_TEMP/openEMS-Project"
+          cd "$RUNNER_TEMP/openEMS-Project"
+          git checkout "$OPENEMS_PROJECT_REV"
+          git submodule update --init --recursive
+          ./update_openEMS.sh "$OPENEMS_PREFIX" --python --disable-GUI
+      - name: openEMS oracle tests
+        env:
+          CADLAB_ORACLES: "1"
+        run: |
+          export CADLAB_ORACLE_OPENEMS="$OPENEMS_PREFIX/bin/openEMS"
+          export CADLAB_ORACLE_PYTHON="$OPENEMS_PREFIX/venv/bin/python3"
+          export LD_LIBRARY_PATH="$OPENEMS_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          "$CADLAB_ORACLE_PYTHON" -c "import CSXCAD, openEMS, numpy; print('openEMS Python modules ok')"
+          cargo test --release --all-features --test openems -- --nocapture
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f target/tmp/openems_oracle/summary.md ]; then
+            { echo '### openEMS against sim.sparams (lossy microstrip)'; cat target/tmp/openems_oracle/summary.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Keep the comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openems-oracle
+          path: |
+            target/tmp/openems_oracle/*.md
+            target/tmp/openems_oracle/*.s2p
+            target/tmp/openems_oracle/*.xml
+            target/tmp/openems_oracle/*.py
+          if-no-files-found: ignore
+
   corpus:
     name: Open-source corpus (KiCad 10, gerbv)
     runs-on: ubuntu-24.04

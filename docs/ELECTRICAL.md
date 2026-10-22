@@ -7,7 +7,7 @@ and a design lint beyond ERC. Code: `src/electrical/` (impedance closed forms, 2
 checks), `src/spice.rs`, `src/openems/`, `src/fdtd/`, `src/touchstone.rs`, `src/lint.rs`; commands in
 `src/commands/electrical.rs`, `export.spice`, `export.openems`, `sim.sparams`, `touchstone.summary` and
 `circuit.lint`. Decisions: DECISIONS D29, D49 (field solver), D52 (losses), D54 (openEMS export, Touchstone),
-D59 (FDTD solver).
+D59 (FDTD solver), D63 (full-wave losses), D68 (openEMS export parity, openEMS oracle, CPML).
 
 Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md), "Differential pairs"
 and "Length tuning", D38); this document covers the numbers they route to. A pair (`diffpair.add`) routes at
@@ -312,7 +312,9 @@ whose name gives one (`3V3`, `+5V`, `VCC_1V8`, `5V0`); a driven net without a vo
 The first step of full-wave analysis (S-parameters of vias, transitions, connectors and short interconnects):
 a region of the board exported as an [openEMS](https://openems.de) FDTD simulation. openEMS is an external
 tool (GPL): cadlab writes its documented input (the CSXCAD XML geometry format and its Python interface, as
-used in openEMS's tutorials), never links, bundles or reads its code. Code: `src/openems/` (DECISIONS D54).
+used in openEMS's tutorials), never links, bundles or reads its code. Code: `src/openems/` (DECISIONS D54,
+D68). The export writes the same model as the built-in solver (`sim.sparams`): Djordjevic–Sarkar dielectrics
+as the same Debye terms, lossy copper (as openEMS conducting sheets), solder mask.
 
 ```
 cadlab export openems --f-max 10GHz --around via#12 \
@@ -323,11 +325,14 @@ cadlab touchstone summary out/openems/<name>.s2p --frequencies 1GHz,5GHz
 
 **Files** (default `out/openems/<project>.*`):
 
-- `<name>.xml`: an `<openEMS>` document holding the `<ContinuousStructure>`: properties with primitives, and
-  the `<RectilinearGrid>` (lengths in mm, `DeltaUnit` 1e-3, written exactly from the integer nanometers);
+- `<name>.xml`: a CSXCAD geometry file, a `<ContinuousStructure>` document (what `ContinuousStructure.
+  ReadFromXML` reads and AppCSXCAD opens; before D68 it was wrapped in `<openEMS>`, which `ReadFromXML`
+  rejects): properties with primitives, and the `<RectilinearGrid>` (lengths in mm, `DeltaUnit` 1e-3,
+  written exactly from the integer nanometers);
 - `<name>.py`: the driver. For each port in turn it builds an `openEMS` run (`SetGaussExcite`,
   `SetBoundaryCond`), reads the geometry (`ContinuousStructure.ReadFromXML`), adds every port
-  (`AddLumpedPort`, `AddMSLPort`; the excited one with amplitude 1, the others as matched terminations),
+  (`AddLumpedPort`, `AddMSLPort` with `Feed_R` = z0: the line ends inside the region, so each port is
+  its own matched termination; the excited one with amplitude 1),
   runs it in `<name>_sim/portN/`, then computes the port waves (`CalcPort`) and S<sub>ij</sub> =
   b<sub>i</sub> / a<sub>j</sub>, and writes `<name>.sNp` (Touchstone 1.1, RI, one reference impedance;
   2.0 with `[Reference]` when the ports' impedances differ). `--postprocess` recomputes the file from earlier
@@ -344,9 +349,9 @@ rectangle (air beyond an edge), so edge launches are modeled.
 
 | Item | Written as |
 |---|---|
-| Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. One `Material` per dielectric (`Epsilon` = εr; `Kappa` = 2π f₀ ε₀ εr tan δ, f₀ the excitation's center; an unset tan δ is taken as 0.02, as in the loss calculations, and marked "assumed" in the XML comment: losses are exact at f₀ and scale with frequency only approximately). A dispersive dielectric (`ref_freq`) is written with its Djordjevic–Sarkar εr and tan δ at f₀ (noted in a comment). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air, or under the solder mask |
-| Solder mask (`mask`) | A `solder_mask` `Material` (`mask_er`, default 3.8, and a `Kappa` from `mask_loss_tangent`, default 0.025, at f₀) on both outer layers: the board outline from the laminate surface to `mask` beyond it (priority 5) and each outer layer's copper from its outer surface to `mask_copper` (default `mask`) beyond it (priority 7); a `mask_openings` air material (εr 1) clears what lies above the copper outside its own mask (priority 6) and the pads with a mask opening on that side (their copper, priority 8). Metal (10) stays above all of it. Mesh lines at both mask surfaces |
-| Copper | One `Metal` (perfect conductor) per net: the union of its pads, tracks, vias, drawings and zone fills on each layer, clipped to the region. `copper: solid` (default): extruded through the copper thickness (`LinPoly`, or `Box` for rectangles); `sheet`: zero-thickness `Polygon`s with the copper left out of the stack. Polygons with holes (planes around antipads) are cut into hole-free pieces by vertical lines through each hole |
+| Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. A lossy dielectric is a `DebyeMaterial`: the Djordjevic–Sarkar model through its εr and tan δ (at `ref_freq`, or anchored at the pulse's center f₀ when the stackup gives none; an unset tan δ is taken as 0.02, as in the loss calculations, and marked "assumed"), fitted over the Touchstone band exactly as `sim.sparams` fits it (`fdtd::fit`: ε∞ as `Epsilon`, a conductivity as `Kappa`, and Δε on the shared relaxation times as `EpsilonDelta_n` / `EpsilonRelaxTime_n`, CSXCAD's documented parameter names; terms of zero weight left out, 7 significant digits); a comment gives εr and tan δ at f₀. A lossless one is a plain `Material` (`Epsilon` = εr). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air, or under the solder mask |
+| Solder mask (`mask`) | A `solder_mask` material (`mask_er`, default 3.8, `mask_loss_tangent`, default 0.025: Debye terms like an unreferenced laminate) on both outer layers: the board outline from the laminate surface to `mask` beyond it (priority 5) and each outer layer's copper from its outer surface to `mask_copper` (default `mask`) beyond it (priority 7); a `mask_openings` air material (εr 1) clears what lies above the copper outside its own mask (priority 6) and the pads with a mask opening on that side (their copper, priority 8). Metal (10) stays above all of it. Mesh lines at both mask surfaces |
+| Copper | One `Metal` (perfect conductor) per net: the union of its pads, tracks, vias, drawings and zone fills on each layer, clipped to the region. `copper: solid` (default): extruded through the copper thickness (`LinPoly`, or `Box` for rectangles); `sheet`: zero-thickness `Polygon`s with the copper left out of the stack. Polygons with holes (planes around antipads) are cut into hole-free pieces by vertical lines through each hole. With a `conductivity` (default 58 MS/m, as `sim.sparams`; `perfect_copper` keeps perfect metal only) each net's copper on each layer is instead a `ConductingSheet` (`Conductivity`, `Thickness` = the layer's copper thickness: openEMS's documented `AddConductingSheet` model of a thin lossy metal) at priority 11: on both surfaces of solid copper, or as the sheet itself; the `Metal` keeps only the via barrels. (With a perfect conductor left between the two sheets of solid copper, openEMS read 60 % of the conductor loss of `sim.sparams`; without it the two agree: 0.017 against 0.018 dB at 1 GHz, 0.031 against 0.030 dB at 3 GHz on the 20 mm line below with lumped ports.) Roughness (`roughness`, `huray_radius` / `huray_ratio`) is folded into the conductivity at f₀ (σ / K², since Rs K = √(πfμ₀ / (σ/K²))): openEMS's sheet has no roughness model |
 | Vias, plated holes | Metal `Cylinder`s of the drill diameter between the outer surfaces of their first and last layers (slots: the slot outline extruded) |
 | Non-plated holes | Air (εr 1) cylinders through the board, above everything else |
 
@@ -379,15 +384,43 @@ another net under the port's position; none is `openems.no_reference`. Ports mus
 (`openems.port_outside`); one whose feed falls inside the PML cells is warned (`openems.port_in_pml`: grow the
 margin).
 
+openEMS's microstrip port measures a zero-thickness strip: with `copper: solid` its probes read nonsense
+(εeff 3.6–6.8 for a 3.0 line, Z₀ with a large imaginary part, seen with the oracle), so an `msl` port on solid
+copper is warned (`openems.msl_solid_copper`: export with `copper: sheet`, or use lumped ports). The
+built-in solver measures both.
+
 **Not modeled in the export:** silkscreen, the mask's own margin around pads (openings are the pad copper),
-surface roughness and finite copper conductivity (copper is a perfect `Metal`; `sim.sparams` models both),
-the dispersion of εr and tan δ beyond f₀ (openEMS's Debye/Lorentz materials are not used: their XML is not
-documented precisely enough to write without its code), components (pads are bare copper: add lumped elements
-in the driver if needed). openEMS is not installed on the development machines yet, so the files follow the
-documentation and the golden file `tests/golden/openems/via.{xml,py}` (a 4-layer via transition) pins them;
-the optional oracle (`CADLAB_ORACLES=1`, `openEMS` on the PATH or `CADLAB_ORACLE_OPENEMS`, the driver run by
-`python3` or `CADLAB_ORACLE_PYTHON`) runs the driver on that board and checks |S21| > −3 dB and |S11| < −6 dB
-at 1 GHz (`tests/openems.rs`).
+roughness beyond f₀ (folded into the sheets' conductivity there), conductor loss in via barrels (perfect
+cylinders), components (pads are bare copper: add lumped elements in the driver if needed). The golden file
+`tests/golden/openems/via.{xml,py}` (a 4-layer via transition) pins the format. The openEMS oracle
+(`CADLAB_ORACLES=1`, `openEMS` on the PATH or `CADLAB_ORACLE_OPENEMS`, the driver run by `python3` or
+`CADLAB_ORACLE_PYTHON`; CI job "openEMS oracle", openEMS built from source at a pinned commit) runs the
+driver on a lossy microstrip
+(`lossy_microstrip_oracle`: 24 mm of 1 mm strip on 0.5 mm of Djordjevic–Sarkar εr 4 / tan δ 0.02 at 1 GHz,
+58 MS/m copper, 6 GHz, thirds rule) against `sim.sparams` on the same options, twice: sheet copper between
+microstrip ports 4 mm long, and solid copper between lumped ports at the track's ends:
+
+| Quantity (0.5–6 GHz) | openEMS | `sim.sparams` |
+|---|---|---|
+| sheet / msl: Z₀ from the ABCD matrix (to 3.6 GHz) | 50.3–52.8 Ω | 50.8–51.0 Ω (2D field solver 50.8 Ω) |
+| sheet / msl: \|S21\| at 1.05 / 3.03 / 6 GHz | −0.097 / −0.220 / −0.422 dB | −0.076 / −0.203 / −0.375 dB |
+| sheet / msl: conductor part (lossy minus perfect copper) at 1.05 / 3.03 GHz | 0.015 / 0.024 dB | 0.014 / 0.025 dB |
+| solid / lumped: Z₀ (to 2.6 GHz) | 50.6–52.7 Ω | 49.5–52.8 Ω |
+| solid / lumped: \|S21\| at 1.05 / 3.03 / 6 GHz | −0.116 / −0.270 / −0.559 dB | −0.088 / −0.263 / −0.522 dB |
+| solid / lumped: conductor part at 1.05 / 3.03 GHz | 0.017 / 0.031 dB | 0.018 / 0.030 dB |
+| \|S11\| | ≤ 0.073 | |
+
+The conductor loss agrees within a few percent; openEMS's dielectric loss is 5–9 % higher (its εeff, 3.24–3.30
+from its port's own probes, is above the 2D solver's 3.07 at 1 GHz, which `sim.sparams` matches within 0.7 %:
+more of the field in the laminate), and each run carries ±0.02 dB of noise at this coarse mesh and 50 dB end
+criterion (a lossless line reads −0.019 to +0.016 dB). The test asserts |S21| within 15 % + 0.025 dB, Z₀ within
+5 % of `sim.sparams` (and of the 2D solver with the microstrip ports), |S11| < 0.1 (`tests/openems.rs`; the
+tables go to `target/tmp/openems_oracle/summary.md` and the CI job's summary).
+
+The golden via transition's driver (|S21| > −3 dB, |S11| < −6 dB at 1 GHz) is opt-in (`CADLAB_OPENEMS_VIA=1`):
+openEMS diverges on that board (a late-time instability from about 15 000 steps that needs its GND planes, also
+with perfect copper and constant-κ dielectrics, so not the D68 materials; `sim.sparams` passes the same region),
+and `boundary: mur` diverges within a few thousand steps on any region with a dielectric. Not resolved (D68).
 
 ## Full-wave solver: FDTD (`sim.sparams`)
 
@@ -446,8 +479,11 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   timestep).
 - Boundaries: a convolutional PML (J. A. Roden and S. D. Gedney, Microwave Opt. Technol. Lett. 27, 2000;
   Taflove ch. 7) in the outer `pml_cells` cells (default 8) of every side, inside the region like openEMS's:
-  polynomial grading m = 3, σ_max = 0.8 (m + 1) / (η₀ Δ), κ = 1, a CFS α falling from 2π ε₀ f₀ / 10 to 0
-  into the layer; the electric walls behind it close the domain. Copper running into the layer is absorbed
+  polynomial grading m = 3, σ_max = 0.8 (m + 1) / (η₀ Δ), κ = 1, a CFS α falling from 2π ε₀ f₀ (0.28 S/m
+  at 5 GHz, in Taflove's 0.05–0.3 S/m) to 0 into the layer as (1 − ρ)²; the electric walls behind it close the domain.
+  The CFS α is what absorbs the evanescent near field of a line close to the layer: at a tenth of that value
+  (D59–D63) a microstrip 4 h from the side PML drew energy from it (a lossless line read up to −0.06 Np/m
+  around 1.8 GHz, the −9.5 % of the lossy line below; D68). Copper running into the layer is absorbed
   (a line through the region's edge is a matched continuation).
 - Ports: lumped ports are resistive voltage sources of the reference impedance z0 (M. Piket-May, A. Taflove,
   J. Baron, IEEE Trans. MTT-42, 1994; Taflove ch. 15): columns of z edges from the reference copper's surface
@@ -521,7 +557,8 @@ line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
 | microstrip on that laminate (35 µm perfect conductors), 1–5 GHz | field solver with the same model (D52 dispersion): εeff 3.021 → 2.966 | εeff +0.6 to +1.1 % (the line's own +0.5 % bias, above); α within −4 to +6 %, mean −1 % (3–6 GHz) |
 | `sim.sparams`, the full model: a routed 64 mm line (the same section on that laminate, 35 µm solid copper at 58 MS/m, microstrip ports 4 mm), Z₀ and εeff from the S-parameters (ABCD of the 60 mm between the reference planes), 1–3 GHz | field solver | Z₀ +1.1 to +3.0 %, εeff +0.6 to +1.1 % |
 | the same: matched line | | |S₁₁| < −28 dB from 0.5 to 9.5 GHz |
-| the same: |S₂₁| (total loss: conductor with skin effect, dispersive dielectric) | D52, 0.136 dB at 0.6 GHz to 1.657 dB at 9 GHz | −9.5 % (1.6 GHz) to +4.9 % (9 GHz); −0.8 to +4.9 % from 3 GHz |
+| the same: |S₂₁| (total loss: conductor with skin effect, dispersive dielectric) | D52, 0.136 dB at 0.6 GHz to 1.657 dB at 9 GHz | −2.3 % (1.1–1.6 GHz) to +5.0 % (9 GHz) (before D68's CPML shift: −9.5 % at 1.6 GHz) |
+| the same line lossless (perfect copper, tan δ 0), the side PML 4 h from the strip | passivity, \|S₁₁\|² + \|S₂₁\|² ≤ 1 | ≤ 1.001 from 0.5 to 4 GHz (1.007 at 1.8 GHz before D68) |
 | the same line, sheet copper, 25 µm solder mask of εr 3.8 | field solver with the conformal mask: εeff 3.162 (bare line 3.071) | εeff −0.3 %, Z₀ +1.1 %; the mask's change of εeff −23 % (the bare line's +0.4 % bias) |
 | 20 × 12 mm PEC cavity, εr 4.4, 0.5 mm cells: TM₁₁₀ and TM₂₁₀ | analytic c/(2√εr) √((m/a)² + (n/b)²) | −0.05 %, −0.08 % (numerical dispersion) |
 | the same with σ for tan δ 0.01 at TM₁₁₀: energy decay | Q = 1 / tan δ = 100 | 99.99 |
@@ -533,10 +570,10 @@ line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
 | the same: shunt 2 pF (low-pass) and a shunt 5 Ω + 2 nH + 2 pF (notch to 2R/(2R + Z₀) = 0.167 at 2.52 GHz) | S₂₁ = 2/(2 + Y Z₀) | \|S₂₁\| within 0.007 / 0.009 (0.1663 at the notch) |
 | `sim.sparams`: a 0603 part (pads 0.9 × 1 mm, 0.7 mm gap) in a 50 Ω microstrip (1 mm on 0.5 mm of εr 4), microstrip ports, 0.5–6 GHz: 50 Ω resistor; 1 pF capacitor; 1 pF with 1 nH ESL and 1 Ω ESR | ideal series element between 50 Ω | \|S₂₁\| within +0.008 (R), +0.015 (C), +0.011 (RLC); the pads' own gap capacitance and steps account for the rest |
 
-The line-level figures carry the measurement's own error in this open region (feed transients, surface waves
-reaching the measurement planes): the same 64 mm line with a frequency-independent conductivity, whose loss
-should be flat, measures 0.30 to 0.39 Np/m over 0.6–4 GHz, so the cavities (closed, single mode) are the precise checks of
-the loss models and the line runs check that they combine into D52's total.
+The cavities (closed, single mode) are the precise checks of the loss models; the line runs check that they
+combine into D52's total, with the open region's own measurement error. Until D68 that error was mostly the PML:
+with too small a frequency shift the side PML drew energy from the line's near field (the lossless line above
+gained 0.7 % in power), which read as −9.5 % of the loss at 1.6 GHz.
 
 **Limits.** Parts are two-pin R, L, C only, ideal series elements at their values (no package model beyond
 `esr` / `esl`, no self-resonance of inductors, no ferrite beads, ICs or connectors: those pads are bare

@@ -44,7 +44,8 @@ PORTS = [
 
 def simulate(excited, run):
     """Sets up the run exciting port `excited` (0-based), runs it if `run`; returns its
-    directory and the port objects."""
+    directory, the port objects and the simulation (which owns the structure the ports
+    read their grid from: it must outlive them)."""
     path = os.path.join(SIM_DIR, 'port%d' % (excited + 1))
     fdtd = openEMS(NrTS=MAX_TIMESTEPS, EndCriteria=END_CRITERIA)
     fdtd.SetGaussExcite(F0, FC)
@@ -60,11 +61,13 @@ def simulate(excited, run):
         else:
             metal = csx.AddMetal('msl_port_%d' % (i + 1))
             port = fdtd.AddMSLPort(i + 1, metal, p['start'], p['stop'], p['prop'], p['dir'], excite=-excite,
-                                   FeedShift=p['feed_shift'], MeasPlaneShift=p['meas_shift'], priority=10)
+                                   FeedShift=p['feed_shift'], MeasPlaneShift=p['meas_shift'], Feed_R=p['z0'],
+                                   priority=10)
         ports.append(port)
     if run:
+        os.makedirs(path, exist_ok=True)
         fdtd.Run(path, cleanup=True)
-    return path, ports
+    return path, ports, fdtd
 
 
 def write_touchstone(path, f, s, z0):
@@ -103,7 +106,7 @@ def main():
     n = len(PORTS)
     s = np.zeros((len(f), n, n), dtype=complex)
     for j in range(n):
-        path, ports = simulate(j, run)
+        path, ports, _fdtd = simulate(j, run)
         for i, port in enumerate(ports):
             port.CalcPort(path, f, ref_impedance=PORTS[i]['z0'])
         for i in range(n):

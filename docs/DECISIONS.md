@@ -1475,6 +1475,63 @@ STM32 100 × 75 mm board, as before), large pinned groups (the MCU with its sate
 since only whole groups move, and on sparse boards the middle stays empty when every group sits by its
 connector.
 
+### D68. openEMS export at parity with `sim.sparams` (Debye materials, conducting sheets), an openEMS oracle in CI, the CPML's frequency shift at f₀ (2026-10-22)
+**Export.** `export.openems` now writes the model `sim.sparams` simulates. A lossy dielectric (and the solder mask)
+is a CSXCAD `DebyeMaterial` holding exactly the solver's fit (`fdtd::fit::debye_fit` over the Touchstone band on
+the shared relaxation times: ε∞ as `Epsilon`, the conductivity as `Kappa`, each non-zero Δε and its τ as
+`EpsilonDelta_n` / `EpsilonRelaxTime_n`, 7 significant digits); lossless ones stay plain `Material`s. Copper takes
+`sim.sparams`'s `conductivity` (default 58 MS/m), `perfect_copper`, `roughness`, `huray_radius`/`huray_ratio`
+(shared validation, `export::copper_options`): each net's copper per layer becomes a `ConductingSheet`
+(`Conductivity`, `Thickness` = the layer's copper) at priority 11, on both surfaces of solid copper or as the sheet
+itself; roughness becomes σ/K(f₀)² (openEMS's sheet has none). Vias stay perfect `Metal`. A perfect conductor kept
+between the two sheets of solid copper cost 40 % of the conductor loss in openEMS (0.011 against `sim.sparams`'s
+0.018 dB at 1 GHz on a 20 mm line with lumped ports); without it 0.017 against 0.018, 0.031 against 0.030 at 3 GHz.
+Three bugs the first real openEMS runs found: the geometry file was wrapped in `<openEMS>`, which
+`ContinuousStructure.ReadFromXML` rejects ("No ContinuousStructure found"; it is now a bare
+`<ContinuousStructure>`, as `Write2XML` writes and AppCSXCAD opens); the driver let the simulation object (which
+owns the structure) die before `CalcPort` read its grid, and `Run` needs its directory to exist; and `AddMSLPort`
+without `Feed_R` has no termination (openEMS's documentation: the line must then end in an absorbing boundary;
+ours end inside the region), so the unexcited port reflected everything and the run never decayed — every
+microstrip port now gets `Feed_R` = z0. openEMS's microstrip port also reads nonsense on a strip with thickness
+(εeff 3.6–6.8 for a 3.0 line), so `msl` ports on solid copper are warned (`openems.msl_solid_copper`).
+**Oracle.** openEMS has no Ubuntu package or Linux wheel; a CI job (`openems`, informative like the KiCad oracle)
+builds openEMS-Project at a pinned commit (`update_openEMS.sh --python --disable-GUI`, about 4 minutes after 6 of
+apt, cached per commit) and runs `tests/openems.rs` with it. `lossy_microstrip_oracle` runs a 24 mm lossy
+microstrip through both solvers twice. Sheet copper between microstrip ports: openEMS Z₀ 50.3–52.8 Ω against
+`sim.sparams`'s 50.8–51.0 Ω and the 2D solver's 50.8 Ω; conductor loss 0.015 against 0.014 dB at 1 GHz. Solid
+copper between lumped ports: conductor loss 0.017 against 0.018 dB at 1 GHz, 0.031 against 0.030 at 3 GHz. The
+total |S21| is 0.02–0.05 dB higher in openEMS (its εeff 3.24–3.30 against the 2D solver's 3.07 puts more field in
+the laminate); the test allows 15 % + 0.025 dB on |S21| and 5 % on Z₀, and writes the tables to the job summary.
+The golden via transition's openEMS run is opt-in (`CADLAB_OPENEMS_VIA=1`): openEMS diverges on it from about
+15 000 steps, with the GND planes present, also with perfect copper and constant-κ dielectrics (so it was there with
+D54's export, which no openEMS had run), while `sim.sparams` passes it; and `boundary: mur` diverges on any region
+with a dielectric. Not resolved.
+**CPML.** The −9.5 % board-level loss at 1–2 GHz of D63 was not the loss models: the same 60 mm line lossless read
+up to −0.06 Np/m (|S21|² + |S11|² = 1.007, a gain) around 1.8 GHz, independent of the line's length per meter,
+of the end criterion and of the dielectric or conductor model, and gone with the side margin at 12 mm. The CPML's
+complex frequency shift was 2π ε₀ f₀/10 (0.028 S/m at 5 GHz), a tenth of the 0.05–0.3 S/m range Taflove and Hagness
+give; the shift is what makes the layer absorb evanescent fields, and with too small a value the line's near field
+in the side PML 4 h from the strip exchanged energy with it. The shift is now 2π ε₀ f₀ at the layer's inner face,
+falling as (1 − ρ)² into it (falling linearly, the deep lossy part kept too much shift and absorbed a line running
+into the end PML too little below f₀: Z₀ −2.3 % at 1 GHz in `microstrip_fine_with_loss`; a κ of 5 did not help the
+near field at all). The lossless line is passive within 0.1 % in power (|S21|² + |S11|² ≤ 1.001) with the same
+5 mm margin and the full model's |S21| is within −2.3 to +5.0 % of D52 from 0.5 to 9.5 GHz
+(was −9.5 to +4.9 %). Left: with a linear α the conductor-only reading of that line was still 8–12 % low from 1 to 3
+GHz on this coarse mesh (3–4 cells across the strip); and the engine-level dispersive microstrip, which runs into the
+end PMLs and measures with probes on the line, now reads α 10–17 % high at 1.5–2 GHz (+3 % before; its check stays
+3–6 GHz, within −4 to +4 %): below f₀ a stronger shift absorbs a line entering the layer less well, so lines
+measured against a PML at low frequencies want `f_min` (a lower f₀) or a thicker layer.
+*Why:* the Debye form is exactly what `sim.sparams` integrates, so writing its fitted terms (rather than εr and κ
+at f₀) makes the two solvers simulate one model and the oracle compare solvers, not models. The attribute names
+come from CSXCAD's documented material parameters (`SetMaterialProperty`'s `EpsilonDelta_n`, `EpsilonRelaxTime_n`;
+`AddConductingSheet(conductivity, thickness)`), with the element names CSXCAD's own `Write2XML` gives those
+properties, checked by reading files back through openEMS's Python interface (black-box, no code read). The
+conducting sheet is openEMS's documented model for lossy traces; putting it on both faces of solid copper keeps
+the solid geometry for lumped ports, while microstrip ports need sheets anyway. Building openEMS in CI is ten
+minutes once per pinned commit, which is reasonable for an informative job; installing it on developer machines is
+not required (the oracle skips). The CPML fix is a parameter of the textbook method, not a work-around: margins
+large enough to keep the PML out of every line's near field would cost cells on every run.
+
 ## Open questions
 
 

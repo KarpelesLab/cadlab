@@ -931,11 +931,42 @@ fn sim_sparams_microstrip_validation() {
             assert!(c64(&sm[0]).abs() < 0.04, "{f}: |S11| {}", c64(&sm[0]).abs());
             let s21_db = 20.0 * c64(&sm[2]).abs().log10();
             let want_db = -20.0 * std::f64::consts::LOG10_E * p.alpha * l;
-            // −9 % to +6 %: the residual of this open-region measurement (the same line with a
-            // constant conductivity, whose loss is flat, measures 0.30–0.39 Np/m over 0.6–4 GHz).
-            let tol = if *f < 2.5e9 { 0.10 } else { 0.06 };
+            // −2.3 % to +5.0 % (D68). Before D68 −9.5 % at 1.6 GHz: the side PML 4 h from the
+            // strip drew energy from the line's near field (a lossless line read −0.06 Np/m).
+            let tol = if *f < 2.5e9 { 0.03 } else { 0.06 };
             println!("{f}: |S21| {s21_db:.4} vs {want_db:.4} dB ({:+.1} %)", 100.0 * (s21_db / want_db - 1.0));
             assert!((s21_db - want_db).abs() < tol * want_db.abs(), "{f}: |S21| {s21_db} vs {want_db} dB");
+        }
+    }
+}
+
+/// The same 60 mm line lossless (εr 4, perfect copper) with the side PML 4 h from the strip:
+/// passive, |S21|² + |S11|² ≤ 1 within 0.25 % from 0.5 to 4 GHz (0.1 % measured). With the CPML's frequency
+/// shift α at a tenth of f₀ (D59) its near field drew energy from the PML: up to 0.7 % gain
+/// (−0.06 Np/m) around 1.8 GHz, the low reading of D63's lossy line (DECISIONS D68).
+#[test]
+#[ignore]
+fn lossless_line_near_the_pml_is_passive() {
+    let r = Registry::with_builtins();
+    let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0", "1mm", 64);
+    let out = dir.path().join("out");
+    exec(
+        &r,
+        &mut s,
+        "sim.sparams",
+        sim_args(
+            &out,
+            id,
+            json!({"f_max": "10GHz", "points": 41, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6,
+                "copper": "solid", "perfect_copper": true}),
+        ),
+    );
+    let ts = cadlab::touchstone::parse(&std::fs::read_to_string(out.join("line.s2p")).unwrap(), Some(2)).unwrap();
+    for (f, sm) in ts.freqs.iter().zip(&ts.data) {
+        if (0.5e9..=4e9).contains(f) {
+            let p = c64(&sm[0]).abs().powi(2) + c64(&sm[2]).abs().powi(2);
+            println!("{f}: |S11|² + |S21|² = {p:.5}");
+            assert!(p < 1.0025, "{f}: |S11|² + |S21|² = {p}");
         }
     }
 }

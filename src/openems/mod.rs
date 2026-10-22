@@ -5,10 +5,12 @@
 //! Python interface of its tutorials); no openEMS or CSXCAD code is used, linked or bundled.
 //! The export has two files:
 //!
-//! - `<name>.xml`: the CSXCAD geometry inside an `<openEMS>` document: dielectrics from the
-//!   stackup (εr, and a conductivity from the loss tangent), copper of every layer as extruded
-//!   polygons (or zero-thickness sheets), plated holes and vias as metal cylinders, non-plated
-//!   holes as air, and a graded rectilinear mesh (lines at metal edges, λ/N resolution);
+//! - `<name>.xml`: the CSXCAD geometry (a `<ContinuousStructure>` document): dielectrics from
+//!   the stackup (Debye terms of their Djordjevic–Sarkar model, as the built-in solver fits
+//!   them), copper of every layer as extruded polygons (or zero-thickness sheets), or as
+//!   conducting sheets with a conductivity, plated holes and vias as metal cylinders,
+//!   non-plated holes as air, and a graded rectilinear mesh (lines at metal edges, λ/N
+//!   resolution);
 //! - `<name>.py`: a driver that reads that geometry, adds the ports (lumped or microstrip), the
 //!   Gaussian excitation and the boundary conditions, runs openEMS once per excited port and
 //!   writes the S-parameters as a Touchstone file (read back with [`crate::touchstone`]).
@@ -27,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::board::{self, CopperItem, ItemRef, PlacedPad};
 use crate::diag::Diagnostic;
+use crate::electrical::loss::Roughness;
 use crate::geom::Point;
 use crate::geom::poly::{self, Boolean, FillRule, Location, Op, Polygon, Rect, Ring};
 use crate::model::Project;
@@ -193,6 +196,10 @@ pub struct Options {
     pub port_planes: bool,
     /// Solder mask on both outer layers (none by default).
     pub mask: Option<MaskOptions>,
+    /// Copper conductivity (S/m) for the skin-effect loss; `None`: perfect conductors.
+    pub conductivity: Option<f64>,
+    /// Copper surface roughness (on the surface resistance).
+    pub roughness: Roughness,
 }
 
 impl Default for Options {
@@ -223,6 +230,8 @@ impl Default for Options {
             thirds: false,
             port_planes: false,
             mask: None,
+            conductivity: None,
+            roughness: Roughness::Smooth,
         }
     }
 }
@@ -331,6 +340,8 @@ pub(crate) struct Layer {
     pub(crate) name: String,
     pub(crate) bottom: i64,
     pub(crate) top: i64,
+    /// The copper's thickness (also with `sheet` copper, where `top == bottom`).
+    pub(crate) thickness: i64,
 }
 
 /// A dielectric box in z (nm).
@@ -366,11 +377,12 @@ fn stack(s: &Stackup, copper: CopperModel) -> (Vec<Layer>, Vec<Diel>, bool) {
             diels[i] = Some(Diel { gap: i + 1, bottom: z, top: z + d.thickness.0, d: d.clone() });
             z += d.thickness.0;
         }
+        let thickness = crate::electrical::copper_thickness(s, &names[i]).0;
         let t = match copper {
-            CopperModel::Solid => crate::electrical::copper_thickness(s, &names[i]).0,
+            CopperModel::Solid => thickness,
             CopperModel::Sheet => 0,
         };
-        layers[i] = Some(Layer { name: names[i].clone(), bottom: z, top: z + t });
+        layers[i] = Some(Layer { name: names[i].clone(), bottom: z, top: z + t, thickness });
         z += t;
     }
     // Inner copper is embedded in the dielectric above it (prepreg flows around the traces).
@@ -597,7 +609,10 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
         board: &r.board,
         masks: &r.masks,
         mask_material: r.mask_material,
-        kappa_hz: r.f0,
+        f0: r.f0,
+        band: (script::f_start(o) as f64, o.f_max_hz as f64),
+        conductivity: o.conductivity,
+        roughness: o.roughness,
         lines: [&r.lines[0], &r.lines[1], &r.lines[2]],
         window: r.window,
     };
@@ -606,6 +621,25 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
     let touchstone = format!("{}.s{}p", o.name, n.max(1));
     let script = script::write(o, &r.ports, &touchstone, r.f0, r.fc);
     let mut diags = r.diagnostics;
+    if o.copper == CopperModel::Solid
+        && let Some(p) = r.ports.iter().find(|p| p.info.kind == PortKind::Msl)
+    {
+        // Seen with the openEMS oracle (DECISIONS D68): on a strip with thickness its
+        // microstrip port's probes read εeff 3.6–6.8 for a 3.0 line, Z₀ with a large imaginary
+        // part; on a sheet they agree with the built-in solver.
+        diags.push(
+            Diagnostic::warning(
+                "openems.msl_solid_copper",
+                format!(
+                    "port {} ({}): openEMS's microstrip port measures zero-thickness strips; with solid copper its \
+                     voltage and current probes read wrong values",
+                    p.info.number, p.info.at
+                ),
+            )
+            .with_subject(ObjectRef::parse(&p.info.at).unwrap_or(ObjectRef::Name(p.info.at.clone())))
+            .with_hint("export with `copper: sheet`, or use lumped ports (`sim.sparams` handles both)"),
+        );
+    }
     if r.ports.is_empty() {
         diags.push(
             Diagnostic::warning("openems.no_ports", "no ports: the driver has nothing to excite")

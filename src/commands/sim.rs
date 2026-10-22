@@ -194,6 +194,14 @@ impl Command for SParams {
     fn run(self, ctx: &mut Context<'_>) -> Result<Simulated, CommandError> {
         let (mask, mask_notes) =
             export::mask_options(self.mask, self.mask_copper, self.mask_er, self.mask_loss_tangent)?;
+        let (conductivity, roughness) = export::copper_options(
+            self.conductivity,
+            self.perfect_copper,
+            self.roughness,
+            self.huray_radius,
+            self.huray_ratio,
+            "sim.perfect_copper",
+        )?;
         let p = ctx.project()?;
         let name = self.name.clone().unwrap_or_else(|| crate::model::part::slugify(&p.manifest().name));
         if name.is_empty() || name.contains(['/', '\\']) {
@@ -238,26 +246,12 @@ impl Command for SParams {
             thirds: self.thirds.unwrap_or(true),
             port_planes: true,
             mask,
+            conductivity,
+            roughness,
         };
-        let (sigma, roughness) = crate::commands::electrical::conductor_args(
-            self.conductivity,
-            self.roughness,
-            self.huray_radius,
-            self.huray_ratio,
-        )?;
-        if self.perfect_copper
-            && (self.conductivity.is_some() || self.roughness.is_some() || self.huray_radius.is_some())
-        {
-            return Err(CommandError::invalid_args(
-                "sim.perfect_copper",
-                "`perfect_copper` has no conductivity or roughness: drop one or the other",
-            ));
-        }
         let opts = fdtd::Options {
             region,
             max_cells: self.max_cells.unwrap_or(4_000_000),
-            conductivity: (!self.perfect_copper).then(|| sigma.to_f64()),
-            roughness,
             parts: self.parts.unwrap_or(true),
             ..fdtd::Options::default()
         };

@@ -49,7 +49,6 @@ pub use engine::{
 pub use parts::LumpedPart;
 
 use crate::electrical::dispersion::Dielectric as Dispersive;
-use crate::electrical::loss::Roughness;
 
 /// Simulation options: the region and mesh as for the openEMS export, plus the solver's limits.
 #[derive(Clone, Debug)]
@@ -60,10 +59,6 @@ pub struct Options {
     pub max_cells: u64,
     /// Timestep as a fraction of the Courant limit.
     pub courant: f64,
-    /// Copper conductivity (S/m) for the surface impedance; `None`: perfect conductors.
-    pub conductivity: Option<f64>,
-    /// Copper surface roughness (on the surface impedance's resistance).
-    pub roughness: Roughness,
     /// Model the region's two-pin resistors, capacitors and inductors as lumped elements.
     pub parts: bool,
 }
@@ -71,11 +66,14 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            region: openems::Options::default(),
+            // Copper with its conductivity (the region's `conductivity` and `roughness` give the
+            // surface impedance; `None`: perfect conductors).
+            region: openems::Options {
+                conductivity: Some(crate::electrical::loss::COPPER_CONDUCTIVITY),
+                ..openems::Options::default()
+            },
             max_cells: 4_000_000,
             courant: 0.95,
-            conductivity: Some(crate::electrical::loss::COPPER_CONDUCTIVITY),
-            roughness: Roughness::Smooth,
             parts: true,
         }
     }
@@ -460,7 +458,7 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
         excitation,
         freqs: freqs.clone(),
         threads: 0,
-        surface: o.conductivity.map(|sigma| fit::surface_fit(sigma, &o.roughness, band.0, band.1)),
+        surface: o.region.conductivity.map(|sigma| fit::surface_fit(sigma, &o.region.roughness, band.0, band.1)),
     };
     let mut sim = Simulation::new(&b.structure, &b.ports, b.probes.clone(), settings)
         .map_err(|m| Error::new("sim.bad_setup", m, "grow the region or lower `pml_cells`"))?;

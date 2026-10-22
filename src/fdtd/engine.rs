@@ -1206,8 +1206,15 @@ impl Simulation {
         const M: i32 = 3;
         let n = self.n;
         let dt = self.dt;
+        // The complex-frequency-shift α at the pulse's center (2π ε₀ f₀, 0.28 S/m at 5 GHz, in
+        // the 0.05–0.3 S/m Taflove & Hagness give): it is what absorbs the evanescent near
+        // field of lines close to the PML. A tenth of it (D59) let that near field draw energy
+        // from a microstrip 4 h from a side PML (a lossless line read up to −0.06 Np/m: the
+        // −9 % of D63's board-level loss at 1–2 GHz, DECISIONS D68). It falls as (1 − ρ)² into
+        // the layer (Gedney's graded α): falling linearly, the shift left the deep, lossy part
+        // too little absorption below f₀ for a line running into the layer (Z₀ −2.3 % at 1 GHz).
         let alpha_max =
-            2.0 * std::f64::consts::PI * EPS0 * (self.settings.excitation.f0.max(self.settings.excitation.fc) / 10.0);
+            2.0 * std::f64::consts::PI * EPS0 * self.settings.excitation.f0.max(self.settings.excitation.fc);
         for face in 0..6 {
             let cells = self.settings.pml[face];
             if cells == 0 {
@@ -1223,7 +1230,7 @@ impl Simulation {
                 let rho = ((pos - inner) / (outer - inner)).clamp(0.0, 1.0);
                 let sigma = sigma_max * rho.powi(M);
                 let kappa = 1.0;
-                let alpha = alpha_max * (1.0 - rho);
+                let alpha = alpha_max * (1.0 - rho).powi(2);
                 let b = (-(sigma / kappa + alpha) * dt / EPS0).exp();
                 let c = if sigma > 0.0 { sigma / (sigma * kappa + kappa * kappa * alpha) * (b - 1.0) } else { 0.0 };
                 (b as f32, c as f32, (1.0 / kappa - 1.0) as f32)

@@ -27,7 +27,7 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
 | **gerbv** (and/or other Gerber viewers) | our Gerbers parse cleanly and rasterize to the expected image |
 | **Clipper2** | differential testing of the polygon library |
 | **ngspice** | SPICE netlist export parses and simulates: `ngspice -b` on the divider golden file gives v(out) = 2.5 V (`tests/electrical.rs`, M8) |
-| **openEMS** (optional) | the exported full-wave model runs: the driver of a 4-layer via transition (`python3`, openEMS's Python modules) writes a Touchstone file whose \|S21\| > −3 dB and \|S11\| < −6 dB at 1 GHz (`tests/openems.rs`; skipped when `openEMS` is not installed) |
+| **openEMS** (optional; CI job "openEMS oracle", informative) | the exported full-wave model runs (`python3` with openEMS's Python modules): a lossy microstrip (Djordjevic–Sarkar laminate, 58 MS/m copper) exported and run by openEMS agrees with `sim.sparams` on the same options (\|S21\| within 15 % + 0.025 dB, Z₀ within 5 % of it and of the 2D field solver; ELECTRICAL.md "Full-wave export") (`tests/openems.rs`; skipped when `openEMS` is not installed; the 4-layer via transition's run is opt-in, `CADLAB_OPENEMS_VIA=1`: openEMS diverges on it, see ELECTRICAL.md). There is no Ubuntu package or Linux wheel: CI builds openEMS-Project from source at a pinned commit (`update_openEMS.sh --python --disable-GUI`, cached), about 10 minutes uncached |
 | Fab online DFM checkers | manual, per release, on the demo boards for each supported fab profile |
 
 ### Comparison methods

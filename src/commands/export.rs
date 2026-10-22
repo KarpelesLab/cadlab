@@ -1172,6 +1172,23 @@ pub struct OpenEms {
     /// Solder mask loss tangent (default 0.025, typical LPI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask_loss_tangent: Option<Quantity>,
+    /// Copper conductivity for the skin-effect loss (default 58 MS/m, annealed copper: "58M"):
+    /// openEMS conducting sheets on the copper surfaces, added by the driver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductivity: Option<Quantity>,
+    /// Lossless copper: perfect conductors only (the driver adds no conducting sheets).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub perfect_copper: bool,
+    /// Copper RMS surface roughness (the Hammerstad–Jensen factor at the pulse's center, folded
+    /// into the sheets' conductivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<Nm>,
+    /// Huray snowball radius (with `huray_ratio`: Huray's roughness model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_radius: Option<Nm>,
+    /// Huray surface ratio: snowball surface per flat area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huray_ratio: Option<Quantity>,
 }
 
 /// Gaussian excitation.
@@ -1274,6 +1291,28 @@ pub(crate) fn mask_options(
     Ok((Some(openems::MaskOptions { thickness: t, over_copper: mask_copper, er, loss_tangent }), notes))
 }
 
+/// The copper options (`conductivity`, `perfect_copper`, `roughness`, `huray_radius`,
+/// `huray_ratio`) shared by `export.openems` and `sim.sparams`: the conductivity (S/m; `None`
+/// for perfect conductors, default 58 MS/m) and the roughness.
+pub(crate) fn copper_options(
+    conductivity: Option<Quantity>,
+    perfect_copper: bool,
+    roughness: Option<Nm>,
+    huray_radius: Option<Nm>,
+    huray_ratio: Option<Quantity>,
+    code: &'static str,
+) -> Result<(Option<f64>, crate::electrical::loss::Roughness), CommandError> {
+    let (sigma, rough) =
+        crate::commands::electrical::conductor_args(conductivity, roughness, huray_radius, huray_ratio)?;
+    if perfect_copper && (conductivity.is_some() || roughness.is_some() || huray_radius.is_some()) {
+        return Err(CommandError::invalid_args(
+            code,
+            "`perfect_copper` has no conductivity or roughness: drop one or the other",
+        ));
+    }
+    Ok(((!perfect_copper).then(|| sigma.to_f64()), rough))
+}
+
 pub(crate) fn hertz(q: Quantity, field: &str) -> Result<u64, CommandError> {
     let q = crate::commands::electrical::expect_unit(q, Unit::Hertz, field)?;
     let v = q.to_f64();
@@ -1293,6 +1332,14 @@ impl Command for OpenEms {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<OpenEmsExported, CommandError> {
         let (mask, mask_notes) = mask_options(self.mask, self.mask_copper, self.mask_er, self.mask_loss_tangent)?;
+        let (conductivity, roughness) = copper_options(
+            self.conductivity,
+            self.perfect_copper,
+            self.roughness,
+            self.huray_radius,
+            self.huray_ratio,
+            "openems.perfect_copper",
+        )?;
         let p = ctx.project()?;
         let name = self.name.clone().unwrap_or_else(|| crate::model::part::slugify(&p.manifest().name));
         if name.is_empty() || name.contains(['/', '\\']) {
@@ -1349,6 +1396,8 @@ impl Command for OpenEms {
             thirds: self.thirds,
             port_planes: false,
             mask,
+            conductivity,
+            roughness,
         };
         let x = openems::export(p, &opts).map_err(|e| {
             let base = if e.code.starts_with("openems.unknown") {

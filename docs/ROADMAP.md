@@ -290,9 +290,14 @@ Research-sized items beyond the milestones above; none blocks a release.
       Board parts (D65): two-pin resistors, capacitors and inductors in the region are series R–L–C lumped
       elements from their part values (`esr`, `esl` too) across their pads' gap, validated against circuit
       theory (series and shunt R, L, C and resonant R–L–C between 50 Ω ports within 0.02 in |S₂₁|).
-      Not covered (refinements, not part of this goal): lumped parts in the openEMS export, conformal (Dey–Mittra) or subgridded edges for curved copper (arcs and round pads staircase),
-      openEMS's own dispersive materials and conducting sheets in the export (written at f₀ and as perfect
-      conductors), and a FEM alternative
+      Not covered (refinements, not part of this goal): lumped parts in the openEMS export, conformal
+      (Dey–Mittra) or subgridded edges for curved copper (arcs and round pads staircase), and a FEM alternative
+- [x] openEMS export parity with the built-in solver (D68): Djordjevic–Sarkar dielectrics and the solder mask
+      as `DebyeMaterial`s with the solver's own fitted terms, lossy copper as `ConductingSheet`s (roughness
+      folded into the conductivity at f₀), matched microstrip port terminations, a geometry file openEMS reads;
+      an openEMS oracle CI job (built from source, pinned) comparing a lossy microstrip with `sim.sparams`;
+      the CPML's frequency shift raised to 2π ε₀ f₀, which removes the −9.5 % low loss reading at 1–2 GHz
+
 ---
 
 ## Cross-cutting, always on
