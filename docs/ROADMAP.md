@@ -283,8 +283,10 @@ Research-sized items beyond the milestones above; none blocks a release.
       guard, progress and cancellation, thread-count-independent results; validated against the 2D field solver
       (Z₀, εeff within 1.5 %), D52's conductor, dielectric and total loss, cavity resonances and Q (copper:
       h/δ within 1 %; dispersive: 1/tan δ(f) within 1 %), energy conservation and the Courant limit.
-      Not covered (refinements, not part of this goal): lumped components on pads (R/L/C elements in the
-      region), conformal (Dey–Mittra) or subgridded edges for curved copper (arcs and round pads staircase),
+      Board parts (D65): two-pin resistors, capacitors and inductors in the region are series R–L–C lumped
+      elements from their part values (`esr`, `esl` too) across their pads' gap, validated against circuit
+      theory (series and shunt R, L, C and resonant R–L–C between 50 Ω ports within 0.02 in |S₂₁|).
+      Not covered (refinements, not part of this goal): lumped parts in the openEMS export, conformal (Dey–Mittra) or subgridded edges for curved copper (arcs and round pads staircase),
       openEMS's own dispersive materials and conducting sheets in the export (written at f₀ and as perfect
       conductors), and a FEM alternative
 ---

@@ -201,6 +201,8 @@ pub const KNOWN_PARAMS: &[KnownParam] = &[
     KnownParam { key: "capacitance", unit: Some(Unit::Farad), description: "Capacitance" },
     KnownParam { key: "inductance", unit: Some(Unit::Henry), description: "Inductance" },
     KnownParam { key: "impedance", unit: Some(Unit::Ohm), description: "Impedance (e.g. ferrite bead at 100 MHz)" },
+    KnownParam { key: "esr", unit: Some(Unit::Ohm), description: "Equivalent series resistance (sim.sparams)" },
+    KnownParam { key: "esl", unit: Some(Unit::Henry), description: "Equivalent series inductance (sim.sparams)" },
     KnownParam { key: "tolerance", unit: Some(Unit::Percent), description: "Value tolerance" },
     KnownParam { key: "voltage_rating", unit: Some(Unit::Volt), description: "Maximum voltage" },
     KnownParam { key: "current_rating", unit: Some(Unit::Ampere), description: "Maximum continuous current" },

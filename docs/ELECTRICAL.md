@@ -457,6 +457,23 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   line at a fifth of their length and measure at its middle (the reference plane, `reference_plane` in the
   output): voltage from the line's middle to the reference surface, current from the circulation of H around
   the strip on both sides of the plane, interpolated to it. Their feed and reference planes get mesh lines.
+- Board parts (D65; `parts`, default true): every two-pin resistor, capacitor and inductor with both pads in
+  the region is a lumped series R–L–C element from its values: a resistor's `resistance`, a capacitor's
+  `capacitance`, an inductor's `inductance`, plus `esr` and `esl` when given (a component property of the
+  same name wins over the part's parameter; a 0 Ω resistor is a short, made of conductor edges). The element
+  lies on the pads' copper layer along x or y (the axis joining the pad centers), in the mesh edges between
+  the two pads' copper (the gap: edges that are not copper, from the last node of one pad to the first of
+  the other), over the nodes where the pads face each other across that axis and, with `solid` copper, on
+  both copper surfaces. The columns are in parallel and each column's edges in series, sharing R, L and 1/C
+  in proportion to their lengths (Piket-May, Taflove and Baron; Taflove ch. 15, extended to reactive
+  elements). Each edge carries the element's current I and charge q as state, advanced with its E by the
+  trapezoidal rule: E l = R I + L dI/dt + q/C at the half step and (I⁺ + I)/2 over the dual face in Ampère's
+  law, so E⁺ and I⁺ come from one 2 × 2 elimination per edge (semi-implicit: stable at the Courant limit for
+  any values, and passive). The element's edges are not dispersive (the Debye terms' permittivity at f₀) and
+  its stored energy (L I²/2, q²/2C) counts in the end criterion. Parts left out, with a warning
+  (`sim.part_not_modeled`): no value, more or fewer than two pads, a pad outside the region, pads on two
+  layers, pads not facing along x or y, or no mesh cell between the pads' copper (their pads stay open);
+  DNP parts are left open with a note. `parts` in the output lists the parts modeled with their values.
 - Excitation: a Gaussian pulse covering f_min .. f_max at −20 dB (f₀ = (f_min + f_max)/2, τ = √ln10 / (π f_c),
   starting 3.5 τ before its peak); one run per port, the other ports terminated by their resistances.
 - S-parameters: running DFTs of every port's voltage and current at their sampling times give the power waves
@@ -511,13 +528,19 @@ line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
 | lossless graded mesh (ratio 1.4) with a dielectric and a strip, 6000 steps after the pulse | energy conservation | within −0.7 % / +0.05 % (the staggered E/H sampling) |
 | uniform cubic grid at 0.99 and 1.03 of the Courant limit | stability | stable / diverges |
 | one thread against three, without and with the surface impedance, Debye terms and roughness | | bit-identical spectra |
+| lumped elements (`tests/fdtd_parts.rs`), engine level: a 0.4 mm strip 0.2 mm over ground in a closed 3 mm box between 50 Ω lumped ports, 0.5–4 GHz; series R 10 / 50 / 200 Ω | S₂₁ = 2Z₀/(2Z₀ + Z), S₁₁ = Z/(2Z₀ + Z) | \|S₂₁\| within 0.001, \|S₁₁\| within 0.011 (the strip's own inductance) |
+| the same: series 1 pF (high-pass), 5 nH (low-pass), 10 Ω + 4 nH + 1 pF (band-pass at 2.5 GHz) | same | \|S₂₁\| within 0.016 |
+| the same: shunt 2 pF (low-pass) and a shunt 5 Ω + 2 nH + 2 pF (notch to 2R/(2R + Z₀) = 0.167 at 2.52 GHz) | S₂₁ = 2/(2 + Y Z₀) | \|S₂₁\| within 0.007 / 0.009 (0.1663 at the notch) |
+| `sim.sparams`: a 0603 part (pads 0.9 × 1 mm, 0.7 mm gap) in a 50 Ω microstrip (1 mm on 0.5 mm of εr 4), microstrip ports, 0.5–6 GHz: 50 Ω resistor; 1 pF capacitor; 1 pF with 1 nH ESL and 1 Ω ESR | ideal series element between 50 Ω | \|S₂₁\| within +0.008 (R), +0.015 (C), +0.011 (RLC); the pads' own gap capacitance and steps account for the rest |
 
 The line-level figures carry the measurement's own error in this open region (feed transients, surface waves
 reaching the measurement planes): the same 64 mm line with a frequency-independent conductivity, whose loss
 should be flat, measures 0.30 to 0.39 Np/m over 0.6–4 GHz, so the cavities (closed, single mode) are the precise checks of
 the loss models and the line runs check that they combine into D52's total.
 
-**Limits.** No components (pads are bare copper; terminate them with ports); staircased curves (arcs and
+**Limits.** Parts are two-pin R, L, C only, ideal series elements at their values (no package model beyond
+`esr` / `esl`, no self-resonance of inductors, no ferrite beads, ICs or connectors: those pads are bare
+copper; terminate them with ports), placed across their pads' gap along x or y; staircased curves (arcs and
 round pads follow the mesh; vias are cylinders of whole edges); quasi-uniform lines need the mesh lines that
 the export puts at copper edges (diagonal tracks staircase). The surface impedance assumes a skin depth well
 below the copper's thickness and its features (as D52; no DC floor below the skin-effect range), and its

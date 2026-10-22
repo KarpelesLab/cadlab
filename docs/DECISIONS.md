@@ -1362,6 +1362,33 @@ order; an assignment with local repair serves the pads the geometry allows, and 
 say which pads mattered. The router's time went to searches whose costs the heuristic ignored, so the estimate, not
 the clearance bookkeeping, was the thing to fix.
 
+### D65. Full-wave solver: board parts as lumped series R–L–C elements, from their part values (2026-10-22)
+`sim.sparams` models the two-pin resistors, capacitors and inductors of the region (`parts`, default true):
+each is a series R–L–C (`resistance`, `capacitance` or `inductance`, plus the new known parameters `esr` and
+`esl`; a component property overrides the part's parameter; 0 Ω is a short of conductor edges) placed on its
+pads' copper layer along x or y, in the mesh edges between the two pads' copper, over the nodes where the
+pads face each other (both surfaces of solid copper). Columns are in parallel, the edges of a column in
+series, sharing R, L and 1/C by length. The engine's new `LumpedElement` keeps the element current and
+charge per edge and advances them with E by the trapezoidal rule (E l = R I + L dI/dt + q/C at the half step,
+(I⁺ + I)/2 in Ampère's law): a 2 × 2 elimination per edge after the curl update, serial (few edges), so the
+results stay bit-identical for any thread count; the stored energy counts in the end criterion; element
+edges take the Debye terms' permittivity at f₀ instead of their own polarization state. Parts that cannot
+be placed (no value, not two pads, a pad outside the region, pads on two layers or not facing along an axis,
+no cell between the pads) are reported (`sim.part_not_modeled`) and their pads stay open; DNP parts are open
+with a note; the output lists the parts modeled. Validated (tests/fdtd_parts.rs) against circuit theory
+between 50 Ω ports: series R within 0.001 in |S₂₁|; series C, L, R–L–C and shunt C, R–L–C (a notch to 0.167)
+within 0.016; on a board microstrip through `sim.sparams`, a 0603 part as R, C and C with ESL/ESR within
+0.015 of the ideal element from 0.5 to 6 GHz (the pads' own gap and steps). The openEMS export does not write
+the parts yet.
+*Why:* AC-coupling capacitors and series terminations sit on the nets agents simulate, and their pads alone
+are an open circuit. The trapezoidal (semi-implicit) update is the textbook way to add reactive lumped
+elements without lowering the timestep (an explicit inductor current is only conditionally stable for small
+L), and passive for any non-negative values; a series R–L–C covers the parts with a datasheet ESR/ESL, while
+an ideal element at the BOM value is what a part is when nothing else is known. Placing the element in the
+gap edges found on the voxelized copper, rather than adding mesh lines at the pads, keeps the openEMS mesh
+(shared with the export) unchanged. Curved copper still staircases: a conformal method was not cheap enough
+for this step.
+
 ## Open questions
 
 

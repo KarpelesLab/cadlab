@@ -19,12 +19,15 @@
 //! - Lumped ports are resistive voltage sources of the reference impedance, from the reference
 //!   copper to the signal copper; microstrip ports feed the same source on the line and measure
 //!   voltage and current on it at their reference plane.
+//! - Board parts: two-pin resistors, capacitors and inductors in the region are series R–L–C
+//!   lumped elements from their part values, across the gap between their pads ([`LumpedElement`]).
 //! - Absorbing boundaries: CPML in the outer `pml_cells` cells of every side.
 //! - S = B A⁻¹ from the incident and reflected power waves of every port in every run, so
 //!   terminations that are not exactly matched do not bias the result.
 
 pub mod engine;
 pub mod fit;
+mod parts;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,8 +43,10 @@ use crate::touchstone::{self, Touchstone};
 use crate::units::Nm;
 
 pub use engine::{
-    Cancelled, Gaussian, Hooks, LumpedPort, Material, Probe, Run, Settings, Simulation, Structure, SurfaceImpedance,
+    Cancelled, Gaussian, Hooks, LumpedElement, LumpedPort, Material, Probe, Run, Settings, Simulation, Structure,
+    SurfaceImpedance,
 };
+pub use parts::LumpedPart;
 
 use crate::electrical::dispersion::Dielectric as Dispersive;
 use crate::electrical::loss::Roughness;
@@ -59,6 +64,8 @@ pub struct Options {
     pub conductivity: Option<f64>,
     /// Copper surface roughness (on the surface impedance's resistance).
     pub roughness: Roughness,
+    /// Model the region's two-pin resistors, capacitors and inductors as lumped elements.
+    pub parts: bool,
 }
 
 impl Default for Options {
@@ -69,6 +76,7 @@ impl Default for Options {
             courant: 0.95,
             conductivity: Some(crate::electrical::loss::COPPER_CONDUCTIVITY),
             roughness: Roughness::Smooth,
+            parts: true,
         }
     }
 }
@@ -134,6 +142,8 @@ pub struct SParams {
     pub timestep: f64,
     /// One run per port.
     pub runs: Vec<PortRun>,
+    /// Board parts simulated as lumped elements.
+    pub parts: Vec<LumpedPart>,
     /// Warnings and notes.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -155,6 +165,7 @@ struct Built {
     measures: Vec<Measure>,
     probes: Vec<Probe>,
     z0: Vec<f64>,
+    parts: Vec<LumpedPart>,
 }
 
 fn pt(x: i64, y: i64) -> poly::Point {
@@ -181,7 +192,12 @@ fn dielectric(s: &mut Structure, d: &Dispersive, anchor: f64, band: (f64, f64), 
 /// Voxelizes the region: dielectrics (dispersive) inside the board outline, the solder mask,
 /// non-plated holes as air, copper and plated holes as perfect conductors; ports and their
 /// probes. `band`: the frequencies of the result (Hz).
-fn build(r: &Region, band: (f64, f64)) -> Result<Built, Error> {
+fn build(
+    r: &Region,
+    band: (f64, f64),
+    parts: Vec<parts::Candidate>,
+    diags: &mut Vec<Diagnostic>,
+) -> Result<Built, Error> {
     let mut s = Structure::new(r.lines.clone())
         .map_err(|m| Error::new("sim.bad_mesh", m, "check `max_cell`, `min_cell` and the region"))?;
     let w = r.window;
@@ -260,6 +276,7 @@ fn build(r: &Region, band: (f64, f64)) -> Result<Built, Error> {
         let (x, y) = (s.lines()[0][i], s.lines()[1][j]);
         s.pec([x, y, z0], [x, y, z1], &|_, _| true);
     }
+    let parts = parts::place(&mut s, r, parts, diags);
 
     let mut ports = Vec::new();
     let mut measures = Vec::new();
@@ -358,7 +375,7 @@ fn build(r: &Region, band: (f64, f64)) -> Result<Built, Error> {
             }
         }
     }
-    Ok(Built { structure: s, ports, measures, probes, z0 })
+    Ok(Built { structure: s, ports, measures, probes, z0, parts })
 }
 
 /// Solves `S A = B` for S (N×N complex, row-major), by Gaussian elimination with partial
@@ -430,7 +447,9 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
     }
     let freqs = frequencies(&o.region);
     let band = (freqs[0], *freqs.last().unwrap_or(&freqs[0]));
-    let b = build(&r, band)?;
+    let mut diags = r.diagnostics.clone();
+    let candidates = if o.parts { parts::candidates(p, r.window, &mut diags) } else { Vec::new() };
+    let b = build(&r, band, candidates, &mut diags)?;
     let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
     let pml = o.region.pml_cells as usize;
     let settings = Settings {
@@ -451,7 +470,6 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
     let mut a = vec![vec![C64::new(0.0, 0.0); np * np]; nf];
     let mut bw = a.clone();
     let mut runs = Vec::new();
-    let mut diags = r.diagnostics.clone();
     for j in 0..np {
         let progress = |done: u64, _total: Option<u64>, msg: &str| {
             (hooks.progress)(done, Some(o.region.timesteps), &format!("port {}/{np}: {msg}", j + 1));
@@ -531,6 +549,7 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
         excitation: (r.f0, r.fc),
         timestep: sim.dt(),
         runs,
+        parts: b.parts,
         diagnostics: diags,
     })
 }

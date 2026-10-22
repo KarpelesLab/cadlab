@@ -24,6 +24,8 @@ pub(crate) fn register(r: &mut Registry) {
 /// `export.openems`: stackup dielectrics (εr, loss tangent, dispersive with a reference
 /// frequency), copper with skin-effect loss and roughness (a surface impedance), optional
 /// solder mask, vias, lumped or microstrip ports, CPML absorbing boundaries; one run per port.
+/// Two-pin resistors, capacitors and inductors in the region are lumped elements from their part
+/// values (`resistance`, `capacitance`, `inductance`, and `esr` / `esl` when given).
 /// Long: reports progress and can be cancelled; `max_cells` guards the mesh size.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -130,6 +132,11 @@ pub struct SParams {
     /// Huray surface ratio: snowball surface per flat area.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub huray_ratio: Option<Quantity>,
+    /// Model the region's two-pin resistors, capacitors and inductors as series R–L–C lumped
+    /// elements between their pads, from the part values (default true; false leaves their pads
+    /// open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<bool>,
 }
 
 /// Result of `sim.sparams`.
@@ -158,6 +165,9 @@ pub struct Simulated {
     pub params: Vec<ParamSummary>,
     /// Nets with copper in the region.
     pub nets: Vec<String>,
+    /// Board parts simulated as lumped elements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<fdtd::LumpedPart>,
 }
 
 fn decibels(q: Option<Quantity>, field: &str, default: u32) -> Result<u32, CommandError> {
@@ -248,6 +258,7 @@ impl Command for SParams {
             max_cells: self.max_cells.unwrap_or(4_000_000),
             conductivity: (!self.perfect_copper).then(|| sigma.to_f64()),
             roughness,
+            parts: self.parts.unwrap_or(true),
             ..fdtd::Options::default()
         };
         let result = {
@@ -301,6 +312,7 @@ impl Command for SParams {
             runs: result.runs,
             params,
             nets: result.nets,
+            parts: result.parts,
         })
     }
 
@@ -314,6 +326,10 @@ impl Command for SParams {
             o.mesh.cells,
             o.timestep
         );
+        if !o.parts.is_empty() {
+            let names: Vec<&str> = o.parts.iter().map(|p| p.refdes.as_str()).collect();
+            s.push_str(&format!("\n  lumped parts: {}", names.join(", ")));
+        }
         for r in &o.runs {
             s.push_str(&format!(
                 "\n  port {}: {} timesteps, energy {} dB{}",

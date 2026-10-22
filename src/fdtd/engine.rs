@@ -7,7 +7,8 @@
 //! (CPML, after J. A. Roden and S. D. Gedney, Microwave Opt. Technol. Lett. 27, 2000), 9 (Debye
 //! media by auxiliary differential equations), 10 (surface impedance, after J. G. Maloney and
 //! G. S. Smith, and J. H. Beggs et al., IEEE Trans. AP-40, 1992) and 15 (lumped elements, after
-//! M. Piket-May, A. Taflove and J. Baron, IEEE Trans. MTT-42, 1994).
+//! M. Piket-May, A. Taflove and J. Baron, IEEE Trans. MTT-42, 1994: resistive ports, and series
+//! R–L–C elements whose current is advanced with E by the trapezoidal rule).
 //! The graded grid uses the integral (finite integration) form: curls are circulations divided by
 //! the face areas of the primal or dual grid.
 //!
@@ -63,6 +64,36 @@ pub struct Structure {
     taus: Vec<f64>,
     cell: Vec<u16>,
     pec: [Vec<bool>; 3],
+    elements: Vec<LumpedElement>,
+}
+
+/// A lumped series R–L–C element along `axis` (Piket-May, Taflove & Baron; Taflove ch. 15):
+/// columns of edges at every node of the transverse ranges, from `lo[axis]` to `hi[axis]`, the
+/// columns in parallel, each column's edges in series sharing the element in proportion to
+/// their lengths. The element's current is a state of every edge, advanced with the edge's E by
+/// the trapezoidal rule (semi-implicit, so any R, L, C is stable at the Courant limit), and
+/// enters Ampère's law as the current density I / A of the edge's dual face.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LumpedElement {
+    /// Direction of the element (0 x, 1 y, 2 z).
+    pub axis: usize,
+    /// Lowest node (inclusive box).
+    pub lo: [usize; 3],
+    /// Highest node.
+    pub hi: [usize; 3],
+    /// Series resistance (Ω).
+    pub r: f64,
+    /// Series inductance (H).
+    pub l: f64,
+    /// Series capacitance (F); `None`: no capacitor (a DC path).
+    pub c: Option<f64>,
+}
+
+impl LumpedElement {
+    /// Whether the element is a short (no resistance, inductance or capacitor).
+    pub fn is_short(&self) -> bool {
+        self.r == 0.0 && self.l == 0.0 && self.c.is_none()
+    }
 }
 
 /// Number of entries of a node-indexed array.
@@ -93,6 +124,7 @@ impl Structure {
             taus: Vec::new(),
             cell: vec![0; cells],
             pec: [vec![false; nodes(n)], vec![false; nodes(n)], vec![false; nodes(n)]],
+            elements: Vec::new(),
         })
     }
 
@@ -239,6 +271,45 @@ impl Structure {
     pub fn is_pec(&self, axis: usize, at: [usize; 3]) -> bool {
         let n = self.n();
         self.pec[axis][at[0] + n[0] * (at[1] + n[1] * at[2])]
+    }
+
+    /// Whether any edge ending at node `at` is a perfect conductor.
+    pub fn touches_pec(&self, at: [usize; 3]) -> bool {
+        let n = self.n();
+        (0..3).any(|a| {
+            let up = at[a] + 1 < n[a] && self.is_pec(a, at);
+            let down = at[a] > 0 && {
+                let mut q = at;
+                q[a] -= 1;
+                self.is_pec(a, q)
+            };
+            up || down
+        })
+    }
+
+    /// Adds a lumped element. A short (no R, L or C) makes its edges perfect conductors; the
+    /// others are checked by [`Simulation::new`].
+    pub fn element(&mut self, e: LumpedElement) {
+        if e.is_short() && e.axis < 3 && (0..3).all(|x| e.lo[x] <= e.hi[x] && e.hi[x] < self.n()[x]) {
+            let n = self.n();
+            let (a, b, c) = (e.axis, (e.axis + 1) % 3, (e.axis + 2) % 3);
+            for ic in e.lo[c]..=e.hi[c] {
+                for ib in e.lo[b]..=e.hi[b] {
+                    for ia in e.lo[a]..e.hi[a] {
+                        let mut q = [0; 3];
+                        (q[a], q[b], q[c]) = (ia, ib, ic);
+                        self.pec[a][q[0] + n[0] * (q[1] + n[1] * q[2])] = true;
+                    }
+                }
+            }
+            return;
+        }
+        self.elements.push(e);
+    }
+
+    /// The lumped elements (shorts excluded: they are perfect conductors).
+    pub fn elements(&self) -> &[LumpedElement] {
+        &self.elements
     }
 }
 
@@ -472,6 +543,35 @@ pub struct Simulation {
     disp: Option<Dispersion>,
     /// Surface-impedance faces.
     sibc: Option<Sibc>,
+    /// Lumped element edges.
+    elements: Vec<ElementEdge>,
+}
+
+/// One edge of a lumped series R–L–C element (its share of the element: R, L and 1/C in
+/// proportion to the edge's length in its column, times the number of parallel columns).
+/// Trapezoidal rule on the edge's voltage E l and current I:
+/// E l (at the half step) = R I + L dI/dt + q / C, dq/dt = I, and Ampère's law takes (I⁺ + I)/2
+/// spread over the dual face A. With Z = R/2 + L/Δt + Δt/(4C), Z' = R/2 − L/Δt + Δt/(4C),
+/// E* the update without the element and cb its coefficient:
+/// E⁺ = (E* − κ E − α I + β q) / (1 + κ), κ = cb l / (4 A Z), α = cb L / (Δt A Z),
+/// β = cb / (2 A C Z); then I⁺ = (l (E⁺ + E)/2 − Z' I − q/C) / Z and q⁺ = q + Δt (I⁺ + I)/2.
+struct ElementEdge {
+    axis: usize,
+    g: usize,
+    kappa: f64,
+    alpha: f64,
+    beta: f64,
+    /// l / (2 Z), Z' / Z, 1 / (C Z).
+    half_l: f64,
+    zr: f64,
+    sz: f64,
+    /// L and 1/C of the edge (stored energy).
+    l: f64,
+    s: f64,
+    /// E before the update, the current and the charge.
+    e: f64,
+    i: f64,
+    q: f64,
 }
 
 /// Edges or faces of one field component in index order, split per z plane, with their state
@@ -693,6 +793,7 @@ impl Simulation {
             probes: Vec::new(),
             disp: None,
             sibc: None,
+            elements: Vec::new(),
             settings,
         };
         sim.coefficients(s, ports)?;
@@ -774,6 +875,43 @@ impl Simulation {
             let sign = if p.positive_high { -1.0 } else { 1.0 };
             port_edges.push((a, edges, sign, columns, per_edge, r_e, p.r));
         }
+        // Lumped element edges: (axis, edge) → (element, R, L, 1/C of the edge, length, area).
+        type EdgeShare = (f64, f64, f64, f64, f64);
+        let mut elem: std::collections::BTreeMap<(usize, usize), EdgeShare> = std::collections::BTreeMap::new();
+        for (ei, el) in s.elements.iter().enumerate() {
+            let a = el.axis;
+            let bad = |m: &str| Err(format!("lumped element {}: {m}", ei + 1));
+            if a > 2 || (0..3).any(|x| el.lo[x] > el.hi[x] || el.hi[x] >= n[x]) || el.lo[a] == el.hi[a] {
+                return bad("its box is empty or outside the grid");
+            }
+            let finite = |v: f64| v.is_finite() && v >= 0.0;
+            if !finite(el.r) || !finite(el.l) || el.c.is_some_and(|c| !(c.is_finite() && c > 0.0)) {
+                return bad("R and L must be non-negative and C positive");
+            }
+            let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+            let columns = ((el.hi[b] - el.lo[b] + 1) * (el.hi[c] - el.lo[c] + 1)) as f64;
+            let span: f64 = self.d[a][el.lo[a]..el.hi[a]].iter().sum();
+            let inv_c = el.c.map_or(0.0, |c| 1.0 / c);
+            for ic in el.lo[c]..=el.hi[c] {
+                for ib in el.lo[b]..=el.hi[b] {
+                    for ia in el.lo[a]..el.hi[a] {
+                        let mut q = [0; 3];
+                        (q[a], q[b], q[c]) = (ia, ib, ic);
+                        let l = self.d[a][ia];
+                        let share = columns * l / span;
+                        let area: f64 = self.around(a, q).iter().map(|x| x.1).sum();
+                        let e = self.id(q);
+                        if extra[a].contains_key(&e) {
+                            return bad("it overlaps a port");
+                        }
+                        if elem.insert((a, e), (el.r * share, el.l * share, inv_c * share, l, area)).is_some() {
+                            return bad("it overlaps another element");
+                        }
+                    }
+                }
+            }
+        }
+        let omega0 = 2.0 * std::f64::consts::PI * self.settings.excitation.f0.max(self.settings.excitation.fc);
         let mut table: std::collections::BTreeMap<Vec<u32>, u32> = std::collections::BTreeMap::new();
         let mut coef = vec![(0.0f32, 0.0f32, 1.0f32)];
         table.insert(vec![0, 0, 1.0f32.to_bits()], 0);
@@ -798,7 +936,8 @@ impl Simulation {
                             self.tab[a][e] = 0;
                             continue;
                         }
-                        if s.pec[a][e] && !extra[a].contains_key(&e) {
+                        let is_elem = elem.contains_key(&(a, e));
+                        if s.pec[a][e] && !extra[a].contains_key(&e) && !is_elem {
                             self.tab[a][e] = 0;
                             conductor[a][e] = true;
                             continue;
@@ -815,7 +954,15 @@ impl Simulation {
                             }
                             w += area;
                         }
-                        let (eps, mut sig) = (EPS0 * eps / w, sig / w);
+                        let (mut eps, mut sig) = (EPS0 * eps / w, sig / w);
+                        if is_elem {
+                            // Element edges are not dispersive: the Debye terms' permittivity at
+                            // the pulse's center.
+                            for (d, t) in delta.iter_mut().zip(&s.taus) {
+                                eps += EPS0 * (*d / w) / (1.0 + (omega0 * t).powi(2));
+                                *d = 0.0;
+                            }
+                        }
                         sig += extra[a].get(&e).copied().unwrap_or(0.0);
                         // Debye terms: β = 2ε₀Δε/(2τ + Δt) (zero when the edge has none).
                         let beta: Vec<f64> =
@@ -868,6 +1015,26 @@ impl Simulation {
             self.sibc = self.surface_faces(z, &conductor);
         }
         self.coef = coef;
+        for (&(a, g), &(r, l, s_c, len, area)) in &elem {
+            let cb = self.coef[self.tab[a][g] as usize].1 as f64;
+            let z = r / 2.0 + l / dt + dt * s_c / 4.0;
+            let zr = r / 2.0 - l / dt + dt * s_c / 4.0;
+            self.elements.push(ElementEdge {
+                axis: a,
+                g,
+                kappa: cb * len / (4.0 * area * z),
+                alpha: cb * l / (dt * area * z),
+                beta: cb * s_c / (2.0 * area * z),
+                half_l: len / (2.0 * z),
+                zr: zr / z,
+                sz: s_c / z,
+                l,
+                s: s_c,
+                e: 0.0,
+                i: 0.0,
+                q: 0.0,
+            });
+        }
         for (a, edges, sign, columns, per_edge, r_e, r) in port_edges {
             let edges = edges
                 .into_iter()
@@ -1163,6 +1330,35 @@ impl Simulation {
         if let Some(z) = &mut self.sibc {
             z.state.fill(0.0);
             z.e.fill(0.0);
+        }
+        for el in &mut self.elements {
+            (el.e, el.i, el.q) = (0.0, 0.0, 0.0);
+        }
+    }
+
+    /// Number of lumped element edges.
+    pub fn element_edges(&self) -> usize {
+        self.elements.len()
+    }
+
+    /// Saves E on the lumped element edges before the curl update.
+    fn elements_before(&mut self) {
+        for el in &mut self.elements {
+            el.e = self.f[el.axis][el.g] as f64;
+        }
+    }
+
+    /// The lumped elements' currents in Ampère's law, then their own update from the new E.
+    fn elements_after(&mut self) {
+        let dt = self.dt;
+        for el in &mut self.elements {
+            let f = &mut self.f[el.axis][el.g];
+            let star = *f as f64;
+            let new = (star - el.kappa * el.e - el.alpha * el.i + el.beta * el.q) / (1.0 + el.kappa);
+            let i = el.half_l * (new + el.e) - el.zr * el.i - el.sz * el.q;
+            el.q += dt * (i + el.i) / 2.0;
+            el.i = i;
+            *f = new as f32;
         }
     }
 
@@ -1577,10 +1773,15 @@ impl Simulation {
         if let Some(pool) = &self.pool {
             use rayon::prelude::*;
             let sums: Vec<f64> = pool.install(|| (0..n[2]).into_par_iter().map(per_plane).collect());
-            return sums.iter().sum();
+            return sums.iter().sum::<f64>() + self.element_energy();
         }
         let sums: Vec<f64> = (0..n[2]).map(per_plane).collect();
-        sums.iter().sum()
+        sums.iter().sum::<f64>() + self.element_energy()
+    }
+
+    /// Energy stored in the lumped elements' inductors and capacitors (J).
+    fn element_energy(&self) -> f64 {
+        self.elements.iter().map(|e| 0.5 * (e.l * e.i * e.i + e.s * e.q * e.q)).sum()
     }
 
     /// One timestep: H from E, then E from H with the port sources at `t + dt/2`. `drive` gives
@@ -1591,6 +1792,7 @@ impl Simulation {
         self.update_cpml(false);
         let before: Vec<f64> = self.ports.iter().map(|p| self.port_voltage(p)).collect();
         self.disp_before();
+        self.elements_before();
         self.update_e();
         self.update_cpml(true);
         if let Some((k, vs)) = drive
@@ -1602,6 +1804,7 @@ impl Simulation {
             }
         }
         self.disp_after();
+        self.elements_after();
         self.ports
             .iter()
             .enumerate()
