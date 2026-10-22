@@ -14,7 +14,8 @@ use crate::geom::{BBox, Point};
 use crate::id::ObjectId;
 use crate::model::Project;
 use crate::model::board::{
-    BoardSide, Contour, EdgeHint, PlacedFootprint, PlacementHint, RULE_FIELDS, RulePreset, Rules, Segment, Track, Via,
+    BoardSide, Contour, EdgeHint, HintRegion, PlacedFootprint, PlacementHint, RULE_FIELDS, RulePreset, Rules, Segment,
+    Track, Via,
 };
 use crate::model::sections::natural_cmp;
 use crate::suggest::did_you_mean;
@@ -1012,6 +1013,50 @@ pub(super) fn unlocked<'a>(p: &'a mut Project, r: &str) -> Result<&'a mut Placed
     Ok(fp)
 }
 
+/// After a move of placed components: the nets whose routing ended on their pads before the
+/// move (`before`, [`geo::nets_routed_at`]) are ripped up with `rip`, else reported.
+fn routing_left_behind(
+    ctx: &mut Context<'_>,
+    refdes: &[String],
+    before: std::collections::BTreeSet<String>,
+    rip: bool,
+) -> Result<(), CommandError> {
+    if before.is_empty() {
+        return Ok(());
+    }
+    let nets: Vec<String> = before.into_iter().collect();
+    let list = nets.join(",");
+    if rip {
+        let b = ctx.project_mut()?.board_mut();
+        let hit = |n: &Option<String>| n.as_ref().is_some_and(|n| nets.contains(n));
+        b.tracks.retain(|t| t.locked || !hit(&t.net));
+        b.vias.retain(|v| v.locked || !hit(&v.net));
+        let mut d = Diagnostic::info(
+            "place.ripped",
+            format!("ripped up the routing of {} (it ended on the moved pads)", nets.join(", ")),
+        );
+        for n in &nets {
+            d = d.with_subject(crate::refs::ObjectRef::Net(n.clone()));
+        }
+        ctx.report(d.with_hint(format!("route them again: `route.nets {list}` (fill zones again after)")));
+    } else {
+        let mut d = Diagnostic::warning(
+            "place.moved_routed",
+            format!("{} moved, but the tracks of {} still end where its pads were", refdes.join(", "), nets.join(", ")),
+        );
+        for r in refdes {
+            d = d.with_subject(crate::refs::ObjectRef::Name(r.clone()));
+        }
+        for n in &nets {
+            d = d.with_subject(crate::refs::ObjectRef::Net(n.clone()));
+        }
+        ctx.report(d.with_hint(format!(
+            "rip them up and route again: `route.rip {list}` then `route.nets {list}`, or move with `rip: true`"
+        )));
+    }
+    Ok(())
+}
+
 /// Place (or re-place) a component's footprint.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1026,6 +1071,9 @@ pub struct PlaceSet {
     /// Side: top or bottom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<BoardSide>,
+    /// Rip up the routing of the nets that ended on the part's pads (else a warning names them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rip: bool,
 }
 
 impl Command for PlaceSet {
@@ -1037,12 +1085,13 @@ impl Command for PlaceSet {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Placed, CommandError> {
         let r = check_placeable(ctx.project()?, &self.refdes)?;
+        let before = geo::nets_routed_at(ctx.project()?, std::slice::from_ref(&r));
         let p = ctx.project_mut()?;
         let existing = p.board().footprints.get(&r).cloned();
         if existing.as_ref().is_some_and(|f| f.locked) {
             return Err(CommandError::conflict("place.locked", format!("{r} is locked")));
         }
-        let mut fp = existing.unwrap_or(PlacedFootprint {
+        let mut fp = existing.clone().unwrap_or(PlacedFootprint {
             at: self.at,
             rotation: Angle::ZERO,
             side: BoardSide::Top,
@@ -1056,7 +1105,11 @@ impl Command for PlaceSet {
         if let Some(s) = self.side {
             fp.side = s;
         }
+        let moved = existing.as_ref().is_some_and(|e| e.at != fp.at || e.rotation != fp.rotation || e.side != fp.side);
         p.board_mut().footprints.insert(r.clone(), fp.clone());
+        if moved {
+            routing_left_behind(ctx, std::slice::from_ref(&r), before, self.rip)?;
+        }
         Ok(Placed { placements: [(r, fp)].into(), unplaced: vec![], ratsnest_length: None })
     }
 
@@ -1073,6 +1126,9 @@ pub struct PlaceMove {
     pub refdes: Vec<String>,
     /// Offset: ["2mm", "-1mm"].
     pub by: Point,
+    /// Rip up the routing of the nets that ended on the parts' pads (else a warning names them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rip: bool,
 }
 
 impl Command for PlaceMove {
@@ -1083,13 +1139,18 @@ impl Command for PlaceMove {
     type Output = Placed;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Placed, CommandError> {
-        let mut out = BTreeMap::new();
+        let mut keys = Vec::new();
         for r in &self.refdes {
-            let r = util::refdes_key(ctx.project()?, r)?;
+            keys.push(util::refdes_key(ctx.project()?, r)?);
+        }
+        let before = geo::nets_routed_at(ctx.project()?, &keys);
+        let mut out = BTreeMap::new();
+        for r in keys.iter().cloned() {
             let fp = unlocked(ctx.project_mut()?, &r)?;
             fp.at = fp.at + self.by;
             out.insert(r, fp.clone());
         }
+        routing_left_behind(ctx, &keys, before, self.rip)?;
         Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
     }
 
@@ -1107,6 +1168,9 @@ pub struct PlaceRotate {
     /// Added rotation, degrees counter-clockwise (default 90).
     #[serde(default = "ninety")]
     pub by: Angle,
+    /// Rip up the routing of the nets that ended on the parts' pads (else a warning names them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rip: bool,
 }
 
 fn ninety() -> Angle {
@@ -1121,13 +1185,18 @@ impl Command for PlaceRotate {
     type Output = Placed;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Placed, CommandError> {
-        let mut out = BTreeMap::new();
+        let mut keys = Vec::new();
         for r in &self.refdes {
-            let r = util::refdes_key(ctx.project()?, r)?;
+            keys.push(util::refdes_key(ctx.project()?, r)?);
+        }
+        let before = geo::nets_routed_at(ctx.project()?, &keys);
+        let mut out = BTreeMap::new();
+        for r in keys.iter().cloned() {
             let fp = unlocked(ctx.project_mut()?, &r)?;
             fp.rotation = (fp.rotation + self.by).normalized();
             out.insert(r, fp.clone());
         }
+        routing_left_behind(ctx, &keys, before, self.rip)?;
         Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
     }
 
@@ -1142,6 +1211,9 @@ impl Command for PlaceRotate {
 pub struct PlaceFlip {
     /// Designators.
     pub refdes: Vec<String>,
+    /// Rip up the routing of the nets that ended on the parts' pads (else a warning names them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rip: bool,
 }
 
 impl Command for PlaceFlip {
@@ -1152,13 +1224,18 @@ impl Command for PlaceFlip {
     type Output = Placed;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Placed, CommandError> {
-        let mut out = BTreeMap::new();
+        let mut keys = Vec::new();
         for r in &self.refdes {
-            let r = util::refdes_key(ctx.project()?, r)?;
+            keys.push(util::refdes_key(ctx.project()?, r)?);
+        }
+        let before = geo::nets_routed_at(ctx.project()?, &keys);
+        let mut out = BTreeMap::new();
+        for r in keys.iter().cloned() {
             let fp = unlocked(ctx.project_mut()?, &r)?;
             fp.side = if fp.side == BoardSide::Top { BoardSide::Bottom } else { BoardSide::Top };
             out.insert(r, fp.clone());
         }
+        routing_left_behind(ctx, &keys, before, self.rip)?;
         Ok(Placed { placements: out, unplaced: vec![], ratsnest_length: None })
     }
 
@@ -1323,6 +1400,10 @@ pub struct PlaceHint {
     /// facing its pad of a shared net, and keeps them there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub near: Option<String>,
+    /// Area the parts stay inside, by two opposite corners (`{"from": ["0mm", "0mm"], "to":
+    /// ["30mm", "50mm"]}`): the analog section of a mixed-signal board, a shielded corner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<HintRegion>,
     /// Remove the hints of these parts (all hints when no designator is given).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear: bool,
@@ -1344,17 +1425,33 @@ impl Command for PlaceHint {
     type Output = PlacementHints;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<PlacementHints, CommandError> {
-        if self.clear && (self.edge.is_some() || self.near.is_some()) {
+        let setting = self.edge.is_some() || self.near.is_some() || self.region.is_some();
+        if self.clear && setting {
             return Err(CommandError::invalid_args(
                 "place.hint_conflict",
-                "give either `edge` / `near` or `clear`, not both",
+                "give either `edge` / `near` / `region` or `clear`, not both",
             )
             .with_hint("`place hint D2 --edge any` sets a hint, `place hint D2 --clear` removes it"));
         }
         let mut keys = Vec::new();
         for r in self.refdes.iter().flat_map(|r| r.split(',')).map(str::trim).filter(|r| !r.is_empty()) {
-            keys.push(util::refdes_key(ctx.project()?, r)?);
+            // A block instance ("CH1") stands for its components.
+            let p = ctx.project()?;
+            if p.circuit().instances.contains_key(r) && !p.circuit().components.contains_key(r) {
+                let mut members: Vec<String> = p
+                    .circuit()
+                    .components
+                    .iter()
+                    .filter(|(_, c)| c.block.as_deref() == Some(r))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                members.sort_by(|a, b| natural_cmp(a, b));
+                keys.extend(members);
+                continue;
+            }
+            keys.push(util::refdes_key(p, r)?);
         }
+        keys.dedup();
         if self.clear {
             let p = ctx.project_mut()?;
             if keys.is_empty() {
@@ -1365,10 +1462,34 @@ impl Command for PlaceHint {
                     p.board_mut().placement_hints.remove(k);
                 }
             }
-        } else if self.edge.is_some() || self.near.is_some() {
+        } else if setting {
+            if let Some(g) = &self.region {
+                let p = ctx.project()?;
+                let bb = outline_bbox(p);
+                let (x0, x1) = (g.from.x.min(g.to.x), g.from.x.max(g.to.x));
+                let (y0, y1) = (g.from.y.min(g.to.y), g.from.y.max(g.to.y));
+                if x0 == x1 || y0 == y1 {
+                    return Err(CommandError::invalid_args("place.invalid_region", "the region has no area")
+                        .with_hint(
+                            "give two opposite corners: `{\"from\": [\"0mm\", \"0mm\"], \"to\": [\"30mm\", \"50mm\"]}`",
+                        ));
+                }
+                if let Some(BBox { min: a, max: b }) = bb
+                    && (x1 <= a.x || x0 >= b.x || y1 <= a.y || y0 >= b.y)
+                {
+                    return Err(CommandError::invalid_args(
+                        "place.region_outside",
+                        "the region does not overlap the board outline",
+                    )
+                    .with_hint("`board.info` shows the outline; regions use board coordinates"));
+                }
+            }
             if keys.is_empty() {
-                return Err(CommandError::invalid_args("place.hint_no_parts", "`edge` and `near` need designators")
-                    .with_hint("name the parts: `place hint J1 --edge top`, `place hint R2 --near D9`"));
+                return Err(CommandError::invalid_args(
+                    "place.hint_no_parts",
+                    "`edge`, `near` and `region` need designators",
+                )
+                .with_hint("name the parts: `place hint J1 --edge top`, `place hint R2 --near D9`"));
             }
             let near = match &self.near {
                 Some(n) => Some(util::refdes_key(ctx.project()?, n.trim())?),
@@ -1409,6 +1530,9 @@ impl Command for PlaceHint {
                 if let Some(n) = &near {
                     h.near = Some(n.clone());
                 }
+                if let Some(g) = self.region {
+                    h.region = Some(g);
+                }
             }
         }
         let locked: Vec<String> = {
@@ -1442,6 +1566,9 @@ impl Command for PlaceHint {
                 }
                 if let Some(n) = &h.near {
                     what.push(format!("near {n}"));
+                }
+                if let Some(g) = &h.region {
+                    what.push(format!("region ({}, {})-({}, {})", g.from.x, g.from.y, g.to.x, g.to.y));
                 }
                 if what.is_empty() {
                     what.push("-".into());
@@ -1504,7 +1631,16 @@ impl Command for PlaceAuto {
                     .iter()
                     .filter_map(|(r, h)| h.near.clone().map(|n| (r.clone(), n)))
                     .collect();
-                let opts = geo::place::AutoOptions { gap, spread: !self.compact, density: self.density, edges, near };
+                let regions: BTreeMap<String, geo::place::Rect> = p
+                    .board()
+                    .placement_hints
+                    .iter()
+                    .filter_map(|(r, h)| {
+                        h.region.map(|g| (r.clone(), geo::place::Rect::of([g.from, g.to]).expect("two points")))
+                    })
+                    .collect();
+                let opts =
+                    geo::place::AutoOptions { gap, spread: !self.compact, density: self.density, edges, near, regions };
                 let r = geo::place::auto_place(p, &moving, &opts)
                     .map_err(|e| CommandError::conflict(e.code, e.message).with_hint(e.hint))?;
                 (r.placements, r.unplaced)

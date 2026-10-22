@@ -9,8 +9,9 @@
 //! | power inputs with no power output, unless the net is marked `driven` or they are all ground pins | error |
 //!
 //! A net reached from a powered net through a series inductor, ferrite bead or fuse (two pins,
-//! the other one on that net) is powered too: a buck converter's output behind its inductor,
-//! a filtered analog rail.
+//! the other one on that net), or through a net tie (a footprint whose net-tie group joins the
+//! two nets: the star point between AGND and GND), is powered too: a buck converter's output
+//! behind its inductor, a filtered analog rail, a split ground.
 //! | inputs with nothing that can drive them, unless `driven` | warning |
 //! | a pin of type `no_connect` connected to a net | warning |
 //! | net with a single pin | warning |
@@ -38,7 +39,7 @@ fn list(pins: &[&PinRef]) -> String {
 }
 
 /// Nets powered by a power output, marked `driven`, or reached from such a net through series
-/// inductors, ferrite beads and fuses (two-pin parts).
+/// inductors, ferrite beads and fuses (two-pin parts), or net ties.
 fn fed_nets(p: &Project) -> BTreeSet<&str> {
     let c = p.circuit();
     let lib = p.library();
@@ -70,6 +71,20 @@ fn fed_nets(p: &Project) -> BTreeSet<&str> {
             && a != b
         {
             links.push((a, b));
+        }
+    }
+    // Net ties: every net of a tie group with every other.
+    for r in c.components.keys() {
+        for group in crate::board::net_tie_nets(p, r) {
+            for a in &group {
+                for b in &group {
+                    if a < b
+                        && let (Some((a, _)), Some((b, _))) = (c.nets.get_key_value(a), c.nets.get_key_value(b))
+                    {
+                        links.push((a.as_str(), b.as_str()));
+                    }
+                }
+            }
         }
     }
     loop {
@@ -188,7 +203,13 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
                 crate::symbolgen::is_ground(&name)
             });
         if !power_in.is_empty() && !all_ground && !fed.contains(name.as_str()) {
-            let hint = if has_connector {
+            let hint = if crate::symbolgen::is_ground(name) {
+                format!(
+                    "a separate ground such as `{name}` joins the main ground at one point: a net-tie part \
+                     between them (a footprint with `net_ties`, `footprint.set`) carries the reference over; \
+                     if `{name}` comes from outside, mark it: `net.set {name} --driven`"
+                )
+            } else if has_connector {
                 format!("if `{name}` comes from a connector or external supply, mark it: `net.set {name} --driven`")
             } else {
                 format!(

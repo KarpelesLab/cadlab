@@ -241,6 +241,8 @@ struct Part {
     rel: [[(Rect, Vec<Point>); 4]; 2],
     /// Edge hint (`place.hint`).
     edge: Option<EdgeHint>,
+    /// Region hint (`place.hint --region`): the courtyard box stays inside.
+    region: Option<Rect>,
 }
 
 impl Part {
@@ -354,7 +356,7 @@ fn build_part(
             (r, fp.pads.iter().map(|pd| tf(pd.at)).collect())
         })
     });
-    Some(Part { refdes: refdes.to_string(), kind, pins, footprint: fp.name.clone(), pads, rel, edge })
+    Some(Part { refdes: refdes.to_string(), kind, pins, footprint: fp.name.clone(), pads, rel, edge, region: None })
 }
 
 /// The allowed area of a board side for courtyards: outer contour shrunk by `edge`, minus
@@ -440,6 +442,7 @@ impl<'a> Engine<'a> {
         gap: i64,
         silk: bool,
         edges: &BTreeMap<String, EdgeHint>,
+        regions: &BTreeMap<String, Rect>,
     ) -> Result<Self, PlaceError> {
         let b = p.board();
         let c = b.outline.contours.first().ok_or_else(PlaceError::no_outline)?;
@@ -449,7 +452,8 @@ impl<'a> Engine<'a> {
         let net_index: BTreeMap<String, usize> = net_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
         let mut parts = Vec::new();
         for r in moving {
-            if let Some(part) = build_part(p, r, &net_index, silk, edges.get(r).copied()) {
+            if let Some(mut part) = build_part(p, r, &net_index, silk, edges.get(r).copied()) {
+                part.region = regions.get(r).copied();
                 parts.push(part);
             }
         }
@@ -619,6 +623,11 @@ impl<'a> Engine<'a> {
     /// its breakouts clear of the passives.
     fn valid(&self, i: usize, pose: &Pose) -> bool {
         let r = self.parts[i].rect(pose);
+        if let Some(g) = &self.parts[i].region
+            && (r.x0 < g.x0 || r.y0 < g.y0 || r.x1 > g.x1 || r.y1 > g.y1)
+        {
+            return false;
+        }
         if self.parts[i].kind == Kind::Passive
             && self.pair_zones.iter().any(|(side, z)| *side == pose.side && !r.clear_of(z, 0))
         {
@@ -1146,11 +1155,20 @@ pub struct AutoOptions {
     pub edges: BTreeMap<String, EdgeHint>,
     /// "Keep next to" hints (`place.hint --near`): designator → the part it stays next to.
     pub near: BTreeMap<String, String>,
+    /// Region hints (`place.hint --region`): designator → the box its courtyard stays inside.
+    pub regions: BTreeMap<String, Rect>,
 }
 
 impl Default for AutoOptions {
     fn default() -> Self {
-        AutoOptions { gap: DEFAULT_GAP, spread: true, density: None, edges: BTreeMap::new(), near: BTreeMap::new() }
+        AutoOptions {
+            gap: DEFAULT_GAP,
+            spread: true,
+            density: None,
+            edges: BTreeMap::new(),
+            near: BTreeMap::new(),
+            regions: BTreeMap::new(),
+        }
     }
 }
 
@@ -1215,7 +1233,7 @@ pub struct AutoPlacement {
 /// placed like anchors rather than next to a pin) and only move along it or closer.
 pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<AutoPlacement, PlaceError> {
     let spread = o.spread;
-    let mut e = Engine::new(p, moving, o.gap.0.max(0), spread, &o.edges)?;
+    let mut e = Engine::new(p, moving, o.gap.0.max(0), spread, &o.edges, &o.regions)?;
     let nets = net_info(&e);
     let ap = anchor_pads(&e);
     let mut targets = assign(&e, &nets, &ap);
@@ -1391,6 +1409,32 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
             s
         };
         let mut found = None;
+        // An explicit edge hint: the part goes to its edge even where the rooms of groups placed
+        // earlier cover it (their passives still find room around it); the closest valid poses
+        // to that edge, the best of them by score.
+        if let Some(edge) = e.parts[i].edge {
+            let at_edge: Vec<(i64, Pose)> = cands
+                .iter()
+                .filter(|c| e.valid(i, c))
+                .map(|c| (e.edge_distance(&e.parts[i].rect(c), edge).0, *c))
+                .collect();
+            if let Some(dmin) = at_edge.iter().map(|x| x.0).min() {
+                let near: Vec<Pose> = at_edge.iter().filter(|x| x.0 <= dmin + step).map(|x| x.1).collect();
+                let fits =
+                    |pose: &Pose| halos.iter().all(|(j, o)| Some(*j) == master || e.parts[i].rect(pose).clear_of(o, 0));
+                let clear: Vec<Pose> = near.iter().copied().filter(|c| fits(c)).collect();
+                let pick = if clear.is_empty() { near } else { clear };
+                if let Some(pose) = e.best(i, pick, |c| score(&e, c)) {
+                    // The largest room that stays clear of the others' rooms.
+                    let r = e.parts[i].rect(&pose);
+                    let h = [halo, halo / 2]
+                        .into_iter()
+                        .find(|&h| halos.iter().all(|(j, o)| Some(*j) == master || r.expand(h).clear_of(o, 0)))
+                        .unwrap_or(0);
+                    found = Some((pose, h));
+                }
+            }
+        }
         // A connector that opens on one side (a receptacle) faces its edge: those poses are
         // tried at every room size before the others.
         let facing_out: Vec<Pose> = match edge {
@@ -1403,6 +1447,9 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
             vec![&facing_out, &cands]
         };
         'sets: for set in sets {
+            if found.is_some() {
+                break;
+            }
             for h in [halo, halo / 2, 0] {
                 let fits = |pose: &Pose| {
                     let hr = e.parts[i].rect(pose).expand(h);
@@ -1682,7 +1729,7 @@ fn improve(e: &mut Engine, passes: usize) {
 /// Total ratsnest length of the placed footprints: minimum spanning tree per net over pad
 /// centers, ignoring copper (an estimate of the routing effort of a placement).
 pub fn ratsnest_length(p: &Project) -> Nm {
-    match Engine::new(p, &[], 0, false, &BTreeMap::new()) {
+    match Engine::new(p, &[], 0, false, &BTreeMap::new(), &BTreeMap::new()) {
         Ok(e) => Nm(e.total().round() as i64),
         Err(_) => Nm::ZERO,
     }
@@ -1756,7 +1803,7 @@ pub fn place_near(
     let tpf = p.board().footprints.get(tref).ok_or_else(not_placed)?;
     let trect = courtyard_box(p, tref).ok_or_else(not_placed)?;
     let gap = distance.0.clamp(0, DEFAULT_GAP.0);
-    let mut e = Engine::new(p, &[refdes.to_string()], gap, false, &BTreeMap::new())?;
+    let mut e = Engine::new(p, &[refdes.to_string()], gap, false, &BTreeMap::new(), &BTreeMap::new())?;
     let Some(&i) = e.index.get(refdes) else {
         return Err(PlaceError::new(
             "place.no_footprint",

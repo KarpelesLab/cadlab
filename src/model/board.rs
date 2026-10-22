@@ -539,13 +539,27 @@ pub struct PlacementHint {
     /// whatever else pulls it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub near: Option<String>,
+    /// Area of the board the part stays inside (its courtyard), e.g. the analog section of a
+    /// mixed-signal board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<HintRegion>,
 }
 
 impl PlacementHint {
     /// Whether the hint says nothing.
     pub fn is_empty(&self) -> bool {
-        self.edge.is_none() && self.near.is_none()
+        self.edge.is_none() && self.near.is_none() && self.region.is_none()
     }
+}
+
+/// A rectangle of the board by two opposite corners (`place.hint` regions).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HintRegion {
+    /// One corner.
+    pub from: Point,
+    /// The opposite corner.
+    pub to: Point,
 }
 
 /// A copper track segment (or arc when `mid` is set).

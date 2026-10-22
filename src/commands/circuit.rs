@@ -184,6 +184,9 @@ pub struct List {
     /// Only components using this part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<String>,
+    /// Only components of this block instance ("CH1").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 /// A component, for listings.
@@ -202,6 +205,9 @@ pub struct ComponentInfo {
     /// The part's footprint, when the placement uses another one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_footprint: Option<String>,
+    /// Block instance the component belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     /// Do not populate.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dnp: bool,
@@ -229,11 +235,20 @@ impl Command for List {
             Some(id) => Some(util::part(p, id)?.id.clone()),
             None => None,
         };
+        if let Some(i) = &self.instance
+            && !p.circuit().instances.contains_key(i)
+        {
+            let s = crate::suggest::did_you_mean(i, p.circuit().instances.keys().map(String::as_str), 3);
+            return Err(CommandError::not_found("block.instance_not_found", format!("no block instance `{i}`"))
+                .with_suggestions(&s)
+                .with_hint_if_none("`block.list` shows the blocks and their instances"));
+        }
         let mut components: Vec<ComponentInfo> = p
             .circuit()
             .components
             .iter()
             .filter(|(_, c)| filter.as_ref().is_none_or(|f| *f == c.part))
+            .filter(|(_, c)| self.instance.is_none() || c.block == self.instance)
             .map(|(r, c)| {
                 let part = p.library().parts.get(&c.part);
                 let own = part.and_then(|pt| pt.footprint()).map(|f| f.footprint.clone());
@@ -248,6 +263,7 @@ impl Command for List {
                     value: part.map(|pt| pt.value()).unwrap_or_default(),
                     footprint,
                     part_footprint,
+                    instance: c.block.clone(),
                     dnp: p.bom().dnp.contains(r),
                     properties: c.properties.clone(),
                 }
@@ -265,7 +281,7 @@ impl Command for List {
             .iter()
             .map(|c| {
                 format!(
-                    "{:<6} {:<10} {}{}{}",
+                    "{:<6} {:<10} {}{}{}{}",
                     c.refdes,
                     c.value,
                     c.part,
@@ -274,6 +290,7 @@ impl Command for List {
                         (Some(f), None) => format!("  ({f})"),
                         _ => String::new(),
                     },
+                    c.instance.as_ref().map(|i| format!("  [{i}]")).unwrap_or_default(),
                     if c.dnp { "  DNP" } else { "" }
                 )
             })
@@ -374,6 +391,23 @@ pub struct Erc {
     /// Also run the design lint (missing decoupling, I²C pull-ups, USB ESD, ...).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lint: bool,
+    /// List only findings at least this severe: `error`, `warning` or `info` (default: all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<crate::diag::Severity>,
+    /// List only findings whose code is one of these or starts with one of them followed by a
+    /// dot or an underscore (`erc.unconnected`, `lint`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codes: Vec<String>,
+    /// List at most this many findings (after `offset`); the counts still cover them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Skip this many of the selected findings (pagination with `limit`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// ERC result; the findings themselves are the command's diagnostics.
@@ -383,6 +417,15 @@ pub struct ErcReport {
     pub errors: usize,
     /// Number of warnings.
     pub warnings: usize,
+    /// Errors and warnings per code, errors first, most first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_code: Vec<super::drc::CodeCount>,
+    /// Findings listed (after `severity`, `codes`, `offset` and `limit`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub listed: usize,
+    /// Findings selected by `severity` and `codes` but not listed (`offset`, `limit`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub not_listed: usize,
 }
 
 impl Command for Erc {
@@ -396,20 +439,48 @@ impl Command for Erc {
         if self.lint {
             diags.extend(crate::lint::check(ctx.project()?));
         }
-        let errors = diags.iter().filter(|d| d.severity == crate::diag::Severity::Error).count();
-        let warnings = diags.iter().filter(|d| d.severity == crate::diag::Severity::Warning).count();
-        for d in diags {
+        use crate::diag::Severity;
+        let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+        let warnings = diags.iter().filter(|d| d.severity == Severity::Warning).count();
+        let mut by: BTreeMap<(String, Severity), usize> = BTreeMap::new();
+        for d in diags.iter().filter(|d| d.severity != Severity::Info) {
+            *by.entry((d.code.to_string(), d.severity)).or_default() += 1;
+        }
+        let mut by_code: Vec<super::drc::CodeCount> =
+            by.into_iter().map(|((code, severity), count)| super::drc::CodeCount { code, severity, count }).collect();
+        by_code.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.count.cmp(&a.count)).then(a.code.cmp(&b.code)));
+        let selected: Vec<_> = diags
+            .into_iter()
+            .filter(|d| self.severity.is_none_or(|s| d.severity >= s))
+            .filter(|d| self.codes.is_empty() || self.codes.iter().any(|c| super::drc::code_matches(&d.code, c)))
+            .collect();
+        let total = selected.len();
+        let listed: Vec<_> = selected.into_iter().skip(self.offset).take(self.limit.unwrap_or(usize::MAX)).collect();
+        let n = listed.len();
+        for d in listed {
             ctx.report(d);
         }
-        Ok(ErcReport { errors, warnings })
+        Ok(ErcReport { errors, warnings, by_code, listed: n, not_listed: total - n })
     }
 
     fn summarize(o: &ErcReport) -> String {
-        if o.errors == 0 && o.warnings == 0 {
-            "ERC clean".into()
+        let mut s = if o.errors == 0 && o.warnings == 0 {
+            "ERC clean".to_string()
         } else {
             format!("ERC: {} error(s), {} warning(s)", o.errors, o.warnings)
+        };
+        // Many findings: the counts per code tell where to look first.
+        if o.errors + o.warnings > super::drc::UNROUTED_AUTO_LIMIT && o.by_code.len() > 1 {
+            let list: Vec<String> = o.by_code.iter().map(|c| format!("{} {}", c.code, c.count)).collect();
+            s += &format!("\n  by code: {}", list.join(", "));
         }
+        if o.not_listed > 0 {
+            s += &format!(
+                "\n  listed {} finding(s), {} more not listed (`offset`/`limit`, or narrow with `codes`/`severity`)",
+                o.listed, o.not_listed
+            );
+        }
+        s
     }
 }
 

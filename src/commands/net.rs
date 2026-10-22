@@ -309,6 +309,36 @@ impl Command for NoConnect {
     }
 }
 
+/// Renames net `from` to `to` (merging into `to` when it exists), with every reference to it:
+/// diff pairs, length groups, and the board's tracks, vias and zones.
+pub(crate) fn move_net(p: &mut Project, from: &str, to: &str) {
+    let c = p.circuit_mut();
+    let Some(net) = c.nets.remove(from) else { return };
+    match c.nets.get_mut(to) {
+        Some(t) => {
+            t.pins.extend(net.pins);
+            t.driven |= net.driven;
+            if t.class.is_none() {
+                t.class = net.class;
+            }
+        }
+        None => {
+            c.nets.insert(to.to_string(), net);
+        }
+    }
+    c.rename_net_refs(from, to);
+    // Board copper follows the rename.
+    let b = p.board_mut();
+    let rename = |n: &mut Option<String>| {
+        if n.as_deref() == Some(from) {
+            *n = Some(to.to_string());
+        }
+    };
+    b.tracks.iter_mut().for_each(|t| rename(&mut t.net));
+    b.vias.iter_mut().for_each(|v| rename(&mut v.net));
+    b.zones.iter_mut().for_each(|z| rename(&mut z.net));
+}
+
 /// Rename a net.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -343,31 +373,7 @@ impl Command for Rename {
             return Err(CommandError::conflict("net.exists", format!("net `{to}` already exists"))
                 .with_hint("pass `merge: true` to merge the two nets"));
         }
-        let c = ctx.project_mut()?.circuit_mut();
-        let net = c.nets.remove(&from).expect("found above");
-        match c.nets.get_mut(to) {
-            Some(t) => {
-                t.pins.extend(net.pins);
-                t.driven |= net.driven;
-                if t.class.is_none() {
-                    t.class = net.class;
-                }
-            }
-            None => {
-                c.nets.insert(to.clone(), net);
-            }
-        }
-        c.rename_net_refs(&from, to);
-        // Board copper follows the rename.
-        let b = ctx.project_mut()?.board_mut();
-        let rename = |n: &mut Option<String>| {
-            if n.as_deref() == Some(from.as_str()) {
-                *n = Some(to.clone());
-            }
-        };
-        b.tracks.iter_mut().for_each(|t| rename(&mut t.net));
-        b.vias.iter_mut().for_each(|v| rename(&mut v.net));
-        b.zones.iter_mut().for_each(|z| rename(&mut z.net));
+        move_net(ctx.project_mut()?, &from, to);
         Ok(info(ctx.project()?, to))
     }
 

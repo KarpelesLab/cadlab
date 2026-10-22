@@ -1389,6 +1389,47 @@ gap edges found on the voxelized copper, rather than adding mesh lines at the pa
 (shared with the export) unchanged. Curved copper still staircases: a conformal method was not cheap enough
 for this step.
 
+### D66. Agent session 5: mixed-signal board with blocks: first instance at capture, net ties in ERC/SPICE/BOM, placement regions, split-crossing DRC (2026-10-22)
+Session 5 (docs/TESTING.md) designed a 2-channel 24-bit data logger on four layers through the MCP server only
+(STM32F411, ADS1220 with REF5025, an op-amp front end as a block instantiated twice, AGND/GND joined by a net-tie
+star point under split pours, two LDOs, USB-C, microSD). What it changed:
+**Blocks.** `block.create` takes `instance`: the captured components become the block's first instance (they keep
+their designators, belong to the instance, internal nets are renamed `<instance>/<net>` with their copper) instead
+of staying outside it, which took a remove and two instantiations; without it an info `block.not_instance` says
+so. Components already in an instance are refused (`block.component_in_instance`). `circuit.list` shows and
+filters by instance, `circuit.summary` lists instances with their members. `place.hint` and `export.spice
+--components` accept an instance name for its components.
+**Net ties.** A component whose footprint's pads all sit in net-tie groups is a net tie (`board::is_net_tie`): ERC
+powers a net reached through one, like through a ferrite bead (AGND fed from GND at the star point; the
+`erc.power_not_driven` hint for a ground net now names a net tie before `--driven`); SPICE writes it as 1 mΩ per
+tied net, so a split ground keeps its DC path to node 0 (it was a commented-out placeholder that left AGND
+floating); BOM lines, placement files, X3 component layers and STEP bodies leave it out (copper, nothing to buy or
+place), and the KiCad export marks it `exclude_from_pos_files exclude_from_bom`. Net ties stay data of the
+footprint (D40), with no flag of their own.
+**Placement.** `place.hint --region {from, to}` keeps parts' courtyards inside a rectangle (the analog section);
+enforced in the placer's validity test, so every stage (anchors, passives, improvement, spreading, swaps) respects
+it. An explicit edge hint now wins over the rooms of groups placed earlier: the part takes the valid poses
+closest to its edge (best by score among them, with the largest room still clear), where before a left-edge
+connector went to the top because the analog groups' rooms covered the left edge.
+**DRC.** `drc.split_crossing` (warning): a signal net whose tracks on a layer run over the fills of two different
+ground nets on an adjacent copper layer, one finding per net, layer and plane layer, located where it changes
+ground. Only ground pours are reference planes and only signals are checked (supply rails reach both sides and are
+decoupled on each). Intended crossings are waived with a reason, as the session did for the ADC's SPI lines.
+**ERC output** takes `severity`, `codes`, `limit`, `offset` and reports `by_code`, `listed`, `not_listed` like
+`drc.run` (an ERC before wiring was 37 KB of open pins). **Moves of routed parts** (`place.set/move/rotate/flip`)
+warn `place.moved_routed` with the nets whose tracks ended on the old pads and the rip/route commands; `rip: true`
+removes that routing (`place.ripped`). **SPICE** exports a subset (`components`, designators or instances): one
+channel simulated on its own. **Schematic** ground symbols print their net's name unless it is `GND`, so AGND and
+GND read apart.
+Deferred: `part.set` cannot change one pin's kind (the session re-sent the whole pin list with `part.create
+--replace`); the placer still put the USB ESD array's flow-through pins so that the pair crossed once (fixed by the
+spread run that followed, but not by construction); `describe part.create` is 26 KB (the `package_spec` schema).
+*Why:* hierarchy, split grounds and partitioned placement are what make a board mixed-signal, and each of them
+forced a workaround (remove and re-instantiate, mark AGND driven, place analog parts by hand, waive nothing because
+nothing checked the split) or produced wrong outputs (a floating AGND in SPICE, a net tie in the pick-and-place
+file); the fixes keep the design data's meaning (a net tie is still a footprint property, regions are hints like
+edges).
+
 ## Open questions
 
 

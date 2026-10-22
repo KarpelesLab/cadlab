@@ -314,4 +314,8 @@ Research-sized items beyond the milestones above; none blocks a release.
   KiCad re-export; D58), replayed by `tests/agent_session4.rs`; its open items fixed (D62: KiCad DRC
   exclusions as waivers, keep-together hints, `place.near` over routing, `route.nets` shoving leftovers,
   zone fills in the KiCad export, supplier part numbers from netlist fields; the schematic netlist reader
-  stays open).
+  stays open). Session 5 done through the MCP server (mixed-signal 24-bit data logger: front-end block
+  instantiated twice, AGND/GND star point under split pours, analog/digital placement regions; D66), replayed by
+  `tests/agent_session5.rs`; fixed: first block instance at capture, net ties in ERC/SPICE/BOM/CPL/STEP,
+  `place.hint --region`, edge hints over rooms, `drc.split_crossing`, ERC filters, warnings when routed parts
+  move, SPICE subsets, named ground symbols.

@@ -1,0 +1,5 @@
+* Ideal op-amp for the session's AC/DC checks: a VCVS with gain 1e6, output referred to node 0.
+* Pins: OUT V- +IN -IN V+ (the part's spice_pins order).
+.subckt OPAMP_IDEAL out vneg inp inn vpos
+E1 out 0 inp inn 1e6
+.ends OPAMP_IDEAL

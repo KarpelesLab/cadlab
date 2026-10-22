@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::util;
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::connect::{self, ConnectReport};
+use crate::diag::Diagnostic;
 use crate::model::Project;
 use crate::model::circuit::{Block, BlockComponent, Component, PinRef};
 use crate::model::part::valid_id;
@@ -95,6 +96,28 @@ pub struct Create {
     /// Replace an existing block of the same name.
     #[serde(default)]
     pub replace: bool,
+    /// Make the captured components the block's first instance under this name ("CH1"): they
+    /// stay in the circuit as they are, belong to the instance, and the block's internal nets
+    /// are renamed `<instance>/<net>` like those of later instances. Without it the components
+    /// stay outside any instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+}
+
+/// Checks an instance name: letters, digits, `_`, `-`, and not in use.
+fn instance_name(p: &Project, name: &str) -> Result<String, CommandError> {
+    let inst = name.trim().to_string();
+    if inst.is_empty() || !inst.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err(CommandError::invalid_args(
+            "block.invalid_instance",
+            format!("invalid instance name `{inst}` (letters, digits, `_`, `-`)"),
+        ));
+    }
+    if p.circuit().instances.contains_key(&inst) {
+        return Err(CommandError::conflict("block.instance_exists", format!("instance `{inst}` already exists"))
+            .with_hint("choose another instance name; `block.list` shows the instances"));
+    }
+    Ok(inst)
 }
 
 impl Command for Create {
@@ -122,6 +145,21 @@ impl Command for Create {
         let mut set = BTreeSet::new();
         for r in &self.components {
             set.insert(util::refdes_key(p, r)?);
+        }
+        let instance = match &self.instance {
+            Some(i) => Some(instance_name(p, i)?),
+            None => None,
+        };
+        if instance.is_some()
+            && let Some((r, other)) =
+                set.iter().find_map(|r| p.circuit().components[r].block.as_ref().map(|b| (r.clone(), b.clone())))
+        {
+            return Err(CommandError::conflict(
+                "block.component_in_instance",
+                format!("{r} already belongs to instance `{other}`"),
+            )
+            .with_subject(crate::refs::ObjectRef::Name(r))
+            .with_hint("capture components outside instances, or leave `instance` out"));
         }
         let c = p.circuit();
         let mut nets: BTreeMap<String, BTreeSet<PinRef>> = BTreeMap::new();
@@ -167,7 +205,46 @@ impl Command for Create {
             no_connect: c.no_connect.iter().filter(|pin| set.contains(&pin.refdes)).cloned().collect(),
         };
         let name = self.name.clone();
-        ctx.project_mut()?.circuit_mut().blocks.insert(name.clone(), block);
+        let internal: Vec<String> = block.nets.keys().filter(|n| !block.ports.contains(n)).cloned().collect();
+        if let Some(inst) = &instance {
+            // Internal nets get the instance prefix, as `block.instantiate` names them.
+            for n in &internal {
+                let to = format!("{inst}/{n}");
+                if *n != to && p.circuit().nets.contains_key(&to) {
+                    return Err(CommandError::conflict("net.exists", format!("net `{to}` already exists"))
+                        .with_hint("rename it first (`net.rename`), or choose another instance name"));
+                }
+            }
+        }
+        let p = ctx.project_mut()?;
+        p.circuit_mut().blocks.insert(name.clone(), block);
+        match &instance {
+            Some(inst) => {
+                for n in &internal {
+                    let to = format!("{inst}/{n}");
+                    if *n != to {
+                        super::net::move_net(p, n, &to);
+                    }
+                }
+                let c = p.circuit_mut();
+                for r in &set {
+                    if let Some(comp) = c.components.get_mut(r) {
+                        comp.block = Some(inst.clone());
+                    }
+                }
+                c.instances.insert(inst.clone(), name.clone());
+            }
+            None => ctx.report(
+                Diagnostic::info(
+                    "block.not_instance",
+                    format!("the {} captured component(s) stay outside any instance of `{name}`", set.len()),
+                )
+                .with_hint(format!(
+                    "to use them as the first copy, capture with `instance` (`block.create {name} ... --instance CH1`); \
+                     else `block.instantiate {name} <instance>` adds copies next to them"
+                )),
+            ),
+        }
         Ok(summary(ctx.project()?, &name))
     }
 
@@ -213,16 +290,7 @@ impl Command for Instantiate {
         let p = ctx.project()?;
         let name = block_name(p, &self.block)?;
         let block = p.circuit().blocks[&name].clone();
-        let inst = self.instance.trim().to_string();
-        if inst.is_empty() || !inst.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err(CommandError::invalid_args(
-                "block.invalid_instance",
-                format!("invalid instance name `{inst}` (letters, digits, `_`, `-`)"),
-            ));
-        }
-        if p.circuit().instances.contains_key(&inst) {
-            return Err(CommandError::conflict("block.instance_exists", format!("instance `{inst}` already exists")));
-        }
+        let inst = instance_name(p, &self.instance)?;
         for port in self.connect.keys() {
             if !block.ports.contains(port) {
                 let s = did_you_mean(port, block.ports.iter().map(String::as_str), 3);

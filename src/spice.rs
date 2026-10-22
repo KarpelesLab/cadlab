@@ -43,6 +43,9 @@ pub struct Options {
     pub control: Vec<String>,
     /// Also write DNP components.
     pub include_dnp: bool,
+    /// Only these components (a block instance's, to simulate it on its own); nets reaching
+    /// other components stay as open nodes. `None`: every component.
+    pub only: Option<BTreeSet<String>>,
 }
 
 /// Why the export failed.
@@ -212,6 +215,9 @@ pub fn export(p: &Project, opts: &Options) -> Result<Netlist, SpiceError> {
     refs.sort_by(|a, b| natural_cmp(a, b));
     for refdes in refs {
         let comp = &c.components[refdes];
+        if opts.only.as_ref().is_some_and(|o| !o.contains(refdes)) {
+            continue;
+        }
         if p.bom().dnp.contains(refdes) && !opts.include_dnp {
             let _ = writeln!(body, "* {refdes}: not populated (DNP)");
             out.omitted.push(refdes.clone());
@@ -260,6 +266,22 @@ pub fn export(p: &Project, opts: &Options) -> Result<Netlist, SpiceError> {
                     )),
             );
         };
+        // A net tie (a star point between AGND and GND) joins its nets: a 1 mΩ link per tied
+        // net, so a split ground keeps its DC path to node 0.
+        if model_name.is_none() && crate::board::is_net_tie(p, refdes) {
+            for group in crate::board::net_tie_nets(p, refdes) {
+                for other in &group[1..] {
+                    let name = elem('R', &mut elem_names);
+                    let _ = writeln!(body, "{name} {} {} 1m", nodes.names[&group[0]], nodes.names[other]);
+                    out.elements += 1;
+                }
+            }
+            out.diagnostics.push(
+                Diagnostic::info("spice.net_tie", format!("{refdes} (net tie) joins its nets with 1 mΩ"))
+                    .with_subject(subject.clone()),
+            );
+            continue;
+        }
         match part.category {
             Category::Resistor | Category::Capacitor | Category::Inductor => {
                 let (letter, key) = match part.category {
@@ -410,9 +432,13 @@ pub fn export(p: &Project, opts: &Options) -> Result<Netlist, SpiceError> {
 
     // Supplies.
     let mut sources = String::new();
+    // With a selection, only the nets it touches.
+    let touched = |net: &crate::model::circuit::Net| {
+        opts.only.as_ref().is_none_or(|o| net.pins.iter().any(|pin| o.contains(&pin.refdes)))
+    };
     if opts.supplies {
         for (name, net) in &c.nets {
-            if Some(name) == ground.as_ref() {
+            if Some(name) == ground.as_ref() || !touched(net) {
                 continue;
             }
             let v = net.voltage.or_else(|| if net.driven { rail_voltage(name) } else { None });
@@ -467,7 +493,7 @@ pub fn export(p: &Project, opts: &Options) -> Result<Netlist, SpiceError> {
             format!("{} unconnected pin(s) got their own node", nodes.nc),
         ));
     }
-    out.nodes = nodes.names;
+    out.nodes = nodes.names.into_iter().filter(|(n, _)| c.nets.get(n).is_some_and(touched)).collect();
     out.text = t;
     Ok(out)
 }

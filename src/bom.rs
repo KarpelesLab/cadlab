@@ -97,7 +97,8 @@ pub fn line_skus(p: &Project, id: &str) -> BTreeMap<String, String> {
     seen.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
 }
 
-/// Computes BOM lines, ordered by first reference designator.
+/// Computes BOM lines, ordered by first reference designator. Net ties
+/// ([`crate::board::is_net_tie`]) are left out.
 pub fn rows(p: &Project) -> Vec<BomRow> {
     let lib = p.library();
     let bom = p.bom();
@@ -106,7 +107,12 @@ pub fn rows(p: &Project) -> Vec<BomRow> {
     ids.sort();
     ids.dedup();
     for id in ids {
-        let mut refdes: Vec<String> = p.circuit().using_part(id).map(|(r, _)| r.clone()).collect();
+        // Net ties are copper (a star point between grounds), nothing to buy or assemble.
+        let mut refdes: Vec<String> =
+            p.circuit().using_part(id).map(|(r, _)| r.clone()).filter(|r| !crate::board::is_net_tie(p, r)).collect();
+        if refdes.is_empty() {
+            continue;
+        }
         refdes.sort_by(|a, b| natural_cmp(a, b));
         let (dnp, refdes): (Vec<String>, Vec<String>) = refdes.into_iter().partition(|r| bom.dnp.contains(r));
         let part = lib.parts.get(id);

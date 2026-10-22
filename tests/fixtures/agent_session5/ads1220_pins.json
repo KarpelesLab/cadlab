@@ -1,0 +1,18 @@
+[
+  {"number": "1", "name": "SCLK", "kind": "input"},
+  {"number": "2", "name": "CS", "kind": "input"},
+  {"number": "3", "name": "CLK", "kind": "input"},
+  {"number": "4", "name": "DGND", "kind": "power_in"},
+  {"number": "5", "name": "AVSS", "kind": "power_in"},
+  {"number": "6", "name": "AIN3", "kind": "input"},
+  {"number": "7", "name": "AIN2", "kind": "input"},
+  {"number": "8", "name": "REFN0", "kind": "input"},
+  {"number": "9", "name": "REFP0", "kind": "input"},
+  {"number": "10", "name": "AIN1", "kind": "input"},
+  {"number": "11", "name": "AIN0", "kind": "input"},
+  {"number": "12", "name": "AVDD", "kind": "power_in"},
+  {"number": "13", "name": "DVDD", "kind": "power_in"},
+  {"number": "14", "name": "DRDY", "kind": "output"},
+  {"number": "15", "name": "DOUT", "kind": "tri_state"},
+  {"number": "16", "name": "DIN", "kind": "input"}
+]

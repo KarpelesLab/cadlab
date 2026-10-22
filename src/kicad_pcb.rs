@@ -476,6 +476,8 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
     }];
     if p.bom().dnp.contains(refdes) {
         attr.extend(["exclude_from_pos_files", "exclude_from_bom", "dnp"]);
+    } else if crate::board::is_net_tie(p, refdes) {
+        attr.extend(["exclude_from_pos_files", "exclude_from_bom"]);
     }
     w.line(2, &format!("(attr {})", attr.join(" ")));
     write_overrides(w, &fp.overrides, false);

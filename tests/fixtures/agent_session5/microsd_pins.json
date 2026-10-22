@@ -1,0 +1,11 @@
+[
+  {"number": "1", "name": "DAT2", "kind": "bidirectional"},
+  {"number": "2", "name": "DAT3", "kind": "bidirectional"},
+  {"number": "3", "name": "CMD", "kind": "bidirectional"},
+  {"number": "4", "name": "VDD", "kind": "power_in"},
+  {"number": "5", "name": "CLK", "kind": "input"},
+  {"number": "6", "name": "VSS", "kind": "power_in"},
+  {"number": "7", "name": "DAT0", "kind": "bidirectional"},
+  {"number": "8", "name": "DAT1", "kind": "bidirectional"},
+  {"number": "S", "name": "SHIELD", "kind": "passive"}
+]

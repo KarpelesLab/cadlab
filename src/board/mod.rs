@@ -36,6 +36,58 @@ pub fn footprint_for<'a>(p: &'a Project, refdes: &str) -> Option<&'a Footprint> 
     lib.footprints.get(&name)
 }
 
+/// The nets a component's net ties join: per tie group of its footprint, the distinct nets of
+/// the group's pads (a net-tie part between AGND and GND gives `[["AGND", "GND"]]`).
+pub fn net_tie_nets(p: &Project, refdes: &str) -> Vec<Vec<String>> {
+    let Some(fp) = footprint_for(p, refdes) else { return Vec::new() };
+    if fp.net_ties.is_empty() {
+        return Vec::new();
+    }
+    let index = pin_nets(p, Some(refdes));
+    let nets = pad_nets_in(p, refdes, index.get(refdes));
+    fp.net_ties
+        .iter()
+        .map(|g| {
+            let mut v: Vec<String> = g.iter().filter_map(|pad| nets.get(pad).cloned()).collect();
+            v.sort();
+            v.dedup();
+            v
+        })
+        .filter(|v| v.len() > 1)
+        .collect()
+}
+
+/// Whether a component is only a net tie: its footprint has numbered pads and every one of
+/// them is in a net-tie group. Such a part is copper on the board (a star point between AGND
+/// and GND), nothing to buy or assemble.
+pub fn is_net_tie(p: &Project, refdes: &str) -> bool {
+    footprint_for(p, refdes).is_some_and(|fp| {
+        let pads = fp.pad_numbers();
+        !fp.net_ties.is_empty() && !pads.is_empty() && pads.iter().all(|n| fp.tie_group(n).is_some())
+    })
+}
+
+/// Nets whose tracks or vias end on a pad of these components where they are placed now: the
+/// routing a move of the components would leave behind.
+pub fn nets_routed_at(p: &Project, refdes: &[String]) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let b = p.board();
+    for pad in placed_pads(p) {
+        let Some(net) = pad.net.as_deref() else { continue };
+        if !refdes.contains(&pad.refdes) || out.contains(net) {
+            continue;
+        }
+        let Some(bb) = polyclip::Geometry::bbox(&pad.shape) else { continue };
+        let on = |q: Point| bb.min.x <= q.x.0 && q.x.0 <= bb.max.x && bb.min.y <= q.y.0 && q.y.0 <= bb.max.y;
+        let hit = b.tracks.iter().any(|t| t.net.as_deref() == Some(net) && (on(t.start) || on(t.end)))
+            || b.vias.iter().any(|v| v.net.as_deref() == Some(net) && on(v.at));
+        if hit {
+            out.insert(net.to_string());
+        }
+    }
+    out
+}
+
 /// Footprint-local → board transform: mirror for the bottom side, rotate, translate.
 pub fn transform(pf: &PlacedFootprint) -> impl Fn(Point) -> Point + '_ {
     move |p: Point| {

@@ -66,6 +66,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     keepouts(&ctx, &courtyards, &mut out);
     disallowed(&ctx, &items, &mut out);
     unrouted(&items, &mut out);
+    split_crossings(p, &items, &mut out);
     out.extend(netclass_conflicts(p));
     out.extend(crate::electrical::current_check(p));
     out.extend(crate::electrical::impedance_check(p));
@@ -1492,6 +1493,128 @@ fn disallowed(ctx: &Ctx, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
             d = d.with_subject(ObjectRef::Net(n.clone()));
         }
         out.push(d);
+    }
+}
+
+/// Sampling step along tracks for [`split_crossings`].
+const SPLIT_STEP: i64 = 100_000;
+
+/// Signals routed over a split in their reference plane: a net whose tracks on a layer run over
+/// the fills of two different ground nets (AGND and GND) on an adjacent copper layer. Its
+/// return current has to detour around the gap between the pours (to the star point), which
+/// makes a loop antenna and couples digital return current into the analog ground. One
+/// warning per net, layer and plane layer, at the first place it passes from one ground to
+/// the other. Only ground pours are reference planes here, and only signals are checked: not
+/// the grounds themselves, nor supply rails (nets marked `driven` or with power pins), which
+/// have to reach both sides and are decoupled on each.
+fn split_crossings(p: &Project, items: &[CopperItem], out: &mut Vec<Diagnostic>) {
+    let layers = p.board().stackup.copper_names();
+    // Ground fills per layer: (net, fill), several nets per layer only.
+    let mut planes: BTreeMap<&str, Vec<(&str, &PolygonSet)>> = BTreeMap::new();
+    for it in items {
+        if !matches!(it.item, geo::ItemRef::Zone(..)) {
+            continue;
+        }
+        let Some(net) = it.net.as_deref().filter(|n| crate::symbolgen::is_ground(n)) else { continue };
+        for l in &it.layers {
+            planes.entry(l.as_str()).or_default().push((net, &it.shape));
+        }
+    }
+    planes.retain(|_, v| {
+        let mut nets: Vec<&str> = v.iter().map(|x| x.0).collect();
+        nets.dedup();
+        nets.len() > 1
+    });
+    if planes.is_empty() {
+        return;
+    }
+    let ground_nets: Vec<&str> = planes.values().flatten().map(|x| x.0).collect();
+    let c = p.circuit();
+    let lib = p.library();
+    let power = |net: &str| {
+        c.nets.get(net).is_some_and(|n| {
+            n.driven
+                || n.pins.iter().any(|pin| {
+                    c.components
+                        .get(&pin.refdes)
+                        .and_then(|comp| lib.parts.get(&comp.part))
+                        .and_then(|pt| pt.symbol.pins.iter().find(|s| s.number == pin.pin))
+                        .is_some_and(|s| {
+                            matches!(
+                                s.kind,
+                                crate::model::part::PinKind::PowerIn | crate::model::part::PinKind::PowerOut
+                            )
+                        })
+                })
+        })
+    };
+    for (k, layer) in layers.iter().enumerate() {
+        let adjacent: Vec<&String> =
+            [k.checked_sub(1), Some(k + 1)].into_iter().flatten().filter_map(|j| layers.get(j)).collect();
+        for plane_layer in adjacent {
+            let Some(fills) = planes.get(plane_layer.as_str()) else { continue };
+            let under = |q: Point| -> Option<&str> {
+                let q = polyclip::Point::new(q.x.0, q.y.0);
+                fills
+                    .iter()
+                    .find(|(_, f)| {
+                        f.bbox().is_some_and(|b| b.contains_point(q))
+                            && polyclip::locate(*f, q) != polyclip::Location::Outside
+                    })
+                    .map(|x| x.0)
+            };
+            // Per net: the grounds seen under its tracks, and where it first changes.
+            let mut seen: BTreeMap<&str, (Vec<&str>, Option<Point>)> = BTreeMap::new();
+            for t in &p.board().tracks {
+                let Some(net) = t.net.as_deref() else { continue };
+                if t.layer != *layer || ground_nets.contains(&net) || power(net) {
+                    continue;
+                }
+                let e = seen.entry(net).or_default();
+                let (dx, dy) = (t.end.x.0 - t.start.x.0, t.end.y.0 - t.start.y.0);
+                let len = ((dx as f64).hypot(dy as f64) as i64).max(1);
+                let n = (len / SPLIT_STEP).max(1);
+                let mut prev: Option<&str> = None;
+                for i in 0..=n {
+                    let q = Point::new(Nm(t.start.x.0 + dx * i / n), Nm(t.start.y.0 + dy * i / n));
+                    let Some(g) = under(q) else { continue };
+                    if !e.0.contains(&g) {
+                        if !e.0.is_empty() && e.1.is_none() {
+                            e.1 = Some(q);
+                        }
+                        e.0.push(g);
+                    }
+                    if prev.is_some_and(|x| x != g) && e.1.is_none() {
+                        e.1 = Some(q);
+                    }
+                    prev = Some(g);
+                }
+            }
+            for (net, (grounds, at)) in seen {
+                if grounds.len() < 2 {
+                    continue;
+                }
+                let mut d = Diagnostic::warning(
+                    "drc.split_crossing",
+                    format!(
+                        "net {net} on {layer} runs over both {} on {plane_layer}: its return current has to go around the split",
+                        grounds.join(" and ")
+                    ),
+                )
+                .with_subject(ObjectRef::Net(net.to_string()));
+                for g in &grounds {
+                    d = d.with_subject(ObjectRef::Net(g.to_string()));
+                }
+                if let Some(q) = at {
+                    d = d.at(q);
+                }
+                out.push(d.with_hint(
+                    "route it across where the grounds join (the net tie or star point), or keep it over one ground; \
+                     a part sitting on the split (the ADC) takes its signals across at its own pins; \
+                     waive it (`drc.waive`) when the crossing is intended",
+                ));
+            }
+        }
     }
 }
 

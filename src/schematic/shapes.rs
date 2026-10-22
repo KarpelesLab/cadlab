@@ -114,6 +114,26 @@ pub(crate) fn power_text(at: (f64, f64), dir: Dir) -> ((f64, f64), HAlign, VAlig
     (p, h, v)
 }
 
+/// Whether a ground symbol prints its net's name: every ground but the plain `GND`, so a split
+/// ground (AGND, PGND) reads apart from the main one.
+pub(crate) fn ground_named(net: &str) -> bool {
+    net != "GND"
+}
+
+/// Ground symbol text anchor/alignment, past the symbol's bars.
+pub(crate) fn ground_text(at: (f64, f64), dir: Dir) -> ((f64, f64), HAlign, VAlign) {
+    let (dx, dy) = dir.vec();
+    let reach = 1.5 + 1.0 + 0.5;
+    let p = (at.0 + dx as f64 * reach, at.1 + dy as f64 * reach);
+    let (h, v) = match dir {
+        Dir::Up => (HAlign::Center, VAlign::Bottom),
+        Dir::Down => (HAlign::Center, VAlign::Top),
+        Dir::Right => (HAlign::Left, VAlign::Middle),
+        Dir::Left => (HAlign::Right, VAlign::Middle),
+    };
+    (p, h, v)
+}
+
 /// Box of a label or power symbol.
 pub(crate) fn label_rect(at: Point, dir: Dir, net: &str, kind: LabelKind) -> Rect {
     let (x, y) = (at.x.0, at.y.0);
@@ -138,7 +158,15 @@ pub(crate) fn label_rect(at: Point, dir: Dir, net: &str, kind: LabelKind) -> Rec
             let (p, h, v) = power_text(mmp, dir);
             union(sym, text_rect(net, p, ts, h, v, 0))
         }
-        LabelKind::Ground => along_across(nm(2.5), nm(1.3)),
+        LabelKind::Ground => {
+            let sym = along_across(nm(2.5), nm(1.3));
+            if ground_named(net) {
+                let (p, h, v) = ground_text(mmp, dir);
+                union(sym, text_rect(net, p, ts, h, v, 0))
+            } else {
+                sym
+            }
+        }
     }
 }
 
@@ -263,4 +291,19 @@ pub fn overlaps(p: &Project, l: &SheetLayout) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A split ground prints its name past the symbol; the plain `GND` does not.
+    #[test]
+    fn named_grounds_reserve_room_for_their_name() {
+        let at = Point::ORIGIN;
+        let gnd = label_rect(at, Dir::Down, "GND", LabelKind::Ground);
+        let agnd = label_rect(at, Dir::Down, "AGND", LabelKind::Ground);
+        assert!(!ground_named("GND") && ground_named("AGND"));
+        assert!(agnd[1] < gnd[1], "the name goes past the bars: {agnd:?} vs {gnd:?}");
+    }
 }

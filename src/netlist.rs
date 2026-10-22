@@ -245,7 +245,22 @@ pub fn summary(p: &Project) -> String {
             None => format!("missing part {}", comp.part),
         };
         let fp = part.and_then(Part::footprint).map(|f| format!(" [{}]", f.footprint)).unwrap_or_default();
-        let _ = writeln!(s, "  {refdes}: {what}{fp}");
+        let inst = comp.block.as_ref().map(|i| format!(" (in {i})")).unwrap_or_default();
+        let _ = writeln!(s, "  {refdes}: {what}{fp}{inst}");
+    }
+    if !c.instances.is_empty() {
+        s += "block instances:\n";
+        for (inst, block) in &c.instances {
+            let mut members: Vec<&str> = c
+                .components
+                .iter()
+                .filter(|(_, x)| x.block.as_deref() == Some(inst))
+                .map(|(r, _)| r.as_str())
+                .collect();
+            members.sort_by(|a, b| crate::model::sections::natural_cmp(a, b));
+            let ports = c.blocks.get(block).map(|b| b.ports.join(", ")).unwrap_or_default();
+            let _ = writeln!(s, "  {inst} ({block}; ports {ports}): {}", members.join(" "));
+        }
     }
     s += "nets:\n";
     for (name, net) in &c.nets {

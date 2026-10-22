@@ -1,0 +1,7 @@
+[
+  {"number": "1", "at": ["-3.85mm", "0mm"], "size": ["0.7mm", "1.5mm"], "count": 8, "pitch": ["1.1mm", "0mm"]},
+  {"number": "S", "at": ["-6.6mm", "1.1mm"], "size": ["1.2mm", "1.6mm"]},
+  {"number": "S", "at": ["6.6mm", "1.1mm"], "size": ["1.2mm", "1.6mm"]},
+  {"number": "S", "at": ["-7.2mm", "10.1mm"], "size": ["1.4mm", "1.8mm"]},
+  {"number": "S", "at": ["7.2mm", "10.1mm"], "size": ["1.4mm", "1.8mm"]}
+]

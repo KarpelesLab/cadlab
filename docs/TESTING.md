@@ -642,3 +642,47 @@ workaround:
 | the KiCad re-export had no zone fills | fills written (`filled_polygon`, fractured), `fill yes` | KiCad's DRC of the re-export runs without `--refill-zones`: no unconnected pads (both variants) |
 | `LCSC` fields not used | component fields with a supplier's part number fill the fab BOM's part number column and come first among substitutes (basis `field`) | the ring light's JLCPCB BOM carries its LCSC numbers |
 
+
+### Session 5 (2026-10-22): mixed-signal data logger with blocks, through the MCP server
+
+The agent used `cadlab mcp` only (a small Python client: `tools/list`, `describe`, results and errors).
+
+Prompt: *"A 2-channel 24-bit ADC data logger on four layers: STM32-class MCU, precision ADC with a voltage
+reference, an analog front end (one op-amp block instantiated twice), separate AGND and DGND joined at a star
+point with split pours, LDOs for the analog and digital rails, USB-C and a microSD card. Parts, circuit, hierarchy,
+ERC, placement, routing, pours, DRC, SPICE where it applies, fab outputs."*
+
+Result: 61 components (STM32F411CEU6 QFN-48, ADS1220 TSSOP-16 with a REF5025 2.5 V reference, two OPA376
+gain-2 channels as instances CH1/CH2 of block `afe`, ADP150 analog and AP2112K digital LDOs with a ferrite bead
+between the rails, USBLC6-2SC6, USB-C and microSD from pad lists, SWD header, 4-pole analog input, a two-pad
+net-tie star point between AGND and GND). 70x50 mm, JLC04161H-7628 stackup, USB pair solved to 90 Ω; AGND/GND
+split on In1.Cu and B.Cu and +3V3A/+3V3 on In2.Cu at x = 30 mm, analog parts left of it and digital parts right
+of it (`place.hint --region`). USB pair routed coupled, everything else 100 % routed in about 2 s (release), DRC
+without errors, the ADC's SPI crossings of the split waived with a reason, CH1 exported to SPICE alone with an
+ideal op-amp model, JLCPCB bundle, STEP and KiCad export. Replayed by `tests/agent_session5.rs` (fixtures in
+`tests/fixtures/agent_session5/`), which checks each fix along the way.
+
+| # | Where the agent got stuck | Fix (D66) |
+|---|---|---|
+| 1 | `block.create` captures components but leaves them outside any instance: to get CH1 and CH2 the agent removed the originals and instantiated twice | `block.create --instance CH1`: the captured components become the first instance, internal nets renamed `CH1/<net>`; info `block.not_instance` without it |
+| 2 | `circuit.list` / `circuit.summary` did not say which component belongs to which instance | `instance` column and filter; summary lists instances with members and ports |
+| 3 | `erc.power_not_driven` on AGND although the net-tie part joins it to GND; the hint said to mark AGND `--driven` | ERC follows net ties like ferrite beads; the hint for a ground net names a net tie first |
+| 4 | Before wiring, `circuit.erc` returned 37 KB of unconnected pins with no filter (the server instructions say long check results take `codes`/`severity`/`limit`) | `circuit.erc` takes `severity`, `codes`, `limit`, `offset`; reports `by_code`, `listed`, `not_listed` |
+| 5 | `place hint J4 --edge left`: the terminal went to the top edge (the analog groups' rooms covered the left edge) | Explicit edge hints take the valid poses closest to their edge first |
+| 6 | No way to keep the analog parts on the analog side: `place.auto` put a front-end op-amp over the digital ground | `place.hint --region {from, to}` (block instances accepted as designators) |
+| 7 | Nothing checked signals crossing the AGND/GND split | `drc.split_crossing` warning per net and layer, located; waivable |
+| 8 | SPICE wrote the net tie as a comment, leaving AGND (and the whole front end) without a DC path to node 0; the agent could not export one channel alone | Net ties written as 1 mΩ; `export.spice --components CH1` |
+| 9 | The net tie appeared in the BOM ("no MPN"), the CPL and as a missing STEP body | Net ties left out of BOM, placement files, component layers and STEP; KiCad export marks them excluded |
+| 10 | Ground symbols looked the same for AGND and GND on the schematic | Ground symbols print their net's name unless it is `GND` |
+| 11 | `place rotate U8` on a routed board left the tracks at the old pads: six DRC errors (shorts) | `place.moved_routed` names the nets and the rip/route commands; `rip: true` rips them |
+
+Seen but left as they are (noted for the next session):
+
+- `part.set` cannot change one pin's kind (REF5025's TRIM/NR declared `input` raised `lint.floating_input`); the
+  agent re-sent the whole pin list with `part.create --replace`. A pin patch (`part.set --pins`) would do.
+- The first spread placement put the USB ESD array so that the pair would cross between it and the MCU
+  (`route.diffpair` polarity failure); the run with regions did not, but nothing guarantees it.
+- `describe part.create` is 26 KB, almost all of it the `package_spec` schema.
+- `VCAP1` (the MCU's core regulator capacitor, outside any region hint) was routed over the analog ground and
+  stays a `drc.split_crossing` warning; hinting the MCU's passives with its region would have avoided it, which
+  suggests regions could pass from an IC to its decoupling capacitors.

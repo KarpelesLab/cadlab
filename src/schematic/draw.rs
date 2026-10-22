@@ -1,6 +1,6 @@
 //! Drawing a laid-out sheet.
 
-use super::shapes::{frame_title, power_text, wire_text};
+use super::shapes::{frame_title, ground_named, ground_text, power_text, wire_text};
 use super::symbol::{self, STYLE, symbol_of};
 use super::{LabelKind, SheetLayout, junctions};
 use crate::model::Project;
@@ -115,6 +115,10 @@ pub fn draw(p: &Project, l: &SheetLayout) -> Scene {
                 for (i, half) in [1.3, 0.85, 0.4].iter().enumerate() {
                     let (cx, cy) = (ex + dx * 0.5 * i as f64, ey + dy * 0.5 * i as f64);
                     s.line(vec![(cx - px * half, cy - py * half), (cx + px * half, cy + py * half)], 0.3, POWER);
+                }
+                if ground_named(&lb.net) {
+                    let (at, h, v) = ground_text((x, y), lb.dir);
+                    s.text(&lb.net, at, ts, h, v, 0, POWER);
                 }
             }
         }

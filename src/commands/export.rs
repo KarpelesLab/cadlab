@@ -975,6 +975,10 @@ pub struct Spice {
     /// Also write DNP components.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_dnp: bool,
+    /// Only these components: designators, or block instances ("CH1") standing for theirs, to
+    /// simulate a subcircuit on its own (default: the whole circuit).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<String>,
 }
 
 /// Result of `export.spice`.
@@ -1006,12 +1010,32 @@ impl Command for Spice {
 
     fn run(self, ctx: &mut Context<'_>) -> Result<SpiceExported, CommandError> {
         let p = ctx.project()?;
+        let only = if self.components.is_empty() {
+            None
+        } else {
+            let mut set = std::collections::BTreeSet::new();
+            for r in self.components.iter().flat_map(|r| r.split(',')).map(str::trim).filter(|r| !r.is_empty()) {
+                if p.circuit().instances.contains_key(r) && !p.circuit().components.contains_key(r) {
+                    set.extend(
+                        p.circuit()
+                            .components
+                            .iter()
+                            .filter(|(_, c)| c.block.as_deref() == Some(r))
+                            .map(|(k, _)| k.clone()),
+                    );
+                } else {
+                    set.insert(super::util::refdes_key(p, r)?);
+                }
+            }
+            Some(set)
+        };
         let opts = crate::spice::Options {
             ground: self.ground.clone(),
             supplies: self.supplies,
             analysis: self.analysis.clone(),
             control: self.control.clone(),
             include_dnp: self.include_dnp,
+            only,
         };
         let n =
             crate::spice::export(p, &opts).map_err(|e| CommandError::not_found(e.code, e.message).with_hint(e.hint))?;

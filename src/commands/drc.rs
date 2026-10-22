@@ -278,7 +278,7 @@ impl Command for Run {
 }
 
 /// Whether `code` is `filter` or lies under it (`fab` and `fab.silk` select `fab.silk_width`).
-fn code_matches(code: &str, filter: &str) -> bool {
+pub(crate) fn code_matches(code: &str, filter: &str) -> bool {
     let filter = filter.trim_end_matches(['.', '*']);
     code == filter || code.strip_prefix(filter).is_some_and(|rest| rest.starts_with('.') || rest.starts_with('_'))
 }

@@ -416,7 +416,11 @@ to a routed board, such as an imported one, land clear of its copper).
    the anchor it names. Session 4's LED resistor, pulled to +5V, had landed 15 mm from its LED. Loops (`R2`
    near `D9` near `R2`) and a part near itself are refused (`place.hint_near_loop`, `place.hint_near_self`).
    Hints of locked parts do nothing (`place.hint_locked` note); they follow `circuit.rename` and go with
-   `circuit.remove` (a `near` naming a removed part goes too).
+   `circuit.remove` (a `near` naming a removed part goes too). An explicit `edge` hint takes the valid poses
+   closest to its edge before any room size is tried, even inside the rooms of groups placed earlier (D66).
+   A `region` hint (D66: `place.hint CH1 U3 --region` with two corners) keeps the part's box inside that
+   rectangle at every stage (the placer's validity test): the analog section of a mixed-signal board. Block
+   instance names stand for their components in `place.hint`.
 3. Passives, group by group (decoupling capacitors first, then chains), on a 0.25 mm grid within 3 mm, then
    8 mm, of their target pin, all rotations: the score is the distance from their connecting pad to the
    target pin (weighted 4 for decoupling, 2 otherwise) plus the distance of their other pads to the nearest
@@ -503,6 +507,7 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.disallowed` | error (rule's severity) | a copper item of a kind a custom rule's `disallow` forbids in its scope |
 
 | `drc.unrouted` | error | a ratsnest connection, with both ends; `drc.run` reports more than 10 as one finding with the count per net (`unrouted: each` lists them) and the total in `unrouted` |
+| `drc.split_crossing` | warning | a signal net (not a ground, not a supply rail: no power pins, not `driven`) whose tracks on a layer run over the fills of two different ground nets on an adjacent copper layer (AGND and GND of a split plane): one per net, layer and plane layer, at the first change of ground (D66) |
 | `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |
 | `drc.impedance` | warning | tracks of a net whose class has an `impedance` target more than 10 % off on their layer |
 
