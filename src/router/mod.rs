@@ -19,7 +19,8 @@
 //!    vertical preference) and congestion; multi-source/multi-target so nets grow as trees.
 //! 4. **Negotiated congestion** (PathFinder, McMurchie and Ebeling 1995): route everything
 //!    allowing overlaps at a cost, raise history costs on overused points, rip up and reroute
-//!    the nets involved until nothing is shared; then legalize what still conflicts and retry
+//!    the nets involved until nothing is shared (nets of many connections keep their wires
+//!    clear of the overuse); then legalize what still conflicts and retry
 //!    failures by rerouting the nets in their way. Nets with disjoint regions are routed in
 //!    batches (on rayon threads with the `parallel` feature); the batches depend only on the
 //!    data, so results are identical for any thread count.
@@ -37,7 +38,7 @@
 //!    ripped up and reported, so the output never violates the rules silently.
 //! 7. **Re-planned escapes**: pads the escape planning left without an exit and whose
 //!    connections failed get their exits first in another run of their nets and their
-//!    neighbors' (kept when fewer fail).
+//!    neighbors' (kept when fewer fail); the first run leaves it part of the time budget.
 //! 8. **Push-and-shove** (`shove`) for what is left: connections that failed get one more try
 //!    with the unlocked copper of other nets pushed aside (walkaround, shove, spring-back);
 //!    [`place_track`] places a track along waypoints the same way.
@@ -432,7 +433,7 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
         }
     }
     let start = Instant::now();
-    let (mut first, missed) = route_run(p, scope, opts, hooks, Soft::No, &[])?;
+    let (mut first, missed) = route_run(p, scope, opts, hooks, Soft::No, &[], true)?;
     if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
         first = replan_boxed(p, scope, opts, hooks, first, &missed, start)?;
     }
@@ -534,7 +535,7 @@ fn replan_boxed(
     let keep_v: Vec<Via> = first.vias.iter().filter(|v| !mine(&v.net)).cloned().collect();
     apply_items(&mut q, &keep_t, &keep_v, &[], &[]);
     let sub = RouteOptions { budget: left, ..opts.clone() };
-    let (again, _) = route_run(&q, &Scope::Nets(group.iter().cloned().collect()), &sub, hooks, Soft::No, &prio)?;
+    let (again, _) = route_run(&q, &Scope::Nets(group.iter().cloned().collect()), &sub, hooks, Soft::No, &prio, false)?;
     if failed(&again, &group) >= before {
         return Ok(first);
     }
@@ -1340,11 +1341,34 @@ fn route_once(
     hooks: &Hooks<'_>,
     soft: Soft,
 ) -> Result<RouteResult, RouteError> {
-    Ok(route_run(p, scope, opts, hooks, soft, &[])?.0)
+    Ok(route_run(p, scope, opts, hooks, soft, &[], false)?.0)
 }
 
+/// Fewest connections of a net for partial rip-up in negotiation: such a net, when it is
+/// rerouted for being near an overused point and has none of its own, keeps the wires whose
+/// box, grown by the clearance reach and [`PARTIAL_MARGIN`], holds no overused point, and
+/// routes only the rest. A net in conflict is routed again whole.
+const PARTIAL_MIN: usize = 64;
+
+/// Margin (grid pitches) beyond the clearance reach within which an overused point rips a
+/// wire of a net routed partially: the wires around the congestion move too, as with a
+/// full rip-up (without it, 1–3 more connections failed on the corpus boards).
+const PARTIAL_MARGIN: f64 = 10.0;
+
+/// Time a first run leaves to [`replan_boxed`], in setup times of the run (fanout, board,
+/// grid and pad access, most of what re-planning a few nets costs), when connections of pads
+/// its escape planning boxed in still fail before the gridless phases.
+const REPLAN_SETUPS: u32 = 2;
+
+/// Largest share of the time budget left to [`replan_boxed`]: beyond it the re-plan does not
+/// fit the budget anyway, and the gridless phases keep their time.
+const REPLAN_SHARE: f64 = 0.25;
+
 /// One routing run whose escape planning serves the pads `prio` (labels) first; also returns
-/// the fine-pitch pads its escape planning left without an exit.
+/// the fine-pitch pads its escape planning left without an exit. With `replan`, the
+/// gridless phases and via minimization stop early enough to leave the re-plan of those pads
+/// time ([`REPLAN_SETUPS`]) when their connections still fail.
+#[allow(clippy::too_many_arguments)]
 fn route_run(
     p: &Project,
     scope: &Scope,
@@ -1352,6 +1376,7 @@ fn route_run(
     hooks: &Hooks<'_>,
     soft: Soft,
     prio: &[String],
+    replan: bool,
 ) -> Result<(RouteResult, Vec<String>), RouteError> {
     let start = Instant::now();
     let slots = routing_slots(p, &opts.layers)?;
@@ -1447,6 +1472,9 @@ fn route_run(
     }
 
     (hooks.progress)(0, None, "negotiation");
+    // Setting up a run (fanout, board, grid, access) is most of what a re-plan of a few nets
+    // costs.
+    let setup = start.elapsed();
     let mut stats = RouteStats { grid: Nm(pitch as i64), ..Default::default() };
     let max_iter = opts.max_iterations.unwrap_or(match opts.effort {
         Effort::Low => 10,
@@ -1536,6 +1564,28 @@ fn route_run(
             }
         }
         reroute = order.iter().copied().filter(|r| set.contains(r)).collect();
+        // Nets with many connections rerouted only for being near the overuse (none of their
+        // own) keep the wires clear of it (partial rip-up).
+        let hot: Vec<P> = points.iter().map(|(c, _)| eng.conflict_pos(*c)).collect();
+        for &ri in &reroute {
+            let r = &mut routes[ri];
+            if r.conns.len() < PARTIAL_MIN || net_conf[ri] > 0 {
+                continue;
+            }
+            r.keep = r
+                .wires
+                .iter()
+                .map(|w| {
+                    let mut bb = BoxF::EMPTY;
+                    for &q in &w.nodes {
+                        let (_, x, y) = eng.unpack(q);
+                        bb.add(eng.grid.cell(x, y));
+                    }
+                    let bb = bb.expand(reach + PARTIAL_MARGIN * pitch);
+                    w.geo.is_none() && !w.nodes.is_empty() && !hot.iter().any(|&h| bb.dist(h) == 0.0)
+                })
+                .collect();
+        }
         // Perturb the order a little (seeded) to break cycles.
         for i in (1..reroute.len()).rev() {
             if rng.next().is_multiple_of(4) {
@@ -1548,6 +1598,10 @@ fn route_run(
     }
     if (hooks.cancelled)() {
         return Err(RouteError::Cancelled);
+    }
+    // Partial rip-up only applies to negotiation (a cut-short iteration leaves masks behind).
+    for r in routes.iter_mut() {
+        r.keep.clear();
     }
     // Restore the best iteration.
     if let Some((bt, wires, failed)) = best {
@@ -1663,6 +1717,21 @@ fn route_run(
         if !improved {
             break;
         }
+    }
+    // Boxed pads whose connections still fail get their exits re-planned afterwards
+    // (`replan_boxed`), which needs time the gridless phases would otherwise take.
+    let reserve = setup * REPLAN_SETUPS;
+    if replan
+        && let (Some(b), Some(end)) = (opts.budget, budget_end)
+        && reserve <= b.mul_f64(REPLAN_SHARE)
+        && routes.iter().any(|r| {
+            r.conns
+                .iter()
+                .zip(&r.failed)
+                .any(|(c, f)| f.is_some() && (missed.contains(&c.from) || missed.contains(&c.to)))
+        })
+    {
+        *phase_end.lock().expect("deadline") = Some(end - reserve);
     }
     (hooks.progress)(0, None, "gridless pass");
     // ---- `auto`: what the grid left unrouted, by exact gridless searches ----
@@ -2583,6 +2652,7 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
             region,
             dyn_ids: vec![],
             rooms: None,
+            keep: vec![],
         });
     }
     if let Scope::Connection { from, to } = scope

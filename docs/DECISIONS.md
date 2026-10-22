@@ -1532,6 +1532,45 @@ minutes once per pinned commit, which is reasonable for an informative job; inst
 not required (the oracle skips). The CPML fix is a parameter of the textbook method, not a work-around: margins
 large enough to keep the PML out of every line's near field would cost cells on every run.
 
+### D69. Router: USB-C crossovers leave the outer pads an exit, escapes may turn earlier, the boxed-pad re-plan gets its time, large nets keep wires away from the overuse (2026-10-22)
+**USB-C pads without exits (corne-cherry).** The receptacle's CC1 pad and the D+ pad beyond the crossover had no
+candidate exit at all. Not the pad geometry or a keep-out: the crossover via (D57) sat at the shallowest depth from
+which its two row neighbors could pass it, so their exits turned 45° towards the next pads right past the pad ends,
+0.12 mm into their lines; those pads could neither go straight on (0.38 mm to the turned track, 0.45 mm needed)
+nor turn earlier (a no-connect pad's corner beside them), and an escape candidate only turned at 45° straight onto
+its end cell. Now the crossover via is the shallowest that also leaves each wanted pad beyond a neighbor a way out
+(straight, then turning away by as much as the neighbor moves, before it does), the neighbors' exits turn as late
+as the via allows, and a pad with no candidate tries exits turning earlier, then running straight on to the cell.
+The via moved 0.1 mm deeper; both receptacles route (corne-cherry 97.7 % → 98.8 %, 44 → 31 s).
+**Re-plan time (tinytapeout-demo).** The re-plan of boxed pads (D64) needs a twentieth of the budget, but the
+gridless rip-up and retry ran to the end of the budget. When connections of pads the escape planning boxed in still
+fail after rip-up and retry, the gridless phases and via minimization now stop early by twice the run's setup
+time (fanout, board, grid, pad access: most of what the re-plan of a few nets costs; 10 s there), when that is at
+most a quarter of the budget. The re-plan now runs and no QFN-80 pad is left boxed in (96.7 % → 97.0 %). A fixed
+fifth of the budget was tried first: with a 30 s budget on slower machines it cut the gridless phases without
+leaving the re-plan enough time.
+**Time per pass (glasgow).** Profiling (stack samples, and per-batch timings) showed the negotiation of both
+glasgow boards running mostly on one thread in batches of one or two nets, with GND alone 60 % of revC3's
+negotiation (184 connections, 1.3 s per iteration) and 30 % of revD1's: a net is rerouted whole whenever its box
+holds an overused point, and GND's box holds all of them. A net of 64 connections or more that is rerouted only for
+that reason (no overuse of its own) now keeps its wires whose box, grown by the clearance reach and ten grid
+pitches, holds no overused point, and routes the rest from them (partial rip-up, as connection-based PathFinder
+variants do); kept wires must still reach the net's pads through each other, else they are ripped too. Iterations:
+revC3 1.75 → 0.87 s (40 iterations inside the budget instead of 24, 94.9–95.1 % → 95.4 %), revD1 4.5 → 3.9 s
+(93.6–93.7 % → 93.7 %), lumenpnp-mobo 56 → 41 s at the same 99.3 %; over seeds 1–3 (60 s) revC3 failed 106 → 102
+connections in total, revD1 311 → 301. Tried and dropped: partial rip-up for nets in
+conflict too (2× faster on revC3, but 4 more failures there and 1–3 more at convergence on mobo, cynthion and
+revC3), without the ten-pitch margin (the wires beside the congestion stayed put), and applying it to nets of 24
+connections (stm32-2l gained 10 vias, fine-4l 4 % length). The generated-board baseline is unchanged (no net
+reaches 64 connections). Legalization and retries still route whole nets, and only negotiation honors the kept
+wires (a mask left by an iteration cut short once let a retry keep wires through another net's new path: shorts
+the verification removed). The remaining serial time is in many single-connection BGA nets of ~100 ms each and in
+the unbudgeted verification DRC of post-processing (7 s on revD1).
+*Why:* the USB-C failure was a planning artifact (the crossover chose its depth for the neighbors alone); the
+re-plan existed but never got time; and the budget went to rerouting a net whose wires were far from any conflict.
+Each change is checked against the generated-board baseline (identical) and the corpus (ROUTER.md; CI's 30 s runs
+vary by more than the change, so the local 60 s runs and a four-seed check decide).
+
 ## Open questions
 
 

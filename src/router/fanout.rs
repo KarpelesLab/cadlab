@@ -195,7 +195,8 @@ const CROSS_DEPTH: f64 = 3_000_000.0;
 /// receptacle) cannot both join their pads on that layer: whichever joins first walls in the
 /// other's inner pad. This gives the inner pad of one of the two nets a via straight out of
 /// the pad, deep enough that both its neighbors can still leave the row (straight, then at 45°
-/// away from the via, past it), so the other net can loop around the via on the pad layer and
+/// away from the via, past it) and the pads beyond them can turn away first, so the other net
+/// can loop around the via on the pad layer and
 /// this one joins its pads on another layer. The neighbors' exits are reserved as escapes
 /// (other nets' routing would otherwise take them), and the net's other pad of the crossing,
 /// when a neighbor's exit leaves the router no grid access to it, gets an exit and a via too. The shallowest legal via of the two
@@ -301,7 +302,7 @@ pub(crate) fn crossovers(
                     }
                 }
                 let Some(y) = crossing else { continue };
-                if let Some((d, _, _)) = crossover_via(rb, index, &row, k, layer, axis) {
+                if let Some((d, _, _)) = crossover_via(rb, index, &row, k, layer, axis, &wanted) {
                     cands.push((d, x, rb.terminals[t].label.clone(), t, layer, axis, row.clone(), k, y));
                 }
             }
@@ -317,7 +318,7 @@ pub(crate) fn crossovers(
             continue;
         }
         // Planned again with the crossovers placed so far.
-        let Some((_, v, exits)) = crossover_via(rb, index, &row, k, layer, axis) else { continue };
+        let Some((_, v, exits)) = crossover_via(rb, index, &row, k, layer, axis, &wanted) else { continue };
         let at = rb.terminals[t].at;
         let pr = rb.profile(x);
         index.insert(Item::Seg { net: x, layer: layer as u8, a: at, b: v }, BoxF::of2(at, v).expand(pr.hw));
@@ -436,8 +437,10 @@ pub(crate) struct Crossovers {
 /// An exit of a crossover via's neighbor: (terminal, points from the pad center).
 type Exit = (usize, Vec<P>);
 
-/// The shallowest via straight out of pad `row[k]` (along `axis`) that is legal and leaves
-/// both row neighbors an exit: (depth in µm, via center, the exits).
+/// The shallowest via straight out of pad `row[k]` (along `axis`) that is legal, leaves both
+/// row neighbors an exit and leaves the wanted pads beyond them a way out past those exits
+/// ([`outer_exit`]): (depth in µm, via center, the exits).
+#[allow(clippy::too_many_arguments)]
 fn crossover_via(
     rb: &RouterBoard,
     index: &mut Index,
@@ -445,6 +448,7 @@ fn crossover_via(
     k: usize,
     layer: usize,
     axis: P,
+    wanted: &[bool],
 ) -> Option<(i64, P, Vec<Exit>)> {
     let term = &rb.terminals[row[k].1];
     let (net, at) = (term.net, term.at);
@@ -470,10 +474,18 @@ fn crossover_via(
                 ids.extend(insert_escape(rb, index, rb.terminals[n].net, layer, &pts));
                 exits.push((n, pts));
             }
+            // The pads beyond the neighbors still get out: their exits turn away before the
+            // neighbors' exits turn towards them.
+            let outer_ok = exits.len() == 2
+                && exits.iter().zip([k.wrapping_sub(2), k + 2]).all(|((n, pts), o)| {
+                    o >= row.len()
+                        || !wanted[row[o].1]
+                        || outer_exit(rb, index, row[o].1, layer, axis, *n, pts, at, d).is_some()
+                });
             for id in ids {
                 index.remove(id);
             }
-            if exits.len() == 2 {
+            if outer_ok {
                 return Some(((d / 1_000.0).round() as i64, v, exits));
             }
         }
@@ -485,6 +497,7 @@ fn crossover_via(
 /// An exit for pad `t` out of its row past a via of radius `rv` at `depth` along `axis` from
 /// `from`: straight out, then at 45° away from the via until it clears it, then straight on to
 /// the via's depth (beyond it a track can keep turning away); exact checks against `index`.
+/// The turn is the deepest legal one.
 #[allow(clippy::too_many_arguments)]
 fn neighbor_exit(
     rb: &RouterBoard,
@@ -505,11 +518,61 @@ fn neighbor_exit(
     let need = (rv + pr.hw + rb.c_tracks_near(t) + 2.0 * TOL - off.abs()).max(0.0);
     let base = (term.at.x - from.x) * axis.x + (term.at.y - from.y) * axis.y;
     let end = depth - base;
-    let mut t0 = 0.0;
-    while t0 + need <= end {
+    // Deepest turn first: the exit stays in its pad's line as long as the via allows, which
+    // leaves the pad beyond it room to turn away first.
+    let steps = ((end - need) / CROSS_STEP).floor();
+    if steps < 0.0 {
+        return None;
+    }
+    let mut i = steps as i64;
+    while i >= 0 {
+        let t0 = i as f64 * CROSS_STEP;
         let p1 = P::new(term.at.x + axis.x * t0, term.at.y + axis.y * t0);
         let p2 = P::new(p1.x + (axis.x + u.x) * need, p1.y + (axis.y + u.y) * need);
         let rest = end - t0 - need;
+        let p3 = P::new(p2.x + axis.x * rest, p2.y + axis.y * rest);
+        let mut pts = vec![term.at, p1, p2, p3];
+        pts.dedup_by(|a, b| a.dist(*b) < 1.0);
+        if pts.len() > 1 && pts.windows(2).all(|s| ck.seg(layer, s[0], s[1], term.net).is_none()) {
+            return Some(pts);
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// An exit for pad `t`, the pad beyond a crossover via's row neighbor `n` (whose exit `npts`
+/// turns towards it at the via), checked against `index` (which holds the via and the
+/// neighbors' exits): straight out, then at 45° away from the via by as much as the neighbor's
+/// exit moves, then straight on to the via's depth (`depth` along `axis` from `from`). Only
+/// tells that such a pad is not walled in by the crossover; its escape is planned later.
+#[allow(clippy::too_many_arguments)]
+fn outer_exit(
+    rb: &RouterBoard,
+    index: &Index,
+    t: usize,
+    layer: usize,
+    axis: P,
+    n: usize,
+    npts: &[P],
+    from: P,
+    depth: f64,
+) -> Option<Vec<P>> {
+    let term = &rb.terminals[t];
+    let ck = Checker { rb, index };
+    let lat = P::new(-axis.y, axis.x);
+    let off = (term.at.x - from.x) * lat.x + (term.at.y - from.y) * lat.y;
+    let u = if off >= 0.0 { lat } else { P::new(-lat.x, -lat.y) };
+    let n0 = rb.terminals[n].at;
+    let n1 = *npts.last()?;
+    let shift = ((n1.x - n0.x) * lat.x + (n1.y - n0.y) * lat.y).abs();
+    let base = (term.at.x - from.x) * axis.x + (term.at.y - from.y) * axis.y;
+    let end = depth - base;
+    let mut t0 = 0.0;
+    while t0 + shift <= end {
+        let p1 = P::new(term.at.x + axis.x * t0, term.at.y + axis.y * t0);
+        let p2 = P::new(p1.x + (axis.x + u.x) * shift, p1.y + (axis.y + u.y) * shift);
+        let rest = end - t0 - shift;
         let p3 = P::new(p2.x + axis.x * rest, p2.y + axis.y * rest);
         let mut pts = vec![term.at, p1, p2, p3];
         pts.dedup_by(|a, b| a.dist(*b) < 1.0);
@@ -677,7 +740,8 @@ const ESCAPE_SIDE: f64 = 2.0;
 
 /// The candidate exits of one pad, shallowest first (see [`escape`]): each legal against
 /// everything in `index`, apart from the escapes `done`, and ending on a cell from which the
-/// router can move outwards.
+/// router can move outwards. When no exit turning at 45° straight onto its cell is legal, exits
+/// turning earlier and then running straight on to the cell are tried.
 #[allow(clippy::too_many_arguments)]
 fn escape_cands(
     rb: &RouterBoard,
@@ -713,7 +777,7 @@ fn escape_cands(
     let ck = Checker { rb, index };
     let step = (axis.x as i32, axis.y as i32);
     let mut out = Vec::new();
-    for (_, _, x, y) in cells {
+    for &(_, _, x, y) in &cells {
         let e = grid.cell(x, y);
         let d = P::new(e.x - term.at.x, e.y - term.at.y);
         let side = (d.x * lat.x + d.y * lat.y).abs();
@@ -733,6 +797,37 @@ fn escape_cands(
             if out.len() == ESCAPE_CANDS {
                 break;
             }
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    // None: the turn earlier, then straight on to the cell (a neighbor's track turning
+    // towards the pad further out leaves it no room to turn there), deepest turn first.
+    for &(_, _, x, y) in &cells {
+        let e = grid.cell(x, y);
+        let d = P::new(e.x - term.at.x, e.y - term.at.y);
+        let side = d.x * lat.x + d.y * lat.y;
+        let along = d.x * axis.x + d.y * axis.y;
+        if side.abs() <= 1.0 || !open(term.net, layer, (x, y), step) {
+            continue;
+        }
+        let mut t0 = along - side.abs() - CROSS_STEP;
+        while t0 >= 0.0 {
+            let p1 = P::new(term.at.x + axis.x * t0, term.at.y + axis.y * t0);
+            let p2 = P::new(p1.x + axis.x * side.abs() + lat.x * side, p1.y + axis.y * side.abs() + lat.y * side);
+            let mut pts = vec![term.at, p1, p2, e];
+            pts.dedup_by(|a, b| a.dist(*b) < 1.0);
+            if pts.windows(2).all(|s| ck.seg(layer, s[0], s[1], term.net).is_none())
+                && done.iter().all(|o: &Escape| apart(rb, grid, o, term.net, layer, &pts))
+            {
+                out.push(pts);
+                break;
+            }
+            t0 -= CROSS_STEP;
+        }
+        if out.len() == ESCAPE_CANDS {
+            break;
         }
     }
     out

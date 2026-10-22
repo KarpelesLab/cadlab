@@ -157,6 +157,9 @@ pub(crate) struct NetRoute {
     /// The rooms of the gridless search for this net (static obstacles), kept between
     /// iterations.
     pub rooms: Option<std::sync::Arc<super::expansion::NetRooms>>,
+    /// Wires the next [`Engine::route_net`] keeps (by index in `wires`; empty: none), set by
+    /// negotiation for nets with many connections whose wires are clear of the overuse.
+    pub keep: Vec<bool>,
 }
 
 impl Default for NetRoute {
@@ -174,6 +177,7 @@ impl Default for NetRoute {
             region: BoxF::EMPTY,
             dyn_ids: vec![],
             rooms: None,
+            keep: vec![],
         }
     }
 }
@@ -1468,13 +1472,15 @@ impl<'a> Engine<'a> {
         Ok(keys)
     }
 
-    /// Routes every connection of a net (its wires are replaced). Connections whose islands
-    /// are already joined by earlier wires are skipped.
+    /// Routes every connection of a net (its wires are replaced, except, in negotiation, the
+    /// ones `nr.keep` marks that still join its pads: see [`kept_wires`]). Connections whose
+    /// islands are already joined by earlier or kept wires are skipped.
     pub fn route_net(&self, sc: &mut Scratch, nr: &mut NetRoute, mode: Mode) -> Result<(), Stop> {
+        let keep = std::mem::take(&mut nr.keep);
         if self.gridless {
             return super::expansion::route_net(self, sc, nr, mode);
         }
-        nr.wires.clear();
+        let old = std::mem::take(&mut nr.wires);
         sc.own_vias.clear();
         let n = nr.islands.len();
         let mut parent: Vec<usize> = (0..n).collect();
@@ -1487,6 +1493,32 @@ impl<'a> Engine<'a> {
         }
         let mut tree: Vec<Vec<u32>> = vec![Vec::new(); n];
         let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+        // Kept wires (partial rip-up): their islands start joined, their nodes in the trees.
+        if keep.len() == old.len() && matches!(mode, Mode::Negotiate(_)) {
+            let kept = kept_wires(nr, old, &keep);
+            let cells = self.cells() as u32;
+            for (isls, w) in kept {
+                let r0 = find(&mut parent, isls[0]);
+                for &i in &isls[1..] {
+                    let (ra, rb) = (find(&mut parent, r0), find(&mut parent, i));
+                    if ra != rb {
+                        let (ma, mb) = (std::mem::take(&mut members[rb]), std::mem::take(&mut tree[rb]));
+                        members[ra].extend(ma);
+                        tree[ra].extend(mb);
+                        parent[rb] = ra;
+                    }
+                }
+                let r = find(&mut parent, r0);
+                tree[r].extend(w.nodes.iter().copied());
+                for q in w.nodes.windows(2) {
+                    if q[0] / cells != q[1] / cells {
+                        let (_, x, y) = self.unpack(q[0]);
+                        sc.own_vias.push((x, y));
+                    }
+                }
+                nr.wires.push(w);
+            }
+        }
         for ci in 0..nr.conns.len() {
             if matches!(nr.failed[ci], Some(FailKind::Static | FailKind::NoAccess | FailKind::Drc)) {
                 continue;
@@ -1567,6 +1599,99 @@ impl<'a> Engine<'a> {
     }
 }
 
+/// The wires of `old` marked in `keep` that still join islands of `nr` on their own: both
+/// ends on an island's access node (with the wire's stub) or on a node of another such wire
+/// (dropped until that holds), and each group of wires so joined reaching an island. Returns, per wire, the islands its group
+/// joins (one wire of a group carries them, the others an island of the group), in `old`'s
+/// order.
+fn kept_wires(nr: &NetRoute, old: Vec<Wire>, keep: &[bool]) -> Vec<(Vec<usize>, Wire)> {
+    // Access nodes: (island, stub) per node.
+    let mut access: BTreeMap<u32, Vec<(usize, Option<&Stub>)>> = BTreeMap::new();
+    for (i, isl) in nr.islands.iter().enumerate() {
+        for a in &isl.access {
+            access.entry(a.node).or_default().push((i, a.stub.as_ref()));
+        }
+    }
+    // The islands an end of a wire reaches: an access at its node whose stub (if any) is the
+    // wire's.
+    let ends = |q: u32, st: Option<&Stub>| -> Vec<usize> {
+        access.get(&q).map_or(vec![], |v| v.iter().filter(|(_, s)| s.is_none() || *s == st).map(|(i, _)| *i).collect())
+    };
+    let mut kept: Vec<Wire> = old
+        .into_iter()
+        .zip(keep)
+        .filter(|(w, k)| **k && w.geo.is_none() && w.nodes.len() > 1)
+        .map(|(w, _)| w)
+        .collect();
+    loop {
+        let mut on: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (j, w) in kept.iter().enumerate() {
+            for &q in &w.nodes {
+                let v = on.entry(q).or_default();
+                if v.last() != Some(&j) {
+                    v.push(j);
+                }
+            }
+        }
+        let held = |j: usize, q: u32, st: Option<&Stub>| {
+            !ends(q, st).is_empty() || on.get(&q).is_some_and(|v| v.iter().any(|&o| o != j))
+        };
+        let before = kept.len();
+        let ok: Vec<bool> = kept
+            .iter()
+            .enumerate()
+            .map(|(j, w)| {
+                held(j, w.nodes[0], w.start.as_ref()) && held(j, *w.nodes.last().expect("nodes"), w.end.as_ref())
+            })
+            .collect();
+        let mut it = ok.into_iter();
+        kept.retain(|_| it.next().expect("flag"));
+        if kept.len() == before {
+            break;
+        }
+    }
+    // Groups: union-find over the wires, joined where they share a node.
+    let m = kept.len();
+    let mut parent: Vec<usize> = (0..m).collect();
+    fn find(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    let mut first: BTreeMap<u32, usize> = BTreeMap::new();
+    for (j, w) in kept.iter().enumerate() {
+        for &q in &w.nodes {
+            let o = *first.entry(q).or_insert(j);
+            let (a, b) = (find(&mut parent, o), find(&mut parent, j));
+            if a != b {
+                parent[b.max(a)] = a.min(b);
+            }
+        }
+    }
+    let mut isls: Vec<Vec<usize>> = vec![Vec::new(); m];
+    for (j, w) in kept.iter().enumerate() {
+        let r = find(&mut parent, j);
+        isls[r].extend(ends(w.nodes[0], w.start.as_ref()));
+        isls[r].extend(ends(*w.nodes.last().expect("nodes"), w.end.as_ref()));
+    }
+    for v in &mut isls {
+        v.sort_unstable();
+        v.dedup();
+    }
+    let roots: Vec<usize> = (0..m).map(|j| find(&mut parent, j)).collect();
+    kept.into_iter()
+        .enumerate()
+        .filter(|(j, _)| !isls[roots[*j]].is_empty())
+        .map(|(j, w)| {
+            let r = roots[j];
+            let v = if r == j { isls[r].clone() } else { vec![isls[r][0]] };
+            (v, w)
+        })
+        .collect()
+}
+
 /// The point of segment `a`–`b` closest to segment `c`–`d`.
 fn closest_on(a: P, b: P, c: P, d: P) -> P {
     let cands = [a, b, super::geo::project(c, a, b), super::geo::project(d, a, b)];
@@ -1585,6 +1710,22 @@ fn closest_on(a: P, b: P, c: P, d: P) -> P {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kept_wires_must_still_reach_the_pads() {
+        let isl = |node: u32| Island { terms: vec![], access: vec![Access { node, stub: None, cost: 0.0 }] };
+        let wire = |conn: usize, nodes: Vec<u32>| Wire { conn, nodes, start: None, end: None, geo: None };
+        let nr = NetRoute { islands: vec![isl(1), isl(10), isl(20)], ..NetRoute::default() };
+        // w0 joins islands 0 and 1; w1 starts on w0 and ends on island 2.
+        let old = || vec![wire(0, vec![1, 2, 3, 10]), wire(1, vec![3, 4, 20])];
+        let groups = |keep: &[bool]| -> Vec<(Vec<usize>, usize)> {
+            kept_wires(&nr, old(), keep).into_iter().map(|(i, w)| (i, w.conn)).collect()
+        };
+        assert_eq!(groups(&[true, true]), vec![(vec![0, 1, 2], 0), (vec![0], 1)]);
+        assert_eq!(groups(&[true, false]), vec![(vec![0, 1], 0)]);
+        // Without w0, w1 hangs from nothing.
+        assert_eq!(groups(&[false, true]), vec![]);
+    }
 
     #[test]
     fn queue_pops_like_a_binary_heap() {

@@ -169,6 +169,8 @@ Details in [ROUTER.md](ROUTER.md).
 - [x] Escape planning per package (an assignment over candidate exits with ejection chains, necks for crowded
       rows, boxed pads re-planned), exact stub conflicts, negotiation estimates the costs near its targets
       (DECISIONS D64)
+- [x] Corpus residuals: USB-C crossovers leave the outer pads an exit, escapes may turn earlier, time for the
+      boxed-pad re-plan, partial rip-up of large nets near the overuse (corne-cherry 97.7 % → 98.8 %, DECISIONS D69)
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 
