@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::Diagnostic;
-use crate::touchstone::{self, Complex, Parameter};
+use crate::touchstone::{self, Checks, Complex, Parameter, Reflection};
 use crate::value::{Quantity, Unit};
 
 pub(crate) fn register(r: &mut Registry) {
@@ -33,6 +33,10 @@ pub struct Summary {
     /// Number of ports of a version 1 file whose extension does not give it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ports: Option<usize>,
+    /// Band of interest: the best and worst values are over these two frequencies ("2.4GHz",
+    /// "2.4835GHz") instead of the whole file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band: Option<[Quantity; 2]>,
 }
 
 /// A parameter at one frequency.
@@ -46,6 +50,16 @@ pub struct Point {
     pub mag: f64,
     /// Phase in degrees.
     pub phase: f64,
+    /// For a reflection (S11, S22): the impedance looking into the port, VSWR, return loss and
+    /// mismatch loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reflection: Option<Reflection>,
+    /// For a transmission (S21) at a requested frequency: the loss with the mismatch at the driven
+    /// port taken out, −10 log10(|S21|² / (1 − |S11|²)) in dB: what the network dissipates and
+    /// radiates, or sends to other ports. |S21| between two terminations mixes it with the
+    /// reflection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_loss_db: Option<f64>,
 }
 
 /// Summary of one parameter.
@@ -82,8 +96,13 @@ pub struct TouchstoneSummary {
     /// Number of noise parameter points.
     #[serde(skip_serializing_if = "is_zero")]
     pub noise_points: usize,
+    /// The band of the best and worst values, when `band` narrowed it (Hz).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<[f64; 2]>,
     /// The parameters.
     pub params: Vec<ParamSummary>,
+    /// Passivity and reciprocity of the data over the whole file.
+    pub checks: Checks,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -96,19 +115,115 @@ fn round(v: f64, decimals: i32) -> f64 {
     if r == 0.0 { 0.0 } else { r }
 }
 
-fn point(f: f64, c: Complex) -> Point {
-    Point { freq: f, db: round(c.db().max(-999.0), 3), mag: round(c.abs(), 6), phase: round(c.arg_deg(), 2) }
+fn point(f: f64, c: Complex, z0: Option<f64>) -> Point {
+    Point {
+        freq: f,
+        db: round(c.db().max(-999.0), 3),
+        mag: round(c.abs(), 6),
+        phase: round(c.arg_deg(), 2),
+        reflection: z0.map(|z| touchstone::reflection(c, z)),
+        available_loss_db: None,
+    }
 }
 
-/// Summary of S(i+1, j+1) of an `n`-port: band extremes and values at `at` (Hz, inside the
-/// band).
-pub(crate) fn summarize(freqs: &[f64], s: &[Vec<Complex>], i: usize, j: usize, n: usize, at: &[f64]) -> ParamSummary {
+/// What to summarize: frequencies to report, the band of the extremes, reference impedances.
+pub(crate) struct View<'a> {
+    pub(crate) at: &'a [f64],
+    pub(crate) band: Option<[f64; 2]>,
+    pub(crate) reference: &'a [f64],
+}
+
+/// Summary of S(i+1, j+1) of an `n`-port: extremes (over `view.band`, its ends interpolated, else
+/// the whole file) and values at `view.at` (Hz, inside the file's band).
+pub(crate) fn summarize(
+    freqs: &[f64],
+    s: &[Vec<Complex>],
+    i: usize,
+    j: usize,
+    n: usize,
+    view: &View<'_>,
+) -> ParamSummary {
     let idx = i * n + j;
-    let pts: Vec<Point> = freqs.iter().zip(s).map(|(&f, m)| point(f, m[idx])).collect();
+    let z0 = (i == j).then(|| view.reference.get(i).or(view.reference.first()).copied().unwrap_or(50.0));
+    let mut pts: Vec<Point> = Vec::new();
+    if let Some([lo, hi]) = view.band {
+        for f in [lo, hi] {
+            pts.extend(touchstone::interpolate(freqs, s, f, idx).map(|c| point(f, c, z0)));
+        }
+    }
+    let inside = |f: f64| view.band.is_none_or(|[lo, hi]| f >= lo && f <= hi);
+    pts.extend(freqs.iter().zip(s).filter(|(f, _)| inside(**f)).map(|(&f, m)| point(f, m[idx], z0)));
     let min = pts.iter().min_by(|a, b| a.mag.total_cmp(&b.mag)).unwrap().clone();
     let max = pts.iter().max_by(|a, b| a.mag.total_cmp(&b.mag)).unwrap().clone();
-    let at = at.iter().filter_map(|&f| touchstone::interpolate(freqs, s, f, idx).map(|c| point(f, c))).collect();
+    let at = view
+        .at
+        .iter()
+        .filter_map(|&f| {
+            let c = touchstone::interpolate(freqs, s, f, idx)?;
+            let mut pt = point(f, c, z0);
+            if i != j {
+                let g = touchstone::interpolate(freqs, s, f, j * n + j)?.abs();
+                let available = 1.0 - g * g;
+                if available > 0.0 && c.abs() > 0.0 {
+                    pt.available_loss_db = Some(round(-10.0 * (c.abs() * c.abs() / available).log10(), 3));
+                }
+            }
+            Some(pt)
+        })
+        .collect();
     ParamSummary { name: name(i, j, n), min, max, at }
+}
+
+/// A frequency as text ("2.44GHz").
+pub(crate) fn hz(f: f64) -> String {
+    Quantity::from_f64(f, 0, Unit::Hertz).map_or_else(|| format!("{f} Hz"), |q| q.to_string())
+}
+
+/// `band` as Hz, checked against the file's or simulation's band.
+pub(crate) fn band_hz(band: Option<[Quantity; 2]>, lo: f64, hi: f64) -> Result<Option<[f64; 2]>, CommandError> {
+    let Some([a, b]) = band else { return Ok(None) };
+    let a = crate::commands::electrical::expect_unit(a, Unit::Hertz, "band")?.to_f64();
+    let b = crate::commands::electrical::expect_unit(b, Unit::Hertz, "band")?.to_f64();
+    if a >= b || a < lo || b > hi {
+        return Err(CommandError::invalid_args(
+            "touchstone.out_of_band",
+            format!("`band` must be two increasing frequencies inside {} .. {}", hz(lo), hz(hi)),
+        )
+        .with_hint("choose frequencies inside the band"));
+    }
+    Ok(Some([a, b]))
+}
+
+/// Warnings when the data cannot be physical. `prefix`: the code's group; `hint`: what to do.
+pub(crate) fn check_diagnostics(c: &Checks, prefix: &str, hint: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if c.max_power > 1.02 {
+        out.push(
+            Diagnostic::warning(
+                format!("{prefix}.not_passive"),
+                format!(
+                    "the network gains power: Σ|Sij|² reaches {} at {} (a passive network stays at or below 1)",
+                    c.max_power,
+                    hz(c.max_power_freq)
+                ),
+            )
+            .with_hint(hint.to_string()),
+        );
+    }
+    if c.max_asymmetry > 0.03 {
+        out.push(
+            Diagnostic::warning(
+                format!("{prefix}.not_reciprocal"),
+                format!(
+                    "S is not symmetric: |Sij − Sji| reaches {} at {} (a board network is reciprocal)",
+                    c.max_asymmetry,
+                    hz(c.max_asymmetry_freq)
+                ),
+            )
+            .with_hint(hint.to_string()),
+        );
+    }
+    out
 }
 
 /// `S21` → (1, 0); `S1,10` → (0, 9).
@@ -124,6 +239,23 @@ fn param_index(s: &str, n: usize) -> Option<(usize, usize)> {
 
 fn name(i: usize, j: usize, n: usize) -> String {
     if n < 10 { format!("S{}{}", i + 1, j + 1) } else { format!("S{},{}", i + 1, j + 1) }
+}
+
+/// One point as text; a reflection adds the impedance and VSWR.
+pub(crate) fn point_text(a: &Point) -> String {
+    let mut s = format!("{}: {:.2} dB, {:.1}°", hz(a.freq), a.db, a.phase);
+    if let Some(r) = &a.reflection {
+        if let (Some(re), Some(im)) = (r.z_re, r.z_im) {
+            s.push_str(&format!(", Z {re:.1} {} j{:.1} Ω", if im < 0.0 { "-" } else { "+" }, im.abs()));
+        }
+        if let Some(v) = r.vswr {
+            s.push_str(&format!(", VSWR {v:.2}"));
+        }
+    }
+    if let Some(l) = a.available_loss_db {
+        s.push_str(&format!(" ({l:.2} dB without the mismatch)"));
+    }
+    s
 }
 
 impl Command for Summary {
@@ -191,7 +323,18 @@ impl Command for Summary {
             }
             freqs.push(f);
         }
-        let params = wanted.iter().map(|&(i, j)| summarize(&ts.freqs, &s, i, j, n, &freqs)).collect();
+        let band = band_hz(self.band, ts.freqs[0], *ts.freqs.last().unwrap())?;
+        let view = View { at: &freqs, band, reference: &ts.reference };
+        let params = wanted.iter().map(|&(i, j)| summarize(&ts.freqs, &s, i, j, n, &view)).collect();
+        let checks = touchstone::checks(&ts.freqs, &s, n);
+        for d in check_diagnostics(
+            &checks,
+            "touchstone",
+            "measured data can be slightly off; a simulation: check its convergence, the absorbing layer's distance and \
+             the mesh",
+        ) {
+            ctx.report(d);
+        }
         Ok(TouchstoneSummary {
             path: path.display().to_string(),
             version: ts.version.clone(),
@@ -201,15 +344,13 @@ impl Command for Summary {
             points: ts.freqs.len(),
             band: [ts.freqs[0], *ts.freqs.last().unwrap()],
             noise_points: ts.noise.len(),
+            over: band,
             params,
+            checks,
         })
     }
 
     fn summarize(o: &TouchstoneSummary) -> String {
-        let hz = |f: f64| {
-            let q = Quantity::from_f64(f, 0, Unit::Hertz).map(|q| q.to_string());
-            q.unwrap_or_else(|| format!("{f} Hz"))
-        };
         let mut s = format!(
             "{}: {}-port {:?}, Touchstone {}, {} points, {} .. {}",
             o.path,
@@ -230,7 +371,7 @@ impl Command for Summary {
                 hz(p.max.freq)
             ));
             for a in &p.at {
-                s.push_str(&format!("\n    {}: {:.2} dB, {:.1}°", hz(a.freq), a.db, a.phase));
+                s.push_str(&format!("\n    {}", point_text(a)));
             }
         }
         s
@@ -249,5 +390,37 @@ mod tests {
         assert_eq!(param_index("S1,10", 12), Some((0, 9)));
         assert_eq!(param_index("S110", 12), None);
         assert_eq!(name(9, 0, 12), "S10,1");
+    }
+
+    #[test]
+    fn reflections_mean_what_they_say() {
+        // Γ = 1/3 on 50 Ω is 100 Ω, VSWR 2, 9.54 dB return loss, 0.51 dB mismatch loss.
+        let r = touchstone::reflection(Complex::new(1.0 / 3.0, 0.0), 50.0);
+        assert_eq!((r.z_re, r.z_im), (Some(100.0), Some(0.0)));
+        assert_eq!(r.vswr, Some(2.0));
+        assert!((r.return_loss_db - 9.542).abs() < 1e-3, "{r:?}");
+        assert!((r.mismatch_loss_db.unwrap() - 0.5115).abs() < 1e-3, "{r:?}");
+        // An open: no impedance, no VSWR.
+        let r = touchstone::reflection(Complex::new(1.0, 0.0), 50.0);
+        assert_eq!((r.z_re, r.vswr, r.mismatch_loss_db), (None, None, None));
+        // j50 Ω.
+        let g = Complex::new(0.0, 1.0);
+        let r = touchstone::reflection(g, 50.0);
+        assert_eq!((r.z_re, r.z_im), (Some(0.0), Some(50.0)));
+    }
+
+    #[test]
+    fn checks_flag_gain_and_asymmetry() {
+        let c = |re: f64| Complex::new(re, 0.0);
+        let freqs = [1e9, 2e9];
+        let good = vec![c(0.1), c(0.9), c(0.9), c(0.1)];
+        let bad = vec![c(0.1), c(1.2), c(0.9), c(0.1)];
+        let k = touchstone::checks(&freqs, &[good.clone(), good.clone()], 2);
+        assert!(check_diagnostics(&k, "sim", "h").is_empty(), "{k:?}");
+        let k = touchstone::checks(&freqs, &[good, bad], 2);
+        assert_eq!(k.max_power_freq, 2e9);
+        assert_eq!(k.max_asymmetry, 0.3);
+        let codes: Vec<String> = check_diagnostics(&k, "sim", "h").iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["sim.not_passive", "sim.not_reciprocal"]);
     }
 }

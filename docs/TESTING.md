@@ -686,3 +686,81 @@ Seen but left as they are (noted for the next session):
 - `VCAP1` (the MCU's core regulator capacitor, outside any region hint) was routed over the analog ground and
   stays a `drc.split_crossing` warning; hinting the MCU's passives with its region would have avoided it, which
   suggests regions could pass from an IC to its decoupling capacitors.
+
+### Session 6 (2026-11-01): 2.4 GHz sensor node, the electrical tools, through the MCP server
+
+The agent used `cadlab mcp` only (a small Python client), and read datasheets for the parts.
+
+Prompt: *"A 2.4 GHz wireless sensor node: module-less RF SoC with its crystal, the matching network into a 50 Ω
+microstrip feeding a U.FL connector, a battery input with a buck converter, an I2C sensor and SWD, on four layers.
+Use the electrical tools as a designer would: stackup and impedance targets, the field solver, net loss, `sim.sparams`
+on the RF feed with the matching parts, Touchstone, openEMS export, then DRC and fab outputs."*
+
+Result: 24 components, 40x25 mm, JLC04161H-7628, GND on In1.Cu and B.Cu, VDD on In2.Cu. The RF path placed and routed
+by hand (nRF52832 ANT, shunt C3 0.8 pF, series L1 3.9 nH, 9.15 mm of line, U.FL), the rest automatic: ERC and lint
+clean, 100 % routed, DRC clean, JLCPCB bundle with the stackup and the controlled line in `fab-lock.json`. Replayed by
+`tests/agent_session6.rs` (fixtures in `tests/fixtures/agent_session6/`; about a minute in a debug build), with the
+full-wave run behind `#[ignore]` (`cargo test --release --test agent_session6 -- --ignored`, 91 s on one thread).
+
+Where the part data comes from:
+
+| Part | Data | Source | Status |
+|---|---|---|---|
+| nRF52832-QFAA | pin table; QFN48 6 x 6, e 0.4, EP 4.6; reference circuit and BOM, internal LDO setup | Nordic product specification (docs.nordicsemi.com, pin assignments, mechanical); PS v1.0 chapter 53, figure 167 and table 139 | read from the source; the land pattern is cadlab's IPC-7351B one, not Nordic's reference layout |
+| TPS62205 | pins, 2.5 V fixed, 2.7–6 V input, 4.7 µF / 10 µH / 10 µF | TI SLVS417F | read from the source |
+| BME280 | pins, I2C strapping, landing pattern | Bosch BST-BME280-DS002-15, table 35, figure 21 | read from the source |
+| U.FL-R-SMT-1 | recommended PCB mounting pattern | Hirose U.FL series catalog | dimensions read from a drawing; the signal pad's position is our reading of it |
+| 32 MHz crystal | 2016, CL 8 pF as in Nordic's BOM | no specific part | **no MPN: the land pattern and its 1.2 mm pad pitch are generated, not from a datasheet** |
+| 0.8 pF, 3.9 nH and other passives | values from Nordic's BOM | generic parts | **no ESL, Q or self-resonance: simulated as ideal** |
+| Laminate | εr, thickness | JLCPCB's published stackup | **tan δ 0.02 at 1 GHz is a nominal FR-4 value we chose; the mask's values are cadlab's defaults** |
+
+Electrical results, and how far they go. All of it describes copper and ideal parts between 50 Ω terminations:
+
+| Quantity | Result | Check |
+|---|---|---|
+| 50 Ω width on F.Cu (0.2104 mm, εr 4.4, 35 µm) | 0.372 mm closed form, 0.373 mm field solver; 0.347 mm with a 25 µm mask (used) | closed form and field solver agree; nothing measured |
+| `net.loss RF_FEED`, 9.15 mm at 2.44 GHz | 0.089 dB bare, 0.097 dB with the mask | tracks only, by definition; tan δ assumed |
+| `sim.sparams`, U1.30 to J1.1, 2.44 GHz, 154 000 cells | \|S21\| −2.12 dB, 143.5° lag; \|S11\| −4.54 dB, Z 42.3 − j67.2 Ω | |
+| The same, 554 000 cells (cells 0.25 mm, 25 µm minimum, margin 4 mm, 8 PML cells) | \|S21\| −2.06 dB, 136.5° lag; \|S11\| −4.63 dB, Z 44.9 − j68.5 Ω; \|S22\| −4.84 dB | magnitudes within 0.1 dB, **phases still move by 7° (S21) and 12° (S22): not converged in phase** |
+| Ideal chain by hand (ABCD: line, shunt C, line, series L, line; 10.6 dB/m) | \|S21\| −1.27 dB, 117° lag; \|S11\| −6.40 dB | the full-wave result is 0.8 dB and 26° away: pads, gaps and the ground via are not in the chain. Adding plate capacitances for the pads explains the phase better (131° lag) but not the magnitude (−1.40 dB). **Not separated further** |
+| Passivity, reciprocity of the runs | Σ\|S\|² ≤ 0.982, \|S12 − S21\| ≤ 0.0008 | necessary, not sufficient |
+| `part_values` C3 = 1 pF, same mesh | \|S11\| −3.92 dB, Z 25.9 − j54.4 Ω | moves the way a larger shunt capacitor should |
+| `parts: false` | \|S21\| −47.6 dB | the open gap isolates; the parts are what connects the path |
+
+**What cannot be claimed.** This network is not a 50 Ω match seen from a 50 Ω port, and need not be: Nordic's values
+match the chip's pin, whose impedance the product specification does not state, to a 50 Ω antenna, on Nordic's own
+layout and stackup. With no impedance to compare with, no statement about the match, output power or range follows
+from these numbers; a VSWR near 3.9 here is not a defect and says nothing good either. Nothing was measured, no part
+parasitics are in, the chip and the U.FL body are not simulated, and the openEMS export of the same region (the
+matching parts missing, see below) was not run: openEMS is CI-only and no CI run compares this board. A real
+board needs Nordic's reference layout files, the real parts' data, and a VNA.
+
+Friction log, and what was done:
+
+| # | Where the agent got stuck | Fix |
+|---|---|---|
+| 1 | The first `sim.sparams` ran past 280 s with no way to see why: 688 000 cells, timestep 15 fs. A 5 µm cell in a 58 µm minimum: `mesh::merge` could keep a line right next to the following cluster's | Lines closer than `min_cell` go (the timestep of that region went from 15 to 47 fs) |
+| 2 | No preview: `timesteps: 5` was the only way to see the mesh, and it read "the energy only decayed to -inf dB" | `sim.sparams --plan`: mesh, ports, parts, warnings and a cost estimate, nothing written; `sim.stopped_in_pulse` |
+| 3 | `openems.port_in_pml` said "grow the region" without saying by how much; the margin needed follows from cells nobody had seen | It gives the missing distance and the layer's thickness; `sim.part_in_pml` for lumped parts |
+| 4 | Six `sim.part_not_modeled` warnings for decoupling capacitors with `only_selected`, burying what mattered | One note, `sim.parts_outside_selection`, for parts on none of the kept signal nets |
+| 5 | The summary printed `1000000000 Hz` and `0.00000000000001667 s`; only band extremes, so 1–6 GHz extremes and a second command for 2.44 GHz | GHz and ps; `frequencies` and `band` on `sim.sparams` and `touchstone.summary`, checked before the run |
+| 6 | \|S11\| −4.5 dB, what is that? No impedance or VSWR; \|S21\| mixes mismatch and dissipation | `reflection` (Z, VSWR, return and mismatch loss), `available_loss_db` |
+| 7 | Nothing said how much to trust a run | `checks`, `sim.not_passive`, `sim.not_reciprocal` (also `touchstone.*`) |
+| 8 | A number that reads as RF performance: nothing said the chip was not simulated or the parts were ideal | `sim.port_replaces_part`, `sim.parts_ideal`, before the run |
+| 9 | Trying another C3 meant a new part and `bom.replace`, and no record in the result | `part_values` for one run, recorded in the Touchstone header with ports and region |
+| 10 | `export.openems` silently left C3 and L1 open: a result to disagree with `sim.sparams` for no visible reason | `openems.parts_not_modeled` (the elements themselves are left to the openEMS work) |
+| 11 | `net.loss` had no mask, so the line solved with a mask was measured without one | `mask*` and `etch` options |
+| 12 | Nothing told the order which line is controlled | `process.impedance` in `fab-lock.json`, in the export's summary, `fab.impedance_without_stackup` |
+| 13 | `C 0.8pF` became `C_800fF_...` and `800fF` in the BOM; "assuming 20m" for a loss tangent; a coplanar solve read as "microstrip"; `impedance.solve --netclass` did not say how to assign nets | `0.8pF`; `0.02`; `[coplanar grounds at ...]`; the summary names `net.set --class` |
+
+Seen but left as they are:
+
+- A keep-out has no net exception, so the feed takes two rectangles, one each side of the track (router and DRC work).
+- `export.openems` writes no lumped elements, so its result for this region is the bare layout.
+- `describe {"name": ...}` ignores the unknown argument and lists every command (the argument is `command`).
+- `sim.sparams` takes one thread below 262 144 nodes by the existing rule. `RAYON_NUM_THREADS` caps the solver and the
+  server: 5 threads instead of 66; an idle server uses no CPU either way, and its idle pool threads only appear after
+  the first parallel call.
+- 91 s for the same run that took 569 s under a machine load of 100: the plan's minutes are nominal.
+- `sim.sparams` has no way to place a part's parasitics by datasheet other than `esr` and `esl`; no self-resonance or
+  frequency-dependent Q.

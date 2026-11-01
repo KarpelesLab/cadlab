@@ -152,6 +152,90 @@ pub struct Touchstone {
     pub noise: Vec<Noise>,
     /// Things the reader tolerated (unknown keywords).
     pub warnings: Vec<String>,
+    /// Comment lines the writer puts first (what the data is: ports, region, part values). The
+    /// reader leaves them out.
+    pub comments: Vec<String>,
+}
+
+/// What a reflection means at a port of reference impedance `z0`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Reflection {
+    /// Resistance looking into the port (Ω): Z = z0 (1 + Γ) / (1 − Γ).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z_re: Option<f64>,
+    /// Reactance looking into the port (Ω).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z_im: Option<f64>,
+    /// Voltage standing wave ratio (1 + |Γ|) / (1 − |Γ|); absent at |Γ| ≥ 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vswr: Option<f64>,
+    /// Return loss (dB), −20 log10 |Γ|.
+    pub return_loss_db: f64,
+    /// Power lost to the mismatch (dB), −10 log10 (1 − |Γ|²); absent at |Γ| ≥ 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mismatch_loss_db: Option<f64>,
+}
+
+fn rounded(v: f64, decimals: i32) -> f64 {
+    let k = 10f64.powi(decimals);
+    let r = (v * k).round() / k;
+    if r == 0.0 { 0.0 } else { r }
+}
+
+/// The reflection `gamma` seen at a port of reference impedance `z0` (Ω).
+pub fn reflection(gamma: Complex, z0: f64) -> Reflection {
+    let mag = gamma.abs();
+    let (dr, di) = (1.0 - gamma.re, -gamma.im);
+    let d = dr * dr + di * di;
+    let (re, im) = if d > 1e-18 {
+        (Some(rounded(z0 * (1.0 - mag * mag) / d, 2)), Some(rounded(z0 * 2.0 * gamma.im / d, 2)))
+    } else {
+        (None, None)
+    };
+    Reflection {
+        z_re: re,
+        z_im: im,
+        vswr: (mag < 1.0).then(|| rounded((1.0 + mag) / (1.0 - mag), 3)),
+        return_loss_db: rounded((-gamma.db()).min(999.0), 3),
+        mismatch_loss_db: (mag < 1.0).then(|| rounded(-10.0 * (1.0 - mag * mag).log10(), 4)),
+    }
+}
+
+/// Whether the data can be physical: a passive reciprocal network keeps every column's power at
+/// or below 1 and S symmetric. Simulations that are truncated or disturbed by their absorbing
+/// layer show here.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Checks {
+    /// Largest Σᵢ |Sᵢⱼ|² of any port j over the band (≤ 1 for a passive network).
+    pub max_power: f64,
+    /// Frequency of `max_power` (Hz).
+    pub max_power_freq: f64,
+    /// Largest |Sᵢⱼ − Sⱼᵢ| over the band (0 for a reciprocal network).
+    pub max_asymmetry: f64,
+    /// Frequency of `max_asymmetry` (Hz).
+    pub max_asymmetry_freq: f64,
+}
+
+/// [`Checks`] of an `n`-port's S-parameters.
+pub fn checks(freqs: &[f64], s: &[Vec<Complex>], n: usize) -> Checks {
+    let mut c = Checks { max_power: 0.0, max_power_freq: 0.0, max_asymmetry: 0.0, max_asymmetry_freq: 0.0 };
+    for (&f, m) in freqs.iter().zip(s) {
+        for j in 0..n {
+            let power: f64 = (0..n).map(|i| m[i * n + j].abs().powi(2)).sum();
+            if power > c.max_power {
+                (c.max_power, c.max_power_freq) = (power, f);
+            }
+            for i in 0..j {
+                let a = m[i * n + j].sub(m[j * n + i]).abs();
+                if a > c.max_asymmetry {
+                    (c.max_asymmetry, c.max_asymmetry_freq) = (a, f);
+                }
+            }
+        }
+    }
+    c.max_power = rounded(c.max_power, 4);
+    c.max_asymmetry = rounded(c.max_asymmetry, 4);
+    c
 }
 
 /// The port count from a file name's extension (`.s2p` → 2, `.S4P` → 4).
@@ -475,6 +559,7 @@ pub fn parse(text: &str, ports: Option<usize>) -> Result<Touchstone, Error> {
         data,
         noise,
         warnings,
+        comments: Vec::new(),
     })
 }
 
@@ -569,6 +654,9 @@ impl Touchstone {
         let n = self.ports;
         let v2 = self.reference.iter().any(|r| *r != self.reference[0]);
         let mut o = String::new();
+        for c in &self.comments {
+            let _ = writeln!(o, "! {c}");
+        }
         let p = format!("{:?}", self.parameter);
         if v2 {
             o.push_str("[Version] 2.0\n");

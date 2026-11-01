@@ -1435,7 +1435,7 @@ fn report_loss_notes(ctx: &mut Context<'_>, r: &Resolved, lp: &LossParams, close
             "impedance.loss_tangent_assumed",
             format!(
                 "the dielectric loss tangent is not specified: assuming {} (nominal FR-4)",
-                crate::model::board::DEFAULT_LOSS_TANGENT
+                crate::model::board::DEFAULT_LOSS_TANGENT.decimal_in(0)
             ),
         )
         .with_hint("set it from the laminate datasheet with `board.dielectric --loss-tangent`, or give `loss_tangent`");
@@ -1511,6 +1511,9 @@ fn result_text(o: &ImpedanceResult) -> String {
         o.geometry.er,
         o.geometry.er2.map(|e| format!("/{e}")).unwrap_or_default()
     );
+    if let Some(g) = o.geometry.coplanar_gap {
+        s += &format!("  [coplanar grounds at {g}]");
+    }
     if o.method == Solver::FieldSolver {
         s += "  [field solver]";
     }
@@ -1902,7 +1905,7 @@ impl Command for Solve {
     fn summarize(o: &Solved) -> String {
         let mut s = format!("{} -> width {}\n{}", o.target, o.result.width, result_text(&o.result));
         if let Some(c) = &o.netclass {
-            s += &format!("\nnet class `{c}` updated");
+            s += &format!("\nnet class `{c}` updated (assign nets with `net.set <nets> --class {c}`)");
         }
         s
     }
@@ -1953,6 +1956,22 @@ pub struct NetLoss {
     /// Huray surface ratio (N·4πa²/A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub huray_ratio: Option<Quantity>,
+    /// Solder mask thickness over the laminate on outer layers, as in `impedance.calc` (selects
+    /// the field solver; inner layers ignore it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Nm>,
+    /// Solder mask thickness over the copper (default: `mask`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_copper: Option<Nm>,
+    /// Solder mask relative permittivity (default 3.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_er: Option<Quantity>,
+    /// Solder mask loss tangent (default 0.025).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_loss_tangent: Option<Quantity>,
+    /// Trapezoidal etch: the top edge inset by this much on each side (selects the field solver).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etch: Option<Nm>,
 }
 
 /// Tracks of a net on one layer at one width.
@@ -2037,7 +2056,18 @@ impl Command for NetLoss {
         let mut total = vec![0.0; lp.freqs.len()];
         let mut length = 0.0;
         let mut noted: Vec<String> = Vec::new();
+        // The solder mask covers outer layers only: a stripline has none.
+        let outer = |p: &crate::model::Project, layer: &str| {
+            let names = p.board().stackup.copper_names();
+            names.first().is_some_and(|n| n == layer) || names.last().is_some_and(|n| n == layer)
+        };
         for ((layer, width), len_nm) in by {
+            let on_outer = outer(ctx.project()?, &layer);
+            let method = if self.method.is_none() && (self.mask.is_some() || self.etch.is_some()) {
+                Some(Solver::FieldSolver)
+            } else {
+                self.method
+            };
             let args = GeoArgs {
                 layer: Some(layer.as_str()),
                 model: None,
@@ -2045,17 +2075,17 @@ impl Command for NetLoss {
                 height2: None,
                 copper: None,
                 er: None,
-                method: self.method,
+                method,
                 er2: None,
-                etch: None,
-                mask: None,
-                mask_copper: None,
-                mask_er: None,
+                etch: self.etch,
+                mask: self.mask.filter(|_| on_outer),
+                mask_copper: self.mask_copper.filter(|_| on_outer),
+                mask_er: self.mask_er.filter(|_| on_outer),
                 coplanar_gap: None,
                 broadside: false,
                 broadside_gap: None,
                 loss_tangent: self.loss_tangent,
-                mask_loss_tangent: None,
+                mask_loss_tangent: self.mask_loss_tangent.filter(|_| on_outer),
                 ref_freq: self.ref_freq,
             };
             let r = resolve(ctx.project()?, &args)?;
@@ -2099,7 +2129,11 @@ impl Command for NetLoss {
             .collect();
         Ok(NetLossResult {
             net,
-            method: self.method.unwrap_or(Solver::ClosedForm),
+            method: match self.method {
+                Some(m) => m,
+                None if self.mask.is_some() || self.etch.is_some() => Solver::FieldSolver,
+                None => Solver::ClosedForm,
+            },
             length: Nm(length.round() as i64),
             via_length,
             segments,

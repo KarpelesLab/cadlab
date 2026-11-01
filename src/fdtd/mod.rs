@@ -46,7 +46,8 @@ pub use engine::{
     Cancelled, Gaussian, Hooks, LumpedElement, LumpedPort, Material, Probe, Run, Settings, Simulation, Structure,
     SurfaceImpedance,
 };
-pub use parts::LumpedPart;
+pub(crate) use parts::in_region as parts_in_region;
+pub use parts::{LumpedPart, Overrides};
 
 use crate::electrical::dispersion::Dielectric as Dispersive;
 
@@ -61,6 +62,8 @@ pub struct Options {
     pub courant: f64,
     /// Model the region's two-pin resistors, capacitors and inductors as lumped elements.
     pub parts: bool,
+    /// Part values replacing the design's in this simulation only.
+    pub overrides: Overrides,
 }
 
 impl Default for Options {
@@ -75,6 +78,7 @@ impl Default for Options {
             max_cells: 4_000_000,
             courant: 0.95,
             parts: true,
+            overrides: Overrides::new(),
         }
     }
 }
@@ -423,8 +427,41 @@ fn frequencies(o: &openems::Options) -> Vec<f64> {
     (0..n).map(|i| start + (stop - start) * i as f64 / (n - 1) as f64).collect()
 }
 
-/// Simulates the region and returns its S-parameters.
-pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, Error> {
+/// A simulation set up but not run: what `sim.sparams --plan` reports.
+#[derive(Clone, Debug)]
+pub struct Plan {
+    /// Ports.
+    pub ports: Vec<PortInfo>,
+    /// Mesh summary.
+    pub mesh: MeshInfo,
+    /// The board region (x, y).
+    pub window: (Point, Point),
+    /// Domain bottom and top (z, with the air).
+    pub z_range: (Nm, Nm),
+    /// Nets with copper in the region.
+    pub nets: Vec<String>,
+    /// Gaussian pulse center and 20 dB half-bandwidth (Hz).
+    pub excitation: (u64, u64),
+    /// Timestep (s).
+    pub timestep: f64,
+    /// Timesteps of the excitation pulse alone: the least a run can take.
+    pub pulse_steps: u64,
+    /// Board parts that would be lumped elements.
+    pub parts: Vec<LumpedPart>,
+    /// Warnings and notes.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// A region extracted, voxelized and checked, ready to run.
+struct Prepared {
+    region: Region,
+    built: Built,
+    freqs: Vec<f64>,
+    band: (f64, f64),
+    diags: Vec<Diagnostic>,
+}
+
+fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
     // The microstrip ports feed and measure on mesh lines.
     let region = openems::Options { port_planes: true, ..o.region.clone() };
     let r = openems::extract(p, &region)?;
@@ -446,8 +483,122 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
     let freqs = frequencies(&o.region);
     let band = (freqs[0], *freqs.last().unwrap_or(&freqs[0]));
     let mut diags = r.diagnostics.clone();
-    let candidates = if o.parts { parts::candidates(p, r.window, &mut diags) } else { Vec::new() };
+    for refdes in o.overrides.keys() {
+        if !p.circuit().components.contains_key(refdes) {
+            let names: Vec<&str> = p.circuit().components.keys().map(String::as_str).collect();
+            let mut e = Error::new(
+                "sim.unknown_part",
+                format!("`part_values` names `{refdes}`, which is not in the circuit"),
+                "use a designator of a two-pin part in the region",
+            );
+            e.suggestions = crate::suggest::did_you_mean(refdes, names.iter().copied(), 3);
+            return Err(e);
+        }
+    }
+    let candidates = if o.parts {
+        parts::candidates(p, r.window, r.kept_signals.as_ref(), &o.overrides, &mut diags)
+    } else {
+        Vec::new()
+    };
     let b = build(&r, band, candidates, &mut diags)?;
+    notes(p, o, &r, &b, &mut diags);
+    Ok(Prepared { region: r, built: b, freqs, band, diags })
+}
+
+/// What a designer should know before reading the result: which part values were ideal, what a
+/// port stands in for, parts in the absorbing layer, overrides that did nothing.
+fn notes(p: &Project, o: &Options, r: &Region, b: &Built, diags: &mut Vec<Diagnostic>) {
+    for refdes in o.overrides.keys() {
+        if !b.parts.iter().any(|q| q.refdes == *refdes) {
+            diags.push(
+                Diagnostic::warning(
+                    "sim.override_unused",
+                    format!("`part_values` for {refdes} has no effect: it is not a lumped element in this region"),
+                )
+                .with_subject(ObjectRef::Name(refdes.clone()))
+                .with_hint("check the region (`around`, `margin`, `only_selected`) and the `parts` list of the result"),
+            );
+        }
+    }
+    let ideal = parts::ideal(&b.parts);
+    if !ideal.is_empty() {
+        diags.push(
+            Diagnostic::info(
+                "sim.parts_ideal",
+                format!(
+                    "ideal parts (nominal value only, no ESL, Q or self-resonance): {}; the result is the layout with \
+                     ideal parts, not with the parts you will buy",
+                    ideal.join(", ")
+                ),
+            )
+            .with_hint("set `esr` and `esl` from the part's datasheet with `part.set`, or try them with `part_values`"),
+        );
+    }
+    for port in &r.ports {
+        let Some((refdes, _)) = port.info.at.split_once('.') else { continue };
+        if p.circuit().components.contains_key(refdes) {
+            diags.push(
+                Diagnostic::info(
+                    "sim.port_replaces_part",
+                    format!(
+                        "port {} at {} loads the bare pad with {}: {refdes} itself is not simulated, so the result \
+                         is the board network between these terminations, not {refdes}'s real impedance",
+                        port.info.number, port.info.at, port.info.z0
+                    ),
+                )
+                .with_subject(ObjectRef::Name(refdes.to_string()))
+                .with_hint("to judge a match, compare with the impedance the part's datasheet asks for"),
+            );
+        }
+    }
+    let n = o.region.pml_cells as usize;
+    let lines = &r.lines;
+    let pads = crate::board::placed_pads(p);
+    let in_pml: Vec<&str> = b
+        .parts
+        .iter()
+        .filter(|q| {
+            let at = |ls: &[i64], v: i64| ls.len() > 2 * n && (v < ls[n] || v > ls[ls.len() - 1 - n]);
+            pads.iter()
+                .filter(|pad| pad.refdes == q.refdes)
+                .any(|pad| at(&lines[0], pad.center.x.0) || at(&lines[1], pad.center.y.0))
+        })
+        .map(|q| q.refdes.as_str())
+        .collect();
+    if !in_pml.is_empty() {
+        diags.push(
+            Diagnostic::warning(
+                "sim.part_in_pml",
+                format!("inside the {n}-cell absorbing layer, so the result does not hold them: {}", in_pml.join(", ")),
+            )
+            .with_hint("grow `margin`, or thin the layer with a smaller `max_cell`"),
+        );
+    }
+}
+
+/// Sets the simulation up and checks it, without running it.
+pub fn plan(p: &Project, o: &Options) -> Result<Plan, Error> {
+    let Prepared { region: r, built: b, diags, .. } = prepare(p, o)?;
+    let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
+    let timestep = r.mesh.timestep * o.courant;
+    let window = r.window;
+    Ok(Plan {
+        ports: r.ports.into_iter().map(|p| p.info).collect(),
+        mesh: r.mesh,
+        window: (Point::new(Nm(window.min.x), Nm(window.min.y)), Point::new(Nm(window.max.x), Nm(window.max.y))),
+        z_range: (Nm(r.z_range.0), Nm(r.z_range.1)),
+        nets: r.nets,
+        excitation: (r.f0, r.fc),
+        timestep,
+        pulse_steps: (excitation.end() / timestep).ceil() as u64,
+        parts: b.parts,
+        diagnostics: diags,
+    })
+}
+
+/// Simulates the region and returns its S-parameters.
+pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, Error> {
+    let Prepared { region: r, built: b, freqs, band, mut diags } = prepare(p, o)?;
     let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
     let pml = o.region.pml_cells as usize;
     let settings = Settings {
@@ -482,7 +633,23 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
                 "lower `courant`; report the case if it persists",
             ));
         }
-        if !run.converged {
+        let pulse_steps = (excitation.end() / sim.dt()).ceil() as u64;
+        if !run.converged && run.steps < pulse_steps {
+            diags.push(
+                Diagnostic::warning(
+                    "sim.stopped_in_pulse",
+                    format!(
+                        "port {}: stopped after {} timesteps, inside the excitation pulse ({pulse_steps} timesteps): \
+                         the S-parameters mean nothing",
+                        j + 1,
+                        run.steps
+                    ),
+                )
+                .with_hint(format!(
+                    "raise `timesteps` well above {pulse_steps}; to see the mesh and ports without running, use `plan`"
+                )),
+            );
+        } else if !run.converged {
             diags.push(
                 Diagnostic::warning(
                     "sim.not_converged",
@@ -535,6 +702,7 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
         data,
         noise: Vec::new(),
         warnings: Vec::new(),
+        comments: Vec::new(),
     };
     let window = r.window;
     Ok(SParams {

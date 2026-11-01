@@ -65,7 +65,16 @@ pub fn merge(mut lines: Vec<Fixed>, lo: i64, hi: i64, min: i64) -> Vec<i64> {
     let hard: Vec<i64> = lines.iter().filter(|f| f.hard).map(|f| f.at).collect();
     out.retain(|&x| hard.binary_search(&x).is_ok() || hard.iter().all(|&h| (h - x).abs() >= min));
     out.dedup();
-    out
+    // Clusters are at least `min` apart at their starts, but the line a cluster keeps (its middle
+    // one) can end up right next to the next cluster's: a sliver cell that sets the timestep of
+    // the whole run. A soft line that close to the line before it goes.
+    let mut spaced: Vec<i64> = Vec::with_capacity(out.len());
+    for x in out {
+        if hard.binary_search(&x).is_ok() || spaced.last().is_none_or(|&l| x - l >= min) {
+            spaced.push(x);
+        }
+    }
+    spaced
 }
 
 /// Cell sizes (floats, summing to `len`) filling a gap of `len` between two fixed lines whose
@@ -184,6 +193,16 @@ mod tests {
         assert_eq!(merge(lines, 0, 1000, 20), vec![0, 100, 105, 1000]);
         // Out of range lines are dropped.
         assert_eq!(merge(vec![Fixed::soft(-5), Fixed::soft(2000)], 0, 1000, 20), vec![0, 1000]);
+    }
+
+    #[test]
+    fn merged_clusters_do_not_leave_slivers() {
+        // Cluster {100, 118} keeps 118; 121 starts the next cluster, 3 away: a sliver that used to
+        // stay (agent session 6: 5 µm cells in a 58 µm minimum, a timestep four times too small).
+        let lines = vec![Fixed::soft(100), Fixed::soft(118), Fixed::soft(121), Fixed::soft(500)];
+        let out = merge(lines, 0, 1000, 20);
+        assert_eq!(out, vec![0, 118, 500, 1000]);
+        assert!(out.windows(2).all(|w| w[1] - w[0] >= 20), "{out:?}");
     }
 
     #[test]

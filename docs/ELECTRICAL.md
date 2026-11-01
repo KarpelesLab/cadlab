@@ -246,7 +246,9 @@ of interest, or the reference frequency).
 **`net.loss`** gives the insertion loss of a routed net: its tracks grouped by layer and width (lengths along
 arcs, as in `diffpair`/length matching), each group's single-ended attenuation at its layer's stackup geometry
 (closed forms, or `method: field_solver`), times its length, summed per frequency. Vias, pads, reflections and
-coupling to other nets are not included (the via length is reported separately).
+coupling to other nets are not included (the via length is reported separately). `mask`, `mask_copper`,
+`mask_er`, `mask_loss_tangent` and `etch` mean what they mean in `impedance.calc` (they select the field solver;
+the mask applies to outer layers only), so the line whose width was solved with a mask is measured with it.
 
 **Speed** (release): closed forms instant; a field-solver single line about 10 ms with losses, a masked pair
 with coplanar grounds on 1.5 mm FR-4 about 0.7 s (pair and single line: the vacuum solve for the currents and
@@ -389,7 +391,8 @@ openEMS's microstrip port measures a zero-thickness strip: with `copper: solid` 
 copper is warned (`openems.msl_solid_copper`: export with `copper: sheet`, or use lumped ports). The
 built-in solver measures both.
 
-**Not modeled in the export:** silkscreen, the mask's own margin around pads (openings are the pad copper),
+**Not modeled in the export:** two-pin parts (their pads stay open, warned as `openems.parts_not_modeled`: a
+matching network needs lumped elements added to the driver, which `sim.sparams` has), silkscreen, the mask's own margin around pads (openings are the pad copper),
 roughness beyond f₀ (folded into the sheets' conductivity there), conductor loss in via barrels (perfect
 cylinders), components (pads are bare copper: add lumped elements in the driver if needed). The golden file
 `tests/golden/openems/via.{xml,py}` (a 4-layer via transition) pins the format. The openEMS oracle
@@ -535,9 +538,44 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   compute their fields from H in chunks, then each face sums its loops' corrections in a fixed order.
 
 **Guards.** `max_cells` (default 4 million cells, `sim.too_many_cells` with what to shrink); `timesteps` per
-run. The cost is cells × timesteps × ports; a release build updates about 80 million cells per second per
-thread (the timestep follows the smallest cell: a 35 µm copper layer in `solid` copper forces small steps;
-`copper: sheet` avoids it). Errors: the export's (`openems.*`), `sim.no_ports`, `sim.port_too_thin` (a lumped
+run. The cost is cells × timesteps × ports; a release build updates about 80 million plain cells per second per
+thread, and about 50 million with Debye dielectrics and the surface impedance (a 154 000-cell run in session 6: 91 s;
+the same run took 569 s with the machine at a load of 100) (the timestep follows the smallest cell: a 35 µm copper layer in `solid`
+copper forces small steps; `copper: sheet` avoids it). The mesh keeps `min_cell` between metal lines: clusters of
+lines merge to one each, and a line that lands closer than `min_cell` to the line before it goes (before D70 two
+neighbouring clusters could leave a 5 µm sliver in a 58 µm minimum, and that one cell set the timestep).
+
+**Plan first.** `plan: true` sets the run up and reports without running it (nothing is written; quick): the mesh
+(line counts, smallest cells per axis), ports, the parts that become lumped elements, every warning below, and
+`estimate`: runs, timesteps of the pulse alone, a rough count for a low-Q structure (1.5 pulses; a resonant one
+rings longer, up to `timesteps`), cell updates, and minutes on one thread at a nominal 50 million cells per second.
+`sim.sparams` is a query and an MCP call blocks until it ends, so this is how to find out a region is too large
+before spending the time.
+
+**Reading the result.** `frequencies` reports |S| and phase there (interpolated), `band` limits the reported best
+and worst values to the band of interest (the extremes of a 1–6 GHz run say nothing about 2.4 GHz), both checked
+before the run (`touchstone.out_of_band`). Reflections add the impedance looking into the port, VSWR, return loss
+and mismatch loss; transmissions at a requested frequency add `available_loss_db`, −10 log₁₀(|S₂₁|² / (1 − |S₁₁|²)):
+what the network dissipates or radiates, with the reflection taken out (|S₂₁| between two 50 Ω terminations mixes
+them). `checks` gives the largest Σᵢ|Sᵢⱼ|² and |Sᵢⱼ − Sⱼᵢ| over the band, with warnings above 1.02
+(`sim.not_passive`) and 0.03 (`sim.not_reciprocal`). The Touchstone file starts with comment lines naming the
+region, ports and part values, so it explains itself away from the project.
+
+**Part values per simulation.** `part_values` (`{"C3": {"capacitance": "1pF"}, "L1": {"esr": "0.3ohm"}}`) replaces
+values for one run without changing the design, to try a matching network; designators must exist
+(`sim.unknown_part`), keys are `resistance`, `capacitance`, `inductance`, `esr`, `esl` (`sim.bad_part_value`), and an
+override on a part that is not an element in this region warns (`sim.override_unused`).
+
+**What the result is not.** Notes say it before the run: `sim.parts_ideal` lists the inductors and capacitors with
+nominal values only (no ESL, Q or self-resonance from a datasheet); `sim.port_replaces_part` for each port on a
+component pad: the part is not simulated, the port's `z0` loads the bare pad, so the S-parameters describe the board
+network between these terminations. A chip's real output impedance, a connector's body and a mated cable are not in
+the model; to judge a match, compare with the impedance the part's datasheet asks for. `sim.part_in_pml` warns of
+lumped parts inside the absorbing layer; `openems.port_in_pml` says how much more `margin` the port needs. With
+`only_selected`, parts on none of the kept signal nets are not part of the simulation: a single note
+(`sim.parts_outside_selection`) instead of a warning each.
+
+A run stopped inside the excitation pulse warns `sim.stopped_in_pulse` (its numbers mean nothing). Errors: the export's (`openems.*`), `sim.no_ports`, `sim.port_too_thin` (a lumped
 port spanning no cell), `sim.port_too_short` (a microstrip port whose feed and reference plane share a mesh
 line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
 
@@ -604,7 +642,10 @@ formats. Mixed-mode data is refused. Y and Z convert to S with the reference imp
 nine ports; default all of up to four ports), the magnitude in dB, the magnitude and the phase at the
 requested `frequencies` (linear interpolation of real and imaginary parts between points) and the band's
 smallest and largest magnitudes with their frequencies: the loop an agent closes after a simulation (worst
-return loss = largest |S11|, worst insertion loss = smallest |S21|). The port count of a version 1 file comes
+return loss = largest |S11|, worst insertion loss = smallest |S21|). `band` narrows the extremes to two
+frequencies. Reflections add `reflection` (impedance looking into the port, VSWR, return loss, mismatch loss) and
+transmissions at a requested frequency `available_loss_db`; `checks` reports passivity and reciprocity, with
+`touchstone.not_passive` and `touchstone.not_reciprocal` warnings. The port count of a version 1 file comes
 from its extension (`.s2p`), else `ports`. Errors: `touchstone.syntax`, `touchstone.truncated`,
 `touchstone.count_mismatch`, `touchstone.no_ports`, `touchstone.bad_param`, `touchstone.out_of_band`, ...
 

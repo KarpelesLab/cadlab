@@ -153,9 +153,50 @@ pub struct LockProcess {
     /// boards with it (impedance control).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stackup: Option<String>,
+    /// Controlled impedance lines to order: what the fab has to hit on which layer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub impedance: Vec<ImpedanceLine>,
     /// Finish and colors.
     #[serde(flatten)]
     pub choices: Choices,
+}
+
+/// Tracks with an impedance target, per net class, layer and width.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImpedanceLine {
+    /// Net class holding the target.
+    pub class: String,
+    /// Target impedance.
+    pub target: crate::value::Quantity,
+    /// Copper layer.
+    pub layer: String,
+    /// Track width.
+    pub width: Nm,
+    /// Nets with these tracks.
+    pub nets: Vec<String>,
+}
+
+/// The routed tracks of nets whose class has an impedance target, for the fab order.
+pub fn impedance_lines(p: &crate::model::Project) -> Vec<ImpedanceLine> {
+    let c = p.circuit();
+    let mut by: std::collections::BTreeMap<(String, String, Nm), Vec<String>> = std::collections::BTreeMap::new();
+    for t in &p.board().tracks {
+        let Some(net) = t.net.as_ref() else { continue };
+        let Some(class) = c.nets.get(net).and_then(|n| n.class.as_ref()) else { continue };
+        if c.netclasses.get(class).is_some_and(|k| k.impedance.is_some()) {
+            let nets = by.entry((class.clone(), t.layer.clone(), t.width)).or_default();
+            if !nets.contains(net) {
+                nets.push(net.clone());
+            }
+        }
+    }
+    by.into_iter()
+        .filter_map(|((class, layer, width), mut nets)| {
+            nets.sort();
+            let target = c.netclasses.get(&class)?.impedance?;
+            Some(ImpedanceLine { class, target, layer, width, nets })
+        })
+        .collect()
 }
 
 /// A file in the lock.
@@ -479,6 +520,7 @@ pub fn bundle(p: &Project, input: &BundleInput<'_>) -> std::io::Result<(Vec<Bund
             outer_copper: s.outer_copper,
             inner_copper: (s.copper_layers > 2).then_some(s.inner_copper),
             stackup: input.process.matching_stackup(s).map(|st| st.id.clone()),
+            impedance: impedance_lines(p),
             choices: input.choices.clone(),
         }),
         files: fab

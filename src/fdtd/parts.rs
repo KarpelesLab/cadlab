@@ -12,6 +12,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::board::{self, PlacedPad};
 use crate::diag::Diagnostic;
 use crate::geom::poly::Rect;
@@ -50,8 +52,22 @@ pub(crate) struct Candidate {
     c: Option<f64>,
 }
 
-/// A parameter: the component's property, else the part's parameter.
-fn param(p: &Project, refdes: &str, params: &crate::model::part::Params, key: &str) -> Option<Quantity> {
+/// Values replacing a component's for one simulation: designator → `resistance`, `capacitance`,
+/// `inductance`, `esr` or `esl` → value.
+pub type Overrides = BTreeMap<String, BTreeMap<String, Quantity>>;
+
+/// A parameter: this simulation's override, else the component's property, else the part's
+/// parameter.
+fn param(
+    p: &Project,
+    overrides: &Overrides,
+    refdes: &str,
+    params: &crate::model::part::Params,
+    key: &str,
+) -> Option<Quantity> {
+    if let Some(v) = overrides.get(refdes).and_then(|m| m.get(key)) {
+        return Some(*v);
+    }
     let prop = p.circuit().components.get(refdes).and_then(|c| c.properties.get(key));
     if let Some(v) = prop.and_then(|v| ParamValue::parse(key, v).ok()) {
         return v.quantity().copied();
@@ -66,11 +82,19 @@ fn skipped(refdes: &str, why: String, hint: &str) -> Diagnostic {
 }
 
 /// The two-pin resistors, capacitors and inductors with a pad in `window`, with their values;
-/// warnings for those that cannot be modeled.
-pub(crate) fn candidates(p: &Project, window: Rect, diags: &mut Vec<Diagnostic>) -> Vec<Candidate> {
+/// warnings for those that cannot be modeled. `kept`: with `only_selected`, the signal nets in the
+/// model; a part on none of them is not part of this simulation (a note, not a warning).
+pub(crate) fn candidates(
+    p: &Project,
+    window: Rect,
+    kept: Option<&BTreeSet<String>>,
+    overrides: &Overrides,
+    diags: &mut Vec<Diagnostic>,
+) -> Vec<Candidate> {
     let pads = board::placed_pads(p);
     let lib = p.library();
     let mut out = Vec::new();
+    let mut outside_selection: Vec<String> = Vec::new();
     for (refdes, comp) in &p.circuit().components {
         let Some(part) = lib.parts.get(&comp.part) else { continue };
         let main = match part.category {
@@ -82,6 +106,12 @@ pub(crate) fn candidates(p: &Project, window: Rect, diags: &mut Vec<Diagnostic>)
         let mine: Vec<&PlacedPad> = pads.iter().filter(|q| q.refdes == *refdes).collect();
         let inside = mine.iter().filter(|q| window.contains_point(super::pt(q.center.x.0, q.center.y.0))).count();
         if inside == 0 {
+            continue;
+        }
+        if let Some(kept) = kept
+            && !mine.iter().any(|q| q.net.as_ref().is_some_and(|n| kept.contains(n)))
+        {
+            outside_selection.push(refdes.clone());
             continue;
         }
         if p.bom().dnp.contains(refdes) {
@@ -107,7 +137,7 @@ pub(crate) fn candidates(p: &Project, window: Rect, diags: &mut Vec<Diagnostic>)
             ));
             continue;
         }
-        let get = |k: &str| param(p, refdes, &part.params, k);
+        let get = |k: &str| param(p, overrides, refdes, &part.params, k);
         let Some(value) = get(main) else {
             diags.push(skipped(
                 refdes,
@@ -150,7 +180,32 @@ pub(crate) fn candidates(p: &Project, window: Rect, diags: &mut Vec<Diagnostic>)
             c: cv,
         });
     }
+    if !outside_selection.is_empty() {
+        diags.push(Diagnostic::info(
+            "sim.parts_outside_selection",
+            format!("not simulated, on none of the selected nets (`only_selected`): {}", outside_selection.join(", ")),
+        ));
+    }
     out
+}
+
+/// Two-pin parts in `window` that a model of these nets should hold (as [`candidates`], without
+/// its diagnostics): for an export whose model has no lumped elements.
+pub(crate) fn in_region(p: &Project, window: Rect, kept: Option<&BTreeSet<String>>) -> Vec<LumpedPart> {
+    let mut ignored = Vec::new();
+    candidates(p, window, kept, &Overrides::new(), &mut ignored).into_iter().map(|c| c.info).collect()
+}
+
+/// The modeled inductors and capacitors with nothing but their nominal value, for a note: at RF
+/// the parasitics a datasheet gives (ESL, Q, self-resonance) move the result.
+pub(crate) fn ideal(parts: &[LumpedPart]) -> Vec<String> {
+    parts
+        .iter()
+        .filter(|q| {
+            (q.capacitance.is_some() && q.inductance.is_none()) || (q.inductance.is_some() && q.resistance.is_none())
+        })
+        .map(|q| q.refdes.clone())
+        .collect()
 }
 
 /// The copper layer of a pad (an SMD pad's own, a through-hole pad's footprint side).

@@ -317,6 +317,10 @@ neither fab publishes a table, so they are user data (see D21).
 | `fab.export {fab, dir?, process?, boards?, force?}` | runs the check (refuses on errors unless `force`), then writes to `out/fab/<fab>/`: the fabrication files named by the profile, the zip archive of them (flat, deflated, fixed timestamps: byte-identical across runs), BOM and CPL in the fab's layouts with rotation offsets applied, and `fab-lock.json`; substitutions in the previous lock are used and kept, substitute candidates are reported as in `fab.check` |
 | `fab.substitute {fab, part, mpn?, remove?, force?, boards?, dir?}` | applies a substitute for one BOM line at one fab: `mpn` (default the best candidate) must be one of the line's candidates (`bom.substitutes`) unless `force` (basis `manual`). Writes it to the fab's `fab-lock.json` (creating a lock without files if there was no export yet), never to the project; `remove` undoes it. The next `fab.check` / `fab.export` for that fab order the substitute; other fabs are not affected |
 
+`process.impedance` in the lock (and `impedance` in the `fab.export` result) lists the controlled lines to state on
+an order: net class, target, layer, width, nets, from the routed tracks of nets whose class has an `impedance`.
+Without a published stackup behind them the export warns `fab.impedance_without_stackup`.
+
 `fab-lock.json` records: lock version, generator, project, profile (`id`, `name`, `verified_at`, `source`),
 process (`id`, layers, thickness, copper, the published `stackup` the board matches exactly when there is
 one — order with it —, chosen finish/colors), every file written with its SHA-256 and size

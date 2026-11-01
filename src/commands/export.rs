@@ -1423,6 +1423,30 @@ impl Command for OpenEms {
         for d in mask_notes.into_iter().chain(x.diagnostics) {
             ctx.report(d);
         }
+        // The export has no lumped elements: a matching network's pads stay open, where
+        // `sim.sparams` on the same region simulates its parts.
+        let window = crate::geom::poly::Rect::new(
+            crate::geom::poly::Point::new(x.window.0.x.0, x.window.0.y.0),
+            crate::geom::poly::Point::new(x.window.1.x.0, x.window.1.y.0),
+        );
+        let open = crate::fdtd::parts_in_region(ctx.project()?, window, x.kept_signals.as_ref());
+        if !open.is_empty() {
+            let names: Vec<&str> = open.iter().map(|q| q.refdes.as_str()).collect();
+            ctx.report(
+                Diagnostic::warning(
+                    "openems.parts_not_modeled",
+                    format!(
+                        "two-pin parts in the region are not exported, their pads stay open: {} (`sim.sparams` on \
+                         the same region simulates them, so the two results differ)",
+                        names.join(", ")
+                    ),
+                )
+                .with_hint(
+                    "add them to the driver as lumped elements (openEMS's `AddLumpedElement`), or read this export \
+                     as the bare layout",
+                ),
+            );
+        }
         let hz = |v: u64| Quantity::int(v as i64, Unit::Hertz);
         Ok(OpenEmsExported {
             run: format!("python3 {}", dir.join(format!("{name}.py")).display()),

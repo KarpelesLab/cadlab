@@ -1571,6 +1571,48 @@ re-plan existed but never got time; and the budget went to rerouting a net whose
 Each change is checked against the generated-board baseline (identical) and the corpus (ROUTER.md; CI's 30 s runs
 vary by more than the change, so the local 60 s runs and a four-seed check decide).
 
+### D70. Agent session 6: the electrical tools on a 2.4 GHz node: `sim.sparams --plan`, part values per run, results at the frequency of interest, mesh slivers, what a port and an ideal part mean (2026-11-01)
+Session 6 (docs/TESTING.md) designed a 2.4 GHz sensor node through the MCP server (nRF52832 QFN48 with Nordic's
+reference network, TPS62205 buck, BME280, U.FL on a 50 Ω microstrip, JLC04161H-7628) and used the electrical tools
+end to end, which no session had. What it changed:
+**Mesh.** `mesh::merge` kept lines closer than `min_cell`: a cluster's kept line (its middle one) could land next to
+the next cluster's. A 5 µm sliver in a 58 µm minimum set the timestep of the whole run, a factor of three or four.
+A soft line that close to the line before it now goes. Golden openEMS files are unchanged.
+**`sim.sparams --plan`.** The command is a query and an MCP call blocks until it ends; a first attempt ran past
+280 s with nothing to look at, and the only preview was `timesteps: 5`, which read "energy decayed to -inf dB". `plan`
+extracts, voxelizes and checks, reports mesh, ports, parts and warnings with a cost `estimate`, and writes nothing.
+The estimate keeps out of the deterministic output anything measured on this machine: it is timesteps and cell
+updates, plus minutes at a fixed nominal rate. A run stopped inside the pulse says so (`sim.stopped_in_pulse`).
+**Reading a result.** `frequencies` and `band` on `sim.sparams` and `band` on `touchstone.summary`: the extremes of a
+1–6 GHz run say nothing about 2.4 GHz, and asking for a second command for the value at the frequency of interest was
+a needless step. Reflections carry impedance, VSWR, return loss and mismatch loss; transmissions
+`available_loss_db`, since |S21| between 50 Ω terminations mixes mismatch with dissipation and a designer cannot
+separate them by eye. `checks` (passivity, reciprocity) with warnings say how far to trust a run. Numbers print as
+GHz and ps, not `1000000000 Hz` and `0.00000000000001667 s`. The Touchstone header names region, ports and part values.
+**Trying values.** `part_values` overrides part values for one run and leaves the design alone: tuning a network
+otherwise meant a new part and `bom.replace` per value, or `part.set` on a part other designators share. Not a
+component property edit, because a trial should not become design data.
+**Saying what the result is not.** Notes rather than documentation, since an agent reads them at the moment it would
+misread the number: `sim.parts_ideal` (nominal values only), `sim.port_replaces_part` (a port on a chip pin is a
+termination, not the chip). No cadlab output may read as RF performance: the board network between 50 Ω ports is not
+the radio's match, and the nRF52832 specification publishes no load impedance to compare with. Parts on none of the
+kept nets are one note instead of a warning each: six false warnings hid the two useful ones.
+**Export.** `export.openems` warns `openems.parts_not_modeled`: the export silently left a matching network's pads
+open, a result that would disagree with `sim.sparams` for no visible reason. Writing lumped elements into the driver
+is left to the openEMS work. `openems.port_in_pml` says how much margin is missing and how thick the layer is.
+**Smaller:** `net.loss` takes the mask and etch options of `impedance.calc`, so a line solved with a mask is measured
+with it; `process.impedance` in `fab-lock.json` lists controlled lines for the order (`fab.impedance_without_stackup`
+without a published stackup); capacitors print in pF below 1 pF (`0.8pF`, not `800fF`, also in part IDs and BOMs);
+the assumed loss tangent prints `0.02`, not `20m`; a coplanar solve says so in its summary; `impedance.solve --netclass`
+says how to assign nets.
+Deferred: keep-outs have no net exception (the feed needs two rectangles, one each side); no lumped elements in the
+openEMS export; passives have no self-resonance model; `describe` ignores an unknown argument and lists everything
+(`name` for `command`). Thread count needs no new option: `RAYON_NUM_THREADS` caps the solver, and an idle server
+uses no CPU (a server shows one idle thread per core after its first parallel call).
+*Why:* the electrical side had been tested as solvers against references, not as a sequence a designer follows; every
+fix above is a place where the number was right and the designer still could not get it, read it, or know what it
+meant.
+
 ## Open questions
 
 

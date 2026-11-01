@@ -1,0 +1,247 @@
+[
+{
+"number": "1",
+"name": "DEC1",
+"kind": "passive"
+},
+{
+"number": "2",
+"name": "P0.00",
+"kind": "bidirectional"
+},
+{
+"number": "3",
+"name": "P0.01",
+"kind": "bidirectional"
+},
+{
+"number": "4",
+"name": "P0.02",
+"kind": "bidirectional"
+},
+{
+"number": "5",
+"name": "P0.03",
+"kind": "bidirectional"
+},
+{
+"number": "6",
+"name": "P0.04",
+"kind": "bidirectional"
+},
+{
+"number": "7",
+"name": "P0.05",
+"kind": "bidirectional"
+},
+{
+"number": "8",
+"name": "P0.06",
+"kind": "bidirectional"
+},
+{
+"number": "9",
+"name": "P0.07",
+"kind": "bidirectional"
+},
+{
+"number": "10",
+"name": "P0.08",
+"kind": "bidirectional"
+},
+{
+"number": "11",
+"name": "P0.09",
+"kind": "bidirectional"
+},
+{
+"number": "12",
+"name": "P0.10",
+"kind": "bidirectional"
+},
+{
+"number": "13",
+"name": "VDD",
+"kind": "power_in"
+},
+{
+"number": "14",
+"name": "P0.11",
+"kind": "bidirectional"
+},
+{
+"number": "15",
+"name": "P0.12",
+"kind": "bidirectional"
+},
+{
+"number": "16",
+"name": "P0.13",
+"kind": "bidirectional"
+},
+{
+"number": "17",
+"name": "P0.14",
+"kind": "bidirectional"
+},
+{
+"number": "18",
+"name": "P0.15",
+"kind": "bidirectional"
+},
+{
+"number": "19",
+"name": "P0.16",
+"kind": "bidirectional"
+},
+{
+"number": "20",
+"name": "P0.17",
+"kind": "bidirectional"
+},
+{
+"number": "21",
+"name": "P0.18",
+"kind": "bidirectional"
+},
+{
+"number": "22",
+"name": "P0.19",
+"kind": "bidirectional"
+},
+{
+"number": "23",
+"name": "P0.20",
+"kind": "bidirectional"
+},
+{
+"number": "24",
+"name": "P0.21",
+"kind": "bidirectional"
+},
+{
+"number": "25",
+"name": "SWDCLK",
+"kind": "input"
+},
+{
+"number": "26",
+"name": "SWDIO",
+"kind": "bidirectional"
+},
+{
+"number": "27",
+"name": "P0.22",
+"kind": "bidirectional"
+},
+{
+"number": "28",
+"name": "P0.23",
+"kind": "bidirectional"
+},
+{
+"number": "29",
+"name": "P0.24",
+"kind": "bidirectional"
+},
+{
+"number": "30",
+"name": "ANT",
+"kind": "passive"
+},
+{
+"number": "31",
+"name": "VSS",
+"kind": "power_in"
+},
+{
+"number": "32",
+"name": "DEC2",
+"kind": "passive"
+},
+{
+"number": "33",
+"name": "DEC3",
+"kind": "passive"
+},
+{
+"number": "34",
+"name": "XC1",
+"kind": "passive"
+},
+{
+"number": "35",
+"name": "XC2",
+"kind": "passive"
+},
+{
+"number": "36",
+"name": "VDD",
+"kind": "power_in"
+},
+{
+"number": "37",
+"name": "P0.25",
+"kind": "bidirectional"
+},
+{
+"number": "38",
+"name": "P0.26",
+"kind": "bidirectional"
+},
+{
+"number": "39",
+"name": "P0.27",
+"kind": "bidirectional"
+},
+{
+"number": "40",
+"name": "P0.28",
+"kind": "bidirectional"
+},
+{
+"number": "41",
+"name": "P0.29",
+"kind": "bidirectional"
+},
+{
+"number": "42",
+"name": "P0.30",
+"kind": "bidirectional"
+},
+{
+"number": "43",
+"name": "P0.31",
+"kind": "bidirectional"
+},
+{
+"number": "44",
+"name": "NC",
+"kind": "no_connect"
+},
+{
+"number": "45",
+"name": "VSS",
+"kind": "power_in"
+},
+{
+"number": "46",
+"name": "DEC4",
+"kind": "passive"
+},
+{
+"number": "47",
+"name": "DCC",
+"kind": "passive"
+},
+{
+"number": "48",
+"name": "VDD",
+"kind": "power_in"
+},
+{
+"number": "49",
+"name": "VSS",
+"kind": "power_in"
+}
+]

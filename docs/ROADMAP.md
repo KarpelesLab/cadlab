@@ -329,4 +329,8 @@ Research-sized items beyond the milestones above; none blocks a release.
   instantiated twice, AGND/GND star point under split pours, analog/digital placement regions; D66), replayed by
   `tests/agent_session5.rs`; fixed: first block instance at capture, net ties in ERC/SPICE/BOM/CPL/STEP,
   `place.hint --region`, edge hints over rooms, `drc.split_crossing`, ERC filters, warnings when routed parts
-  move, SPICE subsets, named ground symbols.
+  move, SPICE subsets, named ground symbols. Session 6 done through the MCP server, on the electrical side (2.4 GHz
+  node: nRF52832, matching network, 50 Ω microstrip, U.FL; D70), replayed by `tests/agent_session6.rs`; fixed: mesh
+  slivers, `sim.sparams --plan`, `part_values`, results at a frequency and over a band with impedance, VSWR and
+  available loss, passivity and reciprocity checks, notes on ideal parts and ports on parts, `net.loss` with mask,
+  impedance lines in `fab-lock.json`; open: lumped elements in the openEMS export, net exceptions in keep-outs.

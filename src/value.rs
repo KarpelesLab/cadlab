@@ -329,7 +329,9 @@ impl Quantity {
         let digits = if self.mantissa == 0 { 1 } else { self.mantissa.unsigned_abs().ilog10() as i32 + 1 };
         let order = digits - 1 + self.exp as i32; // power of ten of the leading digit
         let eng = order.div_euclid(3) * 3;
-        let eng = eng.clamp(-15, 12);
+        // Capacitors are never quoted in femtofarads: a BOM says 0.8pF, not 800fF.
+        let floor = if self.unit == Unit::Farad { -12 } else { -15 };
+        let eng = eng.clamp(floor, 12);
         let prefix = match eng {
             -15 => "f",
             -12 => "p",

@@ -330,6 +330,8 @@ pub struct Export {
     pub nets: Vec<String>,
     /// Gaussian pulse center and 20 dB half-bandwidth (Hz).
     pub excitation: (u64, u64),
+    /// With `only_selected`: the signal nets in the model.
+    pub kept_signals: Option<BTreeSet<String>>,
     /// Warnings and notes.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -563,7 +565,7 @@ pub(crate) struct Port {
     pub(crate) meas_shift: i64,
 }
 
-fn ground_like(name: &str) -> bool {
+pub(crate) fn ground_like(name: &str) -> bool {
     crate::symbolgen::is_ground(name)
 }
 
@@ -594,6 +596,8 @@ pub(crate) struct Region {
     /// Solder mask per outer side, and its εr and tan δ.
     pub(crate) masks: Vec<MaskLayer>,
     pub(crate) mask_material: (f64, f64),
+    /// With `only_selected`: the signal nets kept (selected and ports' nets, grounds left out).
+    pub(crate) kept_signals: Option<BTreeSet<String>>,
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
@@ -657,6 +661,7 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
         mesh: r.mesh,
         nets: r.nets,
         excitation: (r.f0, r.fc),
+        kept_signals: r.kept_signals,
         diagnostics: diags,
     })
 }
@@ -931,13 +936,31 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
             let at = feed_point(port);
             let inside = |ls: &[i64], v: i64| ls.len() > 2 * n && (v < ls[n] || v > ls[ls.len() - 1 - n]);
             if inside(&xs, at[0]) || inside(&ys, at[1]) {
+                // How much more margin puts the port out of the layer, on the worst side.
+                let short = |ls: &[i64], v: i64| {
+                    if ls.len() > 2 * n { (ls[n] - v).max(v - ls[ls.len() - 1 - n]).max(0) } else { 0 }
+                };
+                let grow = short(&xs, at[0]).max(short(&ys, at[1]));
+                let thick = |ls: &[i64]| if ls.len() > n { ls[n] - ls[0] } else { 0 };
                 diags.push(
                     Diagnostic::warning(
                         "openems.port_in_pml",
-                        format!("port {} ({}) excites inside the {}-cell PML", port.info.number, port.info.at, n),
+                        format!(
+                            "port {} ({}) excites inside the {n}-cell PML, {} short of leaving it (the layer is {} / {} \
+                             thick in x / y here)",
+                            port.info.number,
+                            port.info.at,
+                            Nm(grow),
+                            Nm(thick(&xs)),
+                            Nm(thick(&ys))
+                        ),
                     )
                     .with_subject(ObjectRef::parse(&port.info.at).unwrap_or(ObjectRef::Name(port.info.at.clone())))
-                    .with_hint("grow the region (`margin`) or move the port away from the region's edge"),
+                    .with_hint(format!(
+                        "grow `margin` by at least {}, or thin the layer with a smaller `max_cell` (it sets the outer \
+                         cells) or fewer `pml_cells`",
+                        Nm(grow)
+                    )),
                 );
             }
         }
@@ -962,6 +985,9 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
         fc,
         masks,
         mask_material: o.mask.as_ref().map_or((1.0, 0.0), |m| (m.er, m.loss_tangent)),
+        kept_signals: o.only_selected.then(|| {
+            keep.iter().filter(|n| !o.ground.contains(n) && !ground_like(n)).cloned().collect::<BTreeSet<String>>()
+        }),
         diagnostics: diags,
     })
 }

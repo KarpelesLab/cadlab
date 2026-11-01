@@ -545,6 +545,9 @@ pub struct FabExported {
     pub dir: String,
     /// Files written, the lock last.
     pub files: Vec<WrittenFile>,
+    /// Controlled impedance lines to state on the order (also in `fab-lock.json`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub impedance: Vec<crate::fab::export::ImpedanceLine>,
     /// The fab's published stackup the board matches (order with impedance control).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stackup: Option<String>,
@@ -643,6 +646,23 @@ impl Command for Export {
         };
         let (files, lock) = crate::fab::export::bundle(project, &input).map_err(|e| io(Path::new(LOCK_FILE), e))?;
         let stackup = lock.process.as_ref().and_then(|q| q.stackup.clone());
+        let impedance = lock.process.as_ref().map(|q| q.impedance.clone()).unwrap_or_default();
+        if !impedance.is_empty() && stackup.is_none() {
+            ctx.report(
+                Diagnostic::warning(
+                    "fab.impedance_without_stackup",
+                    format!(
+                        "the board has controlled impedance tracks, but its stackup is not one {} publishes: the \
+                         widths were computed for layers the fab may not build",
+                        p.name
+                    ),
+                )
+                .with_hint(format!(
+                    "list the fab's stackups with `board.fab_stackup {}`, apply one and solve the widths again",
+                    p.id
+                )),
+            );
+        }
         for r in unplaced {
             ctx.report(
                 Diagnostic::warning(
@@ -669,6 +689,7 @@ impl Command for Export {
             process: process_id,
             dir: project_relative(ctx, &dir),
             files: written,
+            impedance,
             stackup,
             substitutes: parts.substitutes,
             substituted,
@@ -679,6 +700,16 @@ impl Command for Export {
         let mut s = format!("{} ({}): wrote {} file(s) to {}", o.fab, o.process, o.files.len(), o.dir);
         if let Some(st) = &o.stackup {
             s.push_str(&format!("\n  stackup: {st} (order with impedance control; recorded in fab-lock.json)"));
+        }
+        for l in &o.impedance {
+            s.push_str(&format!(
+                "\n  impedance: {} on {}, {} wide ({}: {})",
+                l.target,
+                l.layer,
+                l.width,
+                l.class,
+                l.nets.join(", ")
+            ));
         }
         // File names only, wrapped at about 100 characters: the directory is above, functions
         // are in the output.
