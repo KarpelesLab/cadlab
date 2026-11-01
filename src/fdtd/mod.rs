@@ -29,7 +29,7 @@
 pub mod conformal;
 pub mod engine;
 pub mod fit;
-mod parts;
+pub(crate) mod parts;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,6 @@ pub use engine::{
     Cancelled, Gaussian, Hooks, LumpedElement, LumpedPort, Material, Probe, Run, Settings, Simulation, Structure,
     SurfaceImpedance,
 };
-pub(crate) use parts::in_region as parts_in_region;
 pub use parts::{LumpedPart, Overrides};
 
 use crate::electrical::dispersion::Dielectric as Dispersive;

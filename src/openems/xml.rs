@@ -23,11 +23,14 @@ const PRIO_MASK: u32 = 5;
 const PRIO_MASK_CLEAR: u32 = 6;
 const PRIO_MASK_COPPER: u32 = 7;
 const PRIO_MASK_OPENING: u32 = 8;
+const PRIO_PART: u32 = 9;
 const PRIO_METAL: u32 = 10;
 const PRIO_SHEET: u32 = 11;
 const PRIO_NPTH: u32 = 20;
 
 pub(super) struct Geometry<'a> {
+    /// Board parts as lumped elements.
+    pub parts: &'a [crate::fdtd::parts::PartBox],
     pub title: &'a str,
     pub layers: &'a [Layer],
     pub diels: &'a [Diel],
@@ -309,7 +312,21 @@ pub(super) fn write(g: &Geometry<'_>) -> String {
                 }
             }
             for h in holes {
-                cylinder(&mut out, h, g.layers[h.span.1].bottom, g.layers[h.span.0].top, PRIO_METAL);
+                let (z0, z1) = (g.layers[h.span.1].bottom, g.layers[h.span.0].top);
+                cylinder(&mut out, h, z0, z1, PRIO_METAL);
+                if h.slot.is_none() {
+                    // A barrel between mesh lines holds no mesh edge, so it conducts nothing (a
+                    // via read open in openEMS, D74): its nearest node column, as the built-in
+                    // solver adds it (D59). On mesh coordinates: a line between them is dropped.
+                    let near = |ls: &[i64], v: i64| ls.iter().copied().min_by_key(|l| (l - v).abs()).unwrap_or(v);
+                    let (x, y) = (mm(near(g.lines[0], h.center.x.0)), mm(near(g.lines[1], h.center.y.0)));
+                    let _ = writeln!(
+                        out,
+                        "          <Box Priority=\"{PRIO_METAL}\">\n            <P1 X=\"{x}\" Y=\"{y}\" Z=\"{}\"/>\n            <P2 X=\"{x}\" Y=\"{y}\" Z=\"{}\"/>\n          </Box>",
+                        mm(z0),
+                        mm(z1)
+                    );
+                }
             }
             let _ = writeln!(out, "        </Primitives>");
             let _ = writeln!(out, "      </Metal>");
@@ -346,6 +363,49 @@ pub(super) fn write(g: &Geometry<'_>) -> String {
             let _ = writeln!(out, "        </Primitives>");
             let _ = writeln!(out, "      </ConductingSheet>");
         }
+    }
+    // Board parts: `LumpedElement`s (openEMS's documented property), in the gap between their pads.
+    // Only a resistance is a plain element; anything with a reactance a series one. 0 Ω is a short.
+    for b in g.parts {
+        let (lo, hi) = (b.lo, b.hi);
+        let name = unique(format!("part_{}", ident(&b.info.refdes)));
+        let geom = format!(
+            "<Box Priority=\"{PRIO_PART}\">\n            <P1 X=\"{}\" Y=\"{}\" Z=\"{}\"/>\n            <P2 X=\"{}\" Y=\"{}\" Z=\"{}\"/>\n          </Box>",
+            mm(lo[0]),
+            mm(lo[1]),
+            mm(lo[2]),
+            mm(hi[0]),
+            mm(hi[1]),
+            mm(hi[2])
+        );
+        let _ = writeln!(out, "      <!-- {} -->", xml_text(&b.info.pads.join(" to ")));
+        let (open, tag) = if b.r == 0.0 && b.l == 0.0 && b.c.is_none() {
+            (format!("<Metal ID=\"{id}\" Name=\"{name}\">"), "Metal")
+        } else {
+            let mut values = String::new();
+            if b.r > 0.0 {
+                let _ = write!(values, " R=\"{}\"", num(b.r));
+            }
+            if let Some(c) = b.c {
+                let _ = write!(values, " C=\"{}\"", num(c));
+            }
+            if b.l > 0.0 {
+                let _ = write!(values, " L=\"{}\"", num(b.l));
+            }
+            let series = if b.l > 0.0 || b.c.is_some() { " LEtype=\"1\"" } else { "" };
+            (
+                format!(
+                    "<LumpedElement ID=\"{id}\" Name=\"{name}\" Direction=\"{}\" Caps=\"1\"{values}{series}>",
+                    b.axis
+                ),
+                "LumpedElement",
+            )
+        };
+        id += 1;
+        let _ = writeln!(
+            out,
+            "      {open}\n        <Primitives>\n          {geom}\n        </Primitives>\n      </{tag}>"
+        );
     }
     if g.holes.iter().any(|h| !h.plated) {
         let _ = writeln!(out, "      <!-- non-plated holes: air through the board -->");

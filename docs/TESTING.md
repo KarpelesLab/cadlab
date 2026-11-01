@@ -27,7 +27,7 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
 | **gerbv** (and/or other Gerber viewers) | our Gerbers parse cleanly and rasterize to the expected image |
 | **Clipper2** | differential testing of the polygon library |
 | **ngspice** | SPICE netlist export parses and simulates: `ngspice -b` on the divider golden file gives v(out) = 2.5 V (`tests/electrical.rs`, M8) |
-| **openEMS** (optional; CI job "openEMS oracle", informative) | the exported full-wave model runs (`python3` with openEMS's Python modules): a lossy microstrip (Djordjevic–Sarkar laminate, 58 MS/m copper) exported and run by openEMS agrees with `sim.sparams` on the same options (\|S21\| within 15 % + 0.025 dB, Z₀ within 5 % of it and of the 2D field solver; ELECTRICAL.md "Full-wave export") (`tests/openems.rs`; skipped when `openEMS` is not installed; the 4-layer via transition's run is opt-in, `CADLAB_OPENEMS_VIA=1`: openEMS diverges on it, see ELECTRICAL.md). There is no Ubuntu package or Linux wheel: CI builds openEMS-Project from source at a pinned commit (`update_openEMS.sh --python --disable-GUI`, cached), about 10 minutes uncached |
+| **openEMS** (optional; CI job "openEMS oracle", informative) | the exported full-wave model runs (`python3` with openEMS's Python modules): a lossy microstrip (Djordjevic–Sarkar laminate, 58 MS/m copper) exported and run by openEMS agrees with `sim.sparams` on the same options (\|S21\| within 15 % + 0.025 dB, Z₀ within 5 % of it and of the 2D field solver; ELECTRICAL.md "Full-wave export") ; the 4-layer via transition passes the signal and agrees with `sim.sparams` (\|S21\| within 0.25 dB from 0.5 GHz); a series resistor and a series capacitor on a microstrip agree with `sim.sparams` and circuit theory within 0.03 in \|S21\| from 0.5 to 4.5 GHz (`tests/openems.rs`; skipped when `openEMS` is not installed; D74). Local stability work can use a build without the Python modules: `openEMS model.xml` on hand-written XML (element names from the documented format, D74), reading the energy from its console. There is no Ubuntu package or Linux wheel: CI builds openEMS-Project from source at a pinned commit (`update_openEMS.sh --python --disable-GUI`, cached), about 10 minutes uncached |
 | Fab online DFM checkers | manual, per release, on the demo boards for each supported fab profile |
 
 ### Comparison methods
@@ -757,7 +757,7 @@ Friction log, and what was done:
 | 7 | Nothing said how much to trust a run | `checks`, `sim.not_passive`, `sim.not_reciprocal` (also `touchstone.*`) |
 | 8 | A number that reads as RF performance: nothing said the chip was not simulated or the parts were ideal | `sim.port_replaces_part`, `sim.parts_ideal`, before the run |
 | 9 | Trying another C3 meant a new part and `bom.replace`, and no record in the result | `part_values` for one run, recorded in the Touchstone header with ports and region |
-| 10 | `export.openems` silently left C3 and L1 open: a result to disagree with `sim.sparams` for no visible reason | `openems.parts_not_modeled` (the elements themselves are left to the openEMS work) |
+| 10 | `export.openems` silently left C3 and L1 open: a result to disagree with `sim.sparams` for no visible reason | `openems.parts_not_modeled`, then the elements themselves (D74, which replaced the warning) |
 | 11 | `net.loss` had no mask, so the line solved with a mask was measured without one | `mask*` and `etch` options |
 | 12 | Nothing told the order which line is controlled | `process.impedance` in `fab-lock.json`, in the export's summary, `fab.impedance_without_stackup` |
 | 13 | `C 0.8pF` became `C_800fF_...` and `800fF` in the BOM; "assuming 20m" for a loss tangent; a coplanar solve read as "microstrip"; `impedance.solve --netclass` did not say how to assign nets | `0.8pF`; `0.02`; `[coplanar grounds at ...]`; the summary names `net.set --class` |
@@ -765,7 +765,7 @@ Friction log, and what was done:
 Seen but left as they are:
 
 - A keep-out has no net exception, so the feed takes two rectangles, one each side of the track (router and DRC work).
-- `export.openems` writes no lumped elements, so its result for this region is the bare layout.
+- `export.openems` wrote no lumped elements, so its result for this region was the bare layout (it writes them since D74, which replaced the `openems.parts_not_modeled` warning).
 - `describe {"name": ...}` ignores the unknown argument and lists every command (the argument is `command`).
 - `sim.sparams` takes one thread below 262 144 nodes by the existing rule. `RAYON_NUM_THREADS` caps the solver and the
   server: 5 threads instead of 66; an idle server uses no CPU either way, and its idle pool threads only appear after

@@ -126,6 +126,17 @@ fn via_transition_export() {
     assert!(xml.contains("Hz; at 5000000000 Hz: εr 4.100000, tan δ 0.020000 -->"), "{xml}");
     assert!(xml.contains("Name=\"copper_GND\"") && xml.contains("Name=\"copper_RF\""));
     assert!(xml.contains("<Cylinder Priority=\"10\" Radius=\"0.15\">\n            <P1 X=\"8\" Y=\"4\" Z=\"0\"/>\n            <P2 X=\"8\" Y=\"4\" Z=\"1.57\"/>"), "via barrel");
+    // Its nearest node column on mesh coordinates: no mesh edge lies inside a barrel between
+    // mesh lines, so without it the via conducts nothing in openEMS (D74).
+    let (xl, yl) = (lines(&xml, "XLines"), lines(&xml, "YLines"));
+    let near = |ls: &[f64], v: f64| ls.iter().copied().min_by(|a, b| (a - v).abs().total_cmp(&(b - v).abs())).unwrap();
+    let (nx, ny) = (near(&xl, 8.0), near(&yl, 4.0));
+    assert!(
+        xml.contains(&format!(
+            "<Box Priority=\"10\">\n            <P1 X=\"{nx}\" Y=\"{ny}\" Z=\"0\"/>\n            <P2 X=\"{nx}\" Y=\"{ny}\" Z=\"1.57\"/>"
+        )),
+        "via node column at {nx}, {ny}"
+    );
     assert!(
         xml.contains("<Polygon Priority=\"11\" Elevation=\"1.3175\" NormDir=\"2\""),
         "In1 plane (its lower conducting sheet), opened around the via"
@@ -155,14 +166,38 @@ fn via_transition_export() {
         "export.openems",
         json!({"dir": out, "name": "via_only", "f_max": "20GHz", "around": [format!("via#{via}")], "copper": "sheet", "boundary": "mur"}),
     );
-    assert_eq!(codes(&o), ["openems.no_ports"]);
+    assert_eq!(codes(&o), ["openems.mur_static_field", "openems.no_ports"]);
     let xml = std::fs::read_to_string(out.join("via_only.xml")).unwrap();
     assert!(!xml.contains("<LinPoly"), "sheet copper has no thickness");
     // Default margin: three stack heights (3 × 1.465 mm with sheet copper) around the 0.6 mm via
     // pad (a polygon just outside the circle).
     assert_eq!(o["output"]["window"], json!([["3.304024mm", "-0.695732mm"], ["12.695mm", "8.695732mm"]]));
+    assert!(codes(&o).contains(&"openems.no_ports".to_string()));
     let py = std::fs::read_to_string(out.join("via_only.py")).unwrap();
     assert!(py.contains("BOUNDARY = ['MUR'] * 6"));
+    // A Mur wall gets eight cells of clearance too (D74); `f_min` above 0 has no static-field note.
+    let keep = lines(&xml, "YLines");
+    assert!(keep[0] < -0.695733 && keep[8] <= -0.695732 && keep[9] > -0.695733, "{keep:?}");
+    let o = exec(
+        &r,
+        &mut s,
+        "export.openems",
+        json!({"dir": out, "name": "via_only", "f_min": "1GHz", "f_max": "20GHz", "around": [format!("via#{via}")],
+            "copper": "sheet", "boundary": "mur"}),
+    );
+    assert_eq!(codes(&o), ["openems.no_ports"]);
+    // The via board's edge is one cell from the wall of its 4 mm region: warned when kept there,
+    // for the PML and for Mur (D74).
+    for boundary in ["pml", "mur"] {
+        let o = exec(
+            &r,
+            &mut s,
+            "export.openems",
+            json!({"dir": out, "name": "near", "f_min": "1GHz", "f_max": "4GHz", "nets": ["RF"], "margin": "4mm",
+                "pml_outside": false, "boundary": boundary}),
+        );
+        assert!(codes(&o).contains(&"openems.edge_near_boundary".to_string()), "{boundary}: {}", o["diagnostics"]);
+    }
 
     // Errors.
     assert_eq!(fail(&r, &mut s, "export.openems", json!({"f_max": "10GHz"})), "openems.no_region");
@@ -191,25 +226,18 @@ fn via_transition_export() {
         "openems.bad_reference"
     );
 
-    // Oracle: run the driver with openEMS and check the transition passes the signal at 1 GHz.
-    // Opt-in (`CADLAB_OPENEMS_VIA=1`): openEMS diverges on this board (a late-time instability
-    // that needs the GND planes, with perfect copper and constant-κ dielectrics as well, so not
-    // D68's materials; the built-in solver passes it), and the run takes 25 minutes in CI.
+    // Oracle: the driver run by openEMS (the absorbing layer beyond the region: D74, with it in the
+    // region's outer cells this board's edge one cell from the wall diverges) passes the signal at
+    // 1 GHz and agrees with the built-in solver on the same options.
     let Some(_openems) = oracle::optional(Oracle::OpenEms) else { return };
-    if std::env::var("CADLAB_OPENEMS_VIA").is_err() {
-        eprintln!("skipping the openEMS via run (set CADLAB_OPENEMS_VIA=1)");
-        return;
-    }
     let python = std::env::var("CADLAB_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("openems_via");
     let _ = std::fs::remove_dir_all(&out);
-    let o = exec(
-        &r,
-        &mut s,
-        "export.openems",
-        json!({"dir": out, "name": "oracle", "f_max": "4GHz", "nets": ["RF"], "margin": "4mm",
-            "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]}),
-    );
+    let common = json!({"dir": out, "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm",
+        "pml_outside": true, "end_criteria": "40dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+    let mut args = common.clone();
+    args["name"] = json!("oracle");
+    let o = exec(&r, &mut s, "export.openems", args);
     let script = out.join("oracle.py");
     oracle::run(Path::new(&python), &[script.to_str().unwrap()]);
     let ts = o["output"]["touchstone"].as_str().unwrap().to_string();
@@ -217,7 +245,34 @@ fn via_transition_export() {
         exec(&r, &mut s, "touchstone.summary", json!({"path": ts, "frequencies": ["1GHz"], "params": ["S11", "S21"]}));
     let p = &sum["output"]["params"];
     let (s11, s21) = (p[0]["at"][0]["db"].as_f64().unwrap(), p[1]["at"][0]["db"].as_f64().unwrap());
-    assert!(s21 > -3.0 && s11 < -6.0, "S11 {s11} dB, S21 {s21} dB at 1 GHz");
+    let mut args = common;
+    args["name"] = json!("builtin");
+    exec(&r, &mut s, "sim.sparams", args);
+    let read = |f: &str| cadlab::touchstone::parse(&std::fs::read_to_string(out.join(f)).unwrap(), Some(2)).unwrap();
+    let (oe, cl) = (read("oracle.s2p"), read("builtin.s2p"));
+    let db = |v: &cadlab::touchstone::Complex| 20.0 * c(v).abs().log10();
+    let mut md = String::from(
+        "\n#### Via transition\n\n| f (GHz) | |S21| openEMS (dB) | |S21| cadlab (dB) | |S11| openEMS (dB) | |S11| cadlab (dB) |\n|---|---|---|---|---|\n",
+    );
+    let mut worst = 0.0f64;
+    for ((f, a), b) in oe.freqs.iter().zip(&oe.data).zip(&cl.data) {
+        md += &format!(
+            "| {:.2} | {:.3} | {:.3} | {:.2} | {:.2} |\n",
+            f / 1e9,
+            db(&a[2]),
+            db(&b[2]),
+            db(&a[0]),
+            db(&b[0])
+        );
+        if *f >= 0.5e9 {
+            worst = worst.max((db(&a[2]) - db(&b[2])).abs());
+        }
+    }
+    md += &format!("\nFrom 0.5 GHz: |S21| within {worst:.2} dB of cadlab's.\n");
+    std::fs::write(out.join("summary_via.md"), &md).unwrap();
+    eprintln!("{md}");
+    assert!(s21 > -3.0 && s11 < -6.0, "S11 {s11} dB, S21 {s21} dB at 1 GHz\n{md}");
+    assert!(worst < 0.25, "{md}");
 }
 
 #[test]
@@ -463,6 +518,258 @@ fn lossy_export() {
     assert_eq!(fail(&r, &mut s, "export.openems", bad), "openems.perfect_copper");
 }
 
+fn lines(xml: &str, tag: &str) -> Vec<f64> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let v = xml.split(&open).nth(1).unwrap().split(&close).next().unwrap();
+    v.split(',').map(|a| a.parse().unwrap()).collect()
+}
+
+/// The absorbing layer beyond the region (D74): `pml_cells` more lines past the window on x and
+/// y (z is air), the window as asked; what ends inside the window stays there, what reaches its
+/// side runs to the wall. `pml_outside: false` keeps the layer in the region's outer cells.
+#[test]
+fn pml_outside_the_region() {
+    let r = Registry::with_builtins();
+    let (dir, mut s, id) = microstrip_board(&r, 24);
+    let out = dir.path().join("sim");
+    let track = format!("track#{id}");
+    // A window across the board: x 8 .. 20 inside the line, y 8 .. 16 inside the 30 mm outline.
+    let args = |name: &str, extra: Value| {
+        let mut a = json!({"dir": out, "name": name, "f_max": "6GHz", "copper": "sheet", "perfect_copper": true,
+            "window": [["8mm", "8mm"], ["20mm", "16mm"]], "air": "5mm"});
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        a
+    };
+    let inner = exec(&r, &mut s, "export.openems", args("inner", json!({"pml_outside": false})));
+    let outer = exec(&r, &mut s, "export.openems", args("outer", json!({"pml_cells": 6})));
+    assert_eq!(inner["output"]["window"], outer["output"]["window"]);
+    let (a, b) = (
+        std::fs::read_to_string(out.join("inner.xml")).unwrap(),
+        std::fs::read_to_string(out.join("outer.xml")).unwrap(),
+    );
+    let (ax, bx) = (lines(&a, "XLines"), lines(&b, "XLines"));
+    assert_eq!((ax[0], ax[ax.len() - 1]), (8.0, 20.0));
+    assert_eq!(bx.len(), ax.len() + 12, "six cells on each side");
+    assert_eq!(&bx[6..bx.len() - 6], &ax[..], "the region's lines are unchanged");
+    let (ay, by) = (lines(&a, "YLines"), lines(&b, "YLines"));
+    assert_eq!(by.len(), ay.len() + 12);
+    assert_eq!(lines(&a, "ZLines"), lines(&b, "ZLines"));
+    // The laminate and the plane reach the wall; the line runs through the x walls.
+    let wall = format!("X=\"{}\" Y=\"{}\"", bx[0], by[0]);
+    let diel = b.split("Name=\"dielectric_1\"").nth(1).unwrap().split("</Material>").next().unwrap();
+    assert!(diel.contains(&wall), "{diel}");
+    assert!(!a.contains(&wall), "{a}");
+    let strip = b.split("Name=\"copper_RF\"").nth(1).unwrap().split("</Metal>").next().unwrap();
+    assert!(strip.contains(&format!("X=\"{}\" Y=\"11.5\"", bx[0])), "{strip}");
+    assert!(strip.contains(&format!("X=\"{}\" Y=\"12.5\"", bx[bx.len() - 1])), "{strip}");
+
+    // A window past the outline: the board's edge stays at the outline, out of the layer.
+    let args = json!({"dir": out, "name": "edge", "f_max": "6GHz", "copper": "sheet", "perfect_copper": true,
+        "around": [track], "margin": "20mm", "air": "5mm"});
+    exec(&r, &mut s, "export.openems", args);
+    let e = std::fs::read_to_string(out.join("edge.xml")).unwrap();
+    let diel = e.split("Name=\"dielectric_1\"").nth(1).unwrap().split("</Material>").next().unwrap();
+    assert!(diel.contains("X=\"0\" Y=\"0\"") && diel.contains("X=\"34\" Y=\"30\""), "{diel}");
+}
+
+/// Two-pin parts in the export (D74): by `sim.sparams`'s selection rules, as `LumpedElement`s in
+/// the gap between the pads' copper; a resistance alone is a plain element, a reactance a series
+/// one, 0 Ω a short; `parts: false` leaves them out, a part without a value is reported.
+#[test]
+fn parts_in_the_export() {
+    let r = Registry::with_builtins();
+    let (dir, mut s, t) = part_board(&r, "resistor", json!({"resistance": "50"}), 4);
+    let out = dir.path().join("sim");
+    let args = |name: &str, extra: Value| {
+        let mut a = part_args(&out, t);
+        a["name"] = json!(name);
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        a
+    };
+    let read = |name: &str| std::fs::read_to_string(out.join(format!("{name}.xml"))).unwrap();
+    let o = exec(&r, &mut s, "export.openems", args("res", json!({})));
+    assert_eq!(o["output"]["parts"], json!([{"refdes": "U1", "pads": ["U1.1", "U1.2"], "resistance": "50Ω"}]));
+    assert!(!codes(&o).contains(&"sim.part_not_modeled".to_string()));
+    let xml = read("res");
+    let el = xml.split("<LumpedElement ").nth(1).unwrap().split("</LumpedElement>").next().unwrap();
+    assert!(el.contains("Name=\"part_U1\" Direction=\"0\" Caps=\"1\" R=\"5.000000e1\">"), "{el}");
+    // The part is at x = 10 mm, pads 0.9 mm wide at ±0.8 mm: the gap 9.65 .. 10.35; across, 1 mm.
+    assert!(
+        el.contains("<P1 X=\"9.65\" Y=\"9.5\" Z=\"0.5\"/>") && el.contains("<P2 X=\"10.35\" Y=\"10.5\" Z=\"0.5\"/>"),
+        "{el}"
+    );
+    assert!(xml.contains("<!-- U1.1 to U1.2 -->"), "{xml}");
+
+    let o = exec(&r, &mut s, "export.openems", args("none", json!({"parts": false})));
+    assert!(o["output"].get("parts").is_none(), "{}", o["output"]);
+    assert!(!read("none").contains("LumpedElement"));
+
+    // A component property overrides the part; zero is a short (metal).
+    exec(&r, &mut s, "part.set", json!({"id": "DUT", "params": {"resistance": "0"}}));
+    exec(&r, &mut s, "export.openems", args("short", json!({})));
+    let xml = read("short");
+    assert!(xml.contains("<Metal ID=") && xml.contains("Name=\"part_U1\"") && !xml.contains("LumpedElement"), "{xml}");
+
+    exec(&r, &mut s, "part.set", json!({"id": "DUT", "params": {"resistance": null}}));
+    let o = exec(&r, &mut s, "export.openems", args("noval", json!({})));
+    assert!(codes(&o).contains(&"sim.part_not_modeled".to_string()), "{}", o["diagnostics"]);
+    assert!(!read("noval").contains("part_U1"));
+
+    // A capacitor with ESR and ESL: one series element.
+    let (dir2, mut s2, t2) =
+        part_board(&r, "capacitor", json!({"capacitance": "1pF", "esr": "0.1", "esl": "0.5nH"}), 4);
+    let out2 = dir2.path().join("sim");
+    let o = exec(&r, &mut s2, "export.openems", part_args(&out2, t2));
+    assert_eq!(o["output"]["parts"][0]["capacitance"], "1pF");
+    let xml = std::fs::read_to_string(out2.join("dut.xml")).unwrap();
+    assert!(xml.contains("Caps=\"1\" R=\"1.000000e-1\" C=\"1.000000e-12\" L=\"5.000000e-10\" LEtype=\"1\">"), "{xml}");
+
+    // A part inside the PML, when it is kept in the region: warned.
+    let o = exec(
+        &r,
+        &mut s2,
+        "export.openems",
+        json!({"dir": out2, "name": "in_pml", "f_max": "6GHz", "copper": "sheet", "perfect_copper": true,
+            "window": [["9mm", "5mm"], ["20mm", "15mm"]], "air": "4mm", "pml_outside": false, "pml_cells": 4}),
+    );
+    assert!(codes(&o).contains(&"openems.part_in_pml".to_string()), "{}", o["diagnostics"]);
+}
+
+/// The board of the parts' tests: a two-layer board, 0.5 mm of εr 4 (lossless) over a ground
+/// pour, a 1 mm microstrip on F.Cu on both sides of a 0603 part `U1` (pads 0.9 × 1 mm at ±0.8 mm)
+/// at x = `len` + 6 mm, y = 10 mm. Returns the project directory, the session and the two
+/// tracks' IDs.
+fn part_board(r: &Registry, category: &str, params: Value, len: i64) -> (tempfile::TempDir, Session, [u64; 2]) {
+    let (dir, mut s) = new_project(r, "parts");
+    let s_ = &mut s;
+    let mm = |v: f64| format!("{v}mm");
+    exec(r, s_, "board.setup", json!({"layers": 2}));
+    exec(r, s_, "board.dielectric", json!({"thickness": "0.5mm", "er": "4", "loss_tangent": "0"}));
+    let width = 2 * len + 12;
+    exec(r, s_, "board.outline", json!({"width": mm(width as f64), "height": "20mm"}));
+    exec(
+        r,
+        s_,
+        "footprint.create",
+        json!({"name": "P0603", "pads": [
+            {"number": "1", "at": ["-0.8mm", "0mm"], "size": ["0.9mm", "1mm"], "shape": "rect"},
+            {"number": "2", "at": ["0.8mm", "0mm"], "size": ["0.9mm", "1mm"], "shape": "rect"}]}),
+    );
+    exec(
+        r,
+        s_,
+        "footprint.create",
+        json!({"name": "TP1", "pads": [
+        {"number": "1", "at": ["0mm", "0mm"], "size": ["1mm", "1mm"], "shape": "rect"}]}),
+    );
+    exec(
+        r,
+        s_,
+        "part.create",
+        json!({"id": "DUT", "category": category, "footprint": "P0603", "params": params,
+            "pins": [{"number": "1", "name": "1"}, {"number": "2", "name": "2"}]}),
+    );
+    exec(
+        r,
+        s_,
+        "part.create",
+        json!({"id": "TP", "category": "connector", "footprint": "TP1",
+        "pins": [{"number": "1", "name": "1"}]}),
+    );
+    exec(r, s_, "circuit.add", json!({"part": "DUT", "refdes": "U1"}));
+    exec(r, s_, "circuit.add", json!({"part": "TP", "count": 3}));
+    exec(r, s_, "net.connect", json!({"net": "A", "pins": ["U1.1", "J1.1"]}));
+    exec(r, s_, "net.connect", json!({"net": "B", "pins": ["U1.2", "J2.1"]}));
+    exec(r, s_, "net.connect", json!({"net": "GND", "pins": ["J3.1"]}));
+    let x = (len + 6) as f64;
+    exec(r, s_, "place.set", json!({"refdes": "U1", "at": [mm(x), "10mm"]}));
+    exec(r, s_, "place.set", json!({"refdes": "J1", "at": ["2mm", "18mm"]}));
+    exec(r, s_, "place.set", json!({"refdes": "J2", "at": [mm(width as f64 - 2.0), "18mm"]}));
+    exec(r, s_, "place.set", json!({"refdes": "J3", "at": ["2mm", "2mm"]}));
+    let mut track = |a: f64, b: f64, net: &str| {
+        let o = exec(
+            r,
+            s_,
+            "track.add",
+            json!({"layer": "F.Cu", "points": [[mm(a), "10mm"], [mm(b), "10mm"]], "width": "1mm", "net": net}),
+        );
+        o["output"]["tracks"][0]["id"].as_u64().unwrap()
+    };
+    let (t1, t2) = (track(x - len as f64 - 1.0, x - 0.8, "A"), track(x + 0.8, x + len as f64 + 1.0, "B"));
+    exec(r, &mut s, "via.add", json!({"at": ["2mm", "2mm"], "net": "GND", "drill": "0.3mm", "diameter": "0.6mm"}));
+    exec(r, &mut s, "zone.add", json!({"name": "gnd", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
+    (dir, s, [t1, t2])
+}
+
+fn part_args(dir: &Path, t: [u64; 2]) -> Value {
+    json!({"dir": dir, "name": "dut", "around": [format!("track#{}", t[0]), format!("track#{}", t[1])],
+        "copper": "sheet", "perfect_copper": true, "f_max": "6GHz", "points": 13, "margin": "4mm", "air": "4mm",
+        "max_cell": "0.5mm", "pml_cells": 6, "thirds": true, "end_criteria": "50dB",
+        "ports": [{"at": format!("track#{}", t[0]), "kind": "msl", "length": "3mm"},
+                  {"at": format!("track#{}", t[1]), "end": "end", "kind": "msl", "length": "3mm"}]})
+}
+
+/// With openEMS installed: a series resistor and a series capacitor on a microstrip, exported and
+/// run by openEMS, against `sim.sparams` on the same options (PML beyond the region in both) and
+/// against circuit theory, S21 = 2 Z₀ / (2 Z₀ + Z). The tables go to `summary_parts.md`.
+#[test]
+fn lumped_parts_oracle() {
+    let Some(_openems) = oracle::optional(Oracle::OpenEms) else { return };
+    let python = std::env::var("CADLAB_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let r = Registry::with_builtins();
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("openems_parts");
+    let _ = std::fs::remove_dir_all(&out);
+    let cases = [
+        ("series_r", "resistor", json!({"resistance": "50"}), None),
+        ("series_c", "capacitor", json!({"capacitance": "1pF"}), Some(1e-12)),
+    ];
+    let mut md = String::new();
+    let mut fails = Vec::new();
+    for (name, category, params, cap) in cases {
+        let (_dir, mut s, t) = part_board(&r, category, params, 6);
+        let mut a = part_args(&out, t);
+        a["name"] = json!(name);
+        let o = exec(&r, &mut s, "export.openems", a.clone());
+        assert_eq!(o["output"]["parts"].as_array().unwrap().len(), 1, "{}", o["output"]);
+        oracle::run(Path::new(&python), &[out.join(format!("{name}.py")).to_str().unwrap()]);
+        a["name"] = json!(format!("{name}_builtin"));
+        a["pml_outside"] = json!(true);
+        exec(&r, &mut s, "sim.sparams", a);
+        let read = |file: String| {
+            cadlab::touchstone::parse(&std::fs::read_to_string(out.join(file)).unwrap(), Some(2)).unwrap()
+        };
+        let (oe, cl) = (read(format!("{name}.s2p")), read(format!("{name}_builtin.s2p")));
+        md +=
+            &format!("\n#### {name}\n\n| f (GHz) | |S21| openEMS | |S21| cadlab | |S21| theory |\n|---|---|---|---|\n");
+        for ((f, x), y) in oe.freqs.iter().zip(&oe.data).zip(&cl.data) {
+            let z = match cap {
+                None => C64::new(50.0, 0.0),
+                Some(c) => C64::new(0.0, -1.0 / (2.0 * std::f64::consts::PI * f * c)),
+            };
+            let ideal = (C64::new(100.0, 0.0) / (C64::new(100.0, 0.0) + z)).abs();
+            let (sa, sb) = (c(&x[2]).abs(), c(&y[2]).abs());
+            md += &format!("| {:.2} | {sa:.4} | {sb:.4} | {ideal:.4} |\n", f / 1e9);
+            if !(0.5e9..=4.5e9).contains(f) {
+                continue;
+            }
+            if (sa - sb).abs() > 0.03 {
+                fails.push(format!("{name} {f}: openEMS {sa} against sim.sparams {sb}"));
+            }
+            if (sa - ideal).abs() > 0.03 {
+                fails.push(format!("{name} {f}: openEMS {sa} against theory {ideal}"));
+            }
+        }
+    }
+    std::fs::write(out.join("summary_parts.md"), &md).unwrap();
+    eprintln!("{md}");
+    assert!(fails.is_empty(), "{fails:?}\n{md}");
+}
+
 /// With openEMS installed (`CADLAB_ORACLES=1`, the `openEMS` executable or
 /// `CADLAB_ORACLE_OPENEMS`, and `CADLAB_ORACLE_PYTHON` with openEMS's Python modules): a lossy
 /// microstrip (Djordjevic–Sarkar laminate, 58 MS/m copper) exported and simulated by openEMS,
@@ -510,6 +817,7 @@ fn lossy_microstrip_oracle() {
     let mut fails = Vec::new();
     for (name, title, ports, copper, z_until) in cases {
         let common = json!({"dir": out, "around": [track], "copper": copper, "thirds": true, "ports": ports,
+            "pml_outside": false,
             "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6,
             "end_criteria": "50dB"});
         let mut args = common.clone();

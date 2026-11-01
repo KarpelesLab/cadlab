@@ -111,6 +111,11 @@ def main():
             port.CalcPort(path, f, ref_impedance=PORTS[i]['z0'])
         for i in range(n):
             s[:, i, j] = ports[i].uf_ref / ports[j].uf_inc
+    # A diverged run ends as if it had converged (openEMS reports the end criterion reached at
+    # "-nan dB"): a passive board's |S| cannot be far above 1.
+    if not np.all(np.isfinite(s)) or np.abs(s).max() > 10:
+        sys.exit('openems.diverged: the fields grew instead of decaying, so these S-parameters are '
+                 'meaningless; export with `pml_outside` (the default), or grow the region (`margin`)')
     write_touchstone(TOUCHSTONE, f, s, [p['z0'] for p in PORTS])
     print('wrote', TOUCHSTONE)
 

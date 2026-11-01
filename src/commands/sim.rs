@@ -73,6 +73,11 @@ pub struct SParams {
     /// Absorbing (CPML) cells on every side of the region (default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pml_cells: Option<u8>,
+    /// Put the absorbing cells in added cells beyond the region's sides, with copper and
+    /// dielectrics that reach a side continued through them (default false: the region's outer
+    /// cells; `export.openems` defaults to true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pml_outside: Option<bool>,
     /// Air above and below the board (default: a quarter wavelength at `f_max`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub air: Option<Nm>,
@@ -328,6 +333,8 @@ impl Command for SParams {
             points: self.points.unwrap_or(201),
             boundary: openems::Boundary::Pml,
             pml_cells: self.pml_cells.unwrap_or(8).max(1),
+            pml_outside: self.pml_outside.unwrap_or(false),
+            parts: false,
             air: self.air,
             copper: self.copper.unwrap_or_default(),
             cells_per_wavelength: self.cells_per_wavelength.unwrap_or(20),

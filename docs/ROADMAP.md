@@ -297,8 +297,7 @@ Research-sized items beyond the milestones above; none blocks a release.
       Board parts (D65): two-pin resistors, capacitors and inductors in the region are series R–L–C lumped
       elements from their part values (`esr`, `esl` too) across their pads' gap, validated against circuit
       theory (series and shunt R, L, C and resonant R–L–C between 50 Ω ports within 0.02 in |S₂₁|).
-      Not covered (refinements, not part of this goal): lumped parts in the openEMS export, subgridded edges,
-      and a FEM alternative
+      Not covered (refinements, not part of this goal): subgridded edges, and a FEM alternative
 - [x] openEMS export parity with the built-in solver (D68): Djordjevic–Sarkar dielectrics and the solder mask
       as `DebyeMaterial`s with the solver's own fitted terms, lossy copper as `ConductingSheet`s (roughness
       folded into the conductivity at f₀), matched microstrip port terminations, a geometry file openEMS reads;
@@ -309,6 +308,10 @@ Research-sized items beyond the milestones above; none blocks a release.
       1 % at 8 cells across (staircase +7 %), curved wall resonances second order, wall and strip conductor Q
       within 2–5 % (staircase −21 %, +41 %); the mesh refined for diagonal tracks under 1.5 cells wide, which were
       open circuits at the default mesh
+- [x] openEMS oracle of the via transition and of board parts (D74): the export's absorbing cells beyond the region
+      (`pml_outside`), because a board edge next to the wall diverged in openEMS's PML and Mur; via barrels as node
+      columns (they read open); two-pin R, L, C as `LumpedElement`s (`parts`), compared with `sim.sparams` and
+      circuit theory; `openems.diverged`, `openems.edge_near_boundary`, `openems.mur_static_field`, `openems.part_in_pml`
 
 ---
 
@@ -344,4 +347,4 @@ Research-sized items beyond the milestones above; none blocks a release.
   node: nRF52832, matching network, 50 Ω microstrip, U.FL; D70), replayed by `tests/agent_session6.rs`; fixed: mesh
   slivers, `sim.sparams --plan`, `part_values`, results at a frequency and over a band with impedance, VSWR and
   available loss, passivity and reciprocity checks, notes on ideal parts and ports on parts, `net.loss` with mask,
-  impedance lines in `fab-lock.json`; open: lumped elements in the openEMS export, net exceptions in keep-outs.
+  impedance lines in `fab-lock.json`; open: net exceptions in keep-outs.

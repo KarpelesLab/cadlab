@@ -134,6 +134,12 @@ jobs:
           if [ -f target/tmp/openems_oracle/summary.md ]; then
             { echo '### openEMS against sim.sparams (lossy microstrip)'; cat target/tmp/openems_oracle/summary.md; } >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -f target/tmp/openems_via/summary_via.md ]; then
+            { echo '### openEMS against sim.sparams (via transition)'; cat target/tmp/openems_via/summary_via.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f target/tmp/openems_parts/summary_parts.md ]; then
+            { echo '### openEMS against sim.sparams and theory (lumped parts)'; cat target/tmp/openems_parts/summary_parts.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Keep the comparison
         if: always()
         uses: actions/upload-artifact@v4
@@ -144,6 +150,11 @@ jobs:
             target/tmp/openems_oracle/*.s2p
             target/tmp/openems_oracle/*.xml
             target/tmp/openems_oracle/*.py
+            target/tmp/openems_via/*.md
+            target/tmp/openems_via/*.s2p
+            target/tmp/openems_parts/*.md
+            target/tmp/openems_parts/*.s2p
+            target/tmp/openems_parts/*.xml
           if-no-files-found: ignore
 
   corpus:

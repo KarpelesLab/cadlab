@@ -463,17 +463,16 @@ fn analysis(c: &mut Client, project: &Path) {
     // The reader skips the header.
     c.ok("touchstone", "summary", json!({"path": "out/sim/short.s2p"}));
 
-    // openEMS: same region; the export has no lumped elements and now says so.
+    // openEMS: same region, the matching parts as lumped elements (D74).
     let x = c.ok(
         "export",
         "openems",
         json!({"name": "rf", "f_min": "1GHz", "f_max": "6GHz", "nets": ["ANT", "RF_FEED"], "only_selected": true,
             "margin": "3mm", "max_cell": "0.4mm", "air": "3mm", "ports": [{"at": "U1.30"}, {"at": "J1.1"}], "copper": "sheet"}),
     );
-    let w = diags(&x, "openems.parts_not_modeled");
-    assert_eq!(w.len(), 1, "{x}");
-    assert!(w[0]["message"].as_str().unwrap().contains("C3, L1"), "{x}");
-    assert!(project.join("out/openems/rf.xml").exists() && project.join("out/openems/rf.py").exists());
+    let xml = std::fs::read_to_string(project.join("out/openems/rf.xml")).unwrap();
+    assert_eq!(xml.matches("<LumpedElement").count(), 2, "{x}");
+    assert!(project.join("out/openems/rf.py").exists());
 }
 
 /// A Touchstone file of the ideal network, computed here: the summary must read what the circuit

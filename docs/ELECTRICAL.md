@@ -7,7 +7,8 @@ and a design lint beyond ERC. Code: `src/electrical/` (impedance closed forms, 2
 checks), `src/spice.rs`, `src/openems/`, `src/fdtd/`, `src/touchstone.rs`, `src/lint.rs`; commands in
 `src/commands/electrical.rs`, `export.spice`, `export.openems`, `sim.sparams`, `touchstone.summary` and
 `circuit.lint`. Decisions: DECISIONS D29, D49 (field solver), D52 (losses), D54 (openEMS export, Touchstone),
-D59 (FDTD solver), D63 (full-wave losses), D68 (openEMS export parity, openEMS oracle, CPML), D73 (conformal copper).
+D59 (FDTD solver), D63 (full-wave losses), D68 (openEMS export parity, openEMS oracle, CPML), D73 (conformal copper),
+D74 (openEMS stability, via barrels, board parts).
 
 Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md), "Differential pairs"
 and "Length tuning", D38); this document covers the numbers they route to. A pair (`diffpair.add`) routes at
@@ -315,8 +316,8 @@ The first step of full-wave analysis (S-parameters of vias, transitions, connect
 a region of the board exported as an [openEMS](https://openems.de) FDTD simulation. openEMS is an external
 tool (GPL): cadlab writes its documented input (the CSXCAD XML geometry format and its Python interface, as
 used in openEMS's tutorials), never links, bundles or reads its code. Code: `src/openems/` (DECISIONS D54,
-D68). The export writes the same model as the built-in solver (`sim.sparams`): Djordjevic–Sarkar dielectrics
-as the same Debye terms, lossy copper (as openEMS conducting sheets), solder mask.
+D68, D74). The export writes the same model as the built-in solver (`sim.sparams`): Djordjevic–Sarkar dielectrics
+as the same Debye terms, lossy copper (as openEMS conducting sheets), solder mask, board parts as lumped elements.
 
 ```
 cadlab export openems --f-max 10GHz --around via#12 \
@@ -354,7 +355,8 @@ rectangle (air beyond an edge), so edge launches are modeled.
 | Stackup | z = 0 at the bottom of the bottom copper, up to the top of `F.Cu`. A lossy dielectric is a `DebyeMaterial`: the Djordjevic–Sarkar model through its εr and tan δ (at `ref_freq`, or anchored at the pulse's center f₀ when the stackup gives none; an unset tan δ is taken as 0.02, as in the loss calculations, and marked "assumed"), fitted over the Touchstone band exactly as `sim.sparams` fits it (`fdtd::fit`: ε∞ as `Epsilon`, a conductivity as `Kappa`, and Δε on the shared relaxation times as `EpsilonDelta_n` / `EpsilonRelaxTime_n`, CSXCAD's documented parameter names; terms of zero weight left out, 7 significant digits); a comment gives εr and tan δ at f₀. A lossless one is a plain `Material` (`Epsilon` = εr). Inner copper sits inside the dielectric above it (prepreg flows around the traces); outer copper is in air, or under the solder mask |
 | Solder mask (`mask`) | A `solder_mask` material (`mask_er`, default 3.8, `mask_loss_tangent`, default 0.025: Debye terms like an unreferenced laminate) on both outer layers: the board outline from the laminate surface to `mask` beyond it (priority 5) and each outer layer's copper from its outer surface to `mask_copper` (default `mask`) beyond it (priority 7); a `mask_openings` air material (εr 1) clears what lies above the copper outside its own mask (priority 6) and the pads with a mask opening on that side (their copper, priority 8). Metal (10) stays above all of it. Mesh lines at both mask surfaces |
 | Copper | One `Metal` (perfect conductor) per net: the union of its pads, tracks, vias, drawings and zone fills on each layer, clipped to the region. `copper: solid` (default): extruded through the copper thickness (`LinPoly`, or `Box` for rectangles); `sheet`: zero-thickness `Polygon`s with the copper left out of the stack. Polygons with holes (planes around antipads) are cut into hole-free pieces by vertical lines through each hole. With a `conductivity` (default 58 MS/m, as `sim.sparams`; `perfect_copper` keeps perfect metal only) each net's copper on each layer is instead a `ConductingSheet` (`Conductivity`, `Thickness` = the layer's copper thickness: openEMS's documented `AddConductingSheet` model of a thin lossy metal) at priority 11: on both surfaces of solid copper, or as the sheet itself; the `Metal` keeps only the via barrels. (With a perfect conductor left between the two sheets of solid copper, openEMS read 60 % of the conductor loss of `sim.sparams`; without it the two agree: 0.017 against 0.018 dB at 1 GHz, 0.031 against 0.030 dB at 3 GHz on the 20 mm line below with lumped ports.) Roughness (`roughness`, `huray_radius` / `huray_ratio`) is folded into the conductivity at f₀ (σ / K², since Rs K = √(πfμ₀ / (σ/K²))): openEMS's sheet has no roughness model |
-| Vias, plated holes | Metal `Cylinder`s of the drill diameter between the outer surfaces of their first and last layers (slots: the slot outline extruded) |
+| Vias, plated holes | Metal `Cylinder`s of the drill diameter between the outer surfaces of their first and last layers (slots: the slot outline extruded), plus each round barrel's nearest node column as a line `Box` on mesh coordinates: a barrel between mesh lines holds no mesh edge and would conduct nothing (D74) |
+| Board parts (`parts`, default true) | Two-pin resistors, capacitors and inductors, by the selection rules of `sim.sparams` (D65; `sim.part_not_modeled`, `sim.part_not_populated`): a `LumpedElement` (`Direction` along the axis joining the pads, `Caps`) in a box over the gap between the pads' copper, across where they face each other, through the copper's thickness, priority 9. A resistance alone is a plain element (`R`); with a reactance, a series one (`LEtype="1"`, `R`, `L`, `C`); 0 Ω is a `Metal` box. The output lists the parts written |
 | Non-plated holes | Air (εr 1) cylinders through the board, above everything else |
 
 **Mesh.** A rectilinear grid per axis: fixed lines at metal edges (the x of vertical and y of horizontal
@@ -369,8 +371,18 @@ copper edges (lines a third of a fine cell inside and two thirds outside, see "F
 default of `sim.sparams`, off here so existing exports keep their mesh).
 
 **Excitation and boundaries.** A Gaussian pulse covering `f_min` .. `f_max` (f₀ = (f_min + f_max) / 2, 20 dB
-half-bandwidth f_c = (f_max − f_min) / 2); `boundary: pml` (default, `PML_8` on all sides, `pml_cells`) or `mur`;
-air `air` above and below (default a quarter wavelength at `f_max`); end criterion `end_criteria` (40 dB energy
+half-bandwidth f_c = (f_max − f_min) / 2); `boundary: pml` (default, `PML_8` on all sides, `pml_cells`) or `mur`.
+A `PML_n` is the outermost n *cells*, however fine, so with `pml_outside` (default true) the export adds those
+cells beyond the region's x and y sides (growing by `grading`, at most the mesh's largest cell), and copper and
+dielectrics that reach a side run through them to the wall. The region keeps all its own cells, what ends inside
+it stays out of the layer, and `window` still reports the region (the mesh is larger: `mesh.lines`). z is air
+already. `boundary: mur` gets eight air cells the same way. `pml_outside: false` puts the layer in the region's
+outer cells as `sim.sparams` does by default (where its stretched CPML is stable), and warns
+`openems.edge_near_boundary` when the board's edge is in that band: both boundaries can diverge there, see "What
+makes openEMS diverge" below. The driver stops with `openems.diverged` instead of writing non-finite or
+|S| > 10 results, since a run that went to NaN otherwise ends as if converged. `boundary: mur` with `f_min` 0
+warns `openems.mur_static_field`: the pulse's DC part stays as a static field the wall does not absorb. Air `air`
+above and below (default a quarter wavelength at `f_max`); end criterion `end_criteria` (40 dB energy
 decay), at most `timesteps` steps. The Touchstone file has `points` frequencies (default 201) from `f_min`, or
 1 % of `f_max` when `f_min` is 0 (port quantities are undefined at DC).
 
@@ -391,10 +403,9 @@ openEMS's microstrip port measures a zero-thickness strip: with `copper: solid` 
 copper is warned (`openems.msl_solid_copper`: export with `copper: sheet`, or use lumped ports). The
 built-in solver measures both.
 
-**Not modeled in the export:** two-pin parts (their pads stay open, warned as `openems.parts_not_modeled`: a
-matching network needs lumped elements added to the driver, which `sim.sparams` has), silkscreen, the mask's own margin around pads (openings are the pad copper),
+**Not modeled in the export:** silkscreen, the mask's own margin around pads (openings are the pad copper),
 roughness beyond f₀ (folded into the sheets' conductivity there), conductor loss in via barrels (perfect
-cylinders), components (pads are bare copper: add lumped elements in the driver if needed). The golden file
+cylinders), components other than two-pin R, L, C (their pads are bare copper). The golden file
 `tests/golden/openems/via.{xml,py}` (a 4-layer via transition) pins the format. The openEMS oracle
 (`CADLAB_ORACLES=1`, `openEMS` on the PATH or `CADLAB_ORACLE_OPENEMS`, the driver run by `python3` or
 `CADLAB_ORACLE_PYTHON`; CI job "openEMS oracle", openEMS built from source at a pinned commit) runs the
@@ -420,10 +431,49 @@ criterion (a lossless line reads −0.019 to +0.016 dB). The test asserts |S21| 
 5 % of `sim.sparams` (and of the 2D solver with the microstrip ports), |S11| < 0.1 (`tests/openems.rs`; the
 tables go to `target/tmp/openems_oracle/summary.md` and the CI job's summary).
 
-The golden via transition's driver (|S21| > −3 dB, |S11| < −6 dB at 1 GHz) is opt-in (`CADLAB_OPENEMS_VIA=1`):
-openEMS diverges on that board (a late-time instability from about 15 000 steps that needs its GND planes, also
-with perfect copper and constant-κ dielectrics, so not the D68 materials; `sim.sparams` passes the same region),
-and `boundary: mur` diverges within a few thousand steps on any region with a dielectric. Not resolved (D68).
+The golden via transition (`via_transition_export`, the region of the 4-layer board at 4 GHz, lumped ports) and
+board parts (`lumped_parts_oracle`, a 0603 on a 1 mm microstrip between 3 mm microstrip ports, thirds rule, sheet
+copper) run in the same job, at the pinned revision:
+
+| Via transition | 0.54 GHz | 1.03 GHz | 2.02 GHz | 3.01 GHz | 4.00 GHz |
+|---|---|---|---|---|---|
+| \|S21\| openEMS / `sim.sparams` (dB) | −0.035 / −0.049 | −0.063 / −0.091 | −0.145 / −0.144 | −0.183 / −0.207 | −0.457 / −0.452 |
+| \|S11\| openEMS / `sim.sparams` (dB) | −31.2 / −29.2 | −26.6 / −25.0 | −28.8 / −26.7 | −26.9 / −26.3 | −15.3 / −13.9 |
+
+| \|S21\| openEMS / `sim.sparams` / theory | 0.56 GHz | 1.05 GHz | 2.04 GHz | 3.03 GHz | 4.02 GHz |
+|---|---|---|---|---|---|
+| series 50 Ω | 0.666 / 0.667 / 0.667 | 0.666 / 0.667 / 0.667 | 0.665 / 0.668 / 0.667 | 0.664 / 0.670 / 0.667 | 0.665 / 0.672 / 0.667 |
+| series 1 pF | 0.331 / 0.337 / 0.329 | 0.551 / 0.555 / 0.551 | 0.788 / 0.798 / 0.788 | 0.889 / 0.894 / 0.885 | 0.939 / 0.938 / 0.930 |
+
+The test asserts |S21| within 0.25 dB from 0.5 GHz for the via (it measures 0.03), |S21| > −3 dB and |S11| < −6 dB
+at 1 GHz, and for the parts within 0.03 of `sim.sparams` and of theory from 0.5 to 4.5 GHz (it measures 0.009 and
+0.011). `lossy_microstrip_oracle` keeps `pml_outside: false` in both solvers, so its numbers above stay comparable.
+
+**What makes openEMS diverge** (D74, black-box runs of openEMS's CLI, energy against time). Run length matters: a
+Mur case bounded at 40 000 steps went to NaN by 113 000, so the steps are given. On the 4-layer via board, whose
+outline lay one 0.30 mm cell inside the region's y sides:
+
+| Case | Steps | Result |
+|---|---|---|
+| PML, the board's edge (two planes with dielectric between them, ending together) one cell from the wall on y | 100 000 | +5 dB per 1000 steps, then NaN |
+| the same edge 2, 3, 5, 8 cells from the wall on y; 1 or 3 cells on x (a 1.18 mm outer cell) | 250 000 | decays |
+| the same reaching the wall | 300 000 | decays |
+| the same one cell from the wall, with one plane, without the dielectric, with εr 1, or without the planes | 80–105 000 | decays |
+| PML on x only or on z only, PEC elsewhere; PEC on all faces | about 40 000 | no growth seen |
+| half the timestep | 79 000 | same growth per unit time, so not a Courant limit |
+| a constant σ added; tracks, vias or copper thickness removed | 35–97 000 | still grows, so not D68's materials or those features |
+| pulse with DC at −20, −55 or −163 dB | 60–80 000 | same rate, so not the excitation's DC |
+| Mur, a dielectric's edge 1, 2 or 3 cells from the wall on y, with planes (1 cell also without) | 40–200 000 | NaN, or growth at 3 cells |
+| Mur, a dielectric's edge on the wall or 4, 6, 8 cells from it on y; 1 or 2 cells on x | 200–250 000 | bounded |
+| the export as it is now, PML, this board with its materials | 219 000 | decays (−68 dB, still falling); both ports reach the 40 dB criterion by 28 000 |
+| the export as it is now, on a window cut from a 40 × 30 mm board (PML), and with Mur on this board | 44–60 000 | decays |
+| `pml_outside: false` on this board, PML / Mur | 89 000 / 33 000 | +4.9 dB per 1000 steps / NaN |
+
+The growing mode's frequency is above the band (the spectrum peaks at 7–16 GHz for a 4 GHz run, not resolved
+further). Why this one position is unstable is **not established**: the runs show what triggers it, and openEMS's
+internals are not read. The rule the export follows is empirical: keep what ends inside the region out of the
+absorbing cells, and let what reaches a side reach the wall. A small box with PEC walls on x and z instead of a
+PML diverged with a vacuum-only PML too (not explained, and not a configuration the export writes).
 
 ## Full-wave solver: FDTD (`sim.sparams`)
 

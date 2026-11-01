@@ -172,6 +172,10 @@ pub struct Options {
     pub boundary: Boundary,
     /// PML thickness in cells.
     pub pml_cells: u8,
+    /// Put the PML in added cells beyond the region's sides (x, y), with the copper and
+    /// dielectrics that reach a side continued through them, instead of in the region's outer
+    /// cells (DECISIONS D74).
+    pub pml_outside: bool,
     /// Air above and below the board (default: a quarter wavelength at `f_max`).
     pub air: Option<Nm>,
     /// Copper model.
@@ -200,6 +204,9 @@ pub struct Options {
     pub conductivity: Option<f64>,
     /// Copper surface roughness (on the surface resistance).
     pub roughness: Roughness,
+    /// Write the region's two-pin resistors, capacitors and inductors as lumped elements
+    /// (`export` only: the built-in solver has its own option).
+    pub parts: bool,
 }
 
 impl Default for Options {
@@ -219,6 +226,8 @@ impl Default for Options {
             points: 201,
             boundary: Boundary::Pml,
             pml_cells: 8,
+            pml_outside: false,
+            parts: false,
             air: None,
             copper: CopperModel::Solid,
             cells_per_wavelength: 20,
@@ -330,8 +339,8 @@ pub struct Export {
     pub nets: Vec<String>,
     /// Gaussian pulse center and 20 dB half-bandwidth (Hz).
     pub excitation: (u64, u64),
-    /// With `only_selected`: the signal nets in the model.
-    pub kept_signals: Option<BTreeSet<String>>,
+    /// Board parts written as lumped elements.
+    pub parts: Vec<crate::fdtd::LumpedPart>,
     /// Warnings and notes.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -603,8 +612,74 @@ pub(crate) struct Region {
 
 /// Builds the export.
 pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
-    let r = extract(p, o)?;
+    let mut r = extract(p, o)?;
+    let parts = if o.parts {
+        let mut diags = std::mem::take(&mut r.diagnostics);
+        let overrides = crate::fdtd::Overrides::new();
+        let candidates = crate::fdtd::parts::candidates(p, r.window, r.kept_signals.as_ref(), &overrides, &mut diags);
+        let boxes = crate::fdtd::parts::boxes(&r, candidates, &mut diags);
+        r.diagnostics = diags;
+        boxes
+    } else {
+        Vec::new()
+    };
+    if !o.pml_outside {
+        // The board's edge close to the wall, in cells, where the oracle runs diverged (D74).
+        let band = match o.boundary {
+            Boundary::Pml => o.pml_cells as usize,
+            Boundary::Mur => MUR_AIR_CELLS.min(3),
+        };
+        if let Some(b) = set_bbox(&r.board) {
+            let near = |ls: &[i64], lo: i64, hi: i64| {
+                let k_lo = ls.partition_point(|&v| v < lo);
+                let k_hi = (ls.len() - 1).saturating_sub(ls.partition_point(|&v| v < hi));
+                (1..=band).contains(&k_lo) || (1..=band).contains(&k_hi)
+            };
+            if near(&r.lines[0], b.min.x, b.max.x) || near(&r.lines[1], b.min.y, b.max.y) {
+                r.diagnostics.push(
+                    Diagnostic::warning(
+                        "openems.edge_near_boundary",
+                        format!(
+                            "the board's edge is within {band} cells of the absorbing boundary: with `pml_outside: \
+                             false` openEMS can diverge (the fields grow, and the run may end at a NaN energy)"
+                        ),
+                    )
+                    .with_hint("leave `pml_outside` at its default, or move the edge away with `margin` or `window`"),
+                );
+            }
+        }
+    }
+    if o.boundary == Boundary::Mur && o.f_min_hz == 0 {
+        // Seen with the oracle (D74): the via board's energy stalled 27 dB below its peak, while
+        // with `f_min` 1 GHz (35 dB less at DC) it went on decaying.
+        r.diagnostics.push(
+            Diagnostic::warning(
+                "openems.mur_static_field",
+                "with `boundary: mur` and `f_min` 0 the pulse's DC part stays as a static field a Mur wall does not \
+                 absorb: the energy can stop decaying before the end criterion, and the run goes on to `timesteps`",
+            )
+            .with_hint("use `boundary: pml`, or give `f_min` above 0"),
+        );
+    }
+    if o.boundary == Boundary::Pml && !o.pml_outside {
+        let n = o.pml_cells as usize;
+        for b in &parts {
+            // Reported by black-box runs of openEMS: lumped elements in its PML can diverge (D74).
+            let inside = |ls: &[i64], lo: i64, hi: i64| ls.len() > 2 * n && (lo < ls[n] || hi > ls[ls.len() - 1 - n]);
+            if inside(&r.lines[0], b.lo[0], b.hi[0]) || inside(&r.lines[1], b.lo[1], b.hi[1]) {
+                r.diagnostics.push(
+                    Diagnostic::warning(
+                        "openems.part_in_pml",
+                        format!("{} lies inside the {n}-cell PML", b.info.refdes),
+                    )
+                    .with_subject(ObjectRef::Name(b.info.refdes.clone()))
+                    .with_hint("use `pml_outside: true` or grow the region (`margin`)"),
+                );
+            }
+        }
+    }
     let geometry = xml::Geometry {
+        parts: &parts,
         title: &o.title,
         layers: &r.layers,
         diels: &r.diels,
@@ -661,7 +736,7 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
         mesh: r.mesh,
         nets: r.nets,
         excitation: (r.f0, r.fc),
-        kept_signals: r.kept_signals,
+        parts: parts.into_iter().map(|b| b.info).collect(),
         diagnostics: diags,
     })
 }
@@ -786,7 +861,7 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
     });
 
     // Board shape within the window, for the dielectrics.
-    let board_shape: Vec<Polygon> = match board::zones::board_area(p, Nm::ZERO) {
+    let mut board_shape: Vec<Polygon> = match board::zones::board_area(p, Nm::ZERO) {
         Ok(Some(area)) => poly::boolean(Op::Intersection, &area, &wring, FillRule::NonZero).unwrap_or_default(),
         _ => vec![Polygon::new(wring.clone(), vec![])],
     };
@@ -894,6 +969,26 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
     }
     let xs = mesh::smooth(&mesh::merge(fx, window.min.x, window.max.x, min_xy), &|_, _| res_sub, ratio);
     let ys = mesh::smooth(&mesh::merge(fy, window.min.y, window.max.y, min_xy), &|_, _| res_sub, ratio);
+    // The absorbing layer beyond the region: what ends inside the region stays out of it, what
+    // reaches a side runs through it to the wall (D74).
+    let beyond = match o.boundary {
+        _ if !o.pml_outside => 0,
+        Boundary::Pml => o.pml_cells as usize,
+        Boundary::Mur => MUR_AIR_CELLS,
+    };
+    let (xs, ys) = if beyond > 0 {
+        let xs = mesh::extend_beyond(&xs, beyond, res_sub, ratio);
+        let ys = mesh::extend_beyond(&ys, beyond, res_sub, ratio);
+        let wall =
+            Rect { min: poly::Point::new(xs[0], ys[0]), max: poly::Point::new(xs[xs.len() - 1], ys[ys.len() - 1]) };
+        for c in &mut copper {
+            c.shape = reach_wall(&c.shape, window, wall);
+        }
+        board_shape = reach_wall(&board_shape, window, wall);
+        (xs, ys)
+    } else {
+        (xs, ys)
+    };
     let zmax = |a: i64, b: i64| -> i64 {
         if a >= z_lo && b <= z_hi {
             // Inside the board (and its mask): λ/N in the substrate, and at least four cells
@@ -990,6 +1085,49 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Region, Error> {
         }),
         diagnostics: diags,
     })
+}
+
+/// Cells between the region and a Mur wall with `pml_outside`. With openEMS a dielectric's edge
+/// one to three cells from a Mur wall diverged, while one at four or more, or on the wall, stayed
+/// bounded for 250 000 steps (D74).
+const MUR_AIR_CELLS: usize = 8;
+
+/// `shape` (clipped to `window`) continued from every edge it has on the window's sides out to
+/// `wall`: first along x, then along y, so that the corners follow too.
+fn reach_wall(shape: &[Polygon], window: Rect, wall: Rect) -> Vec<Polygon> {
+    let rect = |x0: i64, y0: i64, x1: i64, y1: i64| {
+        Polygon::new(rect_ring(Rect { min: poly::Point::new(x0, y0), max: poly::Point::new(x1, y1) }), vec![])
+    };
+    let mut out = shape.to_vec();
+    for axis in 0..2 {
+        let mut add = Vec::new();
+        for q in &out {
+            for r in q.rings() {
+                for (a, b) in r.edges() {
+                    if axis == 0 && a.x == b.x && a.y != b.y {
+                        let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+                        if a.x == window.min.x {
+                            add.push(rect(wall.min.x, y0, window.min.x, y1));
+                        } else if a.x == window.max.x {
+                            add.push(rect(window.max.x, y0, wall.max.x, y1));
+                        }
+                    } else if axis == 1 && a.y == b.y && a.x != b.x {
+                        let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+                        if a.y == window.min.y {
+                            add.push(rect(x0, wall.min.y, x1, window.min.y));
+                        } else if a.y == window.max.y {
+                            add.push(rect(x0, window.max.y, x1, wall.max.y));
+                        }
+                    }
+                }
+            }
+        }
+        if !add.is_empty() {
+            out.extend(add);
+            out = poly::union_all(&out, FillRule::NonZero).unwrap_or(out);
+        }
+    }
+    out
 }
 
 /// The solder mask on each outer side: over the laminate from its surface, over the copper from

@@ -1128,6 +1128,16 @@ pub struct OpenEms {
     /// PML thickness in cells (default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pml_cells: Option<u8>,
+    /// Put the PML in added cells beyond the region's sides, with copper and dielectrics that
+    /// reach a side continued through it (default true). False puts it in the region's outer
+    /// cells, as `sim.sparams` does by default: with openEMS's PML, plates or a board edge there
+    /// can make the run diverge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pml_outside: Option<bool>,
+    /// Write the region's two-pin resistors, capacitors and inductors as lumped elements from
+    /// their part values (`resistance`, `capacitance`, `inductance`, `esr`, `esl`; default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<bool>,
     /// Air above and below the board (default: a quarter wavelength at `f_max`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub air: Option<Nm>,
@@ -1221,6 +1231,9 @@ pub struct OpenEmsExported {
     pub excitation: Excitation,
     /// Nets with copper in the region.
     pub nets: Vec<String>,
+    /// Board parts written as lumped elements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<crate::fdtd::LumpedPart>,
 }
 
 /// The solder mask options (`mask`, `mask_copper`, `mask_er`, `mask_loss_tangent`) shared by
@@ -1385,6 +1398,8 @@ impl Command for OpenEms {
             points: self.points.unwrap_or(201),
             boundary: self.boundary.unwrap_or_default(),
             pml_cells: self.pml_cells.unwrap_or(8).max(1),
+            pml_outside: self.pml_outside.unwrap_or(true),
+            parts: self.parts.unwrap_or(true),
             air: self.air,
             copper: self.copper.unwrap_or_default(),
             cells_per_wavelength: self.cells_per_wavelength.unwrap_or(20),
@@ -1423,30 +1438,6 @@ impl Command for OpenEms {
         for d in mask_notes.into_iter().chain(x.diagnostics) {
             ctx.report(d);
         }
-        // The export has no lumped elements: a matching network's pads stay open, where
-        // `sim.sparams` on the same region simulates its parts.
-        let window = crate::geom::poly::Rect::new(
-            crate::geom::poly::Point::new(x.window.0.x.0, x.window.0.y.0),
-            crate::geom::poly::Point::new(x.window.1.x.0, x.window.1.y.0),
-        );
-        let open = crate::fdtd::parts_in_region(ctx.project()?, window, x.kept_signals.as_ref());
-        if !open.is_empty() {
-            let names: Vec<&str> = open.iter().map(|q| q.refdes.as_str()).collect();
-            ctx.report(
-                Diagnostic::warning(
-                    "openems.parts_not_modeled",
-                    format!(
-                        "two-pin parts in the region are not exported, their pads stay open: {} (`sim.sparams` on \
-                         the same region simulates them, so the two results differ)",
-                        names.join(", ")
-                    ),
-                )
-                .with_hint(
-                    "add them to the driver as lumped elements (openEMS's `AddLumpedElement`), or read this export \
-                     as the bare layout",
-                ),
-            );
-        }
         let hz = |v: u64| Quantity::int(v as i64, Unit::Hertz);
         Ok(OpenEmsExported {
             run: format!("python3 {}", dir.join(format!("{name}.py")).display()),
@@ -1458,6 +1449,7 @@ impl Command for OpenEms {
             mesh: x.mesh,
             excitation: Excitation { f0: hz(x.excitation.0), fc: hz(x.excitation.1) },
             nets: x.nets,
+            parts: x.parts,
         })
     }
 
@@ -1485,6 +1477,10 @@ impl Command for OpenEms {
                 "\n  port {}: {} ({kind}, {}) on {} over {}",
                 p.number, p.at, p.z0, p.layer, p.reference
             ));
+        }
+        if !o.parts.is_empty() {
+            let names: Vec<&str> = o.parts.iter().map(|p| p.refdes.as_str()).collect();
+            s.push_str(&format!("\n  lumped parts: {}", names.join(", ")));
         }
         s.push_str(&format!("\nrun: {}  (writes {})", o.run, o.touchstone));
         s

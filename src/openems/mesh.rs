@@ -162,6 +162,29 @@ pub fn smooth(fixed: &[i64], max_for: &dyn Fn(i64, i64) -> i64, ratio: f64) -> V
     out
 }
 
+/// `n` more cells beyond each end of sorted lines, each `ratio` times the one before it, at most
+/// `max` (where the absorbing boundary goes when it must stay out of the region, DECISIONS D74).
+pub fn extend_beyond(lines: &[i64], n: usize, max: i64, ratio: f64) -> Vec<i64> {
+    let (Some(&first), Some(&last)) = (lines.first(), lines.last()) else { return Vec::new() };
+    let d: Vec<i64> = lines.windows(2).map(|w| w[1] - w[0]).collect();
+    let grow = |cell: i64| ((cell as f64 * ratio).round() as i64).min(max.max(cell));
+    let (mut lo, mut hi) = (first, last);
+    let (mut low_cell, mut high_cell) = (d.first().copied().unwrap_or(max), d.last().copied().unwrap_or(max));
+    let (mut below, mut above) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    for _ in 0..n {
+        low_cell = grow(low_cell);
+        high_cell = grow(high_cell);
+        lo -= low_cell;
+        hi += high_cell;
+        below.push(lo);
+        above.push(hi);
+    }
+    below.reverse();
+    below.extend_from_slice(lines);
+    below.extend(above);
+    below
+}
+
 /// Largest and smallest spacing of sorted lines (0 for fewer than two lines).
 pub fn spacing(lines: &[i64]) -> (i64, i64) {
     let d: Vec<i64> = lines.windows(2).map(|w| w[1] - w[0]).collect();
@@ -222,6 +245,15 @@ mod tests {
         }
         check(&l, 200_000, 1.5);
         assert!(l.len() < 40, "{}", l.len());
+    }
+
+    #[test]
+    fn extends_beyond_both_ends() {
+        // Cells 100 and 400 at the ends; growth 1.5, capped at 500 (a larger end cell stays).
+        let l = extend_beyond(&[0, 100, 1000, 1400], 3, 500, 1.5);
+        assert_eq!(l, vec![-713, -375, -150, 0, 100, 1000, 1400, 1900, 2400, 2900]);
+        assert_eq!(extend_beyond(&[0, 900], 1, 500, 1.5), vec![-900, 0, 900, 1800]);
+        assert_eq!(extend_beyond(&[0, 10], 0, 500, 1.5), vec![0, 10]);
     }
 
     #[test]

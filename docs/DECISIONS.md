@@ -1770,6 +1770,52 @@ copper as voxelized, and cut edges between a pad's center and the element become
 has to reach its element. Same case, staircase and conformal: +0.0099 and +0.0099 at 0.5 mm, +0.0118 and +0.0117 at
 0.25 mm, on 3 and 5 columns both ways (`columns` in the output; a 0 Ω short now also clears its edges' cuts).
 
+### D74. openEMS: the absorbing cells beyond the region, via barrels as node columns, board parts as lumped elements (2026-11-02)
+Closes what D68 left open. Everything below comes from running openEMS as a black box (its CLI on XML written from
+the observable format, a build without the Python modules, one at v0.37.0-32; the driver at CI's pinned revision for
+the S-parameters); neither openEMS's nor CSXCAD's source was read. Full table: ELECTRICAL.md, "What makes openEMS
+diverge".
+**The divergence.** D68's "needs the GND planes" was a symptom. `PML_8` is the outermost eight *cells*; on the via
+board's fine mesh that was 61 % of the region's width in y, and the outline lay one 0.30 mm cell from the wall, because
+a 4 mm margin around y = 4 ends 0.30 mm past an 8 mm board. The trigger is two planes with dielectric between them
+ending together on the last interior line of the y sides: +5 dB per 1000 steps, then NaN. Moved 2, 3, 5 or 8 cells
+in, onto the wall, or one cell from the wall on x (a 1.18 mm outer cell), it decays over 250 000 steps; so it does
+with one plane, no dielectric, or εr 1. Tracks, vias, copper thickness, lossy materials and the pulse's DC content
+(−20 to −163 dB) make no difference, and the rate per unit time does not change with half the timestep, so this is
+neither D68's materials nor a Courant limit. `sim.sparams`'s CPML on the same region is stable; it has a complex
+frequency shift, but openEMS's layer's internals are not read, so that is not established as the reason. **Why** this
+position is unstable is not established either: the runs identify the trigger, not the mechanism.
+**The fix.** `pml_outside` (default true in `export.openems`, false in `sim.sparams`): the layer's cells are added
+beyond the region's x and y sides, copper and dielectrics reaching a side run through them to the wall
+(`openems::reach_wall`), what ends inside the region stays out. On the same board the run now reaches its end
+criterion by 28 000 steps and keeps decaying over 219 000; with `pml_outside: false` it still diverges, and warns
+`openems.edge_near_boundary`.
+**Mur.** D68's "any region with a dielectric" was the same position, not the dielectric: Mur diverges with a
+dielectric's edge 1, 2 or 3 cells from the wall on y (planes not needed), and stays bounded on the wall or 4, 6, 8
+cells from it (200–250 000 steps; 40 000 steps had called 2 and 3 safe). So Mur gets eight air cells beyond the region
+the same way, and works. It keeps one limit, warned as `openems.mur_static_field`: with `f_min` 0 the pulse's DC part
+stays as a static field, and the energy stalled 27 dB below its peak.
+**Via barrels were open.** With the divergence gone the via read |S21| −69 dB, |S11| 0 dB: every plated barrel between
+mesh lines was missing from the grid (no mesh edge inside the cylinder), since D54, unseen because no run had reached a
+result. A line `Box` at the barrel's nearest node column closes it, as `sim.sparams` has done since D59; it must be on
+mesh coordinates, since a degenerate line between them made no difference. |S21| then agrees within 0.03 dB.
+**Parts.** D65's parts through the same selection (`fdtd::parts::candidates`) as `LumpedElement`s over the gap between
+the pads (`boxes`: on the mesh, not on voxels), `parts` as in `sim.sparams`: R alone a plain element, with a reactance
+`LEtype="1"`, 0 Ω metal. Within 0.009 of `sim.sparams` and 0.011 of theory, 0.5–4.5 GHz. `openems.part_in_pml` warns
+when one lies in the layer with `pml_outside: false`: another project's black-box notes report such elements
+diverging; not reproduced here, so the warning is a precaution.
+**Guard.** A diverged run ends as if converged ("end-criteria reached (-nan dB)"), so the driver exits with
+`openems.diverged` on non-finite or |S| > 10 results instead of writing a Touchstone file.
+*Why:* moving the layer rather than warning fixes the default path for every board without a mesh rule fitted to one
+trigger: the export does not need to know which positions are unstable, only to keep edges out of the layer, and a
+layer of cells that hold only air or a uniform cross-section is what a PML is meant to absorb. It costs cells (177 000
+against 91 000 on this board); a warning alone would have left the default run diverging. `sim.sparams` keeps its
+default so its validated results (D59–D68) do not move; the comparison passes the option to both. The barrels are a
+node column, not a mesh line, so the mesh `sim.sparams` shares does not change. Also tried and rejected: mesh lines at
+the via centers (they change the shared mesh, and that run read |V2/V1| 0.09–0.12 with slow growth when cut off at
+46 000 steps, not explained). Treating "structures out of the PML" as sufficient in general is not claimed: a small
+model with PEC walls on x and z diverged with a vacuum-only PML (unexplained, and not a configuration the export writes).
+
 ## Open questions
 
 

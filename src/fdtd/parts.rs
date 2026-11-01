@@ -197,13 +197,6 @@ pub(crate) fn candidates(
     out
 }
 
-/// Two-pin parts in `window` that a model of these nets should hold (as [`candidates`], without
-/// its diagnostics): for an export whose model has no lumped elements.
-pub(crate) fn in_region(p: &Project, window: Rect, kept: Option<&BTreeSet<String>>) -> Vec<LumpedPart> {
-    let mut ignored = Vec::new();
-    candidates(p, window, kept, &Overrides::new(), &mut ignored).into_iter().map(|c| c.info).collect()
-}
-
 /// The modeled inductors and capacitors with nothing but their nominal value, for a note: at RF
 /// the parasitics a datasheet gives (ESL, Q, self-resonance) move the result.
 pub(crate) fn ideal(parts: &[LumpedPart]) -> Vec<String> {
@@ -269,6 +262,73 @@ pub(crate) fn place(
                  along x or y",
             )),
         }
+    }
+    out
+}
+
+/// A part's lumped element in the openEMS export: a box between its two pads' copper (nm), `axis`
+/// joining the pads, with the part's values.
+pub(crate) struct PartBox {
+    pub(crate) info: LumpedPart,
+    pub(crate) axis: usize,
+    pub(crate) lo: [i64; 3],
+    pub(crate) hi: [i64; 3],
+    pub(crate) r: f64,
+    pub(crate) l: f64,
+    pub(crate) c: Option<f64>,
+}
+
+/// The candidates as boxes for the openEMS export, by the rules of [`place`] on the region's
+/// mesh rather than the voxelized copper (openEMS snaps the box to the same mesh lines as the
+/// pads): both pads on one layer, facing along x or y, at least one cell between them.
+pub(crate) fn boxes(r: &Region, parts: Vec<Candidate>, diags: &mut Vec<Diagnostic>) -> Vec<PartBox> {
+    const HINT: &str = "use a finer mesh (`max_cell`, `min_cell`), or place it along x or y";
+    let mut out = Vec::new();
+    for c in parts {
+        let refdes = c.info.refdes.clone();
+        let (la, lb) = (pad_layer(&c.pads[0]), pad_layer(&c.pads[1]));
+        let layer = match r.layers.iter().find(|l| l.name == la) {
+            Some(l) if la == lb => l,
+            _ => {
+                diags.push(skipped(
+                    &refdes,
+                    "its pads are on different copper layers".into(),
+                    "only parts with both pads on one copper layer are modeled",
+                ));
+                continue;
+            }
+        };
+        let [p0, p1] = &c.pads;
+        let (dx, dy) = ((p1.center.x.0 - p0.center.x.0).abs(), (p1.center.y.0 - p0.center.y.0).abs());
+        let a = if dx >= dy { 0 } else { 1 };
+        let b = 1 - a;
+        let span = |q: &PlacedPad, ax: usize| {
+            q.shape_on(&pad_layer(q)).bbox().map(|s| if ax == 0 { (s.min.x, s.max.x) } else { (s.min.y, s.max.y) })
+        };
+        let (Some(a0), Some(a1), Some(b0), Some(b1)) = (span(p0, a), span(p1, a), span(p0, b), span(p1, b)) else {
+            diags.push(skipped(&refdes, "a pad has no copper shape".into(), HINT));
+            continue;
+        };
+        let (o_lo, o_hi) = (b0.0.max(b1.0), b0.1.min(b1.1));
+        if o_lo > o_hi {
+            diags.push(skipped(&refdes, "its pads do not face each other along x or y".into(), HINT));
+            continue;
+        }
+        // The gap along `a`, between the pads' facing edges; it must span a mesh cell.
+        let (g_lo, g_hi) = if a0.0 <= a1.0 { (a0.1, a1.0) } else { (a1.1, a0.0) };
+        let nearest = |v: i64| {
+            let ls = &r.lines[a];
+            (0..ls.len()).min_by_key(|&i| (ls[i] - v).abs()).unwrap_or(0)
+        };
+        if g_hi <= g_lo || nearest(g_lo) == nearest(g_hi) {
+            diags.push(skipped(&refdes, "no mesh cell separates its pads' copper".into(), HINT));
+            continue;
+        }
+        let (mut lo, mut hi) = ([0; 3], [0; 3]);
+        (lo[a], hi[a]) = (g_lo, g_hi);
+        (lo[b], hi[b]) = (o_lo, o_hi);
+        (lo[2], hi[2]) = (layer.bottom, layer.top);
+        out.push(PartBox { info: c.info, axis: a, lo, hi, r: c.r, l: c.l, c: c.c });
     }
     out
 }
