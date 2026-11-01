@@ -78,6 +78,33 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     out
 }
 
+/// The checks of [`check`] that can flag a track or via, and only those: what the router's
+/// verification needs (it rips the wires of routed items with errors). The errors with a track
+/// or via among their subjects are exactly those of [`check`], in the same order; pads, silkscreen,
+/// courtyards, connectivity, lengths and electrical checks are left out, since they cannot
+/// name new copper as an error.
+pub fn check_copper(p: &Project) -> Vec<Diagnostic> {
+    let ctx = Ctx::new(p);
+    let mut out = Vec::new();
+    let items = geo::copper_items(p);
+    let pads = geo::placed_pads(p);
+    copper_pairs(&ctx, &items, &mut out);
+    track_widths(&ctx, &rule_widths(p, &items), &mut out);
+    via_sizes(&ctx, &mut out);
+    hole_to_hole(&ctx, &pads, &mut out);
+    hole_clearance(&ctx, &items, &pads, &mut out);
+    if let Some(o) = BoardShape::of(p) {
+        board_edges(&ctx, &items, &o, &mut out);
+    }
+    keepouts(&ctx, &courtyards(p), &mut out);
+    disallowed(&ctx, &items, &mut out);
+    out.sort_by(|a, b| {
+        let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
+        (a.code.as_ref(), loc(a), &a.message).cmp(&(b.code.as_ref(), loc(b), &b.message))
+    });
+    out
+}
+
 /// Manufacturing limits only, with `rules` in place of the board's and net class values
 /// ignored: clearance (and shorts), track width, hole-to-hole, copper-to-edge (and copper
 /// outside the board), silk-to-pad. Same codes as [`check`]; a zero limit is not checked. Used by

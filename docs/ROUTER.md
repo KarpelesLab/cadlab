@@ -137,7 +137,9 @@ their pad to nothing else are dropped.
 **Search.** Multi-source / multi-target A* over (layer, cell): 8 directions; costs: 1 per orthogonal step,
 √2·1.05 per diagonal step, 1.8 for orthogonal steps against the layer's preferred direction (horizontal on even,
 vertical on odd routing layers), 0.4 per 45° bend, 1.5 per 90° bend, sharper bends forbidden, 10 per through via;
-octile heuristic to the target's bounding box (weighted 1.3 at low effort); the queue is a 4-ary heap of
+octile heuristic to the target's bounding box (weighted 1.3 at low effort; with more than two routing layers,
+the smaller of the distance to the targets on the node's own layer and a via plus the distance to any target, D72);
+the queue is a 4-ary heap of
 (cost, node) keys, popping in the same order as a binary heap would. A net is routed as a tree: each
 connection starts from everything already connected to its source island. A new via keeps `hole_to_hole` from the
 vias of the net's earlier wires.
@@ -309,8 +311,8 @@ index as those chords for later nets. Gerber (G02/G03), KiCad (`arc`) and IPC-25
 export writes them as chords within 1 µm. Lengths (`route.status`, stats, benchmark) are measured along arcs
 (`board::track_length`).
 
-**Verification.** `drc::check` runs on the project with the result; any new track or via in an error (other than
-`drc.unrouted`) has its wire ripped and reported. The final status of every connection is read from the copper
+**Verification.** `drc::check_copper`, the checks of `drc::check` that can flag a track or via (the same errors about
+them, D72), runs on the project with the result; any new track or via in an error has its wire ripped and reported. The final status of every connection is read from the copper
 islands of the verified board.
 
 **Failure reports.** A failed connection is re-searched with obstacles passable at a penalty; what that path runs
@@ -319,11 +321,36 @@ location, layer, subjects and hints (move a component, rip the routing in the wa
 clearance, raise the budget).
 
 **Determinism and control.** No hash iteration, ties broken by node index, seeded RNG; progress per net and
-iteration through a callback, cancellation polled every 4096 search expansions, and a time budget (negotiation
-stops at 75%, legalization at 100%) that returns the best legal partial result. When the budget cuts a run short,
-results may differ between runs.
+iteration through a callback, cancellation polled every 4096 search expansions, and a budget (negotiation stops at
+75 %, the other searching phases at 100 %, of what is left once the estimated end of the run is set aside) that returns
+the best legal partial result. Optimization, verification and reports always run; they get about 12 000 units of work
+per connection out of the budget, in time at the speed the run's setup showed (D72).
 
-**Commands.** `route.all {budget? ("60s") or budget_ms?, layers?, effort?, seed?, fanout?, any_angle?, gridless?, arcs?,
+**Work budget** (`work_budget` on `route.all`, `route.nets`, `route.connection`, `route.diffpair`; `RouteOptions::work`
+in the library; `router::work`, D72). A time budget that runs out makes the result depend on the machine and its load.
+The work budget ends the same phases at a count of the run's own operations: one unit per pop of the grid search's
+queue, the weights of the other operations (gridless nodes and rooms, pair search, halos, setup, post-processing and
+verification by size) measured to take about the same time per unit, 200–300 ns per unit on the development machine on
+the large corpus boards. Searches of a parallel batch charge a pending count that joins the total when the batch ends,
+so stop tests never see another thread's progress; a batch can overshoot by its own size. Results are identical on any
+machine, under any load and with any number of threads (seen: 1, 3, 4, 8, 64 threads, a machine at load 100 and a CI
+runner gave the same tracks, vias and work). `stats.work` reports the work of every run: a scale for choosing a budget, not a
+way to repeat a run the clock cut (the phases end at shares of the budget, so another budget is another run).
+What a user gets:
+
+- *Default: a time budget (60 s).* A board that finishes inside it is deterministic anyway (all of the generated
+  benchmark, 8 of the 12 corpus boards). One that does not gets the best result the machine could reach in that time,
+  which differs from run to run; `route.budget_cut` (info) says so and gives the run's work.
+- *`work_budget`:* the same result every time, the choice for scripts, regression checks, or anything whose output is
+  checked in. The time is what varies, with no bound but the count: revD1's 200 M units took 43 s and 70 s in two CI runs of one
+  commit, with identical results, and up to 170 s on the loaded development machine. Giving both budgets is refused (`route.budget`), since the clock
+  could then decide. The default stays the time budget because a time limit is what an agent or a person waiting for an
+  answer asks for, and a unit is not a fixed time: 200 M units are 33 s on tinytapeout-demo and 44 s on glasgow-revD1, so
+  no count means "a minute" on every board.
+- A unit measures the algorithm, not the code: a faster build does the same work in less time and routes the same,
+  so `stats.work` shows search savings, and the benchmark's time column shows speedups per unit.
+
+**Commands.** `route.all {budget? ("60s") or budget_ms? or work_budget?, layers?, effort?, seed?, fanout?, any_angle?, gridless?, arcs?,
 arc_radius?, router?, neck?}`, `route.nets {nets, ...}` (net or class names, `class:power`), `route.connection {from, to, shove?,
 ...}` (pins), `route.track {layer, points, net?, width?, mode?}` (push-and-shove placement, below),
 `route.fanout {refdes?, layers?}`, `route.rip {nets? | all}` (unlocked items only), `route.status` (connections,
@@ -697,8 +724,9 @@ With `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar` (and `JAVA_HOME` for the 
 the JVM start and file exchange) and imported through `route.import_ses`, then measured the same way.
 `CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results; `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search.
 `route_bench --corpus [names...]` re-routes the open-source corpus instead (below); there `CADLAB_BENCH_TRACE=1`
-prints a timeline of the router's phases and negotiation iterations, and `CADLAB_BENCH_NETS=a,b` routes only
-those nets.
+prints a timeline of the router's phases and negotiation iterations (time and work), `CADLAB_BENCH_NETS=a,b` routes only
+those nets, `CADLAB_BENCH_WORK=<units>` uses a work budget (repeatable: compare builds this way, not on time; the job
+`corpus-route` of CI does it for three seeds) and `CADLAB_BENCH_SEED=<n>` sets the seed.
 
 **Results** (release build, 16-core macOS development machine, freerouting 2.4.1 on Java 25). *M5* is the router
 at the start of M6, *phase 1* the first M6 version (fanout, batches, rip-up and retry), *phase 2* the second (escape
@@ -897,6 +925,36 @@ What is left: the shield-to-GND connection of corne-cherry's receptacle (a VBUS 
 glasgow-revD1, cynthion's BGA and resistor arrays (no exit for 0.127 mm tracks between their pads), the split
 keyboard (sweep) and congestion near nrfmicro's receptacle (its D+ pads stay apart, blocked by the D− exits and
 a no-connect pad).
+
+**Corpus re-route, D72** (work budget; `CADLAB_BENCH_WORK=200000000 route_bench --corpus`, seeds 1/2/3, 3 per board since
+negotiation is chaotic and a single seed says little: failed connections per seed. *Before*: the D69 searches, with only the
+meter added, run locally, *after*: the CI job `corpus-route` on a 4-core runner; both repeat exactly. DRC errors other
+than unrouted: 0 everywhere. nrfmicro, sweep-v2.2 and the small boards are not budget-bound.)
+
+| board | layers | connections | before | after | main change |
+|---|---|---|---|---|---|
+| nrfmicro | 2 | 85 | 2/2/2 | 2/2/3 | crossover via deep enough for the partner's own exit where that exists; the D+/D− crossing still fails in most seeds |
+| buspirate5-rev10 | 4 | 473 | 0/1/0 | 1/1/0 | |
+| lumenpnp-mobo | 4 | 461 | 5/5/3 | **3/0/0** | via-aware estimate |
+| corne-cherry | 2 | 431 | 8/6/11 | **5/4/7** | the shield "failures" were a report error: `J1.S1` names four pads, and the status looked at the first; they are routed |
+| glasgow-revC3 | 4 | 739 | 35/35/34 | **34/34/31** | |
+| glasgow-revD1 | 6 | 1583 | 130/115/125 | **115/112/110** | via-aware estimate; verification reserved |
+| cynthion | 4 | 693 | 27/27/26 | 27/27/28 | 8 of them are the shunts' sense pads (below) |
+| tinytapeout-demo | 4 | 361 | 21/11/12 | 20/19/19 | **worse**, from the via-aware estimate alone |
+
+The other way to read completion: `route_bench`'s *DRC unrouted* column counts what `route.status` sees on the result, with the
+pours filled again around the new copper, while `failed` counts the planned connections. They differ on boards with pours (revD1
+115 and 199, corne-cherry 5 and 13, mobo 3 and 69): pads the plan took as joined by a pour are cut off from it by new tracks
+(the limit noted under v1). So `completion` is optimistic on those boards, in every table above.
+
+Times, on the wall-clock budget (60 s, seed 1, the development machine under other agents' load, indicative only): revD1 71–73 s
+before and 63 s after, at 91.1–91.3 % and 93.1 %; its verification DRC 9.5 → 5.7 s.
+
+What is left: cynthion's 8 sense pads lie *inside* the force pads of the shunts (`R_0603_1608Metric_Current_Sense`, net tie
+groups "1, 2" and "3, 4"). No width gets out, and the original board's own tracks there are shorts for KiCad's DRC too: tried
+first was exempting them (the oracle job rejected it, 11 `shorting_items` KiCad reports and cadlab then did not), so the
+router reports them with a hint. nrfmicro's D+/D− crossing: congestion around the receptacle takes the room in most seeds. revD1
+and revC3 are budget-bound at this count; corne-cherry's GND and QSPI leftovers near the RP2040s are congestion.
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).

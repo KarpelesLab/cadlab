@@ -302,7 +302,9 @@ pub(crate) fn crossovers(
                     }
                 }
                 let Some(y) = crossing else { continue };
-                if let Some((d, _, _)) = crossover_via(rb, index, &row, k, layer, axis, &wanted) {
+                let via = crossover_via(rb, index, &row, k, layer, axis, &wanted, true)
+                    .or_else(|| crossover_via(rb, index, &row, k, layer, axis, &wanted, false));
+                if let Some((d, _, _)) = via {
                     cands.push((d, x, rb.terminals[t].label.clone(), t, layer, axis, row.clone(), k, y));
                 }
             }
@@ -318,7 +320,9 @@ pub(crate) fn crossovers(
             continue;
         }
         // Planned again with the crossovers placed so far.
-        let Some((_, v, exits)) = crossover_via(rb, index, &row, k, layer, axis, &wanted) else { continue };
+        let planned = crossover_via(rb, index, &row, k, layer, axis, &wanted, true)
+            .or_else(|| crossover_via(rb, index, &row, k, layer, axis, &wanted, false));
+        let Some((_, v, exits)) = planned else { continue };
         let at = rb.terminals[t].at;
         let pr = rb.profile(x);
         index.insert(Item::Seg { net: x, layer: layer as u8, a: at, b: v }, BoxF::of2(at, v).expand(pr.hw));
@@ -358,6 +362,15 @@ pub(crate) fn crossovers(
                 out.exits.push(Escape { net: x, layer, pts, label: pt.label.clone() });
             }
             out.bones.push(DogBone { net: x, layer, pad: bend, via: pv, label: pt.label.clone(), small: None });
+            // The exit between the two vias goes on past them, onto a grid cell: from where it
+            // ended, between the vias, the router has no grid access.
+            let n = rb.terminals[row[(i + k) / 2].1].label.clone();
+            if let Some(e) = out.exits.iter_mut().rev().find(|e| e.label == n)
+                && let Some(more) = past_vias(rb, index, grid, e, layer, axis)
+            {
+                insert_escape(rb, index, e.net, layer, &[*e.pts.last().expect("exit"), more[0], more[1]]);
+                e.pts.extend(more);
+            }
         }
     }
     out
@@ -423,6 +436,44 @@ fn partner_exit(
     None
 }
 
+/// The rest of exit `e`: straight on along `axis` to the first point from which a straight stub
+/// reaches a grid cell the router can use: (that point, the cell); exact checks.
+fn past_vias(rb: &RouterBoard, index: &Index, grid: &Grid, e: &Escape, layer: usize, axis: P) -> Option<[P; 2]> {
+    let ck = Checker { rb, index };
+    let pr = rb.profile(e.net);
+    let end = *e.pts.last()?;
+    let margin = delta(pr.hw + pr.c, grid.g * std::f64::consts::SQRT_2 / 2.0);
+    let steps = (CROSS_DEPTH / CROSS_STEP).round() as i64;
+    for i in 1..=steps {
+        let d = i as f64 * CROSS_STEP;
+        let q = P::new(end.x + axis.x * d, end.y + axis.y * d);
+        if ck.seg(layer, end, q, e.net).is_some() {
+            return None;
+        }
+        let (x0, y0, x1, y1) = grid.crange(&BoxF::of2(q, q).expand(grid.g))?;
+        let mut best: Option<(f64, P)> = None;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let c = grid.cell(x, y);
+                let dist = c.dist(q);
+                // Further along the axis only, so the exit does not turn back.
+                let ahead = (c.x - q.x) * axis.x + (c.y - q.y) * axis.y;
+                if ahead >= 0.0
+                    && best.is_none_or(|b| dist < b.0)
+                    && ck.seg_margin(layer, c, c, e.net, margin).is_none()
+                    && ck.seg(layer, q, c, e.net).is_none()
+                {
+                    best = Some((dist, c));
+                }
+            }
+        }
+        if let Some((_, c)) = best {
+            return Some([q, c]);
+        }
+    }
+    None
+}
+
 /// Result of [`crossovers`].
 #[derive(Default)]
 pub(crate) struct Crossovers {
@@ -439,7 +490,8 @@ type Exit = (usize, Vec<P>);
 
 /// The shallowest via straight out of pad `row[k]` (along `axis`) that is legal, leaves both
 /// row neighbors an exit and leaves the wanted pads beyond them a way out past those exits
-/// ([`outer_exit`]): (depth in µm, via center, the exits).
+/// ([`outer_exit`]), and with `partner` the net's other pad its own exit and via
+/// ([`partner_exit`]): (depth in µm, via center, the exits).
 #[allow(clippy::too_many_arguments)]
 fn crossover_via(
     rb: &RouterBoard,
@@ -449,6 +501,7 @@ fn crossover_via(
     layer: usize,
     axis: P,
     wanted: &[bool],
+    partner: bool,
 ) -> Option<(i64, P, Vec<Exit>)> {
     let term = &rb.terminals[row[k].1];
     let (net, at) = (term.net, term.at);
@@ -482,10 +535,30 @@ fn crossover_via(
                         || !wanted[row[o].1]
                         || outer_exit(rb, index, row[o].1, layer, axis, *n, pts, at, d).is_some()
                 });
+            // With `partner`: deep enough that the net's other pad of the crossing can get its
+            // own exit and via past the exit between them.
+            let partner_ok = !partner
+                || !outer_ok
+                || exits.iter().zip([k.wrapping_sub(2), k + 2]).all(|((n, pts), o)| {
+                    o >= row.len()
+                        || rb.terminals[row[o].1].net != net
+                        || rb.terminals[row[o].1].island == term.island
+                        || !wanted[row[o].1]
+                        || partner_exit(
+                            rb,
+                            index,
+                            row[o].1,
+                            layer,
+                            axis,
+                            rb.terminals[*n].net,
+                            *pts.last().expect("exit"),
+                        )
+                        .is_some()
+                });
             for id in ids {
                 index.remove(id);
             }
-            if outer_ok {
+            if outer_ok && partner_ok {
                 return Some(((d / 1_000.0).round() as i64, v, exits));
             }
         }

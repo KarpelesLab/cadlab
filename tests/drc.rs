@@ -601,3 +601,29 @@ fn selection_and_waivers() {
     let e = r.execute(&mut s, "drc.unwaive", json!({"code": "drc.clearance"}), RunOptions::default()).unwrap_err();
     assert_eq!(e.error.diagnostic.code, "drc.waiver_not_found");
 }
+
+/// The router's verification runs the checks that can flag copper only: on a board with shorts,
+/// clearance, width, via, hole and edge errors it sees every error `check` has about a track or via.
+#[test]
+fn copper_checks_find_every_error_about_tracks_and_vias() {
+    let (_d, r, mut s) = routed();
+    // A short, a too-narrow track, a track off the board and a via on top of a pad of another net.
+    add_track(&mut s, "F.Cu", mm(5.0, 3.0), mm(15.0, 3.0), 0.25, Some("VIN"));
+    add_track(&mut s, "F.Cu", mm(10.0, 2.0), mm(10.0, 4.0), 0.25, Some("3V3"));
+    add_track(&mut s, "F.Cu", mm(2.0, 12.0), mm(4.0, 12.0), 0.01, Some("GND"));
+    add_track(&mut s, "B.Cu", mm(19.0, 1.0), mm(25.0, 1.0), 0.25, Some("GND"));
+    exec(&r, &mut s, "via.add", json!({"at": ["10mm", "3mm"], "net": "GND"}));
+    exec(&r, &mut s, "via.add", json!({"at": ["10.2mm", "3mm"], "net": "VIN"}));
+    let about_copper = |d: &[Diagnostic]| -> Vec<String> {
+        d.iter()
+            .filter(|d| d.severity == Severity::Error)
+            .filter(|d| d.subjects.iter().any(|x| matches!(x, ObjectRef::Item { .. })))
+            .filter(|d| d.code != "drc.unrouted")
+            .map(|d| d.to_string())
+            .collect()
+    };
+    let p = s.project.as_ref().unwrap();
+    let full = about_copper(&cadlab::drc::check(p));
+    assert!(full.len() >= 4, "{full:?}");
+    assert_eq!(about_copper(&cadlab::drc::check_copper(p)), full);
+}

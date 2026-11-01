@@ -747,7 +747,8 @@ fn run_project(
     row
 }
 
-/// Rips up every track and via (zones stay) and routes the board again with a time budget
+/// Rips up every track and via (zones stay) and routes the board again with a work budget
+/// (`CADLAB_CORPUS_ROUTE_WORK` units: results repeat exactly, run to run) or a time budget
 /// (`CADLAB_CORPUS_ROUTE_BUDGET` seconds, default 60).
 fn reroute(p: &Project) -> Value {
     use cadlab::router::{self, Hooks, RouteOptions, Scope};
@@ -756,13 +757,17 @@ fn reroute(p: &Project) -> Value {
     q.board_mut().tracks.clear();
     q.board_mut().vias.clear();
     let secs: u64 = std::env::var("CADLAB_CORPUS_ROUTE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
-    let opts = RouteOptions { budget: Some(std::time::Duration::from_secs(secs)), ..Default::default() };
+    let opts = match std::env::var("CADLAB_CORPUS_ROUTE_WORK").ok().and_then(|v| v.parse().ok()) {
+        Some(w) => RouteOptions { work: router::WorkMeter::limited(w), ..Default::default() },
+        None => RouteOptions { budget: Some(std::time::Duration::from_secs(secs)), ..Default::default() },
+    };
     let t0 = Instant::now();
     match router::route(&q, &Scope::All, &opts, &Hooks::none()) {
         Ok(r) => json!({
             "ripped_tracks": tracks, "ripped_vias": vias,
             "connections": r.stats.connections, "routed": r.stats.routed, "completion": r.stats.completion,
             "tracks": r.stats.tracks, "vias": r.stats.vias, "budget_exhausted": r.stats.budget_exhausted,
+            "work": r.stats.work,
             "seconds": t0.elapsed().as_secs_f64(),
         }),
         Err(e) => json!({"error": e.to_string()}),

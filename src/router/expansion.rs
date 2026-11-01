@@ -140,6 +140,8 @@ impl NetRooms {
             }
             site_nodes.push(ids);
         }
+        let rooms: usize = layers.iter().map(|l| l.rooms.len()).sum();
+        eng.work.charge(super::work::GRIDLESS_ROOM * rooms as u64);
         NetRooms { region, layers, nodes, room_nodes, site_nodes }
     }
 }
@@ -422,6 +424,7 @@ fn astar(
     let mut pops = 0usize;
     let mut neigh: Vec<u32> = Vec::new();
     let mut result = None;
+    let mut tally = super::work::Tally::new(&eng.work, super::work::GRIDLESS_EXPANSION, 1024);
     while let Some(Reverse((fb, u))) = heap.pop() {
         let ui = u as usize;
         if st.closed(ui) {
@@ -463,6 +466,7 @@ fn astar(
             break;
         }
         pops += 1;
+        tally.tick();
         if pops & 1023 == 0 && (eng.stop)() {
             sc.own_via_pts = own_vias;
             return Err(Stop);

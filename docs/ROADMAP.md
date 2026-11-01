@@ -166,6 +166,8 @@ Details in [ROUTER.md](ROUTER.md).
 - [x] Parallel routing (independent regions/nets) with deterministic merge: level-scheduled batches of nets
       with disjoint regions, identical for any thread count
 - [x] Benchmark suite: completion rate, vias, wirelength, runtime vs freerouting
+- [x] Work budget (`work_budget`, `stats.work`): results that repeat exactly under any load, for corpus and benchmark
+      comparisons and for users who want them; the budget also covers the verification DRC (DECISIONS D72)
       (`cargo run --release --example route_bench`, results in ROUTER.md)
 - [x] Corpus completion pass: grid snapped to fine pad pitches, USB-C D+/D− crossover vias, failing searches
       skipped by exact reachability tests, capped present factor (corne-cherry 91.8 % → 99.1 %, DECISIONS D57)

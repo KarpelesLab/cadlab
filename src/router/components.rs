@@ -128,10 +128,16 @@ impl Components {
             }
             r
         };
-        let mut from: Vec<u64> = Vec::new();
+        // The targets' components are few and sources may be thousands (a large net's tree):
+        // the first source in one of them answers.
+        let mut to: Vec<u64> = targets.iter().filter(|&&t| ok(state(t), net)).map(|&t| root(tag(t))).collect();
+        to.sort_unstable();
+        to.dedup();
         for &(n, _) in sources {
             if ok(state(n), net) {
-                from.push(root(tag(n)));
+                if to.binary_search(&root(tag(n))).is_ok() {
+                    return true;
+                }
                 continue;
             }
             // A source the maps do not let through: what its first moves reach.
@@ -143,21 +149,24 @@ impl Components {
                 if nx < 0 || ny < 0 || nx >= grid.w || ny >= grid.h {
                     continue;
                 }
-                if ok(map[grid.didx(2 * x + dx, 2 * y + dy)], net) && ok(map[grid.didx(2 * nx, 2 * ny)], net) {
-                    from.push(root(tag(s * cells + grid.cidx(nx, ny) as u32)));
+                if ok(map[grid.didx(2 * x + dx, 2 * y + dy)], net)
+                    && ok(map[grid.didx(2 * nx, 2 * ny)], net)
+                    && to.binary_search(&root(tag(s * cells + grid.cidx(nx, ny) as u32))).is_ok()
+                {
+                    return true;
                 }
             }
             if ok(st.via[prof][c as usize], net) {
                 for s2 in (0..ns).filter(|&s2| s2 != s) {
-                    if ok(st.track[prof][s2 as usize][grid.didx(2 * x, 2 * y)], net) {
-                        from.push(root(tag(s2 * cells + c)));
+                    if ok(st.track[prof][s2 as usize][grid.didx(2 * x, 2 * y)], net)
+                        && to.binary_search(&root(tag(s2 * cells + c))).is_ok()
+                    {
+                        return true;
                     }
                 }
             }
         }
-        from.sort_unstable();
-        from.dedup();
-        targets.iter().any(|&t| ok(state(t), net) && from.binary_search(&root(tag(t))).is_ok())
+        false
     }
 }
 

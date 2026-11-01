@@ -10,9 +10,12 @@
 //! **Corpus re-route mode**: `route_bench --corpus [names...]` imports the boards of the
 //! open-source corpus (`tests/corpus/projects.toml`, fetched by `scripts/fetch-corpus.sh` into
 //! `CADLAB_CORPUS_DIR`, default `target/corpus`; circuits built from the boards, no KiCad needed),
-//! rips every track and via (zones stay), routes again and prints completion, vias, length, time
-//! and DRC errors per board, with the failed connections grouped by reason
-//! (`CADLAB_BENCH_VERBOSE=1` lists each one, and each new DRC error). The budget defaults to 60 s here.
+//! rips every track and via (zones stay), routes again and prints completion, vias, length, time,
+//! work and DRC errors per board, with the failed connections grouped by reason
+//! (`CADLAB_BENCH_VERBOSE=1` lists each one, and each new DRC error). The budget defaults to 60 s here;
+//! `CADLAB_BENCH_WORK=<units>` replaces it by a work budget, which gives the same result on any machine,
+//! under any load and with any number of threads, so two builds can be compared exactly (with
+//! `CADLAB_BENCH_SEED=<n>` for the seed, default 1: negotiation is chaotic, so compare several).
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets.
 
@@ -25,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use cadlab::kicad_import::{self, BoardImportOptions, OriginMode, rules};
 use cadlab::model::Project;
-use cadlab::router::{self, Hooks, RouteOptions, Scope, SearchKind};
+use cadlab::router::{self, Hooks, RouteOptions, Scope, SearchKind, WorkMeter};
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -81,9 +84,10 @@ fn corpus(filters: &[String]) {
         toml::from_str(&std::fs::read_to_string(root.join("tests/corpus/projects.toml")).expect("manifest"))
             .expect("manifest syntax");
     let budget: u64 = std::env::var("CADLAB_BENCH_BUDGET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000);
+    let work: Option<u64> = std::env::var("CADLAB_BENCH_WORK").ok().and_then(|v| v.parse().ok());
     let verbose = std::env::var_os("CADLAB_BENCH_VERBOSE").is_some();
     println!(
-        "| board | layers | connections | completion | failed | vias | length | time | budget out | DRC errors |\n|---|---|---|---|---|---|---|---|---|---|"
+        "| board | layers | connections | completion | failed | DRC unrouted | vias | length | time | work | budget out | DRC errors |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
     );
     for e in
         manifest.project.iter().filter(|e| filters.is_empty() || filters.iter().any(|f| e.name.contains(f.as_str())))
@@ -107,18 +111,20 @@ fn corpus(filters: &[String]) {
         p.board_mut().vias.clear();
         let errors_before = drc_errors(&p);
         let ropts = RouteOptions {
-            budget: Some(Duration::from_millis(budget)),
-            seed: 1,
+            budget: if work.is_some() { None } else { Some(Duration::from_millis(budget)) },
+            work: work.map_or_else(Default::default, WorkMeter::limited),
+            seed: std::env::var("CADLAB_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
             search: search_kind(),
             fanout: std::env::var("CADLAB_BENCH_FANOUT").ok().map(|v| v != "0"),
             ..Default::default()
         };
         let t = Instant::now();
+        let meter = ropts.work.clone();
         // `CADLAB_BENCH_TRACE=1`: a timeline of the router's phases and iteration summaries.
         let trace = std::env::var_os("CADLAB_BENCH_TRACE").is_some();
         let progress = |_: u64, _: Option<u64>, msg: &str| {
             if trace && !msg.contains(": routing ") && !msg.starts_with("gridless: ") {
-                eprintln!("  [{:7.2} s] {msg}", t.elapsed().as_secs_f64());
+                eprintln!("  [{:7.2} s {:7.1} M] {msg}", t.elapsed().as_secs_f64(), meter.used() as f64 / 1e6);
             }
         };
         let hooks = Hooks { progress: &progress, cancelled: &|| false };
@@ -140,6 +146,8 @@ fn corpus(filters: &[String]) {
         q.board_mut().tracks.extend(r.tracks.iter().cloned());
         q.board_mut().vias.extend(r.vias.iter().cloned());
         let drc = drc_errors(&q).saturating_sub(errors_before);
+        // What `route.status` sees on the result (the router's own count is per planned connection).
+        let unrouted = cadlab::drc::check(&q).iter().filter(|d| d.code == "drc.unrouted").count();
         if verbose && drc > 0 {
             let before: std::collections::BTreeSet<String> = drc_messages(&p).into_iter().collect();
             for m in drc_messages(&q).into_iter().filter(|m| !before.contains(m)) {
@@ -150,15 +158,17 @@ fn corpus(filters: &[String]) {
             render(&q, &dir.join(format!("{}.png", e.name)), std::env::var("CADLAB_BENCH_AROUND").ok());
         }
         println!(
-            "| {} | {} | {} | {:.1}% | {} | {} | {:.1} mm | {:.1} s | {} | {} |",
+            "| {} | {} | {} | {:.1}% | {} | {} | {} | {:.1} mm | {:.1} s | {:.1} M | {} | {} |",
             e.name,
             e.layers,
             r.stats.connections,
             r.stats.completion,
             r.stats.failed,
+            unrouted,
             r.stats.vias,
             length,
             ms as f64 / 1000.0,
+            r.stats.work as f64 / 1e6,
             if r.stats.budget_exhausted { "yes" } else { "no" },
             drc
         );

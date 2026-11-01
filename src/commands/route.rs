@@ -302,21 +302,40 @@ fn report_pairs(ctx: &mut Context<'_>, pairs: &[PairReport], left_hint: bool) ->
     Ok(())
 }
 
-/// The time budget in milliseconds from `budget` ("60s") or `budget_ms`.
-fn budget_of(budget: &Option<String>, budget_ms: Option<u64>) -> Result<Option<u64>, CommandError> {
+/// What limits a run: time (`budget` or `budget_ms`, default [`DEFAULT_BUDGET_MS`]) or work.
+#[derive(Clone, Copy, Debug)]
+enum Budget {
+    Time(Option<u64>),
+    Work(u64),
+}
+
+/// The budget from `budget` ("60s"), `budget_ms` or `work_budget`.
+fn budget_of(budget: &Option<String>, budget_ms: Option<u64>, work: Option<u64>) -> Result<Budget, CommandError> {
+    if let Some(w) = work {
+        if budget.is_some() || budget_ms.is_some() {
+            return Err(CommandError::invalid_args("route.budget", "give a time budget or `work_budget`, not both")
+                .with_hint("with both the clock could end the run first, and the result would depend on the load"));
+        }
+        return Ok(Budget::Work(w));
+    }
     match (budget, budget_ms) {
         (Some(_), Some(_)) => Err(CommandError::invalid_args("route.budget", "give `budget` or `budget_ms`, not both")
             .with_hint("`budget` takes a unit (\"60s\"); `budget_ms` is the same in milliseconds")),
-        (Some(b), None) => crate::units::parse_duration_ms(b).map(Some).map_err(|e| {
+        (Some(b), None) => crate::units::parse_duration_ms(b).map(|ms| Budget::Time(Some(ms))).map_err(|e| {
             CommandError::invalid_args("route.budget", e).with_hint("write the budget as \"60s\" or \"500ms\"")
         }),
-        (None, ms) => Ok(ms),
+        (None, ms) => Ok(Budget::Time(ms)),
     }
 }
 
-fn options(budget_ms: Option<u64>, layers: &[String], effort: Option<Effort>, seed: Option<u64>) -> RouteOptions {
+fn options(budget: Budget, layers: &[String], effort: Option<Effort>, seed: Option<u64>) -> RouteOptions {
+    let (time, work) = match budget {
+        Budget::Time(ms) => (Some(Duration::from_millis(ms.unwrap_or(DEFAULT_BUDGET_MS))), Default::default()),
+        Budget::Work(w) => (None, router::WorkMeter::limited(w)),
+    };
     RouteOptions {
-        budget: Some(Duration::from_millis(budget_ms.unwrap_or(DEFAULT_BUDGET_MS))),
+        budget: time,
+        work,
         layers: layers.to_vec(),
         effort: effort.unwrap_or_default(),
         seed: seed.unwrap_or(0),
@@ -433,6 +452,19 @@ fn run_router(
         ctx.report(d);
     }
     report_pairs(ctx, &out.pairs, false)?;
+    if out.stats.budget_exhausted && opts.budget.is_some() {
+        ctx.report(
+            Diagnostic::info(
+                "route.budget_cut",
+                "the time budget cut this run short, so the result depends on the machine and its load",
+            )
+            .with_hint(format!(
+                "for a result that repeats exactly, use `work_budget` (this run did {} units of work); \
+                 for a better one, raise the budget",
+                out.stats.work
+            )),
+        );
+    }
     Ok(out)
 }
 
@@ -446,12 +478,15 @@ fn shove_leftovers(
     opts: &RouteOptions,
     start: std::time::Instant,
 ) -> Result<(), CommandError> {
+    let work_before = opts.work.used().saturating_sub(out.stats.work);
     for i in 0..out.connections.len() {
         if out.connections[i].status != ConnStatus::Failed {
             continue;
         }
         let left = opts.budget.map(|b| b.saturating_sub(start.elapsed()));
-        if left.is_some_and(|l| l < Duration::from_millis(50)) {
+        let spent = left.is_some_and(|l| l < Duration::from_millis(50))
+            || opts.work.limit().is_some_and(|l| l.saturating_sub(opts.work.used()) < router::WORK_MIN_LEFT);
+        if spent {
             break;
         }
         ctx.check_cancelled()?;
@@ -496,6 +531,7 @@ fn shove_leftovers(
         st.length += r.stats.length;
     }
     let st = &mut out.stats;
+    st.work = opts.work.used().saturating_sub(work_before);
     st.routed = out.connections.iter().filter(|c| c.status == ConnStatus::Routed).count();
     st.failed = out.connections.iter().filter(|c| c.status == ConnStatus::Failed).count();
     if st.connections > 0 {
@@ -516,6 +552,13 @@ pub struct RouteAll {
     /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<String>,
+    /// Work budget instead of a time budget: the run stops at this count of its own operations
+    /// (about one grid search step each; `stats.work` reports what a run used), so the result
+    /// is the same on any machine, under any load and with any number of threads; the time it
+    /// takes is what varies, and nothing bounds it but the count. Without it a run the time
+    /// budget cuts short depends on the load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_budget: Option<u64>,
     /// Copper layers to route on (default: all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
@@ -566,7 +609,8 @@ impl Command for RouteAll {
     type Output = Routed;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Routed, CommandError> {
-        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, self.effort, self.seed);
+        let mut opts =
+            options(budget_of(&self.budget, self.budget_ms, self.work_budget)?, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
         opts.pairs = self.pairs;
@@ -594,6 +638,13 @@ pub struct RouteNets {
     /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<String>,
+    /// Work budget instead of a time budget: the run stops at this count of its own operations
+    /// (about one grid search step each; `stats.work` reports what a run used), so the result
+    /// is the same on any machine, under any load and with any number of threads; the time it
+    /// takes is what varies, and nothing bounds it but the count. Without it a run the time
+    /// budget cuts short depends on the load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_budget: Option<u64>,
     /// Copper layers to route on (default: all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
@@ -668,7 +719,8 @@ impl Command for RouteNets {
         }
         nets.sort();
         nets.dedup();
-        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, self.effort, self.seed);
+        let mut opts =
+            options(budget_of(&self.budget, self.budget_ms, self.work_budget)?, &self.layers, self.effort, self.seed);
         opts.fanout = self.fanout;
         opts.any_angle = self.any_angle.unwrap_or(false);
         opts.pairs = self.pairs;
@@ -716,6 +768,13 @@ pub struct RouteConnection {
     /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<String>,
+    /// Work budget instead of a time budget: the run stops at this count of its own operations
+    /// (about one grid search step each; `stats.work` reports what a run used), so the result
+    /// is the same on any machine, under any load and with any number of threads; the time it
+    /// takes is what varies, and nothing bounds it but the count. Without it a run the time
+    /// budget cuts short depends on the load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_budget: Option<u64>,
     /// Copper layers to route on (default: all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
@@ -760,7 +819,8 @@ impl Command for RouteConnection {
     fn run(self, ctx: &mut Context<'_>) -> Result<Routed, CommandError> {
         let p = ctx.project()?;
         let (from, to) = (pad_label(p, &self.from)?, pad_label(p, &self.to)?);
-        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, self.effort, None);
+        let mut opts =
+            options(budget_of(&self.budget, self.budget_ms, self.work_budget)?, &self.layers, self.effort, None);
         opts.shove = self.shove.unwrap_or(true);
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         opts.search = self.router;
@@ -1198,6 +1258,13 @@ pub struct RouteDiffpair {
     /// Time budget with a unit ("60s", "500ms", "2min"), instead of `budget_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<String>,
+    /// Work budget instead of a time budget: the run stops at this count of its own operations
+    /// (about one grid search step each; `stats.work` reports what a run used), so the result
+    /// is the same on any machine, under any load and with any number of threads; the time it
+    /// takes is what varies, and nothing bounds it but the count. Without it a run the time
+    /// budget cuts short depends on the load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_budget: Option<u64>,
     /// Compensate the skew with small bumps on the shorter net (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skew: Option<bool>,
@@ -1228,7 +1295,7 @@ impl Command for RouteDiffpair {
             return Err(CommandError::conflict("diffpair.none", "the circuit has no differential pairs")
                 .with_hint("define one with diffpair.add (diffpair.suggest finds them by net names)"));
         }
-        let mut opts = options(budget_of(&self.budget, self.budget_ms)?, &self.layers, None, None);
+        let mut opts = options(budget_of(&self.budget, self.budget_ms, self.work_budget)?, &self.layers, None, None);
         opts.skew = self.skew;
         let result = {
             let progress = |done: u64, total: Option<u64>, msg: &str| ctx.progress(done, total, msg);

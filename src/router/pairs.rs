@@ -14,7 +14,6 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
-use std::time::Instant;
 
 use crate::id::ObjectId;
 use crate::lengths::{self, PairRules};
@@ -25,6 +24,7 @@ use crate::units::Nm;
 use super::geo::{BoxF, P, seg_seg_dist};
 use super::index::{Blocker, Checker, Index, Item, TOL};
 use super::model::{ObKind, Profile, ProfileKey, RouterBoard};
+use super::work::{Limit, Tally};
 use super::{Hooks, RouteError};
 
 /// Moves: 45° steps, counter-clockwise from +x.
@@ -146,7 +146,7 @@ pub(crate) fn route_pairs(
     p: &Project,
     names: &[String],
     slots: &[usize],
-    deadline: Option<Instant>,
+    deadline: &Limit,
     hooks: &Hooks<'_>,
 ) -> Result<Vec<PairOutcome>, RouteError> {
     let c = p.circuit();
@@ -256,7 +256,7 @@ fn route_conns<'a>(
     conns: &[(usize, usize, bool)],
     job: &dyn Fn(End, End) -> Job<'a>,
     slots: &[usize],
-    deadline: Option<Instant>,
+    deadline: &Limit,
     hooks: &Hooks<'_>,
 ) -> Result<Routed, RouteError> {
     let mut index = index.clone();
@@ -547,7 +547,7 @@ impl Job<'_> {
         &self,
         ck: &Checker<'_>,
         slots: &[usize],
-        deadline: Option<Instant>,
+        deadline: &Limit,
         hooks: &Hooks<'_>,
     ) -> Result<Result<CoupledRoute, Failure>, RouteError> {
         let rb = self.rb;
@@ -682,7 +682,7 @@ impl Job<'_> {
         &self,
         ck: &Checker<'_>,
         layer: usize,
-        deadline: Option<Instant>,
+        deadline: &Limit,
         hooks: &Hooks<'_>,
     ) -> Result<Result<CoupledRoute, Failure>, RouteError> {
         let rb = self.rb;
@@ -804,6 +804,7 @@ impl Job<'_> {
         }
         let mut goal: Option<(usize, f32)> = None;
         let mut expansions = 0usize;
+        let mut tally = Tally::new(deadline.meter(), super::work::PAIR_EXPANSION, 4096);
         while let Some((Reverse(fb), Reverse(sid))) = heap.pop() {
             if sid & GOAL != 0 {
                 goal = Some(((sid & !GOAL) as usize, f32::from_bits(fb)));
@@ -815,11 +816,12 @@ impl Job<'_> {
             }
             closed[s] = true;
             expansions += 1;
+            tally.tick();
             if expansions.is_multiple_of(4096) {
                 if (hooks.cancelled)() {
                     return Err(RouteError::Cancelled);
                 }
-                if deadline.is_some_and(|d| Instant::now() > d) || expansions > MAX_EXPANSIONS {
+                if deadline.passed() || expansions > MAX_EXPANSIONS {
                     break;
                 }
             }

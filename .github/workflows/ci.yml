@@ -181,7 +181,8 @@ jobs:
         env:
           CADLAB_ORACLES: "1"
           CADLAB_CORPUS_ROUTE: "1"
-          CADLAB_CORPUS_ROUTE_BUDGET: "30"
+          # A work budget (about 30 s): the numbers repeat exactly, run to run (D72).
+          CADLAB_CORPUS_ROUTE_WORK: "100000000"
         # xvfb: gerbv (GTK) may want a display even when exporting.
         run: xvfb-run -a cargo test --release --all-features --test corpus -- --nocapture
       - name: Summary
@@ -201,6 +202,47 @@ jobs:
             target/tmp/corpus/*/drc-*.json
             target/tmp/corpus/*/reexport/drc.json
           if-no-files-found: ignore
+
+  corpus-route:
+    name: Router on the corpus at a fixed work budget
+    runs-on: ubuntu-24.04
+    # Informative. Results depend on the build, the board and the seed only (D72), so two runs
+    # of a commit match exactly and two commits can be compared; times are the runner's.
+    continue-on-error: true
+    timeout-minutes: 120
+    env:
+      CADLAB_CORPUS_DIR: ${{ github.workspace }}/../cadlab-corpus
+      CADLAB_BENCH_WORK: "200000000"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: corpus-route
+      - name: Cache the corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CADLAB_CORPUS_DIR }}
+          key: corpus-${{ hashFiles('tests/corpus/projects.toml', 'scripts/fetch-corpus.sh') }}
+      - name: Fetch the corpus
+        run: scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
+      - name: Route (seeds 1, 2, 3)
+        run: |
+          cargo build --release --example route_bench
+          for seed in 1 2 3; do
+            echo "### seed $seed" | tee -a route.md
+            CADLAB_BENCH_SEED=$seed CADLAB_BENCH_VERBOSE=1 target/release/examples/route_bench --corpus \
+              2> "route-$seed.log" | tee -a route.md
+          done
+          cat route.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-route
+          path: |
+            route.md
+            route-*.log
 
   bench:
     name: Benchmarks (router regression, large-board timings)

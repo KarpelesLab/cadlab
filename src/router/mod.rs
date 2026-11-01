@@ -34,7 +34,7 @@
 //!    corners and optional any-angle shortcuts; gridless refinement (`gridless`: shortest paths
 //!    over the clearance hulls of nearby obstacles); optional arc corners (`arcs`). Each step is
 //!    validated exactly against all other copper.
-//! 6. **Verification**: `crate::drc::check` on the result; any routed item with a DRC error is
+//! 6. **Verification**: `crate::drc::check_copper` on the result; any routed item with a DRC error is
 //!    ripped up and reported, so the output never violates the rules silently.
 //! 7. **Re-planned escapes**: pads the escape planning left without an exit and whose
 //!    connections failed get their exits first in another run of their nets and their
@@ -47,7 +47,8 @@
 //! ([`route_diffpairs`]), their skew compensated with small bumps; [`tune`] adds meanders to
 //! bring length groups to their targets.
 //!
-//! Deterministic for a given input, options and seed (unless the time budget cuts it short).
+//! Deterministic for a given input, options and seed, unless a wall-clock budget cuts it short
+//! ([`RouteOptions::work`] is the budget that does not depend on the clock).
 
 mod arcs;
 mod components;
@@ -65,11 +66,15 @@ mod rooms;
 mod scoped;
 mod shove;
 mod tune;
+mod work;
 
 pub use tune::{GroupTuned, MeanderStyle, MemberTuned, SkewTuned, TuneOptions, TuneResult, tune};
+pub use work::WorkMeter;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
+
+use work::{Limit, Span};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -119,9 +124,14 @@ pub enum SearchKind {
 /// Router options.
 #[derive(Clone, Debug, Default)]
 pub struct RouteOptions {
-    /// Wall-clock budget; the best result so far is returned when it runs out (results are
-    /// then no longer guaranteed to be identical between runs).
+    /// Wall-clock budget, verification included; the best result so far is returned when it runs
+    /// out (results are then no longer guaranteed to be identical between runs).
     pub budget: Option<Duration>,
+    /// Counts the run's work and, when limited ([`WorkMeter::limited`]), stops it there: the
+    /// deterministic budget, whose results do not depend on the machine, its load or the
+    /// threads. Give this or `budget`: with both, whichever ends first ends the phase, so the
+    /// result depends on the clock again. The default counts without limit.
+    pub work: WorkMeter,
     /// Copper layers to route on (empty: all).
     pub layers: Vec<String>,
     /// Effort.
@@ -271,8 +281,13 @@ pub struct RouteStats {
     pub vias_removed: usize,
     /// Wires removed because the DRC flagged them.
     pub drc_removed: usize,
-    /// Whether the time budget ran out.
+    /// Whether the time or work budget ran out.
     pub budget_exhausted: bool,
+    /// Work done, in the units of `work_budget` (about one grid search step each): the same
+    /// whatever the machine, its load or the threads, unless a time budget cut the run. A scale
+    /// for choosing a `work_budget`; another budget is another run, since phases end at shares of it.
+    #[serde(default)]
+    pub work: u64,
     /// Dog-bone fanout vias (included in `vias`).
     #[serde(default)]
     pub fanout_vias: usize,
@@ -426,6 +441,14 @@ fn costs(effort: Effort) -> Costs {
 /// Routes the connections in `scope`. The project is not modified. Differential pairs whose
 /// two nets are in scope are routed first, coupled (unless `opts.pairs` is `Some(false)`).
 pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
+    let before = opts.work.used();
+    let mut r = route_phases(p, scope, opts, hooks)?;
+    r.stats.work = opts.work.used().saturating_sub(before);
+    Ok(r)
+}
+
+/// [`route`]: pairs, the run, re-plan of boxed pads, push-and-shove of what is left.
+fn route_phases(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
     if opts.pairs != Some(false) {
         let names = pairs_in_scope(p, scope);
         if !names.is_empty() {
@@ -485,6 +508,11 @@ fn replan_boxed(
     }
     let left = opts.budget.map(|b| b.saturating_sub(start.elapsed()));
     if let (Some(b), Some(l)) = (opts.budget, left)
+        && l < b / 20
+    {
+        return Ok(first);
+    }
+    if let (Some(b), Some(l)) = (opts.work.limit(), opts.work.left())
         && l < b / 20
     {
         return Ok(first);
@@ -667,8 +695,8 @@ pub fn route_diffpairs(
 ) -> Result<PairsResult, RouteError> {
     let start = Instant::now();
     let slots = routing_slots(p, &opts.layers)?;
-    let deadline = opts.budget.map(|b| start + b);
-    let outs = pairs::route_pairs(p, names, &slots, deadline, hooks)?;
+    let deadline = Limit::share(opts.budget, start, &opts.work, opts.work.used(), 1.0);
+    let outs = pairs::route_pairs(p, names, &slots, &deadline, hooks)?;
     let mut q = p.clone();
     let mut owner: BTreeMap<u64, (usize, usize)> = BTreeMap::new();
     for (pi, po) in outs.iter().enumerate() {
@@ -825,6 +853,9 @@ fn drc_owners(q: &Project, owner: &BTreeMap<u64, (usize, usize)>) -> BTreeMap<(u
     bad
 }
 
+/// Least work left for one more attempt at a connection (about the 50 ms of the time budget).
+pub const WORK_MIN_LEFT: u64 = 300_000;
+
 /// Connections left unrouted by a full run get one more chance each: push-and-shove on the
 /// routed board (`push_and_shove`), in report order, within what is left of the time budget.
 /// Returns `first` unchanged when nothing improves.
@@ -852,7 +883,7 @@ fn shove_leftovers(
             continue;
         }
         let left = opts.budget.map(|b| b.saturating_sub(start.elapsed()));
-        if left.is_some_and(|l| l < Duration::from_millis(50)) {
+        if left.is_some_and(|l| l < Duration::from_millis(50)) || opts.work.left().is_some_and(|l| l < WORK_MIN_LEFT) {
             break;
         }
         if (hooks.cancelled)() {
@@ -1379,6 +1410,8 @@ fn route_run(
     replan: bool,
 ) -> Result<(RouteResult, Vec<String>), RouteError> {
     let start = Instant::now();
+    let meter = &opts.work;
+    let start_work = meter.used();
     let slots = routing_slots(p, &opts.layers)?;
     (hooks.progress)(0, None, "preparing");
     // Fanout: planned on the board as it is, then part of the board the router works on.
@@ -1439,11 +1472,12 @@ fn route_run(
     let grid = make_grid(&rb, &routes, opts);
     let pitch = grid.g;
 
-    let budget_end = opts.budget.map(|b| start + b);
-    let negotiate_end = opts.budget.map(|b| start + b.mul_f64(0.75));
-    let phase_end = std::sync::Mutex::new(negotiate_end);
-    let stop = || phase_end.lock().expect("deadline").is_some_and(|d| Instant::now() > d);
+    let budget_end = Limit::share(opts.budget, start, meter, start_work, 1.0);
+    let negotiate_end = Limit::share(opts.budget, start, meter, start_work, 0.75);
+    let phase_end = std::sync::Mutex::new(negotiate_end.clone());
+    let stop = || phase_end.lock().expect("deadline").passed();
     let mut eng = Engine::new(&rb, grid, slots.clone(), &active, costs(opts.effort), &stop);
+    eng.work = meter.clone();
     let search = opts.search.unwrap_or_default();
     eng.gridless = search == SearchKind::Gridless;
     eng.search = search;
@@ -1471,17 +1505,24 @@ fn route_run(
         }
     }
 
+    // Static maps, per profile and layer: everything before the first search.
+    meter.charge(eng.setup_work());
+    // What comes after the searches (optimization, verification DRC, reports) is not cut short,
+    // so the phases that can stop leave it its share of the budget.
+    let total_conns: usize = routes.iter().map(|r| r.conns.len()).sum();
+    let tail = work::tail_estimate(total_conns, Span::since(start, meter, start_work));
+    let budget_end = budget_end.before(tail);
+    *phase_end.lock().expect("deadline") = negotiate_end.before(tail.scaled(0.75));
     (hooks.progress)(0, None, "negotiation");
     // Setting up a run (fanout, board, grid, access) is most of what a re-plan of a few nets
     // costs.
-    let setup = start.elapsed();
+    let setup = Span::since(start, meter, start_work);
     let mut stats = RouteStats { grid: Nm(pitch as i64), ..Default::default() };
     let max_iter = opts.max_iterations.unwrap_or(match opts.effort {
         Effort::Low => 10,
         Effort::Normal => 40,
         Effort::High => 120,
     });
-    let total_conns: usize = routes.iter().map(|r| r.conns.len()).sum();
     let nroutes = routes.len();
 
     // ---- negotiated congestion ----
@@ -1619,7 +1660,7 @@ fn route_run(
     }
 
     // ---- legalization: rip what still conflicts, reroute without sharing ----
-    *phase_end.lock().expect("deadline") = budget_end;
+    *phase_end.lock().expect("deadline") = budget_end.clone();
     let mut ripped: Vec<usize> = Vec::new();
     loop {
         let conf: Vec<usize> = routes.iter().map(|r| eng.conflicts(r).len()).collect();
@@ -1720,10 +1761,10 @@ fn route_run(
     }
     // Boxed pads whose connections still fail get their exits re-planned afterwards
     // (`replan_boxed`), which needs time the gridless phases would otherwise take.
-    let reserve = setup * REPLAN_SETUPS;
+    let reserve = setup.times(REPLAN_SETUPS);
     if replan
-        && let (Some(b), Some(end)) = (opts.budget, budget_end)
-        && reserve <= b.mul_f64(REPLAN_SHARE)
+        && (opts.budget.is_some() || meter.limit().is_some())
+        && reserve.at_most_share(REPLAN_SHARE, opts.budget, meter, start_work)
         && routes.iter().any(|r| {
             r.conns
                 .iter()
@@ -1731,7 +1772,7 @@ fn route_run(
                 .any(|(c, f)| f.is_some() && (missed.contains(&c.from) || missed.contains(&c.to)))
         })
     {
-        *phase_end.lock().expect("deadline") = Some(end - reserve);
+        *phase_end.lock().expect("deadline") = budget_end.before(reserve);
     }
     (hooks.progress)(0, None, "gridless pass");
     // ---- `auto`: what the grid left unrouted, by exact gridless searches ----
@@ -1852,7 +1893,8 @@ fn route_run(
     if !stop() {
         stats.vias_removed += minimize_vias(&mut eng, &mut sc, &mut routes, &stop, hooks)?;
     }
-    stats.budget_exhausted = exhausted;
+    // Any phase that ended on the budget: what it would have done next is missing.
+    stats.budget_exhausted = exhausted || stop();
     (hooks.progress)(0, None, "optimizing");
 
     // ---- post-processing ----
@@ -1970,7 +2012,9 @@ fn route_run(
         post::insert(&mut index, net, &mut geoms[ri], hw, rb.profile(net).rv);
     }
 
+    meter.charge(work::POST_VERTEX * geoms.iter().flat_map(|g| &g.paths).map(|q| q.pts.len() as u64).sum::<u64>());
     // ---- verification ----
+    (hooks.progress)(0, None, "verifying");
     let mut drc_reason: BTreeMap<(usize, usize), String> = BTreeMap::new();
     let mut out;
     let mut round = 0;
@@ -1982,7 +2026,8 @@ fn route_run(
         proj.board_mut().tracks.extend(out.tracks.iter().cloned());
         proj.board_mut().vias.extend(out.vias.iter().cloned());
         // Soft runs overlap movable copper on purpose (push-and-shove moves it next).
-        let diags = if soft == Soft::No { crate::drc::check(&proj) } else { vec![] };
+        let diags = if soft == Soft::No { crate::drc::check_copper(&proj) } else { vec![] };
+        meter.charge(work::VERIFY_ITEM * (proj.board().tracks.len() + proj.board().vias.len()) as u64);
         let mut bad: BTreeSet<(usize, usize)> = BTreeSet::new();
         for d in diags.iter().filter(|d| d.severity == crate::diag::Severity::Error && d.code != "drc.unrouted") {
             for s in &d.subjects {
@@ -2017,6 +2062,7 @@ fn route_run(
     }
 
     // ---- report ----
+    (hooks.progress)(0, None, "reporting");
     let proj = out.proj.take().expect("verified project");
     let fitems = geo_board::copper_items(&proj);
     let fisl = geo_board::islands(&fitems);
@@ -2053,15 +2099,28 @@ fn route_run(
             }
         }
     }
-    let mut island_of: BTreeMap<String, usize> = BTreeMap::new();
+    // Several pads can share a label (the four shell pads `J1.S1` of a USB receptacle): each end
+    // of a connection is the item of its label nearest to it.
+    let mut island_of: BTreeMap<String, Vec<(P, usize)>> = BTreeMap::new();
     for (i, it) in fitems.iter().enumerate() {
-        island_of.entry(it.item.to_string()).or_insert(fisl[i]);
+        island_of.entry(it.item.to_string()).or_default().push((P::of(it.anchor), fisl[i]));
     }
+    let island_at = |label: &str, at: P| -> Option<usize> {
+        let items = island_of.get(label)?;
+        let mut best: Option<(f64, usize)> = None;
+        for &(q, k) in items {
+            let d = q.dist(at);
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, k));
+            }
+        }
+        best.map(|b| b.1)
+    };
     let ck = Checker { rb: &rb, index: &index };
     let mut reports = Vec::new();
     for (ri, r) in routes.iter().enumerate() {
         for (ci, c) in r.conns.iter().enumerate() {
-            let joined = match (island_of.get(&c.from), island_of.get(&c.to)) {
+            let joined = match (island_at(&c.from, c.from_at), island_at(&c.to, c.to_at)) {
                 (Some(a), Some(b)) => a == b,
                 _ => false,
             };
@@ -2201,6 +2260,8 @@ fn route_batch(
         eng.uncommit(&mut routes[ri]);
     }
     let mut taken: Vec<NetRoute> = batch.iter().map(|&ri| std::mem::take(&mut routes[ri])).collect();
+    // Within a batch every search sees the same work count, whatever the threads do.
+    eng.work.begin_batch();
     let e: &Engine<'_> = eng;
     let run = |nr: &mut NetRoute| -> Result<(), Stop> {
         let mut sc = pool.lock().expect("scratch pool").pop().unwrap_or_else(|| e.scratch());
@@ -2217,6 +2278,7 @@ fn route_batch(
     };
     #[cfg(not(feature = "parallel"))]
     let res: Vec<Result<(), Stop>> = taken.iter_mut().map(run).collect();
+    eng.work.end_batch();
     let stopped = res.iter().any(Result::is_err);
     for ((&ri, mut nr), (w, f)) in batch.iter().zip(taken).zip(saved) {
         if stopped {
@@ -2817,6 +2879,19 @@ fn explain(
             ));
             if rep.at.is_none() {
                 rep.at = Some(term.at.to_point());
+            }
+            // A pad inside another net's pad (the sense pads of a Kelvin shunt, even under a net tie):
+            // no width gets out, and any track leaving it shorts that pad for the DRC.
+            let inside = rb.terminals.iter().find(|o| {
+                o.pad && o.net != term.net && o.layers & term.layers != 0 && o.shape.bbox().dist(term.at) == 0.0
+            });
+            if let Some(o) = inside {
+                rep.hints.push(format!(
+                    "{label} lies inside pad {} of another net: any track out of it is a short for the DRC \
+                     (KiCad's too, net tie or not); route it by hand and waive the error, or use a footprint with \
+                     the pads apart",
+                    o.label
+                ));
             }
             rep.hints.push(format!("use a narrower track or smaller clearance for net {}", rep.net));
             rep.hints.extend(layers_hint);

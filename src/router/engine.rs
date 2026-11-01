@@ -244,6 +244,8 @@ pub(crate) struct Engine<'a> {
     pub max_expansions: usize,
     /// Polled during searches (thread-safe: deadline and cancellation flag only).
     pub stop: &'a (dyn Fn() -> bool + Sync),
+    /// Counts the work of the searches.
+    pub work: super::WorkMeter,
     /// Whether `route_net` uses the gridless search (`expansion`) instead of the grid.
     pub gridless: bool,
     /// The search option of the run (for reports).
@@ -425,6 +427,7 @@ impl<'a> Engine<'a> {
             pref,
             max_expansions: usize::MAX,
             stop,
+            work: super::WorkMeter::default(),
             gridless: false,
             search: super::SearchKind::Grid,
             dynamic,
@@ -692,6 +695,12 @@ impl<'a> Engine<'a> {
         (segs, vias)
     }
 
+    /// Work of setting up this engine's maps (`work`).
+    pub fn setup_work(&self) -> u64 {
+        (self.grid.dw() * self.grid.dh()) as u64 * self.slots.len() as u64 * self.active.len() as u64
+            / super::work::SETUP_POINTS
+    }
+
     /// Claims the halo of every wire of a net.
     pub fn commit(&mut self, nr: &mut NetRoute) {
         let mut keys = Vec::new();
@@ -739,6 +748,7 @@ impl<'a> Engine<'a> {
                 self.occ_t[ai][map][idx] = self.occ_t[ai][map][idx].saturating_add(1);
             }
         }
+        self.work.charge(keys.len() as u64 / super::work::COMMIT_KEYS);
         nr.keys = keys;
         nr.bbox = bbox;
     }
@@ -1056,11 +1066,15 @@ impl<'a> Engine<'a> {
         if mode == Mode::Hard && self.pocket(sc, net, prof, sources, targets) {
             return Ok(None);
         }
+        // Bounding box of the targets, and per slot of the targets on that slot.
         let mut tb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        let mut slot_box = vec![tb; self.slots.len()];
         for &t in targets {
             sc.tgt[t as usize] = stamp;
-            let (_, x, y) = self.unpack(t);
+            let (s, x, y) = self.unpack(t);
             tb = (tb.0.min(x), tb.1.min(y), tb.2.max(x), tb.3.max(y));
+            let b = &mut slot_box[s];
+            *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
         }
         let ai = self.act[prof];
         let pres = match mode {
@@ -1075,11 +1089,32 @@ impl<'a> Engine<'a> {
         let mut lb = std::mem::take(&mut sc.lb);
         // Set once the search has run long enough to be worth it (`near_costs`).
         let mut floor = 0.0f32;
-        let heur = |lb: &NearCosts, floor: f32, n: usize, x: i32, y: i32| -> f32 {
-            let dx = (tb.0 - x).max(x - tb.2).max(0) as f32;
-            let dy = (tb.1 - y).max(y - tb.3).max(0) as f32;
-            let (a, b) = if dx > dy { (dx, dy) } else { (dy, dx) };
-            let h = (a + (std::f32::consts::SQRT_2 - 1.0) * b) * w;
+        // Lower bound of the moves to a target (no bends, no congestion): on the node's own layer,
+        // the distance to the targets on that layer; through a via, the via and the distance to
+        // any target. Each is exact on an empty board for its set of paths, so the smaller is
+        // consistent. Without the via term every node of every layer looks as near as the target's
+        // layer, and the searches of a six-layer board visit them all. On two layers it saves little
+        // and the generated boards route worse with it (stm32-2l 58 -> 71 vias, D72): plain
+        // distance there.
+        let layered = self.slots.len() > 2;
+        let diag = if layered { std::f32::consts::SQRT_2 * self.costs.diag } else { std::f32::consts::SQRT_2 };
+        let via_lb = if layered && self.vias_allowed { self.costs.via } else { f32::INFINITY };
+        if !layered {
+            slot_box.iter_mut().for_each(|b| *b = tb);
+        }
+        let octile = |b: (i32, i32, i32, i32), x: i32, y: i32| -> f32 {
+            let dx = (b.0 - x).max(x - b.2).max(0) as f32;
+            let dy = (b.1 - y).max(y - b.3).max(0) as f32;
+            let (a, c) = if dx > dy { (dx, dy) } else { (dy, dx) };
+            a + (diag - 1.0) * c
+        };
+        let heur = |lb: &NearCosts, floor: f32, n: usize, s: usize, x: i32, y: i32| -> f32 {
+            let mut h = via_lb + octile(tb, x, y);
+            let own = slot_box[s];
+            if own.0 <= own.2 {
+                h = h.min(octile(own, x, y));
+            }
+            let h = h * w;
             if floor > 0.0 {
                 let d = if lb.seen[n] == lb.stamp { lb.dist[n].min(floor) } else { floor };
                 h.max(d)
@@ -1104,7 +1139,7 @@ impl<'a> Engine<'a> {
             sc.gc[i] = c;
             sc.parent[i] = u32::MAX;
             sc.dir[i] = NONE;
-            sc.heap.push(c + heur(&lb, floor, i, x, y), n);
+            sc.heap.push(c + heur(&lb, floor, i, s, x, y), n);
         }
         let cells = self.cells();
         let ns = self.slots.len();
@@ -1130,12 +1165,15 @@ impl<'a> Engine<'a> {
             .collect();
         let bend_cost = [0.0, self.costs.bend45, self.costs.bend90];
         let mut pops = 0usize;
+        let mut tally = super::work::Tally::new(&self.work, 1, 4096);
         let block_pen = 60.0f32;
         while let Some((f, u)) = sc.heap.pop() {
+            // Stale entries too: on large nets with many sources they are a good part of the pops.
+            tally.tick();
             let ui = u as usize;
             let (s, x, y) = self.unpack(u);
             let gu = sc.gc[ui];
-            if f > gu + heur(&lb, floor, ui, x, y) + 1e-3 {
+            if f > gu + heur(&lb, floor, ui, s, x, y) + 1e-3 {
                 continue; // stale
             }
             if sc.tgt[ui] == stamp {
@@ -1211,7 +1249,7 @@ impl<'a> Engine<'a> {
                 sc.gc[vi] = c;
                 sc.parent[vi] = u;
                 sc.dir[vi] = nd as u8;
-                sc.heap.push(c + heur(&lb, floor, vi, x + dx, y + dy), vi as u32);
+                sc.heap.push(c + heur(&lb, floor, vi, s, x + dx, y + dy), vi as u32);
             }
             if self.vias_allowed {
                 let cell = self.grid.cidx(x, y);
@@ -1258,7 +1296,7 @@ impl<'a> Engine<'a> {
                     sc.gc[vi] = c0;
                     sc.parent[vi] = u;
                     sc.dir[vi] = NONE;
-                    sc.heap.push(c0 + heur(&lb, floor, vi, x, y), v);
+                    sc.heap.push(c0 + heur(&lb, floor, vi, s2, x, y), v);
                 }
             }
         }
@@ -1310,6 +1348,7 @@ impl<'a> Engine<'a> {
             }
             settled += 1;
             if settled >= limit {
+                self.work.charge(settled as u64);
                 return d;
             }
             let (s, x, y) = self.unpack(v);
@@ -1360,6 +1399,7 @@ impl<'a> Engine<'a> {
             }
         }
         // Everything reachable was settled: nodes not seen cannot reach a target at all.
+        self.work.charge(settled as u64);
         f32::INFINITY
     }
 
@@ -1402,10 +1442,12 @@ impl<'a> Engine<'a> {
             }
         }
         let mut head = 0;
+        let mut tally = super::work::Tally::new(&self.work, 1, 4096);
         while head < queue.len() {
             if queue.len() > POCKET {
                 return false;
             }
+            tally.tick();
             let v = queue[head];
             head += 1;
             let (s, x, y) = self.unpack(v);
@@ -1492,7 +1534,10 @@ impl<'a> Engine<'a> {
             i
         }
         let mut tree: Vec<Vec<u32>> = vec![Vec::new(); n];
-        let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+        // Per island of the union-find: the access points as sources and as targets, merged
+        // as islands join: rebuilding them per connection was a third of the search time of
+        // large nets (ground on glasgow-revC3).
+        let mut sets: Vec<AccessSet<'_>> = nr.islands.iter().map(AccessSet::of).collect();
         // Kept wires (partial rip-up): their islands start joined, their nodes in the trees.
         if keep.len() == old.len() && matches!(mode, Mode::Negotiate(_)) {
             let kept = kept_wires(nr, old, &keep);
@@ -1502,8 +1547,8 @@ impl<'a> Engine<'a> {
                 for &i in &isls[1..] {
                     let (ra, rb) = (find(&mut parent, r0), find(&mut parent, i));
                     if ra != rb {
-                        let (ma, mb) = (std::mem::take(&mut members[rb]), std::mem::take(&mut tree[rb]));
-                        members[ra].extend(ma);
+                        let (ma, mb) = (std::mem::take(&mut sets[rb]), std::mem::take(&mut tree[rb]));
+                        sets[ra].join(ma);
                         tree[ra].extend(mb);
                         parent[rb] = ra;
                     }
@@ -1528,52 +1573,29 @@ impl<'a> Engine<'a> {
             if ra == rb {
                 continue;
             }
-            let mut src: BTreeMap<u32, (f32, Option<&Stub>)> = BTreeMap::new();
-            for &isl in &members[ra] {
-                for a in &nr.islands[isl].access {
-                    let e = src.entry(a.node).or_insert((a.cost, a.stub.as_ref()));
-                    if a.cost < e.0 {
-                        *e = (a.cost, a.stub.as_ref());
-                    }
-                }
-            }
-            for &t in &tree[ra] {
-                src.insert(t, (0.0, None));
-            }
-            let mut dst: BTreeMap<u32, Option<&Stub>> = BTreeMap::new();
-            for &isl in &members[rb] {
-                for a in &nr.islands[isl].access {
-                    let better = match dst.get(&a.node) {
-                        None => true,
-                        Some(s) => s.is_some() && a.stub.is_none(),
-                    };
-                    if better {
-                        dst.insert(a.node, a.stub.as_ref());
-                    }
-                }
-            }
-            for &t in &tree[rb] {
-                dst.insert(t, None);
-            }
             // Searches that may not share keep their stubs clear of other nets' routing too
             // (the halos see a stub only at the grid's samples).
-            let had = !src.is_empty() && !dst.is_empty();
-            if mode == Mode::Hard {
-                src.retain(|&n, (_, st)| st.is_none_or(|st| self.stub_clear(nr.net, n, st)));
-                dst.retain(|&n, st| st.is_none_or(|st| self.stub_clear(nr.net, n, st)));
-            }
-            if src.is_empty() || dst.is_empty() {
+            let had =
+                !(tree[ra].is_empty() && sets[ra].src.is_empty() || tree[rb].is_empty() && sets[rb].dst.is_empty());
+            let clear =
+                |n: u32, st: Option<&Stub>| mode != Mode::Hard || st.is_none_or(|st| self.stub_clear(nr.net, n, st));
+            // What the net has already joined comes first: it starts at no cost and without a
+            // stub, whatever access point lies on it.
+            let mut sources: Vec<(u32, f32)> = tree[ra].iter().map(|&t| (t, 0.0)).collect();
+            sources.extend(sets[ra].src.iter().filter(|(k, v)| clear(**k, v.1)).map(|(k, v)| (*k, v.0)));
+            let mut targets: Vec<u32> = tree[rb].clone();
+            targets.extend(sets[rb].dst.iter().filter(|(k, st)| clear(**k, **st)).map(|(k, _)| *k));
+            if sources.is_empty() || targets.is_empty() {
                 nr.failed[ci] = Some(if had { FailKind::Congestion } else { FailKind::NoAccess });
                 continue;
             }
-            let sources: Vec<(u32, f32)> = src.iter().map(|(k, v)| (*k, v.0)).collect();
-            let targets: Vec<u32> = dst.keys().copied().collect();
             match self.search(sc, nr.net, nr.prof, &sources, &targets, mode)? {
                 Some(path) => {
-                    let start = src[&path[0]].1.cloned();
-                    let end = dst[path.last().expect("path")].cloned();
-                    let (ma, mb) = (std::mem::take(&mut members[rb]), std::mem::take(&mut tree[rb]));
-                    members[ra].extend(ma);
+                    let last = *path.last().expect("path");
+                    let start = if tree[ra].contains(&path[0]) { None } else { sets[ra].src[&path[0]].1.cloned() };
+                    let end = if tree[rb].contains(&last) { None } else { sets[rb].dst[&last].cloned() };
+                    let (ma, mb) = (std::mem::take(&mut sets[rb]), std::mem::take(&mut tree[rb]));
+                    sets[ra].join(ma);
                     tree[ra].extend(mb);
                     tree[ra].extend(path.iter().copied());
                     parent[rb] = ra;
@@ -1596,6 +1618,74 @@ impl<'a> Engine<'a> {
             }
         }
         Ok(())
+    }
+}
+
+/// The access points of a group of joined islands, as a search's sources and targets.
+#[derive(Default)]
+struct AccessSet<'a> {
+    /// Per node, the cheapest access (the first of equals).
+    src: BTreeMap<u32, (f32, Option<&'a Stub>)>,
+    /// Per node, the first access without a stub, else the first.
+    dst: BTreeMap<u32, Option<&'a Stub>>,
+}
+
+impl<'a> AccessSet<'a> {
+    fn of(island: &'a Island) -> AccessSet<'a> {
+        let mut set = AccessSet::default();
+        for a in &island.access {
+            let e = set.src.entry(a.node).or_insert((a.cost, a.stub.as_ref()));
+            if a.cost < e.0 {
+                *e = (a.cost, a.stub.as_ref());
+            }
+            let better = match set.dst.get(&a.node) {
+                None => true,
+                Some(s) => s.is_some() && a.stub.is_none(),
+            };
+            if better {
+                set.dst.insert(a.node, a.stub.as_ref());
+            }
+        }
+        set
+    }
+
+    /// Adds `later`'s access points, as if they followed this set's. The smaller map is merged
+    /// into the larger, so a net's merges cost `n log² n` in all.
+    fn join(&mut self, mut later: AccessSet<'a>) {
+        // `first_src` keeps entries over `later_src` unless strictly dearer.
+        if self.src.len() >= later.src.len() {
+            for (k, v) in later.src {
+                let e = self.src.entry(k).or_insert(v);
+                if v.0 < e.0 {
+                    *e = v;
+                }
+            }
+        } else {
+            for (k, v) in std::mem::take(&mut self.src) {
+                let e = later.src.entry(k).or_insert(v);
+                if v.0 <= e.0 {
+                    *e = v;
+                }
+            }
+            self.src = later.src;
+        }
+        if self.dst.len() >= later.dst.len() {
+            for (k, v) in later.dst {
+                let e = self.dst.entry(k).or_insert(v);
+                if e.is_some() && v.is_none() {
+                    *e = v;
+                }
+            }
+        } else {
+            for (k, v) in std::mem::take(&mut self.dst) {
+                let e = later.dst.entry(k).or_insert(v);
+                // The earlier wins unless it has a stub and the later has none.
+                if !(v.is_some() && e.is_none()) {
+                    *e = v;
+                }
+            }
+            self.dst = later.dst;
+        }
     }
 }
 
@@ -1710,6 +1800,33 @@ fn closest_on(a: P, b: P, c: P, d: P) -> P {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joined_access_sets_equal_rebuilding_them() {
+        let (s1, s2): (Stub, Stub) = (vec![P::new(0.0, 0.0)], vec![P::new(0.0, 0.0); 2]);
+        let acc = |node: u32, cost: f32, stub: Option<&Stub>| Access { node, stub: stub.cloned(), cost };
+        // Node 5 in all three: equal costs and stubs decide by order; sizes differ so that both
+        // merge directions run.
+        let a =
+            Island { terms: vec![], access: vec![acc(5, 1.0, Some(&s1)), acc(6, 1.0, None), acc(7, 3.0, Some(&s1))] };
+        let b = Island { terms: vec![], access: vec![acc(5, 1.0, None), acc(7, 2.0, Some(&s2))] };
+        let c = Island {
+            terms: vec![],
+            access: vec![acc(5, 0.5, Some(&s2)), acc(8, 1.0, None), acc(9, 1.0, None), acc(10, 1.0, None)],
+        };
+        let view = |s: &AccessSet<'_>| {
+            let src: Vec<_> = s.src.iter().map(|(k, v)| (*k, v.0, v.1.map(|t| t.len()))).collect();
+            let dst: Vec<_> = s.dst.iter().map(|(k, v)| (*k, v.map(|t| t.len()))).collect();
+            (src, dst)
+        };
+        for order in [[&a, &b, &c], [&c, &a, &b], [&b, &c, &a]] {
+            let whole = Island { terms: vec![], access: order.iter().flat_map(|i| i.access.iter().cloned()).collect() };
+            let mut joined = AccessSet::of(order[0]);
+            joined.join(AccessSet::of(order[1]));
+            joined.join(AccessSet::of(order[2]));
+            assert_eq!(view(&joined), view(&AccessSet::of(&whole)));
+        }
+    }
 
     #[test]
     fn kept_wires_must_still_reach_the_pads() {

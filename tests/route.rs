@@ -293,6 +293,35 @@ fn cancellation_progress_and_budget() {
     assert_eq!(st["budget_exhausted"], true);
     let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
     assert_eq!(errors, Vec::<String>::new());
+    // A work budget cuts the run at the same point every time, and with any number of threads;
+    // what it reports reproduces it.
+    let cut = |s: &mut Session, threads: usize| {
+        exec(&r, s, "route.rip", json!({"all": true}));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let o = pool.install(|| exec(&r, s, "route.all", json!({"work_budget": 3000})));
+        // Without the IDs, which go on counting after each rip.
+        let (mut tracks, mut vias) = copper(s);
+        for v in tracks.as_array_mut().unwrap().iter_mut().chain(vias.as_array_mut().unwrap()) {
+            v.as_object_mut().unwrap().remove("id");
+        }
+        ((tracks, vias), o["output"]["stats"].clone())
+    };
+    let (c1, st1) = cut(&mut s, 1);
+    assert_eq!(st1["budget_exhausted"], true, "{st1}");
+    assert!(st1["work"].as_u64().unwrap() > 0, "{st1}");
+    for threads in [1, 4] {
+        let (c, st) = cut(&mut s, threads);
+        assert_eq!(c, c1);
+        assert_eq!(st, st1);
+    }
+    // A clock and a count cannot both limit a run: the result would depend on the clock.
+    let f = r
+        .execute(&mut s, "route.all", json!({"budget": "1s", "work_budget": 5}), RunOptions::default())
+        .expect_err("both budgets");
+    assert_eq!(f.error.diagnostic.code, "route.budget");
+    exec(&r, &mut s, "route.rip", json!({"all": true}));
+    let o = exec(&r, &mut s, "route.all", json!({"budget_ms": 1}));
+    assert!(o["diagnostics"].to_string().contains("route.budget_cut"), "{o}");
     // Ripping the partial result and routing again completes the board.
     exec(&r, &mut s, "route.rip", json!({"all": true}));
     let o = exec(&r, &mut s, "route.all", json!({}));

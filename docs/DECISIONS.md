@@ -1675,6 +1675,44 @@ variations tried lost one or two connections); `big_board_spread_timing` measure
 measured under the same conditions); the hand model takes a pair's way out as perpendicular to its pads, away from
 the part's center.
 
+### D72. Router work budget: comparisons that repeat exactly; verification inside the budget; via-aware estimate above two layers (2026-11-01)
+**Measurement.** D69 could not judge its change from CI's numbers: boards ending on the wall-clock budget moved by ±1.5 points
+between runs of one build (here: revD1 91.1 and 91.3 % side by side, against D69's 93.7 % on a quieter machine). `RouteOptions::work`
+is a `WorkMeter`, optionally limited, counting the run's operations (`router::work`): queue pops of the grid search, gridless nodes
+and rooms, pair expansions, halos, setup, and by size the post-processing and verification. A limit ends the same phases as the
+time budget. Searches of a parallel batch charge a pending count joined at the batch's end, so a stop test never reads another
+thread's progress and a batch stops the same way with any threads. Checked: 1/3/4/8/64 threads, several runs side by side at load
+100, and local against the CI runner: identical tracks, vias, failures and work. Offered to users as `work_budget` on the four
+routing commands, through the registry, with `stats.work` always reported and both budgets refused together. The time budget stays
+the default: from the data, a board finishing inside it is deterministic anyway; a unit is 165–300 ns depending on the board and up
+to about three times more under load, so no count means "a minute" and a work budget has no bound on time, while a limit
+on the wait is what an interactive user asks for. A run the clock cut now says so (`route.budget_cut`, info, with its work).
+`budget_exhausted` now also holds when a later phase stopped on the budget, not only negotiation.
+**Seeds.** A repeatable result is not a representative one: one changed tie reshuffles negotiation (nrfmicro 2 to 3 failures, corne
+±4 between seeds), so the comparison is several seeds at a fixed count (`CADLAB_BENCH_SEED`, CI job `corpus-route`, informative).
+**Time.** Stack samples: on revD1 about 78 % of negotiation is search; on revC3 a third was the setup of each connection of large nets
+(`BTreeMap`s of all access points rebuilt per connection, the reachability test over every source). Access sets are now merged as
+islands join (same contents, tested against rebuilding) and the test stops at the first source that reaches a target. The estimate:
+above two layers, the smaller of the distance to targets on the node's own layer and a via plus the distance to any target, so other
+layers no longer look as near as the target's (consistent, so paths stay optimal). Over seeds 1–3 at 200 M units: revD1 370 → 337 failed,
+mobo 13 → 3, revC3 104 → 99, tinytapeout-demo 44 → 58 (worse), buspirate5 1 → 2. Also penalizing steps against a layer's direction: more
+failures (643 → 632 total but tinytapeout 59, corne 30), dropped. On two layers plain distance stays: with the via term stm32-2l went 58 → 71 vias.
+**Verification.** Post-processing, verification DRC and reports ran past the budget (revD1 71–73 s on a 60 s budget). Verification runs
+`drc::check_copper`, the checks that can flag a track or via (a test holds it equal to `check` for those; 9.5 → 5.7 s on revD1, both
+under load), and the budget sets aside an estimate of the tail before negotiation starts (about 12 000 units per connection, two thirds of
+what revD1 used, 18 M against 28 M; in time at the speed of the run's setup, at least 200 ns per unit). revD1 now ends at 63 s (60 s budget).
+**Residuals.** *corne-cherry's shield connections* were no routing failure: several pads share the label `J1.S1` and the report
+compared the first one's island. Each end is now the labelled item nearest to it: 5/4/7 failed instead of 8/6/11. *nrfmicro:* the crossover
+via at its shallowest let the row neighbor's exit turn too early for the other pad's own exit; it now goes deep enough for that where
+it can. The crossing then routes in some seeds, and with the partner's exit always placed (as D57 found) other nets fail instead; no
+net gain, still 2–3 failures. *cynthion:* the 8 "no exit for 0.127 mm" pads lie inside the force pads of Kelvin shunts with net-tie groups.
+Giving them exits and exempting tracks near tied pads in the DRC routed all 8, and KiCad's DRC rejected it: `shorting_items` on those same tracks,
+in the original board as well. Reverted; the failure now says why and to route by hand. *Found on the way:* `failed` counts planned
+connections while the pours are refilled around new copper afterwards, so `route.status` can show more unrouted than `failed` (revD1 115 and
+199): the benchmark prints both now; not fixed here.
+*Why:* a comparison that varies more than the change decides nothing, and a count of the run's own work removes the clock without
+changing what is being measured; the default stays honest about what each budget promises.
+
 ## Open questions
 
 
