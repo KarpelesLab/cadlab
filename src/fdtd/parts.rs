@@ -41,6 +41,13 @@ pub struct LumpedPart {
     /// Series capacitance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacitance: Option<Quantity>,
+    /// Mesh columns the element is spread over, in parallel across the pads (0: not placed).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub columns: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// A two-pin part with its values, before placement.
@@ -173,6 +180,7 @@ pub(crate) fn candidates(
                 resistance: unit(r, Unit::Ohm),
                 inductance: unit(l, Unit::Henry),
                 capacitance: unit(c, Unit::Farad),
+                columns: 0,
             },
             pads: pads2,
             r: rv,
@@ -237,9 +245,22 @@ pub(crate) fn place(
             }
         };
         match element(s, layer, &c) {
-            Ok(e) => {
+            Ok((e, from, to)) => {
+                // The part's terminals sit on its pads: copper cut by an outline between a pad's
+                // center and the element stays copper, or the column would hang on an open edge.
+                let (a, b) = (e.axis, 1 - e.axis);
+                for ib in e.lo[b]..=e.hi[b] {
+                    for k in e.lo[2]..=e.hi[2] {
+                        for ia in (from..e.lo[a]).chain(e.hi[a]..to) {
+                            let mut q = [0; 3];
+                            (q[a], q[b], q[2]) = (ia, ib, k);
+                            s.close_cut_edge(a, q);
+                        }
+                    }
+                }
+                let columns = (e.hi[b] - e.lo[b] + 1) * (e.hi[2] - e.lo[2] + 1);
                 s.element(LumpedElement { r: c.r, l: c.l, c: c.c, ..e });
-                out.push(c.info);
+                out.push(LumpedPart { columns: columns as u32, ..c.info });
             }
             Err(why) => diags.push(skipped(
                 &refdes,
@@ -253,7 +274,12 @@ pub(crate) fn place(
 }
 
 /// The element's box between the two pads' copper.
-fn element(s: &Structure, layer: &crate::openems::Layer, c: &Candidate) -> Result<LumpedElement, String> {
+/// Also the mesh nodes of the two pads' centers along the element, between which it lies.
+fn element(
+    s: &Structure,
+    layer: &crate::openems::Layer,
+    c: &Candidate,
+) -> Result<(LumpedElement, usize, usize), String> {
     let [p0, p1] = &c.pads;
     let (dx, dy) = ((p1.center.x.0 - p0.center.x.0).abs(), (p1.center.y.0 - p0.center.y.0).abs());
     let a = if dx >= dy { 0 } else { 1 };
@@ -283,19 +309,22 @@ fn element(s: &Structure, layer: &crate::openems::Layer, c: &Candidate) -> Resul
         (q[a], q[b], q[2]) = (ia, ib, k);
         q
     };
-    // The run of edges that are not copper between the pads, on one column.
+    // The run of edges that are not copper between the pads, on one column. As voxelized, not as
+    // cut: a round track end poking past a pad would otherwise leave the element only the columns
+    // at the end's tip, and the current crowding into them acts as series inductance (|S21| of a
+    // 1 pF 0603 was up to 0.036 high, against 0.012 with all its columns).
     let gap = |ib: usize, k: usize| -> Option<(usize, usize)> {
         let mut i = from;
-        while i < to && s.is_pec(a, at(i, ib, k)) {
+        while i < to && s.is_voxel_pec(a, at(i, ib, k)) {
             i += 1;
         }
         let start = i;
-        while i < to && !s.is_pec(a, at(i, ib, k)) {
+        while i < to && !s.is_voxel_pec(a, at(i, ib, k)) {
             i += 1;
         }
         let end = i;
         (end > start
-            && (end..to).all(|j| s.is_pec(a, at(j, ib, k)))
+            && (end..to).all(|j| s.is_voxel_pec(a, at(j, ib, k)))
             && s.touches_pec(at(start, ib, k))
             && s.touches_pec(at(end, ib, k)))
         .then_some((start, end))
@@ -320,5 +349,5 @@ fn element(s: &Structure, layer: &crate::openems::Layer, c: &Candidate) -> Resul
     (lo[a], hi[a]) = run;
     (lo[b], hi[b]) = (lo_b, hi_b);
     (lo[2], hi[2]) = (ks, k1);
-    Ok(LumpedElement { axis: a, lo, hi, r: 0.0, l: 0.0, c: None })
+    Ok((LumpedElement { axis: a, lo, hi, r: 0.0, l: 0.0, c: None }, from, to))
 }

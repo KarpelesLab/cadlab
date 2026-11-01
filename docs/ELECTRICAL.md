@@ -7,7 +7,7 @@ and a design lint beyond ERC. Code: `src/electrical/` (impedance closed forms, 2
 checks), `src/spice.rs`, `src/openems/`, `src/fdtd/`, `src/touchstone.rs`, `src/lint.rs`; commands in
 `src/commands/electrical.rs`, `export.spice`, `export.openems`, `sim.sparams`, `touchstone.summary` and
 `circuit.lint`. Decisions: DECISIONS D29, D49 (field solver), D52 (losses), D54 (openEMS export, Touchstone),
-D59 (FDTD solver), D63 (full-wave losses), D68 (openEMS export parity, openEMS oracle, CPML).
+D59 (FDTD solver), D63 (full-wave losses), D68 (openEMS export parity, openEMS oracle, CPML), D73 (conformal copper).
 
 Differential pair routing and length matching are router work ([ROUTER.md](ROUTER.md), "Differential pairs"
 and "Length tuning", D38); this document covers the numbers they route to. A pair (`diffpair.add`) routes at
@@ -476,6 +476,23 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   passive) and convolved recursively (bilinear: Vₚ⁺ = kₚ Vₚ + βₚ (I⁺ − I)). Smooth copper is within 1 % in R
   and X; with roughness R stays within 2.5 % while X takes the causal value of a resistance rising faster
   than √f (up to twice the smooth reactance D52 adds, a fraction of a percent of the line's inductance).
+- Diagonal and curved copper (`conformal`, default true; D73): the cells a slanted polygon edge crosses use the
+  conformal update of S. Dey and R. Mittra (IEEE Microwave Guided Wave Lett. 7, 1997): Faraday's law on a cut
+  face integrates over its open part, μ A H′ = −Σ l E, with A the open area and l the open lengths of its edges,
+  taken from exact intersections with the polygons; Ampère's law is unchanged. That form conserves an energy
+  (Σ ε l A* E²/2 + Σ μ l* A H²/2), so only its largest eigenvalue can limit the timestep. Instead of lowering
+  the timestep for slivers, the area in the update is raised where a face's own frequency would pass a quarter
+  of 4/Δt² (the idea of B. Benkler, N. Chavannes and N. Kuster, IEEE Trans. AP-54, 2006, with our own bound):
+  Δt² λmax was at most 3.56 in the cases below (4 is the leapfrog limit, an uncut cubic grid at 0.95 Courant has
+  3.61). Axis-aligned copper keeps its edges exactly, with the thirds rule, and copper within the absorbing
+  layers stays staircased (the CPML's update takes whole lengths). With a surface impedance, a cut edge carries
+  the covered fraction κ of its dual loop's circulation, its field acting over the covered part (dissipation
+  Zs κ² (∮H)² l / w: positive for any κ), and w is measured: the copper across the edge's dual cell for in-plane
+  edges, the outline's length nearest to it for z edges. Without that a staircase's surface is 4/π too long on a
+  curved wall, and the current on a diagonal strip's edges is missed. A lumped element takes its whole edge even
+  if the outline cuts it, and parts are placed on the copper as voxelized (the same columns with or without
+  conformal cells, `columns` in the output) with cut edges between a pad's center and the element made whole.
+  `conformal_edges` in the output counts the cut edges.
 - Solder mask (`mask`, `mask_copper`, `mask_er`, `mask_loss_tangent`, as in the export): a dielectric layer
   on both outer layers, over the laminate and over the copper, open at the pads; Djordjevic–Sarkar at f₀ like
   an unreferenced laminate; its surfaces are mesh lines (a 25 µm mask makes 25 µm cells, so a smaller
@@ -530,7 +547,13 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   perfect conductor ending on a mesh line behaves about a third of a cell wider: without the rule a microstrip
   sixteen to four cells wide came out 3–10 % low in Z₀). The fine cell is the smallest of the largest cell, half
   the thinnest dielectric and half the copper's width across the edge; `export.openems --thirds` writes the
-  same mesh.
+  same mesh. A diagonal track gets no lines of its own, and one under about a cell wide falls apart into separate
+  pieces on any scheme: a 0.3 mm 45° track on the 0.72 mm cells of 10 GHz read |S₂₁| = −72 dB, an open circuit,
+  with or without conformal cells. So a diagonal track under 1.5 cells wide (width 2 × area / perimeter of its
+  polygon, slanted edge at least three widths long, so not round pads) refines the whole mesh to half its width,
+  reported as `sim.mesh_refined`; with an explicit `max_cell`, or `conformal: false`, the mesh stays and
+  `sim.slanted_copper_unresolved` warns with conformal on. This mesh is `sim.sparams`'s: to cross-check with
+  `export.openems`, give both the same `max_cell`.
 - Determinism and threads: with the `parallel` feature the planes of the grid are split between threads (one
   per 131072 nodes, a pool of the solver's own); every update reads only the other field, reductions are
   summed per plane in order, so results are bit-identical for any thread count. The Debye edges and the
@@ -577,7 +600,7 @@ lumped parts inside the absorbing layer; `openems.port_in_pml` says how much mor
 
 A run stopped inside the excitation pulse warns `sim.stopped_in_pulse` (its numbers mean nothing). Errors: the export's (`openems.*`), `sim.no_ports`, `sim.port_too_thin` (a lumped
 port spanning no cell), `sim.port_too_short` (a microstrip port whose feed and reference plane share a mesh
-line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
+line), `sim.port_at_edge`, `sim.unstable`, `cancelled`. Notes: `sim.mesh_refined`, `sim.slanted_copper_unresolved`.
 
 **Accuracy** (tests in `tests/fdtd.rs`; the `#[ignore]` ones run in release, `cargo test --release --test fdtd
 -- --ignored`):
@@ -603,6 +626,17 @@ line), `sim.port_at_edge`, `sim.unstable`, `cancelled`.
 | lossless graded mesh (ratio 1.4) with a dielectric and a strip, 6000 steps after the pulse | energy conservation | within −0.7 % / +0.05 % (the staggered E/H sampling) |
 | uniform cubic grid at 0.99 and 1.03 of the Courant limit | stability | stable / diverges |
 | one thread against three, without and with the surface impedance, Debye terms and roughness | | bit-identical spectra |
+| conformal (`tests/fdtd_conformal.rs`): 45° zero-thickness strip W = 1 mm, H = 0.5 mm, εr 4, 2–8 GHz, xy cell 500 µm | field solver | staircase Z₀ +20 to +22 %, εeff +27 to +29 %; conformal Z₀ +5.5 to +7.3 %, εeff +6.6 to +8.9 % |
+| the same, 250 µm (4 cells across W) | field solver | staircase Z₀ −2.2 to −4.0 %, εeff +11.5 to +12.9 %; conformal Z₀ +2.0 to +3.7 %, εeff −2.8 to −1.1 % |
+| the same, 125 µm (8 cells across W) | field solver | staircase Z₀ −2.3 to −4.1 %, εeff +5.8 to +7.2 %; conformal Z₀ −0.2 to +1.5 %, εeff −0.4 to +1.0 % |
+| cylinder with PEC wall, a = 10 mm: TM₀₁₀, TM₁₁₀, TM₀₂₀ at a/Δ = 10, 20, 40, 80 | x_mn c / (2π a) | staircase −2.4…−3.0, −1.4…−1.5, −0.8, −0.37 %; conformal −0.25…−0.87, −0.18…−0.30, −0.11…−0.13, −0.07 % (numerical dispersion included) |
+| the same, wall of 580 kS/m, plates lossless, TM₀₁₀ at a/Δ = 10, 20, 40 | Q = a/δ = 1621 | staircase −19, −20.5, −20.9 % (the limit 1 − π/4); conformal −4.3, −3.3, −2.2 % |
+| open-ended 45° strip resonator, 24 mm, W = 1 mm, 35 µm copper at 580 kS/m, 250 µm cells: conductor Q (radiation taken out with a perfect-copper run) | β/(2α) of D52, 38.4 | staircase +40.9 %, conformal −5.2 % |
+| round patch a = 5 mm on 0.5 mm of εr 4, open, TM₁₁ at a/Δ = 5, 10, 20 | no exact value: Wolff and Knoppik's 8.485 GHz (Electron. Lett. 1974, about 2.5 %), and the finer meshes | staircase 7.339, 7.925, 8.254 GHz (8.337 at a/Δ = 40); conformal 7.779, 8.424, 8.438 GHz |
+| `sim.sparams`: 8 mm, 45° run of 14.1 mm, 8 mm, sheet copper, W = 1 mm, H = 0.5 mm: arg S₂₁ at 10 GHz, \|S₁₁\| | the straight line of that length, 164.2° and −35.7 dB (the bends' own effect aside) | default mesh (0.75 mm): staircase 104.1°, −16.4 dB; conformal (refined to 0.5 mm) 154.8°, −23.1 dB; 0.25 mm cells: staircase 143.5°, −18.2 dB; conformal 157.5°, −28.0 dB |
+| the same, W = 0.3 mm, H = 0.17 mm, εr 4.3 | straight 154.8° | default mesh: staircase and conformal without refinement are open circuits (−72 dB); default with refinement (0.15 mm, 2.46 M cells): 141.0°, −22.7 dB; staircase on those cells 113.4° |
+| 31 × 31 × 7 lossless box with a diagonal strip and a disc, cut cells: 300 000 steps after the pulse | energy conservation; Δt² λmax < 4 | −1.9 to +0.03 % (no growth); Δt² λmax 3.26 |
+| the same strip with CPML, ports, Debye dielectric, surface impedance, shunt R–L–C and a series R on a cut edge | decays to −60 dB; 1 thread against 3 | converged; bit-identical spectra |
 | lumped elements (`tests/fdtd_parts.rs`), engine level: a 0.4 mm strip 0.2 mm over ground in a closed 3 mm box between 50 Ω lumped ports, 0.5–4 GHz; series R 10 / 50 / 200 Ω | S₂₁ = 2Z₀/(2Z₀ + Z), S₁₁ = Z/(2Z₀ + Z) | \|S₂₁\| within 0.001, \|S₁₁\| within 0.011 (the strip's own inductance) |
 | the same: series 1 pF (high-pass), 5 nH (low-pass), 10 Ω + 4 nH + 1 pF (band-pass at 2.5 GHz) | same | \|S₂₁\| within 0.016 |
 | the same: shunt 2 pF (low-pass) and a shunt 5 Ω + 2 nH + 2 pF (notch to 2R/(2R + Z₀) = 0.167 at 2.52 GHz) | S₂₁ = 2/(2 + Y Z₀) | \|S₂₁\| within 0.007 / 0.009 (0.1663 at the notch) |
@@ -615,9 +649,13 @@ gained 0.7 % in power), which read as −9.5 % of the loss at 1.6 GHz.
 
 **Limits.** Parts are two-pin R, L, C only, ideal series elements at their values (no package model beyond
 `esr` / `esl`, no self-resonance of inductors, no ferrite beads, ICs or connectors: those pads are bare
-copper; terminate them with ports), placed across their pads' gap along x or y; staircased curves (arcs and
-round pads follow the mesh; vias are cylinders of whole edges); quasi-uniform lines need the mesh lines that
-the export puts at copper edges (diagonal tracks staircase). The surface impedance assumes a skin depth well
+copper; terminate them with ports), placed across their pads' gap along x or y. Conformal cells correct the
+outline, not the field's singularity at a sheet's edge, whose error stays first order; one cell's two open sides
+(a strip narrower than a cell across it) share one H, so a slanted strip needs about two cells across (error at
+two cells across still +6–9 %, at four 2–4 %). Its loss treatment was measured on solid copper and on walls, at one
+mesh for the strip, not on `sheet` copper; dielectric boundaries (the board's outline, non-plated holes) still
+staircase, and the stability bound is a check on the geometries tested (`Simulation::curl_curl_radius`), not a
+proof for all (`sim.unstable` catches a divergence). The surface impedance assumes a skin depth well
 below the copper's thickness and its features (as D52; no DC floor below the skin-effect range), and its
 reactance with roughness is the causal one rather than D52's smooth internal inductance. `sheet` copper has
 no thickness: its edge current is bounded only by the mesh, so its conductor loss depends on the cells at the

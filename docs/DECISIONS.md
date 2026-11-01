@@ -1713,6 +1713,63 @@ connections while the pours are refilled around new copper afterwards, so `route
 *Why:* a comparison that varies more than the change decides nothing, and a count of the run's own work removes the clock without
 changing what is being measured; the default stays honest about what each budget promises.
 
+### D73. Conformal copper in the built-in solver: Dey–Mittra cells at the uncut timestep, measured copper surface for the loss, the mesh refined for narrow diagonal tracks (2026-11-01)
+**Measured first** (`tests/fdtd_conformal.rs`, staircase): a 45° microstrip (W = 1 mm, H = 0.5 mm, εr 4; field
+solver 50.81 Ω, 3.071), 2–8 GHz, xy cells of 500, 250, 125, 62 µm: εeff +27…+29, +11.5…+12.9, +5.8…+7.2, about
++2.6 % (first order), Z₀ +20, −4, −4, +2 %; the same strip along x on those uniform cells without the thirds rule
+stays within +1 to +6 % in εeff (+1 to +3 % from 250 µm), so the error is the diagonal's. A cylinder with a PEC wall (TM₀₁₀, TM₁₁₀, TM₀₂₀):
+−2.4…−3.0 % at a/10, −0.8 % at a/40, −0.37 % at a/80. Round patch TM₁₁: −6 % at a/10. The wall's conductor Q is
+−21 % at any mesh (the limit 1 − π/4: the staircase's surface is 4/π too long, so refining never helps); a 45°
+strip's conductor Q is +41 %. On a routed 45° section, the default mesh of 10 GHz has 60° of phase error on W = 1 mm,
+and W = 0.3 mm is an open circuit (|S₂₁| = −72 dB, no warning). Halving a cell costs 4 to 16 times the run, so
+the data supports conformal cells.
+**Implemented.** `fdtd::conformal` computes, for the cells a slanted polygon edge crosses, each edge's open length
+and each face's open area from exact intersections of mesh lines with the polygons (copper layers and plated
+barrels as prisms; union per z plane). The engine corrects H on those faces after the regular update (Dey and Mittra,
+IEEE MWGWL 7, 1997): μ A H′ = −Σ l E over the open parts. A list per plane, each face written once: bit-identical for
+any thread count. The energy in the end criterion uses the norm this form conserves. **Stability:** the area in the
+update rises to keep a face's own frequency within a quarter of 4/Δt² (Benkler, Chavannes and Kuster, IEEE AP-54,
+2006, have the idea; the bound is ours); the timestep is unchanged. A first bound of a third reached Δt² λmax = 3.97
+at a/80; a quarter gives at most 3.56, below an uncut grid's 3.61. Edges next to a CPML stay whole, so every edge has
+one length in all its faces (the update's symmetry); ports and elements take whole edges. **Loss:** a cut edge
+carries κ, its covered fraction, of its dual loop's circulation over its covered part (power Zs κ² (∮H)² l / w), w
+being the copper across its dual cell, and z edges take the outline nearest to them. **Mesh:** a diagonal track under
+1.5 cells wide refines the whole mesh to half its width (`sim.mesh_refined`), through `max_cell` at the extraction,
+so `src/openems` is unchanged; an explicit `max_cell` warns instead (`sim.slanted_copper_unresolved`). `conformal:
+false` restores the staircase, without refinement. `Simulation::curl_curl_radius` measures Δt² λmax by power
+iteration.
+**After, same mesh** (staircase → conformal): 45° microstrip at 125 µm εeff +5.8…+7.2 → −0.4…+1.0 %, Z₀ −2.3…−4.1 →
+−0.2…+1.5 %; at 250 µm +11.5…+12.9 → −2.8…−1.1 %, Z₀ −2.2…−4 → +2…+3.7 %; at 500 µm +27…+29 → +6.6…+8.9 %. Cylinder
+at a/10 −2.4…−3.0 → −0.25…−0.87 %, a/40 −0.8 → −0.12 %. Wall Q −21 → −2.2…−4.3 %. Strip conductor Q +40.9 → −5.2 %.
+Patch TM₁₁ at a/10 7.925 → 8.424 GHz (8.438 at a/20; Wolff and Knoppik 8.485 ± 2.5 %). Routed section at 10 GHz
+(straight line 164.2°): default mesh 104.1° → 154.8° (refined to 0.5 mm), 0.25 mm 143.5° → 157.5°, |S₁₁| −18 → −28 dB;
+W = 0.3 mm open → 141.0° at 0.15 mm (straight 154.8°, staircase on those cells 113.4°). 300 000 steps on a lossless
+box of cut cells: energy −1.9 to +0.03 %, no growth. Everything together (CPML, ports, Debye, surface impedance,
+lumped elements, one on a cut edge) converges and is bit-identical on 1 and 3 threads.
+**Cost:** per step about 0–4 % on the microstrip (20 against 20 s at 250 µm, 50 against 52 s at 125 µm), setup
+negligible. These timings come from a heavily loaded machine at 3 threads and are only indicative. Reaching the same
+εeff with the staircase needs a mesh at least four times finer in x and y, 16 times the cells or more.
+*Why:* first-order errors that refinement barely reduces, and a loss error it does not reduce at all, are what a
+conformal method exists for, and the update is only a list of faces. Dey–Mittra rather than cell enlargement because
+raising an area is local and keeps the update's symmetric form, hence its energy, with no neighbour bookkeeping; the
+timestep stays what the mesh gives, which matters since one sliver would otherwise slow the whole board. Leaving
+axis-aligned copper alone keeps the thirds rule and every earlier validation. Refining the mesh, not only warning,
+because an open circuit is a wrong answer an agent cannot recognize, and more cells are at worst `sim.too_many_cells`.
+*Left:* κ is a modelling choice validated on one strip mesh and on walls, not on `sheet` copper; probes on a lossy
+diagonal line read α within ±30 % (hence the resonator). A slanted strip still needs about two cells across, a sheet's
+edge singularity stays first order, the stability bound is checked on the geometries tested rather than proved, and
+dielectric outlines still staircase. The refined mesh is `sim.sparams`'s own: `export.openems` needs the same
+`max_cell` to compare.
+*Lumped parts.* The first version placed elements on the copper as cut. A track ending at a pad's center has a round
+end that passes a 0603 pad's inner edge by 50 µm; that made the edges next to the gap partial on every column but the
+one at the end's tip, so the element kept 1 column of 3 at 0.5 mm and 1 of 5 at 0.25 mm. `sim_sparams_parts_validation`
+caught it: a series 1 pF read up to +0.036 in |S21| (staircase +0.014), the same for 1 pF + 1 nH + 1 Ω, and a resistor
+hid it; the error did not close with the mesh because the tip's width does not depend on it. Not the gap's capacitance,
+as the size first suggested: with the part left out the gap holds only 0.007–0.009 pF. Parts are now placed on the
+copper as voxelized, and cut edges between a pad's center and the element become whole copper, since a terminal
+has to reach its element. Same case, staircase and conformal: +0.0099 and +0.0099 at 0.5 mm, +0.0118 and +0.0117 at
+0.25 mm, on 3 and 5 columns both ways (`columns` in the output; a 0 Ω short now also clears its edges' cuts).
+
 ## Open questions
 
 

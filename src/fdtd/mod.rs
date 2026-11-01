@@ -10,7 +10,8 @@
 //! - Copper: perfect-conductor edges inside the copper volume (`solid`) or on the sheet
 //!   (`sheet`); plated holes and vias are metal cylinders. With a conductivity, a surface
 //!   impedance boundary condition on every copper surface gives the skin-effect loss (and
-//!   roughness), fitted over the band ([`fit::surface_fit`]).
+//!   roughness), fitted over the band ([`fit::surface_fit`]). Cells cut by diagonal or curved
+//!   copper use their open lengths and area (Dey–Mittra, [`conformal`]).
 //! - Dielectrics: the Djordjevic–Sarkar model through the stackup's εr and tan δ at their
 //!   reference frequency (at the pulse's center f₀ when the stackup gives none), as Debye terms
 //!   on shared relaxation times ([`fit::debye_fit`]) updated by auxiliary differential
@@ -25,6 +26,7 @@
 //! - S = B A⁻¹ from the incident and reflected power waves of every port in every run, so
 //!   terminations that are not exactly matched do not bias the result.
 
+pub mod conformal;
 pub mod engine;
 pub mod fit;
 mod parts;
@@ -51,6 +53,11 @@ pub use parts::{LumpedPart, Overrides};
 
 use crate::electrical::dispersion::Dielectric as Dispersive;
 
+/// A slanted track under this many cells wide is unresolved (it can break up into separate pieces).
+const UNRESOLVED: f64 = 1.5;
+/// Cells across the narrowest slanted track when the mesh is refined for it.
+const CELLS_ACROSS: f64 = 2.0;
+
 /// Simulation options: the region and mesh as for the openEMS export, plus the solver's limits.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -64,6 +71,9 @@ pub struct Options {
     pub parts: bool,
     /// Part values replacing the design's in this simulation only.
     pub overrides: Overrides,
+    /// Conformal copper (Dey–Mittra) where polygon edges are neither horizontal nor vertical;
+    /// false: every edge is all conductor or all open (staircase).
+    pub conformal: bool,
 }
 
 impl Default for Options {
@@ -79,6 +89,7 @@ impl Default for Options {
             courant: 0.95,
             parts: true,
             overrides: Overrides::new(),
+            conformal: true,
         }
     }
 }
@@ -146,6 +157,8 @@ pub struct SParams {
     pub runs: Vec<PortRun>,
     /// Board parts simulated as lumped elements.
     pub parts: Vec<LumpedPart>,
+    /// Mesh edges partly covered by slanted copper (0: all copper axis-aligned, or `conformal` off).
+    pub conformal_edges: usize,
     /// Warnings and notes.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -168,6 +181,7 @@ struct Built {
     probes: Vec<Probe>,
     z0: Vec<f64>,
     parts: Vec<LumpedPart>,
+    conformal_edges: usize,
 }
 
 fn pt(x: i64, y: i64) -> poly::Point {
@@ -198,6 +212,7 @@ fn build(
     r: &Region,
     band: (f64, f64),
     parts: Vec<parts::Candidate>,
+    cut: bool,
     diags: &mut Vec<Diagnostic>,
 ) -> Result<Built, Error> {
     let mut s = Structure::new(r.lines.clone())
@@ -277,6 +292,46 @@ fn build(
         let (i, j) = (s.node(0, h.center.x.0), s.node(1, h.center.y.0));
         let (x, y) = (s.lines()[0][i], s.lines()[1][j]);
         s.pec([x, y, z0], [x, y, z1], &|_, _| true);
+    }
+    let mut conformal_edges = 0;
+    if cut {
+        let mut prisms: Vec<conformal::Prism> = r
+            .copper
+            .iter()
+            .map(|c| conformal::Prism { shape: c.shape.clone(), z: (r.layers[c.layer].bottom, r.layers[c.layer].top) })
+            .collect();
+        for h in r.holes.iter().filter(|h| h.plated) {
+            let shape = match &h.slot {
+                Some(q) => q.clone(),
+                None => conformal::disc(h.center.x.0, h.center.y.0, h.radius),
+            };
+            prisms
+                .push(conformal::Prism { shape: vec![shape], z: (r.layers[h.span.1].bottom, r.layers[h.span.0].top) });
+        }
+        conformal_edges = conformal::apply(&mut s, &prisms).partial_edges;
+        for c in &r.copper {
+            let lines = s.lines();
+            if let Some(&(width, cell)) = conformal::narrow(&c.shape, &lines[0], &lines[1], UNRESOLVED).first() {
+                let mut d = Diagnostic::warning(
+                    "sim.slanted_copper_unresolved",
+                    format!(
+                        "a diagonal track on {} ({} mm wide) spans too few mesh cells ({} mm each): it can come \
+                         out as an open circuit, and its impedance and delay are unreliable",
+                        r.layers[c.layer].name,
+                        openems::mm(width as i64),
+                        openems::mm(cell as i64),
+                    ),
+                )
+                .with_hint(format!(
+                    "set `max_cell` to {} mm or less, or leave it out to have the mesh refined",
+                    openems::mm((width / CELLS_ACROSS) as i64)
+                ));
+                if let Some(net) = &c.net {
+                    d = d.with_subject(ObjectRef::Net(net.clone()));
+                }
+                diags.push(d);
+            }
+        }
     }
     let parts = parts::place(&mut s, r, parts, diags);
 
@@ -377,7 +432,7 @@ fn build(
             }
         }
     }
-    Ok(Built { structure: s, ports, measures, probes, z0, parts })
+    Ok(Built { structure: s, ports, measures, probes, z0, parts, conformal_edges })
 }
 
 /// Solves `S A = B` for S (N×N complex, row-major), by Gaussian elimination with partial
@@ -448,6 +503,8 @@ pub struct Plan {
     pub pulse_steps: u64,
     /// Board parts that would be lumped elements.
     pub parts: Vec<LumpedPart>,
+    /// Mesh edges partly covered by slanted copper (0: all copper axis-aligned, or `conformal` off).
+    pub conformal_edges: usize,
     /// Warnings and notes.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -463,8 +520,25 @@ struct Prepared {
 
 fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
     // The microstrip ports feed and measure on mesh lines.
-    let region = openems::Options { port_planes: true, ..o.region.clone() };
-    let r = openems::extract(p, &region)?;
+    let mut region = openems::Options { port_planes: true, ..o.region.clone() };
+    let mut r = openems::extract(p, &region)?;
+    // Slanted tracks get no mesh lines of their own: one narrower than the cells breaks up. Unless
+    // `max_cell` was given, the mesh follows the narrowest.
+    let mut refined = None;
+    if o.conformal && o.region.max_cell.is_none() {
+        let narrowest = r
+            .copper
+            .iter()
+            .flat_map(|c| conformal::narrow(&c.shape, &r.lines[0], &r.lines[1], UNRESOLVED))
+            .map(|x| x.0)
+            .fold(f64::INFINITY, f64::min);
+        if narrowest.is_finite() {
+            let cell = Nm((narrowest / CELLS_ACROSS).round() as i64);
+            region.max_cell = Some(cell);
+            r = openems::extract(p, &region)?;
+            refined = Some((narrowest, cell));
+        }
+    }
     if r.ports.is_empty() {
         return Err(Error::new(
             "sim.no_ports",
@@ -476,13 +550,32 @@ fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
         return Err(Error::new(
             "sim.too_many_cells",
             format!("the mesh has {} cells, above the limit of {}", r.mesh.cells, o.max_cells),
-            "shrink the region (`margin`, `window`, `air`), lower `f_max`, coarsen the mesh (`max_cell`, \
-             `cells_per_wavelength`, `min_cell`), or raise `max_cells`",
+            if refined.is_some() {
+                "the mesh was refined for a narrow diagonal track: shrink the region (`margin`, `window`, `air`) \
+                 or raise `max_cells`; a `max_cell` above the track's width can leave it an open circuit"
+            } else {
+                "shrink the region (`margin`, `window`, `air`), lower `f_max`, coarsen the mesh (`max_cell`, \
+                 `cells_per_wavelength`, `min_cell`), or raise `max_cells`"
+            },
         ));
     }
     let freqs = frequencies(&o.region);
     let band = (freqs[0], *freqs.last().unwrap_or(&freqs[0]));
     let mut diags = r.diagnostics.clone();
+    if let Some((width, cell)) = refined {
+        diags.push(
+            Diagnostic::info(
+                "sim.mesh_refined",
+                format!(
+                    "the mesh was refined to {} mm for a diagonal track {} mm wide ({} cells)",
+                    openems::mm(cell.0),
+                    openems::mm(width as i64),
+                    r.mesh.cells
+                ),
+            )
+            .with_hint("set `max_cell` to choose the mesh yourself"),
+        );
+    }
     for refdes in o.overrides.keys() {
         if !p.circuit().components.contains_key(refdes) {
             let names: Vec<&str> = p.circuit().components.keys().map(String::as_str).collect();
@@ -500,7 +593,7 @@ fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
     } else {
         Vec::new()
     };
-    let b = build(&r, band, candidates, &mut diags)?;
+    let b = build(&r, band, candidates, o.conformal, &mut diags)?;
     notes(p, o, &r, &b, &mut diags);
     Ok(Prepared { region: r, built: b, freqs, band, diags })
 }
@@ -592,6 +685,7 @@ pub fn plan(p: &Project, o: &Options) -> Result<Plan, Error> {
         timestep,
         pulse_steps: (excitation.end() / timestep).ceil() as u64,
         parts: b.parts,
+        conformal_edges: b.conformal_edges,
         diagnostics: diags,
     })
 }
@@ -716,6 +810,7 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
         timestep: sim.dt(),
         runs,
         parts: b.parts,
+        conformal_edges: b.conformal_edges,
         diagnostics: diags,
     })
 }

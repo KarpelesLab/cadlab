@@ -8,7 +8,9 @@
 //! media by auxiliary differential equations), 10 (surface impedance, after J. G. Maloney and
 //! G. S. Smith, and J. H. Beggs et al., IEEE Trans. AP-40, 1992) and 15 (lumped elements, after
 //! M. Piket-May, A. Taflove and J. Baron, IEEE Trans. MTT-42, 1994: resistive ports, and series
-//! R–L–C elements whose current is advanced with E by the trapezoidal rule).
+//! R–L–C elements whose current is advanced with E by the trapezoidal rule). Faces cut by slanted
+//! copper follow S. Dey and R. Mittra, IEEE Microwave Guided Wave Lett. 7 (1997), keeping the
+//! timestep by the idea of B. Benkler, N. Chavannes and N. Kuster, IEEE Trans. AP-54 (2006).
 //! The graded grid uses the integral (finite integration) form: curls are circulations divided by
 //! the face areas of the primal or dual grid.
 //!
@@ -21,6 +23,8 @@
 //! Determinism: every update writes each element from the previous values of the other field
 //! only, so splitting the planes between threads gives bit-identical results; reductions (energy)
 //! are summed per plane and then in plane order.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::electrical::complex::C64;
 
@@ -65,6 +69,14 @@ pub struct Structure {
     cell: Vec<u16>,
     pec: [Vec<bool>; 3],
     elements: Vec<LumpedElement>,
+    /// Conformal copper: open fraction of the edges in cut cells (0 a conductor, 1 open, between:
+    /// partly covered); overrides `pec` outside the absorbing layers. Keyed by edge index.
+    open_edge: [BTreeMap<usize, f32>; 3],
+    /// Conformal copper: open fraction of the cut faces, by face normal and face index.
+    open_face: [BTreeMap<usize, f32>; 3],
+    /// Conformal copper: the copper surface (nm → m) that an edge's dual loop encloses, for the
+    /// surface impedance, where the mesh's own count of neighbouring edges would be a staircase's.
+    surface_width: [BTreeMap<usize, f64>; 3],
 }
 
 /// A lumped series R–L–C element along `axis` (Piket-May, Taflove & Baron; Taflove ch. 15):
@@ -125,7 +137,32 @@ impl Structure {
             cell: vec![0; cells],
             pec: [vec![false; nodes(n)], vec![false; nodes(n)], vec![false; nodes(n)]],
             elements: Vec::new(),
+            open_edge: Default::default(),
+            open_face: Default::default(),
+            surface_width: Default::default(),
         })
+    }
+
+    /// Conformal copper: the fraction of the edge along `axis` from node `at` that is not covered
+    /// by conductor (0: a conductor edge, 1: open). Overrides what [`Structure::pec`] set.
+    pub fn set_open_edge(&mut self, axis: usize, at: [usize; 3], open: f64) {
+        let n = self.n();
+        self.open_edge[axis].insert(at[0] + n[0] * (at[1] + n[1] * at[2]), open as f32);
+    }
+
+    /// Conformal copper: the fraction of the face normal to `axis` with lowest corner `at` that
+    /// is not covered by conductor.
+    pub fn set_open_face(&mut self, axis: usize, at: [usize; 3], open: f64) {
+        let n = self.n();
+        self.open_face[axis].insert(at[0] + n[0] * (at[1] + n[1] * at[2]), open as f32);
+    }
+
+    /// Conformal copper: the copper surface width (m) around the edge along `axis` from node `at`,
+    /// for the surface impedance: in-plane edges the copper across their dual cell, z edges the
+    /// outline nearest to them.
+    pub fn set_surface_width(&mut self, axis: usize, at: [usize; 3], width: f64) {
+        let n = self.n();
+        self.surface_width[axis].insert(at[0] + n[0] * (at[1] + n[1] * at[2]), width);
     }
 
     /// Number of mesh lines per axis.
@@ -270,21 +307,44 @@ impl Structure {
     /// Whether the edge along `axis` from node `at` is a perfect conductor.
     pub fn is_pec(&self, axis: usize, at: [usize; 3]) -> bool {
         let n = self.n();
+        let e = at[0] + n[0] * (at[1] + n[1] * at[2]);
+        match self.open_edge[axis].get(&e) {
+            Some(o) => *o == 0.0,
+            None => self.pec[axis][e],
+        }
+    }
+
+    /// Whether the edge along `axis` from node `at` is copper as voxelized (by its midpoint),
+    /// whatever cut cells make of it: what lumped parts are placed on, so that a shape's outline
+    /// does not change the columns of a part.
+    pub fn is_voxel_pec(&self, axis: usize, at: [usize; 3]) -> bool {
+        let n = self.n();
         self.pec[axis][at[0] + n[0] * (at[1] + n[1] * at[2])]
     }
 
-    /// Whether any edge ending at node `at` is a perfect conductor.
+    /// Whether any edge ending at node `at` is copper as voxelized.
     pub fn touches_pec(&self, at: [usize; 3]) -> bool {
         let n = self.n();
         (0..3).any(|a| {
-            let up = at[a] + 1 < n[a] && self.is_pec(a, at);
+            let up = at[a] + 1 < n[a] && self.is_voxel_pec(a, at);
             let down = at[a] > 0 && {
                 let mut q = at;
                 q[a] -= 1;
-                self.is_pec(a, q)
+                self.is_voxel_pec(a, q)
             };
             up || down
         })
+    }
+
+    /// Makes a cut edge whole copper: a lumped part's terminal has to reach its element.
+    pub fn close_cut_edge(&mut self, axis: usize, at: [usize; 3]) {
+        let n = self.n();
+        let e = at[0] + n[0] * (at[1] + n[1] * at[2]);
+        if self.pec[axis][e]
+            && let Some(o) = self.open_edge[axis].get_mut(&e)
+        {
+            *o = 0.0;
+        }
     }
 
     /// Adds a lumped element. A short (no R, L or C) makes its edges perfect conductors; the
@@ -298,7 +358,9 @@ impl Structure {
                     for ia in e.lo[a]..e.hi[a] {
                         let mut q = [0; 3];
                         (q[a], q[b], q[c]) = (ia, ib, ic);
-                        self.pec[a][q[0] + n[0] * (q[1] + n[1] * q[2])] = true;
+                        let g = q[0] + n[0] * (q[1] + n[1] * q[2]);
+                        self.pec[a][g] = true;
+                        self.open_edge[a].remove(&g);
                     }
                 }
             }
@@ -545,7 +607,33 @@ pub struct Simulation {
     sibc: Option<Sibc>,
     /// Lumped element edges.
     elements: Vec<ElementEdge>,
+    /// Faces cut by curved or diagonal copper.
+    conformal: Option<Conformal>,
 }
+
+/// Conformal copper, the method of S. Dey and R. Mittra (IEEE Microwave Guided Wave Lett. 7, 1997):
+/// Faraday's law on a face cut by the conductor integrates over its open part only:
+/// μ A H' = −Σ l E, with A the open area and l the open lengths of its edges (the rest of the
+/// boundary lies on the conductor, where E is zero). Ampère's law is unchanged, so the update is
+/// `C† M C` with diagonal positive M: it conserves the energy Σ ε l A* E² / 2 + Σ μ l* A H² / 2 and
+/// is stable up to a timestep that a small open area would lower. As in the method of
+/// B. Benkler, N. Chavannes and N. Kuster (IEEE Trans. AP-54, 2006) the area in the update is
+/// raised where needed instead ([`STABILITY`]), so the timestep stays that of the uncut mesh.
+struct Conformal {
+    /// Per H component: the corrected faces, each a range of `terms`.
+    faces: [Entries<(u32, u32)>; 3],
+    /// (E component, edge, coefficient): H += coefficient × E after the regular update.
+    terms: Vec<(u8, u32, f32)>,
+    /// Partly open edges (component, index, open fraction): the energy's weights.
+    edges: Vec<(u8, u32, f32)>,
+    /// Corrected faces (component, index, area in the update / full area).
+    areas: Vec<(u8, u32, f32)>,
+}
+
+/// A cut face's own frequency Σ l c² l* / (A A*) (the diagonal of the discrete curl-curl) is kept
+/// within this fraction of 4 / Δt². An uncut cube at the Courant limit has a third: its neighbours
+/// raise the grid's largest eigenvalue to three times the diagonal.
+const STABILITY: f64 = 0.25;
 
 /// One edge of a lumped series R–L–C element (its share of the element: R, L and 1/C in
 /// proportion to the edge's length in its column, times the number of parallel columns).
@@ -794,6 +882,7 @@ impl Simulation {
             disp: None,
             sibc: None,
             elements: Vec::new(),
+            conformal: None,
             settings,
         };
         sim.coefficients(s, ports)?;
@@ -920,6 +1009,7 @@ impl Simulation {
         let mut betas: Vec<Vec<f32>> = vec![Vec::new()];
         let mut disp_edges: [Vec<(u32, u32)>; 3] = Default::default();
         let mut conductor: [Vec<bool>; 3] = std::array::from_fn(|_| vec![false; nodes(n)]);
+        let mut partial: [BTreeMap<usize, f32>; 3] = Default::default();
         for a in 0..3 {
             let (b, c) = ((a + 1) % 3, (a + 2) % 3);
             for k in 0..n[2] {
@@ -937,7 +1027,18 @@ impl Simulation {
                             continue;
                         }
                         let is_elem = elem.contains_key(&(a, e));
-                        if s.pec[a][e] && !extra[a].contains_key(&e) && !is_elem {
+                        let is_port = extra[a].contains_key(&e);
+                        let fraction = if self.in_absorber(p) { None } else { s.open_edge[a].get(&e).copied() };
+                        let is_conductor = fraction.map_or(s.pec[a][e], |o| o == 0.0);
+                        if let Some(o) = fraction
+                            && o > 0.0
+                            && o < 1.0
+                            && !is_elem
+                            && !is_port
+                        {
+                            partial[a].insert(e, o);
+                        }
+                        if is_conductor && !is_port && !is_elem {
                             self.tab[a][e] = 0;
                             conductor[a][e] = true;
                             continue;
@@ -1011,10 +1112,11 @@ impl Simulation {
                 edges: disp_edges.map(|v| Entries::new(v, plane, n[2], poles + 1)),
             });
         }
-        if let Some(z) = &self.settings.surface {
-            self.sibc = self.surface_faces(z, &conductor);
-        }
         self.coef = coef;
+        let areas = self.conformal_faces(s, &partial);
+        if let Some(z) = &self.settings.surface {
+            self.sibc = self.surface_faces(z, &conductor, &areas, &partial, &s.surface_width);
+        }
         for (&(a, g), &(r, l, s_c, len, area)) in &elem {
             let cb = self.coef[self.tab[a][g] as usize].1 as f64;
             let z = r / 2.0 + l / dt + dt * s_c / 4.0;
@@ -1049,6 +1151,216 @@ impl Simulation {
         Ok(())
     }
 
+    /// Whether edges from node `p` touch an absorbing layer (there copper stays staircased, as
+    /// the layer's update takes the uncut lengths).
+    fn in_absorber(&self, p: [usize; 3]) -> bool {
+        (0..3).any(|w| {
+            let (lo, hi) = (self.settings.pml[2 * w], self.settings.pml[2 * w + 1]);
+            (lo > 0 && p[w] <= lo) || (hi > 0 && p[w] + 1 + hi >= self.n[w])
+        })
+    }
+
+    /// Builds the corrections of the faces cut by copper. Returns those faces' area in the update
+    /// over their full area, by (normal, face).
+    fn conformal_faces(&mut self, s: &Structure, partial: &[BTreeMap<usize, f32>; 3]) -> BTreeMap<(u8, u32), f64> {
+        let n = self.n;
+        let node = |g: usize| [g % n[0], (g / n[0]) % n[1], g / (n[0] * n[1])];
+        let valid = |c: usize, p: [usize; 3]| {
+            let (b, d) = ((c + 1) % 3, (c + 2) % 3);
+            p[b] + 1 < n[b] && p[d] + 1 < n[d]
+        };
+        let mut faces: BTreeSet<(u8, u32)> = BTreeSet::new();
+        for (a, edges) in partial.iter().enumerate() {
+            for &e in edges.keys() {
+                let p = node(e);
+                for c in (0..3).filter(|&c| c != a) {
+                    let t = 3 - a - c;
+                    if valid(c, p) {
+                        faces.insert((c as u8, e as u32));
+                    }
+                    if p[t] > 0 {
+                        let mut q = p;
+                        q[t] -= 1;
+                        if valid(c, q) {
+                            faces.insert((c as u8, self.id(q) as u32));
+                        }
+                    }
+                }
+            }
+        }
+        for (c, m) in s.open_face.iter().enumerate() {
+            for (&f, &o) in m {
+                if o < 1.0 && valid(c, node(f)) && !self.in_absorber(node(f)) {
+                    faces.insert((c as u8, f as u32));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        if faces.is_empty() {
+            return out;
+        }
+        let limit = STABILITY * 4.0 / (self.dt * self.dt);
+        let ch = self.dt / MU0;
+        let mut terms = Vec::new();
+        let mut items: [Vec<(u32, (u32, u32))>; 3] = Default::default();
+        let mut areas = Vec::new();
+        for &(c8, f) in &faces {
+            let (c, f) = (c8 as usize, f as usize);
+            let p = node(f);
+            let (b, d) = ((c + 1) % 3, (c + 2) % 3);
+            let (mut pb, mut pd) = (p, p);
+            pb[b] += 1;
+            pd[d] += 1;
+            let edges = [(d, pb, 1.0), (d, p, -1.0), (b, pd, -1.0), (b, p, 1.0)];
+            let full = self.d[b][p[b]] * self.d[d][p[d]];
+            let open = s.open_face[c].get(&f).map_or(1.0, |o| *o as f64);
+            // The face's own frequency at area 1, over its edges that carry a field.
+            let mut own = 0.0;
+            let mut any_partial = false;
+            let mut lengths = [0.0; 4];
+            for (l, &(ax, q, _)) in lengths.iter_mut().zip(&edges) {
+                let g = self.id(q);
+                let t = self.tab[ax][g] as usize;
+                if t == 0 {
+                    continue;
+                }
+                let o = partial[ax].get(&g).map_or(1.0, |o| *o as f64);
+                any_partial |= o < 1.0;
+                *l = self.d[ax][q[ax]] * o;
+                let (x, y) = ((ax + 1) % 3, (ax + 2) % 3);
+                own += *l * self.dd[c][p[c]] / (self.dd[x][q[x]] * self.dd[y][q[y]] * MU0 * self.coef[t].2 as f64);
+            }
+            if !any_partial && (open >= 1.0 || lengths.iter().all(|l| *l == 0.0)) {
+                continue;
+            }
+            let area = (open * full).max(own / limit).min(full);
+            if area <= 0.0 {
+                continue;
+            }
+            let first = terms.len() as u32;
+            for (l, &(ax, q, sign)) in lengths.iter().zip(&edges) {
+                if self.tab[ax][self.id(q)] != 0 {
+                    let coef = ch * sign * (self.d[ax][q[ax]] / full - l / area);
+                    if coef != 0.0 {
+                        terms.push((ax as u8, self.id(q) as u32, coef as f32));
+                    }
+                }
+            }
+            items[c].push((f as u32, (first, terms.len() as u32)));
+            areas.push((c8, f as u32, (area / full) as f32));
+            out.insert((c8, f as u32), area / full);
+        }
+        let plane = n[0] * n[1];
+        let edges = partial
+            .iter()
+            .enumerate()
+            .flat_map(|(a, m)| m.iter().map(move |(&e, &o)| (a as u8, e as u32, o)))
+            .collect();
+        self.conformal = Some(Conformal { faces: items.map(|v| Entries::new(v, plane, n[2], 0)), terms, edges, areas });
+        out
+    }
+
+    /// Number of partly open edges and of faces updated with their open part.
+    pub fn conformal_counts(&self) -> (usize, usize) {
+        self.conformal.as_ref().map_or((0, 0), |c| (c.edges.len(), c.areas.len()))
+    }
+
+    /// The smallest area in the update over a cut face's full area.
+    pub fn conformal_min_area(&self) -> f64 {
+        self.conformal.as_ref().map_or(1.0, |c| c.areas.iter().map(|x| x.2 as f64).fold(1.0, f64::min))
+    }
+
+    /// Largest eigenvalue of Δt² times the discrete curl-curl operator (leapfrog is stable below
+    /// 4), by power iteration from a fixed start; absorbing layers count as uncut grid. Leaves the
+    /// fields at rest.
+    pub fn curl_curl_radius(&mut self, iterations: usize) -> f64 {
+        self.reset();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for f in &mut self.f[..3] {
+            for v in f.iter_mut() {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                *v = (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+            }
+        }
+        for a in 0..3 {
+            for (v, t) in self.f[a].iter_mut().zip(&self.tab[a]) {
+                if *t == 0 {
+                    *v = 0.0;
+                }
+            }
+        }
+        let mut lambda = 0.0;
+        for _ in 0..iterations {
+            for h in &mut self.f[3..] {
+                h.fill(0.0);
+            }
+            self.update_h();
+            self.update_conformal();
+            let before: f64 = self.f[..3].iter().flatten().map(|v| (*v as f64).powi(2)).sum();
+            for e in &mut self.f[..3] {
+                e.fill(0.0);
+            }
+            self.update_e();
+            let after: f64 = self.f[..3].iter().flatten().map(|v| (*v as f64).powi(2)).sum();
+            lambda = (after / before).sqrt();
+            let k = (1.0 / lambda) as f32;
+            for e in &mut self.f[..3] {
+                for v in e.iter_mut() {
+                    *v *= k;
+                }
+            }
+        }
+        self.reset();
+        lambda
+    }
+
+    /// The H correction of the faces cut by copper (after the regular update).
+    fn update_conformal(&mut self) {
+        let plane = self.n[0] * self.n[1];
+        let Simulation { f, conformal, pool, .. } = self;
+        let Some(z) = conformal else { return };
+        let pool = pool.as_ref();
+        let (e, h) = f.split_at_mut(3);
+        let e: &[Vec<f32>] = e;
+        let terms = &z.terms;
+        for (c, faces) in z.faces.iter_mut().enumerate() {
+            entry_jobs(&mut h[c], plane, faces, 0, pool, |fk, o, items, _| {
+                for (g, (a, b)) in items {
+                    let corr: f32 =
+                        terms[*a as usize..*b as usize].iter().map(|&(x, q, w)| w * e[x as usize][q as usize]).sum();
+                    fk[*g as usize - o] += corr;
+                }
+            });
+        }
+    }
+
+    /// The energy's correction for the cut cells: partly open edges and faces count their open
+    /// part (the norm the update conserves).
+    fn conformal_energy(&self) -> f64 {
+        let Some(z) = &self.conformal else { return 0.0 };
+        let n = self.n;
+        let node = |g: usize| [g % n[0], (g / n[0]) % n[1], g / (n[0] * n[1])];
+        let mut w = 0.0;
+        for &(a, g, o) in &z.edges {
+            let (a, g) = (a as usize, g as usize);
+            let p = node(g);
+            let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+            let eps = self.coef[self.tab[a][g] as usize].2 as f64;
+            let v = self.f[a][g] as f64;
+            w -= 0.5 * eps * v * v * self.d[a][p[a]] * self.dd[b][p[b]] * self.dd[c][p[c]] * (1.0 - o as f64);
+        }
+        for &(a, g, r) in &z.areas {
+            let (a, g) = (a as usize, g as usize);
+            let p = node(g);
+            let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+            let v = self.f[3 + a][g] as f64;
+            w -= 0.5 * MU0 * v * v * self.dd[a][p[a]] * self.d[b][p[b]] * self.d[c][p[c]] * (1.0 - r as f64);
+        }
+        w
+    }
+
     /// The surface loops of the conductor edges. For each face that is not inside the conductor
     /// (not all four edges conductor or domain wall) and each conductor edge on it, the face is
     /// part of that
@@ -1058,7 +1370,14 @@ impl Simulation {
     /// edge open on two opposite sides only (inside a sheet) gets one loop per side; any other
     /// edge (on a solid conductor's surface, at its corners, at a sheet's edge where the current
     /// wraps around) one loop over all its faces.
-    fn surface_faces(&self, z: &SurfaceImpedance, conductor: &[Vec<bool>; 3]) -> Option<Sibc> {
+    fn surface_faces(
+        &self,
+        z: &SurfaceImpedance,
+        conductor: &[Vec<bool>; 3],
+        areas: &BTreeMap<(u8, u32), f64>,
+        partial: &[BTreeMap<usize, f32>; 3],
+        widths: &[BTreeMap<usize, f64>; 3],
+    ) -> Option<Sibc> {
         let n = self.n;
         let dt = self.dt;
         let ch = dt / MU0;
@@ -1068,10 +1387,19 @@ impl Simulation {
             let (b, c) = ((ax + 1) % 3, (ax + 2) % 3);
             q[ax] + 1 < n[ax] && (cond(ax, q) || q[b] == 0 || q[b] + 1 == n[b] || q[c] == 0 || q[c] + 1 == n[c])
         };
+        // The share of a partly covered edge's dual loop taken as conduction current: its covered
+        // fraction (1 on conductor edges, 0 on open ones).
+        let covered = |ax: usize, q: [usize; 3]| -> f64 {
+            if q[ax] + 1 >= n[ax] {
+                return 0.0;
+            }
+            let g = self.id(q);
+            if conductor[ax][g] { 1.0 } else { partial[ax].get(&g).map_or(0.0, |o| 1.0 - *o as f64) }
+        };
         let plane = n[0] * n[1];
         // Per conductor edge (axis, index): (side axis, side sign, H component, face index,
-        // σ, dual length, Δ⊥, surface share).
-        type Rec = (usize, i8, u8, u32, f64, f64, f64, f64);
+        // σ, dual length, Δ⊥, surface share, covered fraction).
+        type Rec = (usize, i8, u8, u32, f64, f64, f64, f64, f64);
         let mut by_edge: std::collections::BTreeMap<(u8, u32), Vec<Rec>> = std::collections::BTreeMap::new();
         for c in 0..3 {
             let (b, d) = ((c + 1) % 3, (c + 2) % 3);
@@ -1093,25 +1421,36 @@ impl Simulation {
                         if edges.iter().all(|&(ax, q, ..)| zero(ax, q)) {
                             continue;
                         }
-                        let on: Vec<bool> = edges.iter().map(|&(ax, q, ..)| cond(ax, q)).collect();
+                        let on: Vec<f64> = edges.iter().map(|&(ax, q, ..)| covered(ax, q)).collect();
                         let fi = self.id(p) as u32;
-                        for (&(ax, q, perp, side, sigma), _) in edges.iter().zip(&on).filter(|x| *x.1) {
+                        for (&(ax, q, perp, side, sigma), &kappa) in edges.iter().zip(&on).filter(|x| *x.1 > 0.0) {
                             let mut share = 0.0;
                             if q[c] >= 1 {
                                 let mut lo = q;
                                 lo[c] -= 1;
-                                if zero(ax, lo) {
+                                if zero(ax, lo) || covered(ax, lo) > 0.0 {
                                     share += self.d[c][q[c] - 1] / 2.0;
                                 }
                             }
                             if q[c] + 1 < n[c] {
                                 let mut hi = q;
                                 hi[c] += 1;
-                                if zero(ax, hi) {
+                                if zero(ax, hi) || covered(ax, hi) > 0.0 {
                                     share += self.d[c][q[c]] / 2.0;
                                 }
                             }
-                            let rec = (perp, side, c as u8, fi, sigma, self.dd[c][p[c]], self.d[perp][p[perp]], share);
+                            // Copper across an in-plane edge, measured where the outline is slanted.
+                            if ax != 2
+                                && c != 2
+                                && let Some(w) = widths[ax].get(&self.id(q))
+                            {
+                                share = *w;
+                            }
+                            // The face's height across the edge: its area in the update over
+                            // the edge's length (cut faces have a smaller one).
+                            let ratio = areas.get(&(c as u8, fi)).copied().unwrap_or(1.0);
+                            let across = self.d[perp][p[perp]] * ratio;
+                            let rec = (perp, side, c as u8, fi, sigma, self.dd[c][p[c]], across, share, kappa);
                             by_edge.entry((ax as u8, self.id(q) as u32)).or_default().push(rec);
                         }
                     }
@@ -1126,14 +1465,17 @@ impl Simulation {
             }
             let id = loops.len() as u32;
             for r in recs {
-                contrib[r.2 as usize].push((r.3, id, (ch * r.4 / r.6) as f32));
+                // The field acts over the edge's covered part, on the covered part of the loop's
+                // circulation: passive for any fraction, power Zs κ² (∮H)² l / w.
+                contrib[r.2 as usize].push((r.3, id, (ch * r.4 * r.8 * r.8 / r.6) as f32));
             }
             loops.push(SurfaceLoop {
                 faces: recs.iter().map(|r| (r.2, r.3, (r.4 * r.5) as f32)).collect(),
                 inv_w: (1.0 / w) as f32,
             });
         };
-        for recs in by_edge.values() {
+        for (&(ax, g), recs) in &by_edge {
+            let outline = if ax == 2 { widths[2].get(&(g as usize)).copied() } else { None };
             // Open on both sides along an axis: a sheet (the axis with the most surface).
             let sheet = (0..3)
                 .filter(|&a| recs.iter().any(|r| r.0 == a && r.1 > 0) && recs.iter().any(|r| r.0 == a && r.1 < 0))
@@ -1153,7 +1495,7 @@ impl Simulation {
                 }
                 None => {
                     let all: Vec<&Rec> = recs.iter().collect();
-                    let w = recs.iter().map(|r| r.7).sum();
+                    let w = outline.unwrap_or_else(|| recs.iter().map(|r| r.7).sum());
                     add_loop(&all, w, &mut loops);
                 }
             }
@@ -1780,10 +2122,10 @@ impl Simulation {
         if let Some(pool) = &self.pool {
             use rayon::prelude::*;
             let sums: Vec<f64> = pool.install(|| (0..n[2]).into_par_iter().map(per_plane).collect());
-            return sums.iter().sum::<f64>() + self.element_energy();
+            return sums.iter().sum::<f64>() + self.element_energy() + self.conformal_energy();
         }
         let sums: Vec<f64> = (0..n[2]).map(per_plane).collect();
-        sums.iter().sum::<f64>() + self.element_energy()
+        sums.iter().sum::<f64>() + self.element_energy() + self.conformal_energy()
     }
 
     /// Energy stored in the lumped elements' inductors and capacitors (J).
@@ -1796,6 +2138,7 @@ impl Simulation {
     pub fn step(&mut self, drive: Option<(usize, f64)>) -> Vec<(f64, f64)> {
         self.update_sibc();
         self.update_h();
+        self.update_conformal();
         self.update_cpml(false);
         let before: Vec<f64> = self.ports.iter().map(|p| self.port_voltage(p)).collect();
         self.disp_before();

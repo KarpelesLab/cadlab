@@ -274,7 +274,11 @@ fn sim_sparams_models_parts() {
         "pml_cells": 4, "end_criteria": "30dB"});
     let o = exec(&r, &mut s, "sim.sparams", args(&out, t, coarse.clone()));
     let x = &o["output"];
-    assert_eq!(x["parts"], json!([{"refdes": "U1", "pads": ["U1.1", "U1.2"], "resistance": "50Ω"}]), "{x}");
+    assert_eq!(
+        x["parts"],
+        json!([{"refdes": "U1", "pads": ["U1.1", "U1.2"], "resistance": "50Ω", "columns": 3}]),
+        "{x}"
+    );
     assert!(codes_of(&o).is_empty(), "{}", o["diagnostics"]);
     let ts = cadlab::touchstone::parse(&std::fs::read_to_string(out.join("dut.s2p")).unwrap(), Some(2)).unwrap();
     for (f, m) in ts.freqs.iter().zip(&ts.data) {
@@ -334,5 +338,26 @@ fn sim_sparams_parts_validation() {
             let tol = 0.02;
             assert!((s21 - want).abs() < tol, "{params}: {f}: |S21| {s21} vs {want}");
         }
+    }
+}
+
+/// A track's round end passes the pad's inner edge by 50 µm here, so cut cells sit next to the gap.
+/// The element keeps the columns it has without them: with only those at the end's tip, the
+/// current crowding into them made a 1 pF part's |S21| 0.02 too high (DECISIONS D73).
+#[test]
+fn cut_cells_do_not_change_a_parts_columns() {
+    let r = Registry::with_builtins();
+    let columns = |cut: bool, cell: &str| {
+        let (dir, mut s, t) = board(&r, "capacitor", json!({"capacitance": "1pF"}), 4);
+        let out = dir.path().join("out");
+        let a = json!({"f_max": "6GHz", "f_min": "0.5GHz", "points": 3, "margin": "3mm", "air": "3mm",
+            "max_cell": cell, "pml_cells": 6, "conformal": cut, "timesteps": 2});
+        let o = exec(&r, &mut s, "sim.sparams", args(&out, t, a));
+        assert_eq!(o["output"]["conformal_edges"].as_u64().is_some(), cut, "{}", o["output"]);
+        o["output"]["parts"][0]["columns"].as_u64().unwrap()
+    };
+    for (cell, want) in [("0.5mm", 3), ("0.25mm", 5)] {
+        assert_eq!(columns(false, cell), want, "{cell}");
+        assert_eq!(columns(true, cell), want, "{cell}");
     }
 }

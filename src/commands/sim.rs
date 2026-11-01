@@ -158,6 +158,11 @@ pub struct SParams {
     /// ("2.4GHz", "2.4835GHz") instead of the whole simulated band.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub band: Option<[Quantity; 2]>,
+    /// Conformal copper on diagonal and curved edges (default true: mesh cells cut by slanted
+    /// copper use their open lengths and area; false: every edge is all copper or none, a
+    /// staircase).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformal: Option<bool>,
 }
 
 /// What a run will cost, from the plan.
@@ -222,6 +227,13 @@ pub struct Simulated {
     /// Board parts simulated as lumped elements.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<fdtd::LumpedPart>,
+    /// Mesh edges partly covered by diagonal or curved copper (conformal cells).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub conformal_edges: usize,
+}
+
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 /// Cell updates per second of one thread: a release build with Debye dielectrics and the surface
@@ -354,6 +366,7 @@ impl Command for SParams {
             max_cells: self.max_cells.unwrap_or(4_000_000),
             parts: self.parts.unwrap_or(true),
             overrides: self.part_values.clone(),
+            conformal: self.conformal.unwrap_or(true),
             ..fdtd::Options::default()
         };
         let to_error = |e: fdtd::Error| {
@@ -402,6 +415,7 @@ impl Command for SParams {
                 checks: None,
                 nets: plan.nets,
                 parts: plan.parts,
+                conformal_edges: plan.conformal_edges,
             });
         }
         let mut result = {
@@ -455,6 +469,7 @@ impl Command for SParams {
             params,
             nets: result.nets,
             parts: result.parts,
+            conformal_edges: result.conformal_edges,
         })
     }
 

@@ -297,13 +297,18 @@ Research-sized items beyond the milestones above; none blocks a release.
       Board parts (D65): two-pin resistors, capacitors and inductors in the region are series R–L–C lumped
       elements from their part values (`esr`, `esl` too) across their pads' gap, validated against circuit
       theory (series and shunt R, L, C and resonant R–L–C between 50 Ω ports within 0.02 in |S₂₁|).
-      Not covered (refinements, not part of this goal): lumped parts in the openEMS export, conformal
-      (Dey–Mittra) or subgridded edges for curved copper (arcs and round pads staircase), and a FEM alternative
+      Not covered (refinements, not part of this goal): lumped parts in the openEMS export, subgridded edges,
+      and a FEM alternative
 - [x] openEMS export parity with the built-in solver (D68): Djordjevic–Sarkar dielectrics and the solder mask
       as `DebyeMaterial`s with the solver's own fitted terms, lossy copper as `ConductingSheet`s (roughness
       folded into the conductivity at f₀), matched microstrip port terminations, a geometry file openEMS reads;
       an openEMS oracle CI job (built from source, pinned) comparing a lossy microstrip with `sim.sparams`;
       the CPML's frequency shift raised to 2π ε₀ f₀, which removes the −9.5 % low loss reading at 1–2 GHz
+- [x] Conformal copper in the built-in solver (D73; ELECTRICAL.md "Full-wave solver"): Dey–Mittra cells on
+      diagonal and curved copper, at the uncut timestep, for perfect and lossy copper; 45° microstrip εeff within
+      1 % at 8 cells across (staircase +7 %), curved wall resonances second order, wall and strip conductor Q
+      within 2–5 % (staircase −21 %, +41 %); the mesh refined for diagonal tracks under 1.5 cells wide, which were
+      open circuits at the default mesh
 
 ---
 
