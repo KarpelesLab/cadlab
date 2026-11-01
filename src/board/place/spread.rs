@@ -27,6 +27,9 @@
 //!    differential pairs stay (the arrangement of a pair's ends, an ESD array between the
 //!    receptacle and the MCU, stays the one the constructive placement chose).
 //!
+//! 3. **Lay** ([`lay_along_edges`], D71): long connectors still lying across their edge go along
+//!    an edge, where the ratsnest allows (the caller keeps the result only if it ends no longer).
+//!
 //! Groups at an edge (a connector, a part with an edge hint) stay at it, facing it no worse. A
 //! move that does not fit (another part, the outline, a keep-out, a pair's breakout) is
 //! shortened or not made. Deterministic: fixed move orders, ties to the first.
@@ -423,6 +426,146 @@ pub(super) fn relax_groups(
             break;
         }
     }
+}
+
+/// Weight of connector crowding when a connector chooses where along an edge to lie: enough to
+/// keep equal places apart, less than the ratsnest that going farther away would add.
+const LAY_CROWDING: f64 = 0.05;
+/// A place along an edge: the group's cost there, change of the ratsnest, the group's poses.
+type LayPlace = (f64, f64, Vec<(usize, Pose)>);
+/// Connectors tried per round of [`lay_along_edges`], the longest ones.
+const LAY_MAX: usize = 16;
+
+/// Connectors of unpinned groups lying across their edge: (group, part), longest first. Short
+/// ones count too: a small power header laid better often pays for the long ones.
+pub(super) fn across_edges(e: &Engine, groups: &[Vec<usize>], pinned: &[bool]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(i64, usize, usize)> = Vec::new();
+    for (k, g) in groups.iter().enumerate().filter(|(k, _)| !pinned[*k]) {
+        for &i in g {
+            let Some(q) = e.poses[i] else { continue };
+            let r = e.parts[i].rect(&q);
+            if e.lie(i, &q) > 0.0 {
+                out.push((-r.w().max(r.h()), k, i));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.truncate(LAY_MAX);
+    out.into_iter().map(|(_, k, i)| (k, i)).collect()
+}
+
+/// A connector's best place lying along an edge (the same or another), its group turned rigidly
+/// around it, among those lengthening the ratsnest by `room` at most: (group's cost there, change
+/// of the ratsnest, the group's poses).
+fn best_along(e: &mut Engine, g: &[usize], i: usize, room: f64) -> Option<LayPlace> {
+    let cur = e.poses[i]?;
+    let poses: Vec<(usize, Pose)> = g.iter().filter_map(|&j| e.poses[j].map(|q| (j, q))).collect();
+    let mut nets: Vec<usize> = g.iter().flat_map(|&j| e.part_nets[j].iter().copied()).collect();
+    nets.sort_unstable();
+    nets.dedup();
+    let cost = |e: &Engine| -> (f64, f64) {
+        let r = e.nets_cost(&nets);
+        let crowd: f64 = g.iter().filter_map(|&j| e.poses[j].map(|q| e.crowding(j, &q))).sum();
+        (e.local_cost_with(g, r) + LAY_CROWDING * crowd, r)
+    };
+    let r0 = cost(e).1;
+    let now = e.parts[i].rect(&cur);
+    let c0 = now.center();
+    let b = e.board;
+    // As far from the edge as it is now, at most. An explicit edge hint keeps its edge.
+    let d0 = (now.x0 - b.x0).min(b.x1 - now.x1).min(now.y0 - b.y0).min(b.y1 - now.y1).max(0);
+    let hinted = e.parts[i].edge.filter(|h| *h != EdgeHint::Any);
+    let step = ((b.w() + b.h()) / 400).max(1_000_000);
+    let mut best: Option<LayPlace> = None;
+    for turn in 0..4u8 {
+        let turned: Vec<(usize, Pose)> = poses
+            .iter()
+            .map(|&(j, q)| {
+                let (mut dx, mut dy) = (q.at.x.0 - c0.x.0, q.at.y.0 - c0.y.0);
+                for _ in 0..turn {
+                    (dx, dy) = (-dy, dx);
+                }
+                let at = Point::new(Nm(super::snap(c0.x.0 + dx)), Nm(super::snap(c0.y.0 + dy)));
+                (j, Pose { at, rot: (q.rot + turn) % 4, ..q })
+            })
+            .collect();
+        let me = turned.iter().find(|x| x.0 == i)?.1;
+        let r = e.parts[i].rect(&me);
+        let horizontal = r.w() >= r.h();
+        let sides: [(EdgeHint, i64); 2] = if horizontal {
+            [(EdgeHint::Bottom, b.y0 + d0 - r.y0), (EdgeHint::Top, b.y1 - d0 - r.y1)]
+        } else {
+            [(EdgeHint::Left, b.x0 + d0 - r.x0), (EdgeHint::Right, b.x1 - d0 - r.x1)]
+        };
+        for (side, seat) in sides {
+            if hinted.is_some_and(|h| h != side) {
+                continue;
+            }
+            let span = if horizontal { (b.x0 - r.x0, b.x1 - r.x1) } else { (b.y0 - r.y0, b.y1 - r.y1) };
+            let mut along = span.0.div_euclid(step) * step;
+            while along <= span.1 {
+                let (x, y) = if horizontal { (along, seat) } else { (seat, along) };
+                let off = Point::new(Nm(super::snap(x)), Nm(super::snap(y)));
+                along += step;
+                let moved: Vec<(usize, Pose)> =
+                    turned.iter().map(|&(j, q)| (j, Pose { at: q.at + off, ..q })).collect();
+                for &(j, m) in &moved {
+                    e.poses[j] = Some(m);
+                }
+                let m = e.poses[i]?;
+                let fits = e.lie(i, &m) <= 0.0
+                    && e.parts[i].edge_target().is_none_or(|edge| e.facing(i, &m, edge) < 1.0)
+                    && moved.iter().all(|(j, q)| e.valid(*j, q));
+                if fits {
+                    let (c, r1) = cost(e);
+                    if r1 - r0 <= room && best.as_ref().is_none_or(|x| c < x.0) {
+                        best = Some((c, r1 - r0, moved));
+                    }
+                }
+                for &(j, q) in &poses {
+                    e.poses[j] = Some(q);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Lays connectors lying across their edge along an edge instead, at most `max` of them,
+/// the one that shortens the ratsnest most (or lengthens it least) first, as long as the total
+/// ratsnest stays within `limit`. Returns how many it laid.
+///
+/// A header across its edge reaches into the board, half its length nearer to what it connects
+/// to per pin, which is why the ratsnest likes it there; along an edge it gives that up, but
+/// another edge or another place along one (nearer the pins it serves) can more than make up
+/// for it, and what one header gains pays for the next.
+pub(super) fn lay_along_edges(e: &mut Engine, groups: &[Vec<usize>], pinned: &[bool], limit: f64, max: usize) -> usize {
+    let mut laid = 0;
+    let zones = e.pair_zones.clone();
+    while laid < max {
+        let room = limit - e.total();
+        let mut best: Option<(f64, Vec<(usize, Pose)>)> = None;
+        for (k, i) in across_edges(e, groups, pinned) {
+            if let Some((_, delta, moved)) = best_along(e, &groups[k], i, room)
+                && best.as_ref().is_none_or(|b| delta < b.0)
+            {
+                best = Some((delta, moved));
+            }
+        }
+        let Some((_, moved)) = best else { break };
+        for (j, m) in moved {
+            let Some(q) = e.poses[j] else { continue };
+            if let Some(room) = e.rooms[j] {
+                // The room keeps its margin around the part.
+                let margin = e.parts[j].rect(&q).x0 - room.x0;
+                e.rooms[j] = Some(e.parts[j].rect(&m).expand(margin));
+            }
+            e.poses[j] = Some(m);
+        }
+        laid += 1;
+    }
+    e.pair_zones = if laid > 0 { super::pair_zones(e) } else { zones };
+    laid
 }
 
 /// Where a group's connections pull it: the mean of the placed pins outside the group on its

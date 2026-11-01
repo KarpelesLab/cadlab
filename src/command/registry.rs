@@ -5,7 +5,7 @@ use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{CancelToken, Command, CommandError, CommandKind, Context, NoProgress, Progress, Session};
+use super::{CancelToken, Command, CommandError, CommandKind, Context, NoProgress, Progress, Session, schema_view};
 
 /// A command invocation in data form: one line of a batch file or of the operation log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -87,7 +87,7 @@ impl Entry {
         self.name.rsplit_once('.').map_or(self.name, |(_, a)| a)
     }
 
-    /// Full description, as returned by `describe`.
+    /// Full description, with the schemas as registered (`describe` with `full`).
     pub fn describe(&self) -> Value {
         serde_json::json!({
             "name": self.name,
@@ -97,6 +97,62 @@ impl Entry {
             "input_schema": self.input_schema,
             "output_schema": self.output_schema,
         })
+    }
+
+    /// What `describe` returns: schemas with repeated parts in `$defs` and, past
+    /// [`schema_view::FOLD_LIMIT`], the largest arguments folded (listed in `folded`, each with
+    /// the path that gives it in full). `output_schema` adds the output's schema, shared.
+    pub fn describe_view(&self, output_schema: bool) -> Value {
+        let (input, folded) = schema_view::fold(&self.input_schema, "", self.name);
+        let mut d = serde_json::json!({
+            "name": self.name,
+            "summary": self.summary,
+            "kind": self.kind,
+            "positional": self.positional,
+            "input_schema": input,
+        });
+        if output_schema {
+            d["output_schema"] = schema_view::share(&self.output_schema);
+        }
+        if !folded.is_empty() {
+            d["folded"] = serde_json::json!(folded);
+        }
+        d
+    }
+
+    /// The schema a `describe` path reads (`output.<path>`: the output's), and the path in it.
+    fn split_path<'p>(&self, path: &'p str) -> (&Value, &'p str) {
+        match path.strip_prefix("output.") {
+            Some(rest) => (&self.output_schema, rest),
+            None if path == "output" => (&self.output_schema, ""),
+            None => (&self.input_schema, path),
+        }
+    }
+
+    /// What `describe` with a `path` returns: that part of the input schema (`output.<path>`: of
+    /// the output's), shared and folded like a whole schema. An error says what fits there.
+    pub fn describe_path(&self, path: &str) -> Result<Value, CommandError> {
+        let (schema, inner) = self.split_path(path);
+        let sub = schema_view::at_path(schema, inner).map_err(|(step, fits)| {
+            let fits = if fits.is_empty() { "nothing further".to_string() } else { fits.join(", ") };
+            CommandError::invalid_args(
+                "describe.unknown_path",
+                format!("`{path}` is not in the schema of `{}`: no `{step}` there", self.name),
+            )
+            .with_hint(format!("at that point the schema has: {fits}"))
+        })?;
+        let (view, folded) = schema_view::fold(sub, path, self.name);
+        let mut d = serde_json::json!({"name": self.name, "path": path, "schema": view});
+        if !folded.is_empty() {
+            d["folded"] = serde_json::json!(folded);
+        }
+        Ok(d)
+    }
+
+    /// The part of the input or output schema at `path` as registered, for text output.
+    pub fn schema_at(&self, path: &str) -> Option<&Value> {
+        let (schema, inner) = self.split_path(path);
+        schema_view::at_path(schema, inner).ok()
     }
 }
 

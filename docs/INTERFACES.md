@@ -87,7 +87,7 @@ cadlab fab export pcbway out/pcbway/
 ```sh
 cadlab call bom.add '{"part": "mpn:AP2112K-3.3TRG1"}'   # any command, JSON args
 cadlab batch script.jsonl                               # transaction of many commands
-cadlab describe [<command>]                             # list commands / print a command's schema
+cadlab describe [<command>] [--path p] [--full]         # list commands / a command's schema / one part of it
 cadlab undo | cadlab redo | cadlab history
 cadlab config digikey | show | path | remove        # user settings: supplier credentials (CLI only, D17)
 ```
@@ -126,7 +126,11 @@ Tool groups are the same strings as CLI groups, so docs and examples carry over.
 is not required there); `action` may also be given as `group.action`. Errors of the server itself (missing
 `action`, unknown command in `describe`, malformed `batch` steps) have the shape of command errors: `kind`,
 `code`, `message`, `hint`. `describe` of a command returns its input schema (and, in text, the tool and action
-to call and a one-line `returns:` signature); `output_schema: true` adds the output's JSON Schema.
+to call and a one-line `returns:` signature); `output_schema: true` adds the output's JSON Schema. Repeated parts
+of a schema are in `$defs`; past 6 KB, arguments over 2.5 KB are folded to their description, fields and variants
+(`x-folded`, listed in `folded`). `path` returns one part (`package_spec.qfn`, `pads.shape`, `output.stats`), `full`
+the schema as registered (D71). In the tools list, an argument without a type is a string, and a `...` ends a list
+of values or fields that `describe` gives in full.
 
 ### Output for agents
 

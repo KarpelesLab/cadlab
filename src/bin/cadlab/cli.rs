@@ -282,7 +282,19 @@ pub fn build(registry: &Registry) -> ClapCommand {
         .subcommand(
             ClapCommand::new("describe")
                 .about("List commands, or show one command's arguments and schema")
-                .arg(Arg::new("command").help("Command name (e.g. project.new) or group (e.g. project)")),
+                .arg(Arg::new("command").help("Command name (e.g. project.new) or group (e.g. project)"))
+                .arg(
+                    Arg::new("path")
+                        .long("path")
+                        .requires("command")
+                        .help("Only this part of the command's schema (package_spec.qfn, pads.shape, output.stats)"),
+                )
+                .arg(
+                    Arg::new("full")
+                        .long("full")
+                        .action(ArgAction::SetTrue)
+                        .help("With --json, the schemas as registered: nothing shared or folded"),
+                ),
         )
         .subcommand(crate::settings::command())
         .subcommand(

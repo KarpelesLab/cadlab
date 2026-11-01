@@ -193,7 +193,7 @@ change).
 | Group | Commands |
 |---|---|
 | `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `hole_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
-| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`; reports `ratsnest_length` and `board_use`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
+| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`, `along_edges`; reports `ratsnest_length` and `board_use`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
@@ -420,7 +420,17 @@ to a routed board, such as an imported one, land clear of its copper).
    closest to its edge before any room size is tried, even inside the rooms of groups placed earlier (D66).
    A `region` hint (D66: `place.hint CH1 U3 --region` with two corners) keeps the part's box inside that
    rectangle at every stage (the placer's validity test): the analog section of a mixed-signal board. Block
-   instance names stand for their components in `place.hint`.
+   instance names stand for their components in `place.hint`. Passives and satellite ICs inherit the region of the
+   anchor they go with unless they have a region or edge hint of their own (D71); an inherited region gives way
+   when full (`place.region_full`), an explicit one does not.
+
+   **Flow-through parts** (D71, `src/board/place/pairs.rs`): a part with two pad pairs of a differential pair
+   facing opposite ways (a USB ESD array) is turned, once the anchors are placed, so that the side suiting each
+   neighbour faces it. Each pad pair has a *hand* (the side of its way out the positive pad is on), which rotation
+   cannot change, and two exits join uncrossed only when their hands differ. Order: fewest crossings, room to
+   break out (pair ends keep their breakouts clear of each other when spreading), least turning, then length and
+   pull. Improvement leaves the part there and moves no other pair end into more crossings. A crossing no placement
+   can cure warns (`place.pair_crossing`).
 3. Passives, group by group (decoupling capacitors first, then chains), on a 0.25 mm grid within 3 mm, then
    8 mm, of their target pin, all rotations: the score is the distance from their connecting pad to the
    target pin (weighted 4 for decoupling, 2 otherwise) plus the distance of their other pads to the nearest
@@ -464,6 +474,11 @@ to a routed board, such as an imported one, land clear of its copper).
    relaxation pulled every window towards its even share and was all or nothing: on a sparse board its
    ratsnest overshot the budget and every group move was undone, and it pulled groups into empty windows
    away from their connectors.
+
+   **Connectors along edges** (D71, `spread::lay_along_edges`): connectors still across their edge may take any
+   place along any edge, their group turned rigidly around them, the one shortening the ratsnest most first. The
+   result is kept only if the improved ratsnest ends no longer than without laying any. `along_edges: true` lays all
+   of them whatever that costs (a header reaching into the board has its pads half its length nearer on average).
 5. Improvement: up to 12 passes of greedy moves per part (shifts of 0.25 to 4 mm in 8 directions, rotations)
    and swaps of identical footprints, accepting the best valid move that lowers the ratsnest (MST per net over
    pad centers) plus tethers keeping passives at their target pins; connectors never move away from the edge.
@@ -483,7 +498,10 @@ the courtyard area beyond what a window holds at the default density (1 / 0.6 ti
 least a quarter of the window: on a sparse board one part is no crowd), `unevenness` the coefficient of
 variation of the windows' covered shares (weighted by free area), `largest_empty` the side of the largest
 free square clear of courtyards, `extent` the share of the free area's box covered by the box around all
-courtyards, `fill` the covered share of the free area. `tests/placement_quality.rs` measures spread and
+courtyards, `fill` the covered share of the free area, `fullest_window` the covered share of the fullest window.
+These say where the parts are, not how good the placement is: when `sparse` (under 15 % fill) most windows are
+empty and crowding is 0 however well the parts are placed, and the summary says so: compare the ratsnest there
+(D71). `tests/placement_quality.rs` measures spread and
 compact placement on six boards (`placement_quality_report`, ignored: `cargo test --release --test
 placement_quality -- --ignored --nocapture`, `CADLAB_PLACE_ROUTE=<ms>` also routes them) and checks the roomy
 ones. D55 → D67 (spread placement; `route.all` 30 s on two layers):
@@ -502,6 +520,18 @@ packed placement's 625 mm; the middle of the board stays free, which the window 
 ATtiny board on 80 × 60 mm keeps its group moves (D55 undid them all), the regulator between the power
 connector and the MCU. The STM32 board's unrouted connections are at the MCU's pins, a group the spreading
 does not move; its variation is the router's, the MCU group being the same. Compact placement is unchanged.
+
+D67 → D71 (spread placement; `route.all` 20 s at three threads, on a loaded machine, against D67's 30 s; "across" is
+long connectors across their nearest edge, a column of the report):
+
+| board | ratsnest mm | across | empty windows | routed | vias |
+|---|---|---|---|---|---|
+| ATtiny 40 × 30 mm | 112 → 112 | 0 → 0 | 10 → 10 of 15 | 22/22 → 22/22 | 4 → 4 |
+| ATtiny 80 × 60 mm | 244 → 243 | 0 → 0 | 11 → 12 of 15 | 22/22 → 22/22 | 6 → 8 |
+| STM32 60 × 45 mm | 893 → 863 | 2 → 1 | 1 → 2 of 15 | 108/109 → 107/109 | 73 → 73 |
+| STM32 100 × 75 mm | 1387 → 1370 | 3 → 1 | 5 → 4 of 15 | 107/109 → 107/109 | 76 → 70 |
+| 4 channels 60 × 45 mm | 394 → 371 | 4 → 0 | 1 → 3 of 15 | 64/64 → 64/64 | 16 → 18 |
+| 4 channels 100 × 80 mm | 529 → 509 | 4 → 0 | 8 → 9 of 16 | 64/64 → 64/64 | 16 → 18 |
 
 `place.near` puts the part just outside the target's courtyard (on `side`, default the side the pin faces),
 `distance` between courtyards (default 0.25 mm), with its pad of the target's net aligned with the pin; each

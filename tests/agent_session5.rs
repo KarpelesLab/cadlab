@@ -467,6 +467,10 @@ fn board_and_placement(c: &mut Client, project: &Path) {
     assert!(j4.x0 < 2_000_000, "J4 at the left edge: x0 {}", j4.x0);
     let at = |r: &str| mm(&pl["output"]["placements"][r]["at"][0]);
     assert!(at("U1") < 30.0 && at("U2") < 30.0 && at("U5") > 30.0, "{pl}");
+    // Parts without a hint go with their IC (D71): C27 (VCAP1) is the MCU's, on the digital side;
+    // and the first placement leaves the USB pair uncrossed at the ESD array.
+    assert!(at("C27") > 30.0, "{pl}");
+    assert!(diags(&pl, "place.pair_crossing").is_empty(), "{pl}");
 }
 
 /// Split pours, routing, DRC with the split-crossing check and waivers.
@@ -502,6 +506,8 @@ fn route_and_check(c: &mut Client) {
         .filter(|s| s.starts_with("net:ADC_"))
         .collect();
     assert!(crossing.len() >= 3, "{d}");
+    // The MCU's core capacitor inherits the MCU's region (D71): VCAP1 stays off the analog ground.
+    assert!(diags(&d, "drc.split_crossing").iter().all(|x| x["subjects"][0] != "net:VCAP1"), "{d}");
     for net in &crossing {
         c.ok(
             "drc",

@@ -109,6 +109,9 @@ Details in [RENDERING.md](RENDERING.md).
       density), groups jumping to where their connections pull them, connectors filling empty stretches of
       their edge, every group move within the ratsnest budget; how a placement uses the board measured
       (`board::place::placement_stats`, `board_use` in `place.auto`; `tests/placement_quality.rs`; D67)
+- [x] Regions pass from an IC to what goes with it, flow-through parts turned from their connections
+      (`place.pair_crossing`), long connectors along edges where that costs no ratsnest (`along_edges` for all of
+      them), board use says what its numbers mean on sparse boards (D71)
 - [x] Manual routing commands: tracks through coordinates or pins (net inferred, shorts refused), vias; net
       class widths and via sizes
 - [x] Copper zones with fill (thermal reliefs, clearances, islands removal, priorities, keep-outs)
@@ -329,7 +332,8 @@ Research-sized items beyond the milestones above; none blocks a release.
   instantiated twice, AGND/GND star point under split pours, analog/digital placement regions; D66), replayed by
   `tests/agent_session5.rs`; fixed: first block instance at capture, net ties in ERC/SPICE/BOM/CPL/STEP,
   `place.hint --region`, edge hints over rooms, `drc.split_crossing`, ERC filters, warnings when routed parts
-  move, SPICE subsets, named ground symbols. Session 6 done through the MCP server, on the electrical side (2.4 GHz
+  move, SPICE subsets, named ground symbols. Its open items fixed (D71: `part.set --pins`, `describe` with shared
+  definitions, folding and `path`, a smaller `tools/list`, regions inherited from ICs, flow-through orientation). Session 6 done through the MCP server, on the electrical side (2.4 GHz
   node: nRF52832, matching network, 50 Ω microstrip, U.FL; D70), replayed by `tests/agent_session6.rs`; fixed: mesh
   slivers, `sim.sparams --plan`, `part_values`, results at a frequency and over a band with impedance, VSWR and
   available loss, passivity and reciprocity checks, notes on ideal parts and ports on parts, `net.loss` with mask,

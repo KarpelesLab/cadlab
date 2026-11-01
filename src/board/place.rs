@@ -52,6 +52,13 @@ const SPREAD_WINDOWS: f64 = 12.0;
 /// than this times the crowding removed (D67; D55's two-sided unevenness before).
 const SPREAD_EVEN: f64 = 5.0;
 
+/// How much longer than before laying long connectors along their edges the ratsnest may get
+/// on the way, tried in turn (the first attempt whose improved ratsnest ends no longer than without
+/// laying any is kept).
+const LAY_SLACK: [f64; 4] = [0.12, 0.06, 0.03, 0.0];
+/// Above this many parts being placed, laying connectors gets a single attempt.
+const LAY_ATTEMPTS_PARTS: usize = 200;
+
 /// A placement failure, with a stable code and a fix hint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaceError {
@@ -133,9 +140,11 @@ impl Rect {
 }
 
 mod mst;
+mod pairs;
 mod spread;
 mod stats;
 use mst::dist;
+pub use pairs::pair_crossings;
 pub use stats::{PlacementStats, placement_stats};
 
 fn snap(v: i64) -> i64 {
@@ -311,6 +320,8 @@ struct Engine<'a> {
     /// Parts (not passives) with pads of both nets of a pair: ends whose breakouts move with
     /// them.
     pair_end: Vec<bool>,
+    /// Flow-through parts turned to suit their pair ([`pairs::orient_flow_parts`]).
+    flow_part: Vec<bool>,
     /// Spreading (`place.auto` default). The packed placement (`compact`) keeps D50's rules
     /// exactly: connectors are not turned to face their edge, and passives are assigned as then.
     spread: bool,
@@ -531,6 +542,7 @@ impl<'a> Engine<'a> {
             pair_zones: Vec::new(),
             pair_nets,
             pair_end,
+            flow_part: vec![false; n],
             spread: silk, // the same flag: spread placement also boxes silkscreen
         })
     }
@@ -638,20 +650,8 @@ impl<'a> Engine<'a> {
         {
             return false;
         }
-        if self.pair_end[i] && self.poses[i].is_some_and(|q| q != *pose) {
-            let zones = part_zones(self, i, pose);
-            for (side, z) in &zones {
-                for (j, q) in self.poses.iter().enumerate() {
-                    if let Some(q) = q
-                        && j != i
-                        && self.parts[j].kind == Kind::Passive
-                        && q.side == *side
-                        && !self.parts[j].rect(q).clear_of(z, 0)
-                    {
-                        return false;
-                    }
-                }
-            }
+        if self.pair_end[i] && self.poses[i].is_some_and(|q| q != *pose) && !self.zones_clear(i, pose) {
+            return false;
         }
         for (j, q) in self.poses.iter().enumerate() {
             if j == i {
@@ -665,6 +665,31 @@ impl<'a> Engine<'a> {
             }
         }
         polyclip::contains(&self.free[side_index(pose.side)], &r.ring())
+    }
+
+    /// Whether the breakouts of pair end `i` at `pose` are clear of the passives and, when
+    /// spreading, of the pair's other ends, whose own breakouts stay clear of it too: two ends
+    /// facing each other at a courtyard's gap leave the pair no room to form.
+    fn zones_clear(&self, i: usize, pose: &Pose) -> bool {
+        let zones = part_zones(self, i, pose);
+        for (j, q) in self.poses.iter().enumerate() {
+            let Some(q) = q.filter(|_| j != i) else { continue };
+            let other_end = self.spread && self.pair_end[j];
+            if self.parts[j].kind != Kind::Passive && !other_end {
+                continue;
+            }
+            let r = self.parts[j].rect(&q);
+            if zones.iter().any(|(side, z)| q.side == *side && !r.clear_of(z, 0)) {
+                return false;
+            }
+            if other_end && q.side == pose.side {
+                let own = self.parts[i].rect(pose);
+                if part_zones(self, j, &q).iter().any(|(side, z)| *side == pose.side && !own.clear_of(z, 0)) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// The best valid pose among candidates, by score (ties: candidate order).
@@ -1175,6 +1200,9 @@ pub struct AutoOptions {
     pub near: BTreeMap<String, String>,
     /// Region hints (`place.hint --region`): designator → the box its courtyard stays inside.
     pub regions: BTreeMap<String, Rect>,
+    /// Lay every long connector along an edge even where that lengthens the ratsnest (default:
+    /// only those that cost nothing).
+    pub along_edges: bool,
 }
 
 impl Default for AutoOptions {
@@ -1186,6 +1214,7 @@ impl Default for AutoOptions {
             edges: BTreeMap::new(),
             near: BTreeMap::new(),
             regions: BTreeMap::new(),
+            along_edges: false,
         }
     }
 }
@@ -1231,6 +1260,43 @@ pub struct AutoPlacement {
     pub placements: BTreeMap<String, PlacedFootprint>,
     /// Components that found no room.
     pub unplaced: Vec<String>,
+    /// Parts that should have stayed in the region of the IC they go with, and did not fit it.
+    pub left_region: Vec<String>,
+}
+
+/// Regions passed on to the parts placed with an IC (D71): passives (through their chain) and
+/// satellites take the region of the anchor they go with unless they have their own or an edge
+/// hint. Returns who inherited: for them the region gives way when it is full.
+fn inherit_regions(
+    e: &mut Engine,
+    targets: &BTreeMap<usize, Target>,
+    satellite: &BTreeMap<String, String>,
+    regions: &BTreeMap<String, Rect>,
+) -> BTreeSet<usize> {
+    let mut inherited = BTreeSet::new();
+    for i in 0..e.parts.len() {
+        if e.parts[i].region.is_some() || e.parts[i].edge.is_some() {
+            continue;
+        }
+        let root = match e.parts[i].kind {
+            Kind::Passive => root_of(e, targets, i).map(String::from),
+            Kind::Ic => satellite.get(&e.parts[i].refdes).cloned(),
+            _ => None,
+        };
+        let Some(root) = root else { continue };
+        // A passive's anchor may be a satellite with no hint of its own: its IC's then.
+        let region = e
+            .index
+            .get(root.as_str())
+            .and_then(|&j| e.parts[j].region)
+            .or_else(|| regions.get(&root).filter(|_| e.index.contains_key(root.as_str())).copied())
+            .or_else(|| satellite.get(&root).and_then(|m| regions.get(m)).copied());
+        if let Some(region) = region {
+            e.parts[i].region = Some(region);
+            inherited.insert(i);
+        }
+    }
+    inherited
 }
 
 /// Places footprints by groups: `moving` (designators) are placed, every other footprint
@@ -1291,6 +1357,10 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
     // crystal, a buffer next to an MCU). They share that IC's room instead of claiming their own.
     let satellite: BTreeMap<String, String> = if spread { satellites(&e, &nets, &ap) } else { BTreeMap::new() };
     let group_of = |r: &str| satellite.get(r).cloned().unwrap_or_else(|| r.to_string());
+    // What goes with an IC stays in its region (a decoupling capacitor over the wrong ground
+    // plane crosses the split on its way to the pin).
+    let mut inherited = inherit_regions(&mut e, &targets, &satellite, &o.regions);
+    let mut left_region: Vec<String> = Vec::new();
 
     // Room around each anchor for its passives (and satellites).
     let mut group_area: BTreeMap<String, f64> = BTreeMap::new();
@@ -1492,6 +1562,12 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
                     first_ic = false;
                 }
             }
+            // An inherited region gives way before the part goes unplaced.
+            None if inherited.remove(&i) => {
+                e.parts[i].region = None;
+                left_region.push(e.parts[i].refdes.clone());
+                anchors.insert(k.min(anchors.len()), i);
+            }
             None => unplaced.push(i),
         }
     }
@@ -1499,6 +1575,7 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
     // 2. Passives, group by group (anchor order), decoupling capacitors first, then chains;
     // clear of the differential pairs' breakouts.
     if spread {
+        pairs::orient_flow_parts(&mut e);
         e.pair_zones = pair_zones(&e);
     }
     let order_of: BTreeMap<String, usize> =
@@ -1551,20 +1628,28 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
             s
         };
         let mut found = None;
-        if let Some(c) = around {
-            for r in [3_000_000, 8_000_000] {
-                let cands = e.candidates(side, Some((c, r)), STEP);
-                if let Some(pose) = e.best(i, cands, |c| score(&e, c)) {
-                    found = Some(pose);
-                    break;
+        // An inherited region gives way before the part goes unplaced (second round).
+        for _ in 0..2 {
+            if let Some(c) = around {
+                for r in [3_000_000, 8_000_000] {
+                    let cands = e.candidates(side, Some((c, r)), STEP);
+                    if let Some(pose) = e.best(i, cands, |c| score(&e, c)) {
+                        found = Some(pose);
+                        break;
+                    }
                 }
             }
-        }
-        if found.is_none() {
-            let step = e.coarse_step();
-            let cands = e.candidates(side, None, step);
-            let center = e.center;
-            found = e.best(i, cands, |c| score(&e, c) + 0.1 * dist(e.parts[i].rect(c).center(), center));
+            if found.is_none() {
+                let step = e.coarse_step();
+                let cands = e.candidates(side, None, step);
+                let center = e.center;
+                found = e.best(i, cands, |c| score(&e, c) + 0.1 * dist(e.parts[i].rect(c).center(), center));
+            }
+            if found.is_some() || !inherited.remove(&i) {
+                break;
+            }
+            e.parts[i].region = None;
+            left_region.push(e.parts[i].refdes.clone());
         }
         match found {
             Some(pose) => e.poses[i] = Some(pose),
@@ -1593,6 +1678,7 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
     // Spreading: the groups' arrangement is stretched over the board, then groups move (as
     // rigid blocks) where that shortens the ratsnest or evens out the board; the largest
     // stretch whose ratsnest stays within budget is kept.
+    let mut lay_plan: Option<(Vec<Vec<usize>>, Vec<bool>)> = None;
     if spread {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut slot: BTreeMap<String, usize> = BTreeMap::new();
@@ -1642,8 +1728,50 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
         if !kept {
             (e.poses, e.rooms, e.pair_zones) = start;
         }
+        lay_plan = Some((groups, pinned));
     }
+    let before = lay_plan.as_ref().map(|_| (e.poses.clone(), e.rooms.clone(), e.pair_zones.clone()));
+    let at_lay = e.total();
     improve(&mut e, 12);
+    // Long connectors still across their edge go along one (D71): all of them on request, else
+    // only as far as the improved ratsnest comes out no longer than without laying any.
+    if let (Some((groups, pinned)), Some(before)) = (lay_plan, before) {
+        let plain_total = e.total();
+        let improved = (e.poses.clone(), e.rooms.clone(), e.pair_zones.clone());
+        // Each attempt is another improvement. A large board gets one, without slack, from the
+        // improved placement (little is left to improve then); others start from before it, which
+        // lets the improvement use what the moved connectors freed.
+        let large = n > LAY_ATTEMPTS_PARTS;
+        let (base, base_total, slacks) = if large {
+            (&improved, plain_total, &LAY_SLACK[LAY_SLACK.len() - 1..])
+        } else {
+            (&before, at_lay, &LAY_SLACK[..])
+        };
+        (e.poses, e.rooms, e.pair_zones) = base.clone();
+        let across = spread::across_edges(&e, &groups, &pinned).len();
+        let mut kept = None;
+        if o.along_edges && across > 0 {
+            spread::lay_along_edges(&mut e, &groups, &pinned, f64::INFINITY, usize::MAX);
+            improve(&mut e, 12);
+            kept = Some((e.poses.clone(), e.rooms.clone(), e.pair_zones.clone()));
+        } else if across > 0 {
+            // The improvement after it often wins back more than the laying cost, so a little
+            // slack first: what counts is where the ratsnest ends.
+            for &slack in slacks {
+                (e.poses, e.rooms, e.pair_zones) = base.clone();
+                let limit = base_total * (1.0 + slack);
+                if spread::lay_along_edges(&mut e, &groups, &pinned, limit, usize::MAX) == 0 {
+                    continue;
+                }
+                improve(&mut e, 12);
+                if e.total() <= plain_total {
+                    kept = Some((e.poses.clone(), e.rooms.clone(), e.pair_zones.clone()));
+                    break;
+                }
+            }
+        }
+        (e.poses, e.rooms, e.pair_zones) = kept.unwrap_or(improved);
+    }
 
     let mut placements = BTreeMap::new();
     for (i, pose) in e.poses.iter().enumerate() {
@@ -1653,7 +1781,8 @@ pub fn auto_place(p: &Project, moving: &[String], o: &AutoOptions) -> Result<Aut
     }
     let mut unplaced: Vec<String> = unplaced.into_iter().map(|i| e.parts[i].refdes.clone()).collect();
     unplaced.sort_by(|a, b| natural_cmp(a, b));
-    Ok(AutoPlacement { placements, unplaced })
+    left_region.sort_by(|a, b| natural_cmp(a, b));
+    Ok(AutoPlacement { placements, unplaced, left_region })
 }
 
 /// Greedy local improvement: for each part in turn, the best valid shift (0.25 to 4 mm in
@@ -1700,6 +1829,26 @@ fn improve(e: &mut Engine, passes: usize) {
                     r.x0 >= room.x0 && r.y0 >= room.y0 && r.x1 <= room.x1 && r.y1 <= room.y1
                 });
             }
+            // Spreading: an end of a differential pair never moves into more crossings, however
+            // little the ratsnest sees of them.
+            // A flow-through part keeps the seat its connections gave it: what the ratsnest sees
+            // of it is its rails' pull, and the pair's room and its boxed-in middle pads
+            // (VBUS between the pair's pads) are what that pull closes.
+            if e.flow_part[i] {
+                moves.clear();
+            }
+            if e.spread && e.pair_end[i] {
+                let c0 = e.pair_crossings();
+                let mut kept = Vec::with_capacity(moves.len());
+                for m in moves {
+                    e.poses[i] = Some(m);
+                    if e.pair_crossings() <= c0 {
+                        kept.push(m);
+                    }
+                }
+                e.poses[i] = Some(cur);
+                moves = kept;
+            }
             let mut scored: Vec<(f64, usize, Pose)> = Vec::new();
             for (k, m) in moves.into_iter().enumerate() {
                 e.poses[i] = Some(m);
@@ -1723,6 +1872,8 @@ fn improve(e: &mut Engine, passes: usize) {
                 let (Some(a), Some(b)) = (e.poses[i], e.poses[j]) else { continue };
                 // Parts with different edge hints keep their edges.
                 if e.parts[i].footprint != e.parts[j].footprint
+                    || e.flow_part[i]
+                    || e.flow_part[j]
                     || a.side != b.side
                     || e.parts[i].edge != e.parts[j].edge
                 {
@@ -1737,10 +1888,16 @@ fn improve(e: &mut Engine, passes: usize) {
                     sum += *cached[k].get_or_insert_with(|| e.net_cost(k));
                 }
                 let before = e.local_cost_with(&[i, j], sum);
+                let guard = e.spread && (e.pair_end[i] || e.pair_end[j]);
+                let crossings = if guard { e.pair_crossings() } else { 0 };
                 e.poses[i] = Some(b);
                 e.poses[j] = Some(a);
                 let after = e.local_cost(&[i, j], &nets);
-                if after < before - EPS && e.valid(i, &b) && e.valid(j, &a) {
+                if after < before - EPS
+                    && e.valid(i, &b)
+                    && e.valid(j, &a)
+                    && (!guard || e.pair_crossings() <= crossings)
+                {
                     improved = true;
                     for &k in &nets {
                         cached[k] = None;

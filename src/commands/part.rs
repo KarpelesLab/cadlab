@@ -685,11 +685,136 @@ pub struct Set {
     /// imported board sets it, is dropped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footprint: Option<String>,
+    /// Changes to single pins, by pin number or name (a name several pins share needs the
+    /// numbers): {"TRIM": {"kind": "passive"}, "7": {"name": "NR"}}. Nets keep their pins
+    /// (they go by number); the other pins stay as they are.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pins: BTreeMap<String, PinPatch>,
+}
+
+/// Changes to one pin (`part.set` `pins`): only the fields given change.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PinPatch {
+    /// New pin name (empty string clears: the number is shown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// New electrical type. The pin stays where it is on the symbol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PinKind>,
+    /// New functional group for symbol layout (empty string clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// New symbol side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<Side>,
+}
+
+/// Resolves the keys of `part.set` `pins` to pin numbers: a number first, then a name only one
+/// pin has.
+fn resolve_pin_patches(
+    part: &Part,
+    patches: &BTreeMap<String, PinPatch>,
+) -> Result<Vec<(String, PinPatch)>, CommandError> {
+    let subject = || ObjectRef::Part { scheme: "local".into(), id: part.id.clone() };
+    let mut out: Vec<(String, PinPatch)> = Vec::new();
+    for (key, patch) in patches {
+        if *patch == PinPatch::default() {
+            return Err(CommandError::invalid_args(
+                "part.pin_patch_empty",
+                format!("the change to pin `{key}` of `{}` names no field", part.id),
+            )
+            .with_subject(subject())
+            .with_hint("give `name`, `kind`, `group` or `side`: {\"pins\": {\"TRIM\": {\"kind\": \"passive\"}}}"));
+        }
+        let pins = &part.symbol.pins;
+        let number = if pins.iter().any(|p| p.number == *key) {
+            key.clone()
+        } else {
+            let named: Vec<&str> = pins.iter().filter(|p| p.name == *key).map(|p| p.number.as_str()).collect();
+            match named.as_slice() {
+                [one] => one.to_string(),
+                [] => {
+                    let s = crate::suggest::did_you_mean(
+                        key,
+                        pins.iter().flat_map(|p| [p.number.as_str(), p.name.as_str()]).filter(|n| !n.is_empty()),
+                        3,
+                    );
+                    return Err(CommandError::not_found(
+                        "part.pin_unknown",
+                        format!("part `{}` has no pin numbered or named `{key}`", part.id),
+                    )
+                    .with_subject(subject())
+                    .with_suggestions(&s));
+                }
+                many => {
+                    return Err(CommandError::invalid_args(
+                        "part.pin_ambiguous",
+                        format!("pins {} of `{}` are all named `{key}`", many.join(", "), part.id),
+                    )
+                    .with_subject(subject())
+                    .with_hint(format!("name the pin by its number: one of {}", many.join(", "))));
+                }
+            }
+        };
+        if out.iter().any(|(n, _)| *n == number) {
+            return Err(CommandError::invalid_args(
+                "part.pin_patched_twice",
+                format!("`pins` of `part.set` names pin {number} of `{}` twice, by number and by name", part.id),
+            )
+            .with_subject(subject())
+            .with_hint("merge the two changes under one key"));
+        }
+        out.push((number, patch.clone()));
+    }
+    Ok(out)
+}
+
+/// Applies pin changes to a part. A change of type alone leaves the drawing as it is; a new
+/// name, group or side lays the symbol out again (sides stay, labels and order change), except
+/// for symbols drawn elsewhere (imported ones), whose pins stay where the drawing has them.
+fn apply_pin_patches(part: &mut Part, patches: Vec<(String, PinPatch)>) -> Result<(), CommandError> {
+    let imported = part.provenance.origin == Origin::Import;
+    let mut layout = false;
+    for (number, patch) in &patches {
+        if imported && patch.side.is_some() {
+            return Err(CommandError::invalid_args(
+                "part.pin_side_imported",
+                format!("pin {number} of `{}` is drawn by its imported symbol: its side cannot change", part.id),
+            )
+            .with_subject(ObjectRef::Part { scheme: "local".into(), id: part.id.clone() })
+            .with_hint(
+                "change the name, kind or group only, or edit the symbol in its source library and import it again",
+            ));
+        }
+        let pin = part.symbol.pins.iter_mut().find(|p| p.number == *number).expect("resolved above");
+        if let Some(name) = &patch.name {
+            layout |= pin.name != *name;
+            pin.name = name.clone();
+        }
+        if let Some(kind) = patch.kind {
+            pin.kind = kind;
+        }
+        if let Some(group) = &patch.group {
+            let group = (!group.is_empty()).then(|| group.clone());
+            layout |= pin.group != group;
+            pin.group = group;
+        }
+        if let Some(side) = patch.side {
+            layout |= pin.side != Some(side);
+            pin.side = Some(side);
+        }
+    }
+    if layout && !imported {
+        let pins = std::mem::take(&mut part.symbol.pins);
+        part.symbol = symbolgen::generate(part.category, pins);
+    }
+    Ok(())
 }
 
 impl Command for Set {
     const NAME: &'static str = "part.set";
-    const SUMMARY: &'static str = "Change a part's description, MPN, parameters or footprint";
+    const SUMMARY: &'static str = "Change a part's description, MPN, parameters, footprint or single pins";
     const KIND: CommandKind = CommandKind::Mutation;
     const POSITIONAL: &'static [&'static str] = &["id"];
     type Output = PartSummary;
@@ -723,9 +848,11 @@ impl Command for Set {
                 .map_err(|e| CommandError::invalid_args("part.invalid_param", format!("parameter `{k}`: {e}")))?;
             parsed.push((k.clone(), v));
         }
+        let patches = resolve_pin_patches(&p.library().parts[&id], &self.pins)?;
         let users: Vec<String> = p.circuit().using_part(&id).map(|(r, _)| r.clone()).collect();
         let before = util::placed_footprints(p, &users);
         let part = ctx.project_mut()?.library_mut().parts.get_mut(&id).expect("found above");
+        apply_pin_patches(part, patches)?;
         let opt = |s: String| (!s.is_empty()).then_some(s);
         if let Some(d) = self.description {
             part.description = d;

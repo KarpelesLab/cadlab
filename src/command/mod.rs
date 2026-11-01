@@ -13,6 +13,7 @@ mod context;
 mod error;
 mod history;
 mod registry;
+pub mod schema_view;
 mod session;
 
 pub use command::{Command, CommandKind};

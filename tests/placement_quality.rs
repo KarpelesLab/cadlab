@@ -144,6 +144,8 @@ struct Costs {
     ratsnest: f64,
     decap: f64,
     connector: f64,
+    /// Long connectors lying across their nearest edge rather than along it.
+    across: Vec<String>,
 }
 
 fn costs(p: &Project, w: f64, h: f64) -> Costs {
@@ -172,13 +174,21 @@ fn costs(p: &Project, w: f64, h: f64) -> Costs {
     let bx = cadlab::board::place::courtyard_box;
     let all: Vec<_> = p.board().footprints.keys().filter_map(|r| bx(p, r).map(|b| (r.clone(), b))).collect();
     let mut connector: f64 = 0.0;
+    let mut across = Vec::new();
     for (r, b) in &all {
         if category(r) == Some(cadlab::model::part::Category::Connector) {
             let (x0, y0, x1, y1) = (b.x0 as f64 / 1e6, b.y0 as f64 / 1e6, b.x1 as f64 / 1e6, b.y1 as f64 / 1e6);
             connector = connector.max(x0.min(w - x1).min(y0).min(h - y1));
+            // Long (at least twice as long as wide) and with an end, not a side, to its edge.
+            let (dw, dh) = (x1 - x0, y1 - y0);
+            let to_side = x0.min(w - x1);
+            let to_end = y0.min(h - y1);
+            if (dh >= 2.0 * dw && to_end < to_side) || (dw >= 2.0 * dh && to_side < to_end) {
+                across.push(r.clone());
+            }
         }
     }
-    Costs { ratsnest, decap, connector }
+    Costs { ratsnest, decap, connector, across }
 }
 
 fn place(r: &Registry, s: &mut Session, args: Value, w: f64, h: f64) -> (PlacementStats, Costs) {
@@ -190,7 +200,7 @@ fn place(r: &Registry, s: &mut Session, args: Value, w: f64, h: f64) -> (Placeme
 
 fn row(name: &str, st: &PlacementStats, c: &Costs) -> String {
     format!(
-        "| {name} | {}/{} | {:.2} | {:.2} | {:.1} | {:.2} | {:.1} | {:.2} | {:.2} |",
+        "| {name} | {}/{} | {:.2} | {:.2} | {:.1} | {:.2} | {:.1} | {:.2} | {:.2} | {} |",
         st.empty_windows,
         st.windows,
         st.crowding,
@@ -199,7 +209,8 @@ fn row(name: &str, st: &PlacementStats, c: &Costs) -> String {
         st.extent,
         c.ratsnest,
         c.decap,
-        c.connector
+        c.connector,
+        c.across.len()
     )
 }
 
@@ -211,7 +222,7 @@ fn placement_quality_report() {
     let route = std::env::var_os("CADLAB_PLACE_ROUTE").is_some();
     let budget: u64 = std::env::var("CADLAB_PLACE_ROUTE").ok().and_then(|v| v.parse().ok()).unwrap_or(30_000);
     println!(
-        "| board | empty windows | crowding | unevenness | largest empty mm | extent | ratsnest mm | decap mm | connector mm |{}",
+        "| board | empty windows | crowding | unevenness | largest empty mm | extent | ratsnest mm | decap mm | connector mm | across |{}",
         if route { " routed | vias | track mm |" } else { "" }
     );
     let only = std::env::var("CADLAB_PLACE_ONLY").unwrap_or_default();
@@ -326,6 +337,177 @@ fn sparse_board_keeps_its_group_moves() {
     let detour = dist_mm(j1, u1) + dist_mm(u1, u2) - dist_mm(j1, u2);
     assert!(detour < 6.0, "U1 off the way from J1 to U2 by {detour:.1} mm");
     assert!(st.unevenness < cst.unevenness && st.extent > 2.0 * cst.extent, "{st:?} vs compact {cst:?}");
+}
+
+/// Parts and circuit of a USB front: receptacle (a seven-pin header: one contact per net, so its
+/// polarity is fixed), a flow-through ESD array, an MCU with PA11 and PA12 side by side, and
+/// the pair declared.
+fn usb_front(w: f64, h: f64) -> (tempfile::TempDir, Registry, Session) {
+    let (d, r, mut s) = new_project();
+    let pins = |list: &[(&str, &str)]| -> Value {
+        Value::Array(list.iter().map(|(n, m)| json!({"number": n, "name": m})).collect())
+    };
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "USB", "category": "connector", "package": "PinHeader 1x07",
+            "pins": pins(&[("1", "VBUS"), ("2", "CC1"), ("3", "DM"), ("4", "DP"), ("5", "CC2"), ("6", "GND"), ("7", "SHIELD")])}),
+    );
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "ESD2", "category": "ic", "package": "SOT-23-6",
+            "pins": pins(&[("1", "IO1"), ("2", "GND"), ("3", "IO2"), ("4", "IO2B"), ("5", "VBUS"), ("6", "IO1B")])}),
+    );
+    let mcu: Vec<(String, String)> = (1..=20)
+        .map(|i| {
+            let name = match i {
+                17 => "PA11".to_string(),
+                18 => "PA12".to_string(),
+                15 => "VSS".to_string(),
+                16 => "VDD".to_string(),
+                _ => format!("P{i}"),
+            };
+            (i.to_string(), name)
+        })
+        .collect();
+    let mcu: Vec<(&str, &str)> = mcu.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    exec(&r, &mut s, "part.create", json!({"id": "MCU", "category": "mcu", "package": "TSSOP-20", "pins": pins(&mcu)}));
+    for (part, refdes) in [("USB", "J1"), ("ESD2", "U2"), ("MCU", "U1")] {
+        exec(&r, &mut s, "circuit.add", json!({"part": part, "refdes": refdes}));
+    }
+    exec(&r, &mut s, "net.connect", json!({"net": "USB_DP", "pins": ["J1.DP", "U2.IO1", "U2.IO1B", "U1.PA12"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "USB_DM", "pins": ["J1.DM", "U2.IO2", "U2.IO2B", "U1.PA11"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "VBUS", "pins": ["J1.VBUS", "U2.VBUS"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["J1.GND", "J1.SHIELD", "U2.GND", "U1.VSS"]}));
+    exec(&r, &mut s, "diffpair.add", json!({"p": "USB_DP", "n": "USB_DM", "name": "USB"}));
+    outline(&r, &mut s, w, h);
+    (d, r, s)
+}
+
+/// The first automatic placement of a USB front does not leave the pair crossing at the ESD
+/// array, whatever the board's shape, and the pair then routes.
+#[test]
+fn flow_through_part_keeps_its_pair_uncrossed() {
+    let mut crossed = Vec::new();
+    let mut unrouted = Vec::new();
+    for (w, h) in [(30.0, 20.0), (40.0, 24.0), (40.0, 40.0), (50.0, 30.0), (60.0, 45.0), (80.0, 40.0), (100.0, 75.0)] {
+        let (_d, r, mut s) = usb_front(w, h);
+        let o = exec(&r, &mut s, "place.auto", json!({}));
+        let warned = o["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "place.pair_crossing");
+        let c = cadlab::board::place::pair_crossings(project(&s));
+        assert_eq!(warned, !c.is_empty(), "{w}x{h}: {o}");
+        if !c.is_empty() {
+            crossed.push(format!("{w}x{h}: {c:?}"));
+        }
+        let o = exec(&r, &mut s, "route.diffpair", json!({}));
+        if o["output"]["pairs"][0]["status"] != "routed" {
+            let at: Vec<String> = ["J1", "U2", "U1"]
+                .iter()
+                .map(|x| {
+                    let f = &project(&s).board().footprints[*x];
+                    format!("{x} ({}, {}) {}", f.at.x, f.at.y, f.rotation)
+                })
+                .collect();
+            unrouted.push(format!("{w}x{h} {at:?}: {}", o["output"]["pairs"][0]["failures"]));
+        }
+    }
+    assert!(crossed.is_empty(), "{crossed:#?}");
+    assert!(unrouted.is_empty(), "{unrouted:#?}");
+}
+
+/// Long connectors go along an edge where that costs no ratsnest, however the board is shaped
+/// (before D71: three across on the STM32 board on 100 × 75 mm, 1387 mm); `along_edges` lays them
+/// all at the ratsnest's price.
+#[test]
+fn long_connectors_lie_along_their_edges() {
+    let (_d, r, mut s) = stm32(100.0, 75.0);
+    let (_st, c) = place(&r, &mut s, json!({}), 100.0, 75.0);
+    assert!(c.across.len() <= 1, "{:?}", c.across);
+    assert!(c.ratsnest < 1387.0, "ratsnest {:.1} mm", c.ratsnest);
+    assert_eq!(placement_errors(project(&s)), Vec::<String>::new());
+    for (w, h) in [(60.0, 45.0), (100.0, 80.0)] {
+        let (_d, r, mut s) = channels(w, h);
+        let (_st, c) = place(&r, &mut s, json!({}), w, h);
+        assert!(c.across.is_empty(), "{w}x{h}: {:?}", c.across);
+    }
+    let plain = c.ratsnest;
+
+    let (_d, r, mut s) = stm32(100.0, 75.0);
+    let (_st, c) = place(&r, &mut s, json!({"along_edges": true}), 100.0, 75.0);
+    assert!(c.across.is_empty(), "{:?}", c.across);
+    assert!(c.connector < 2.0, "a connector {:.2} mm from the edge", c.connector);
+    assert_eq!(placement_errors(project(&s)), Vec::<String>::new());
+    println!("along_edges: {:.1} mm against {plain:.1} mm", c.ratsnest);
+
+    let f = r.execute(
+        &mut s,
+        "place.auto",
+        json!({"compact": true, "along_edges": true, "replace": true}),
+        RunOptions::default(),
+    );
+    let f = f.expect_err("not with compact");
+    assert_eq!(f.error.diagnostic.code, "place.along_edges_compact");
+    assert!(f.error.diagnostic.hint.is_some());
+}
+
+/// What goes with an IC inherits its region: decoupling capacitors and other passives stay
+/// inside it without a hint of their own; an own hint wins; a full region gives way with a note
+/// rather than leaving a part unplaced.
+#[test]
+fn passives_inherit_their_ics_region() {
+    let (_d, r, mut s) = channels(100.0, 80.0);
+    // Channel 1 and its parts' IC on the left; U2 on the right, its capacitor hinted elsewhere.
+    let left = json!({"from": ["0mm", "0mm"], "to": ["40mm", "80mm"]});
+    let right = json!({"from": ["60mm", "0mm"], "to": ["100mm", "80mm"]});
+    exec(&r, &mut s, "place.hint", json!({"refdes": ["U1"], "region": left}));
+    exec(&r, &mut s, "place.hint", json!({"refdes": ["U2"], "region": right}));
+    exec(&r, &mut s, "place.hint", json!({"refdes": ["C2"], "region": left}));
+    let o = exec(&r, &mut s, "place.auto", json!({}));
+    assert!(o["diagnostics"].as_array().unwrap().iter().all(|d| d["code"] != "place.region_full"), "{o}");
+    let p = project(&s);
+    let bx = cadlab::board::place::courtyard_box;
+    for x in ["U1", "C1", "R11", "R12", "R13", "R14", "C2"] {
+        let b = bx(p, x).unwrap();
+        assert!(b.x1 <= 40_000_000, "{x} ends at {} mm, past the left region", b.x1 as f64 / 1e6);
+    }
+    for x in ["U2", "R21", "R22", "R23", "R24"] {
+        let b = bx(p, x).unwrap();
+        assert!(b.x0 >= 60_000_000, "{x} starts at {} mm, before the right region", b.x0 as f64 / 1e6);
+    }
+
+    // A region with room for the op-amp only: its passives give way, and say so.
+    let (_d, r, mut s) = channels(100.0, 80.0);
+    let tiny = json!({"from": ["10mm", "10mm"], "to": ["19mm", "17mm"]});
+    exec(&r, &mut s, "place.hint", json!({"refdes": ["U1"], "region": tiny}));
+    let o = exec(&r, &mut s, "place.auto", json!({}));
+    assert!(o["output"].get("unplaced").is_none(), "{o}");
+    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "place.region_full");
+    let d = d.unwrap_or_else(|| panic!("{o}"));
+    assert!(d["hint"].as_str().is_some_and(|h| h.contains("region")), "{d}");
+    assert!(!d["subjects"].as_array().unwrap().is_empty(), "{d}");
+    let b = cadlab::board::place::courtyard_box(project(&s), "U1").unwrap();
+    assert!(b.x1 <= 19_000_000, "the IC's own hint still holds");
+}
+
+/// The text about board use says what its numbers mean on a sparse board.
+#[test]
+fn sparse_boards_say_what_the_numbers_mean() {
+    let (_d, r, mut s) = channels(100.0, 80.0);
+    let o = exec(&r, &mut s, "place.auto", json!({}));
+    let st = placement_stats(project(&s)).unwrap();
+    assert!(st.sparse, "{st:?}");
+    assert_eq!(st.crowding, 0.0, "{st:?}");
+    assert!(st.fullest_window > 0.0, "the fullest window still says how dense the parts are: {st:?}");
+    let text = o["summary"].as_str().unwrap();
+    assert!(text.contains("sparse") && text.contains("judge by the ratsnest"), "{text}");
+
+    let (_d, r, mut s) = stm32(60.0, 45.0);
+    let o = exec(&r, &mut s, "place.auto", json!({}));
+    assert!(!placement_stats(project(&s)).unwrap().sparse);
+    assert!(!o["summary"].as_str().unwrap().contains("sparse"), "{o}");
 }
 
 /// Spread placement of the ~500-part synthetic board (`bigboard`, routing removed), timed:

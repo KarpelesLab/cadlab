@@ -188,3 +188,55 @@ fn footprint_generate_command() {
     let f = fail(&r, &mut s, "footprint.generate", json!({"package": "SOIC-9"}));
     assert_eq!(f.error.diagnostic.code, "footprint.unknown_package");
 }
+
+/// `part.set --pins` changes one pin without sending the whole list (session 5's REF5025 `TRIM`).
+#[test]
+fn part_set_changes_single_pins() {
+    let (_d, r, mut s) = setup();
+    let id = exec(&r, &mut s, "part.create", ldo_args())["output"]["id"].as_str().unwrap().to_string();
+    exec(&r, &mut s, "circuit.add", json!({"part": id, "refdes": "U1"}));
+    exec(&r, &mut s, "net.connect", json!({"net": "EN_NET", "pins": ["U1.EN"]}));
+    let pin = |s: &Session, n: &str| {
+        let lib = s.project.as_ref().unwrap().library();
+        lib.parts[&id].symbol.pins.iter().find(|p| p.number == n).unwrap().clone()
+    };
+    let at_before = pin(&s, "3").at;
+    let others = pin(&s, "1");
+
+    // The type alone, by name: the drawing stays, the other pins too.
+    exec(&r, &mut s, "part.set", json!({"id": id, "pins": {"EN": {"kind": "passive"}}}));
+    let p = pin(&s, "3");
+    assert_eq!(p.kind, cadlab::model::part::PinKind::Passive);
+    assert_eq!(p.at, at_before);
+    assert_eq!(pin(&s, "1"), others);
+
+    // A new name, by number: nets go by number and keep it; the new name works.
+    exec(&r, &mut s, "part.set", json!({"id": id, "pins": {"3": {"name": "SHDN", "group": "ctl"}}}));
+    let p = pin(&s, "3");
+    assert_eq!((p.name.as_str(), p.group.as_deref()), ("SHDN", Some("ctl")));
+    assert!(s.project.as_ref().unwrap().circuit().nets["EN_NET"].pins.iter().any(|x| x.pin == "3"));
+    exec(&r, &mut s, "net.connect", json!({"net": "EN_NET", "pins": ["U1.SHDN"]}));
+    exec(&r, &mut s, "part.set", json!({"id": id, "pins": {"SHDN": {"group": "", "side": "top"}}}));
+    let p = pin(&s, "3");
+    assert_eq!((p.group.as_deref(), p.side), (None, Some(cadlab::model::part::Side::Top)));
+
+    // Errors: stable codes, the part as subject, a hint or suggestions.
+    let f = fail(&r, &mut s, "part.set", json!({"id": id, "pins": {"VINN": {"kind": "input"}}}));
+    assert_eq!(f.error.diagnostic.code, "part.pin_unknown");
+    assert!(f.error.diagnostic.hint.as_deref().is_some_and(|h| h.contains("VIN")), "{:?}", f.error);
+    assert!(!f.error.diagnostic.subjects.is_empty());
+    let f = fail(&r, &mut s, "part.set", json!({"id": id, "pins": {"VIN": {}}}));
+    assert_eq!(f.error.diagnostic.code, "part.pin_patch_empty");
+    assert!(f.error.diagnostic.hint.is_some());
+    let f = fail(&r, &mut s, "part.set", json!({"id": id, "pins": {"1": {"kind": "input"}, "VIN": {"kind": "input"}}}));
+    assert_eq!(f.error.diagnostic.code, "part.pin_patched_twice");
+
+    // A name several pins share needs the number.
+    let mut twin = ldo_args();
+    twin["mpn"] = json!("TWIN");
+    twin["pins"][3]["name"] = json!("GND");
+    let t = exec(&r, &mut s, "part.create", twin)["output"]["id"].as_str().unwrap().to_string();
+    let f = fail(&r, &mut s, "part.set", json!({"id": t, "pins": {"GND": {"kind": "passive"}}}));
+    assert_eq!(f.error.diagnostic.code, "part.pin_ambiguous");
+    assert!(f.error.diagnostic.hint.as_deref().is_some_and(|h| h.contains('2') && h.contains('4')), "{:?}", f.error);
+}

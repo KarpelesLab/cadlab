@@ -416,6 +416,59 @@ fn describe_shows_nested_enum_values() {
     assert!(t.contains("pads[].layers: top|bottom|all|npth"), "{t}");
 }
 
+/// `describe` is affordable for the largest schemas, and nothing is out of reach (D71): repeated
+/// parts in `$defs`, the largest arguments folded with a way to ask for them, `--full` as registered.
+#[test]
+fn describe_folds_large_schemas_and_gives_the_detail() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = |args: &[&str]| -> serde_json::Value {
+        let mut all = args.to_vec();
+        all.push("--json");
+        serde_json::from_str(&text(&cadlab(dir.path(), &all))).unwrap()
+    };
+    let d = json(&["describe", "part.create"]);
+    let size = d.to_string().len();
+    assert!(size < 11_000, "describe part.create is {size} bytes");
+    assert_eq!(d["folded"][0], "package_spec");
+    let spec = &d["input_schema"]["properties"]["package_spec"];
+    assert_eq!(spec["x-folded"]["tag"], "family");
+    assert!(spec["x-folded"]["variants"]["qfn"]["fields"].as_str().unwrap().contains("pitch"), "{spec}");
+    // What most agents need stays unfolded.
+    assert!(d["input_schema"]["properties"]["pins"].get("x-folded").is_none(), "{d}");
+    assert!(d["input_schema"]["properties"]["pins"]["items"]["properties"]["kind"].is_object(), "{d}");
+
+    // One family, with its descriptions.
+    let q = json(&["describe", "part.create", "--path", "package_spec.qfn"]);
+    assert!(q.to_string().len() < 3_000, "{q}");
+    assert!(q["schema"]["properties"]["pitch"]["description"].is_string(), "{q}");
+    // In text too.
+    let t = text(&cadlab(dir.path(), &["describe", "part.create", "--path", "package_spec.qfn"]));
+    assert!(t.contains("pitch: string (required)  Pin pitch."), "{t}");
+    let t = text(&cadlab(dir.path(), &["describe", "part.create"]));
+    assert!(t.contains("package_spec") && t.contains("path"), "{t}");
+
+    // A wrong step says what fits there.
+    let e = json(&["describe", "part.create", "--path", "package_spec.qfp2"]);
+    assert_eq!(e["error"]["code"], "describe.unknown_path", "{e}");
+    assert!(e["error"]["hint"].as_str().unwrap().contains("qfn"), "{e}");
+    let e = json(&["describe", "part", "--path", "package_spec"]);
+    assert_eq!(e["error"]["code"], "describe.path_needs_command", "{e}");
+
+    // As registered, nothing folded.
+    let f = json(&["describe", "part.create", "--full"]);
+    assert!(f.to_string().len() > 20_000);
+    assert!(f.get("folded").is_none());
+    assert!(f["input_schema"]["properties"]["package_spec"].get("x-folded").is_none());
+    assert!(f["input_schema"].get("$defs").is_none());
+
+    // No schema of the command set stays out of proportion, however it is asked for.
+    for name in ["footprint.set", "footprint.generate", "footprint.create", "sim.sparams", "board.rules"] {
+        let d = json(&["describe", name]);
+        let input = d["input_schema"].to_string().len();
+        assert!(input < 11_000, "{name}: input schema {input} bytes");
+    }
+}
+
 /// A `.kicad_mod` whose file name differs from the footprint inside is named after the
 /// footprint inside, with a note; either name selects it; `name` overrides both.
 #[test]

@@ -21,8 +21,10 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 
 const INSTRUCTIONS: &str = "cadlab is a headless electronics CAD tool. Start by creating or opening a project \
 with the `project` tool (action `new` or `open`); later calls act on that project unless `project` names another \
-directory. Each tool groups related actions: pass `action` and its `args`. Use `describe` to get the full argument \
-schema of any action. All lengths need units (\"0.2mm\", \"8mil\"). Use `dry_run: true` to preview a change, \
+directory. Each tool groups related actions: pass `action` and its `args`, listed in the tool's description (an \
+argument without a type is a string; `?` marks optional ones; a trailing `...` in a list of values or fields: the \
+rest is in `describe`). Use `describe` with \"group.action\" for the \
+argument schema of any action, with `path` for one large argument. All lengths need units (\"0.2mm\", \"8mil\"). Use `dry_run: true` to preview a change, \
 `history` to undo. Errors include a `hint` on how to fix them; hints name commands as `group.action {json args}`: \
 call the tool `group` with that `action` and those `args` (or `call`). Long check results take `codes`, `severity`, \
 `limit` and `offset` to narrow them.";
@@ -36,6 +38,13 @@ fn send(out: &Writer, msg: &Value) {
     let mut o = out.lock().unwrap_or_else(|e| e.into_inner());
     let _ = writeln!(o, "{msg}");
     let _ = o.flush();
+}
+
+/// Options of the `describe` tool.
+struct DescribeArgs<'a> {
+    output_schema: bool,
+    path: Option<&'a str>,
+    full: bool,
 }
 
 /// Message passed from the reader thread to the main loop.
@@ -181,8 +190,10 @@ impl Server {
     }
 
     fn tools(&self) -> Vec<Value> {
-        let project_prop = json!({"type": "string", "description": "Project directory to act on (default: the most recently opened or created project)"});
-        let dry_run_prop = json!({"type": "boolean", "description": "Run, report the result, then roll back"});
+        // Repeated in every tool: what these say once, here and in the instructions, costs
+        // an agent 32 times over.
+        let project_prop = json!({"type": "string", "description": "Project directory (default: the current one)"});
+        let dry_run_prop = json!({"type": "boolean", "description": "Preview: roll back after"});
         let mut tools = Vec::new();
         for (group, entries) in self.registry.groups() {
             let mut desc = match cadlab::commands::group_summary(group) {
@@ -190,12 +201,11 @@ impl Server {
                 None => format!("{group} commands. Actions:"),
             };
             for e in &entries {
-                desc += &format!("\n- {}: {}. args: {}", e.action(), e.summary, args_signature(&e.input_schema));
+                desc += &format!("\n- {}: {}. args: {}", e.action(), e.summary, tool_signature(&e.input_schema));
             }
             if let Some((_, a)) = DEFAULT_ACTIONS.iter().find(|(g, _)| *g == group) {
                 desc += &format!("\nWithout `action`: `{a}`.");
             }
-            desc += "\nCall `describe` with \"<group>.<action>\" for the full schema.";
             let actions: Vec<&str> = entries.iter().map(|e| e.action()).collect();
             let mut tool = json!({
                 "name": group,
@@ -203,8 +213,8 @@ impl Server {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": actions, "description": "Action to run, from the list in the description"},
-                        "args": {"type": "object", "description": "Arguments of the action, as listed in the description"},
+                        "action": {"type": "string", "enum": actions, "description": "Action to run"},
+                        "args": {"type": "object", "description": "Its arguments"},
                         "project": project_prop,
                         "dry_run": dry_run_prop,
                     },
@@ -217,10 +227,12 @@ impl Server {
         }
         tools.push(json!({
             "name": "describe",
-            "description": "List all commands, or return the full argument JSON Schema of one command (\"project.new\") or group (\"project\").",
+            "description": "List all commands, or return the argument JSON Schema of one command (\"project.new\") or group (\"project\"). Repeated parts are in `$defs`; large arguments are folded to their fields (`folded` lists them; `x-folded` says how to ask for the rest).",
             "inputSchema": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "Command (\"group.action\") or group to describe; leave out to list every command"},
+                "path": {"type": "string", "description": "Only this part of the command's schema: \"package_spec.qfn\", \"pads.shape\", \"output.stats\""},
                 "output_schema": {"type": "boolean", "description": "Also return the JSON Schema of the command's output (large; default false)"},
+                "full": {"type": "boolean", "description": "The schemas as registered, nothing shared or folded (large; default false)"},
             }},
         }));
         tools.push(json!({
@@ -280,7 +292,11 @@ impl Server {
         match name {
             "describe" => Ok(self.describe(
                 args.get("command").and_then(Value::as_str),
-                args.get("output_schema").and_then(Value::as_bool).unwrap_or(false),
+                DescribeArgs {
+                    output_schema: args.get("output_schema").and_then(Value::as_bool).unwrap_or(false),
+                    path: args.get("path").and_then(Value::as_str),
+                    full: args.get("full").and_then(Value::as_bool).unwrap_or(false),
+                },
             )),
             "call" => {
                 let Some(cmd) = args.get("command").and_then(Value::as_str) else {
@@ -341,10 +357,11 @@ impl Server {
         }
     }
 
-    fn describe(&self, name: Option<&str>, output_schema: bool) -> Value {
+    fn describe(&self, name: Option<&str>, opts: DescribeArgs<'_>) -> Value {
+        let DescribeArgs { output_schema, path, full } = opts;
         let Some(name) = name else {
-            let list: Vec<Value> =
-                self.registry.iter().map(|e| json!({"name": e.name, "kind": e.kind, "summary": e.summary})).collect();
+            // Summaries once, in the text (they were in both, a third of the listing).
+            let list: Vec<Value> = self.registry.iter().map(|e| json!({"name": e.name, "kind": e.kind})).collect();
             let text =
                 self.registry.iter().map(|e| format!("{}: {}", e.name, e.summary)).collect::<Vec<_>>().join("\n");
             return tool_ok(text, json!({"commands": list}));
@@ -368,6 +385,23 @@ impl Server {
                 Diagnostic::error("command.unknown", format!("unknown command or group `{name}`")).with_suggestions(&s);
             let hint = d.hint.clone().unwrap_or_else(|| "call `describe` without `command` to list them".into());
             return tool_error("command.unknown", &d.message, &hint);
+        }
+        if let Some(path) = path {
+            let [e] = entries[..] else {
+                return tool_error(
+                    "describe.path_needs_command",
+                    &format!("`{name}` is a group: a path needs one command"),
+                    &format!("name the command: {{\"command\": \"{name}.<action>\", \"path\": \"{path}\"}}"),
+                );
+            };
+            return match e.describe_path(path) {
+                Ok(v) => tool_ok(crate::describe_path_text(e, path, &v), v),
+                Err(err) => tool_error(
+                    err.diagnostic.code.as_ref(),
+                    &err.diagnostic.message,
+                    err.diagnostic.hint.as_deref().unwrap_or(""),
+                ),
+            };
         }
         let text = entries
             .iter()
@@ -393,6 +427,9 @@ impl Server {
         let described: Vec<Value> = entries
             .iter()
             .map(|e| {
+                if !full {
+                    return e.describe_view(output_schema);
+                }
                 let mut d = e.describe();
                 if !output_schema && let Some(o) = d.as_object_mut() {
                     o.remove("output_schema");
@@ -569,6 +606,21 @@ impl Server {
 
 /// Compact argument signature from a schema: `{path: string, name?: string}`.
 fn args_signature(schema: &Value) -> String {
+    signature(schema, usize::MAX)
+}
+
+/// The longest label of an argument in a tool's description (the tools list is what every agent
+/// pays for up front): longer lists of values or fields end in `...`, `describe` has them all.
+const TOOL_LABEL: usize = 48;
+
+/// An argument's signature in a tool's description: [`args_signature`] with each label at most
+/// [`TOOL_LABEL`] long and `: string` left out (the instructions say so).
+fn tool_signature(schema: &Value) -> String {
+    signature(schema, TOOL_LABEL).replace(": string,", ",").replace(": string}", "}")
+}
+
+/// [`args_signature`] with each argument's label at most `limit` long.
+fn signature(schema: &Value, limit: usize) -> String {
     let required: Vec<&str> =
         schema["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     let Some(props) = schema["properties"].as_object() else {
@@ -578,10 +630,37 @@ fn args_signature(schema: &Value) -> String {
         .iter()
         .map(|(k, v)| {
             let opt = if required.contains(&k.as_str()) { "" } else { "?" };
-            format!("{k}{opt}: {}", crate::type_label(v))
+            format!("{k}{opt}: {}", shorten_label(&crate::type_label(v), limit))
         })
         .collect();
     format!("{{{}}}", parts.join(", "))
+}
+
+/// A type label cut to about `limit` at a separator of its list: `a|b|...`, `{a, b?, ...}[]`.
+fn shorten_label(label: &str, limit: usize) -> String {
+    if label.len() <= limit {
+        return label.to_string();
+    }
+    let cut = |sep: &str| {
+        label
+            .char_indices()
+            .take_while(|(i, _)| *i <= limit)
+            .map(|x| x.0)
+            .last()
+            .map_or(0, |end| label[..end].rfind(sep).unwrap_or(0))
+    };
+    if label.starts_with('{') {
+        let close = label.rfind('}').unwrap_or(label.len() - 1);
+        match cut(", ") {
+            0 => format!("{{...{}", &label[close..]),
+            c => format!("{}, ...{}", &label[..c], &label[close..]),
+        }
+    } else {
+        match cut("|") {
+            0 => label.to_string(),
+            c => format!("{}|...", &label[..c]),
+        }
+    }
 }
 
 fn text_of(summary: &str, diagnostics: &[Diagnostic]) -> String {

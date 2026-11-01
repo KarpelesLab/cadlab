@@ -16,6 +16,13 @@
 //!   weighted by its free area): 0 when every window holds the same share of parts;
 //! - **largest empty square**: the side of the largest square of free, uncovered cells;
 //! - **extent**: the share of the free area's box the box around all courtyards covers.
+//!
+//! These describe where the courtyards are, not whether the placement is good. On a *sparse*
+//! board (parts covering under 15 % of the free area, [`PlacementStats::sparse`]) two of them
+//! stop saying much: most windows are "empty" however well the parts are placed, because parts
+//! that sit by their connections leave the rest free (a board whose ratsnest is much shorter can
+//! score worse), and the crowding is 0 unless a part fills a quarter of a window, because the
+//! density's share of a window is less than one part. Compare the ratsnest first there.
 
 use std::collections::BTreeSet;
 
@@ -37,12 +44,20 @@ const CELLS: f64 = 40_000.0;
 pub struct PlacementStats {
     /// Windows with at least a quarter of their area free to place in.
     pub windows: usize,
-    /// Windows among those holding less than a quarter of the average share of courtyards.
+    /// Windows among those holding less than a quarter of the average share of courtyards. Where
+    /// the parts are, not a cost: on a sparse board most windows are empty however good the
+    /// placement (compare the ratsnest).
     pub empty_windows: usize,
     /// Share of the courtyard area beyond what windows may hold at the default density
     /// ([`super::SPREAD_DENSITY`]: 1 / 0.6 times the board's average, at least a quarter of the
-    /// window): how clumped the parts are.
+    /// window): how clumped the parts are. On a sparse board that quarter of a window decides,
+    /// so it reads 0 unless a window is that full: see `fullest_window`.
     pub crowding: f64,
+    /// Covered share of the fullest window: how dense the parts are where they are, whatever
+    /// the board's size.
+    pub fullest_window: f64,
+    /// Parts cover under 15 % of the free area: `empty_windows` and `crowding` say little here.
+    pub sparse: bool,
     /// Coefficient of variation of the windows' courtyard shares (0: even).
     pub unevenness: f64,
     /// Side of the largest square of the free area clear of courtyards.
@@ -122,6 +137,9 @@ pub fn placement_stats(p: &Project) -> Option<PlacementStats> {
     let cap = (rho / super::SPREAD_DENSITY).max(super::CROWD_FLOOR);
     let excess: f64 = counted.iter().map(|&(f, d)| f * (d - cap).max(0.0)).sum();
     let crowding = if covered_cells > 0 { excess / covered_cells as f64 } else { 0.0 };
+    let fullest = counted.iter().map(|w| w.1).fold(0.0, f64::max);
+    // Below this the floor of the crowding's cap decides, not the density.
+    let sparse = rho / super::SPREAD_DENSITY < super::CROWD_FLOOR;
 
     // Largest empty square (dynamic programming over the raster).
     let mut run = vec![0u32; nx * ny];
@@ -155,6 +173,8 @@ pub fn placement_stats(p: &Project) -> Option<PlacementStats> {
         windows: counted.len(),
         empty_windows,
         crowding: round(crowding),
+        fullest_window: round(fullest),
+        sparse,
         unevenness: round(unevenness),
         largest_empty: Nm(best as i64 * s),
         extent: round(ew * eh / (fr.w() as f64 * fr.h() as f64)),

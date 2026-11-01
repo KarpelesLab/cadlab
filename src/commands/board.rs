@@ -967,8 +967,11 @@ pub struct Placed {
     pub ratsnest_length: Option<Nm>,
     /// How the placement uses the board, for automatic placement: about 16 windows over the
     /// free area, those nearly empty, the crowding (share of courtyard area beyond what a
-    /// window holds at the default 60 % density), the unevenness (variation of the windows'
-    /// shares; 0 is even), the largest empty square and the extent of all parts.
+    /// window holds at the default 60 % density), the fullest window, the unevenness (variation
+    /// of the windows' shares; 0 is even), the largest empty square and the extent of all parts.
+    /// Where the parts are, not how good the placement is: on a `sparse` board (parts under
+    /// 15 % of the free area) most windows are empty and the crowding is 0 however well they
+    /// are placed; compare the ratsnest length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_use: Option<geo::place::PlacementStats>,
 }
@@ -996,10 +999,31 @@ pub(super) fn placed_text(o: &Placed) -> String {
         lines.push(format!("ratsnest length: {l}"));
     }
     if let Some(u) = &o.board_use {
-        lines.push(format!(
-            "board use: {} of {} windows nearly empty, crowding {:.2}, unevenness {:.2}, largest empty square {}",
-            u.empty_windows, u.windows, u.crowding, u.unevenness, u.largest_empty
-        ));
+        lines.push(if u.sparse {
+            format!(
+                "board use: sparse, parts cover {:.0} % of the free area (fullest window {:.0} %); {} of {} windows \
+                 nearly empty and crowding {:.2} are expected here, even with parts well placed by their \
+                 connections: judge by the ratsnest length; unevenness {:.2}, largest empty square {}",
+                u.fill * 100.0,
+                u.fullest_window * 100.0,
+                u.empty_windows,
+                u.windows,
+                u.crowding,
+                u.unevenness,
+                u.largest_empty
+            )
+        } else {
+            format!(
+                "board use: {} of {} windows nearly empty, crowding {:.2} (fullest window {:.0} %), unevenness {:.2}, \
+                 largest empty square {}",
+                u.empty_windows,
+                u.windows,
+                u.crowding,
+                u.fullest_window * 100.0,
+                u.unevenness,
+                u.largest_empty
+            )
+        });
     }
     lines.join("\n")
 }
@@ -1400,11 +1424,18 @@ pub struct PlaceAuto {
     /// with `compact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub density: Option<u32>,
+    /// Groups: lay every long connector along an edge, even where that lengthens the ratsnest
+    /// (a header reaching into the board has its pads nearer what they connect to). By
+    /// default only those that cost nothing are laid. Not with `compact`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub along_edges: bool,
 }
 
 /// Set, clear or list automatic placement hints (persisted in the board, used by every later
 /// `place.auto`): `edge` sends a part to a board edge, e.g. the USB connector to the top
 /// (`place hint J1 --edge top`) or indicator LEDs to any edge (`place hint D2 D3 --edge any`);
+/// `region` keeps parts inside a rectangle; the passives and small ICs placed with a hinted IC
+/// stay in its region too unless they have a hint of their own;
 /// `near` keeps parts next to another one whatever else pulls them, e.g. an LED's resistor
 /// next to the LED (`place hint R2 --near D9`). Without `edge`, `near` or `clear`, lists the
 /// hints.
@@ -1660,10 +1691,40 @@ impl Command for PlaceAuto {
                         h.region.map(|g| (r.clone(), geo::place::Rect::of([g.from, g.to]).expect("two points")))
                     })
                     .collect();
-                let opts =
-                    geo::place::AutoOptions { gap, spread: !self.compact, density: self.density, edges, near, regions };
+                if self.compact && self.along_edges {
+                    return Err(CommandError::invalid_args(
+                        "place.along_edges_compact",
+                        "`along_edges` applies to spread placement, not `compact`",
+                    )
+                    .with_hint("leave out `compact`, or `along_edges`"));
+                }
+                let opts = geo::place::AutoOptions {
+                    gap,
+                    spread: !self.compact,
+                    density: self.density,
+                    edges,
+                    near,
+                    regions,
+                    along_edges: self.along_edges,
+                };
                 let r = geo::place::auto_place(p, &moving, &opts)
                     .map_err(|e| CommandError::conflict(e.code, e.message).with_hint(e.hint))?;
+                if !r.left_region.is_empty() {
+                    let mut d = crate::diag::Diagnostic::info(
+                        "place.region_full",
+                        format!(
+                            "{} did not fit the region of the IC they go with and were placed outside it",
+                            r.left_region.join(", ")
+                        ),
+                    )
+                    .with_hint(
+                        "enlarge the region, or give these parts a region of their own with `place.hint --region`",
+                    );
+                    for x in &r.left_region {
+                        d = d.with_subject(crate::refs::ObjectRef::Name(x.clone()));
+                    }
+                    ctx.report(d);
+                }
                 (r.placements, r.unplaced)
             }
             Strategy::Rows => {
@@ -1689,6 +1750,21 @@ impl Command for PlaceAuto {
                 )
                 .with_hint("enlarge the outline or place them by hand"),
             );
+        }
+        for (pair, parts) in geo::place::pair_crossings(ctx.project()?) {
+            let mut d = crate::diag::Diagnostic::warning(
+                "place.pair_crossing",
+                format!("differential pair {pair} must cross on its way between {}", parts.join(", ")),
+            )
+            .with_hint(
+                "turn or move the parts so both nets keep their order (`place.rotate`, `place.set`), or swap the \
+                 pair's polarity at the connector if the interface allows it",
+            );
+            d = d.with_subject(crate::refs::ObjectRef::Named { kind: "pair".into(), name: pair.clone() });
+            for x in &parts {
+                d = d.with_subject(crate::refs::ObjectRef::Name(x.clone()));
+            }
+            ctx.report(d);
         }
         let length = geo::place::ratsnest_length(ctx.project()?);
         let board_use = geo::place::placement_stats(ctx.project()?);

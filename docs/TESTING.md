@@ -676,16 +676,23 @@ ideal op-amp model, JLCPCB bundle, STEP and KiCad export. Replayed by `tests/age
 | 10 | Ground symbols looked the same for AGND and GND on the schematic | Ground symbols print their net's name unless it is `GND` |
 | 11 | `place rotate U8` on a routed board left the tracks at the old pads: six DRC errors (shorts) | `place.moved_routed` names the nets and the rip/route commands; `rip: true` rips them |
 
-Seen but left as they are (noted for the next session):
+Seen and left as they were, fixed since (D71):
 
-- `part.set` cannot change one pin's kind (REF5025's TRIM/NR declared `input` raised `lint.floating_input`); the
-  agent re-sent the whole pin list with `part.create --replace`. A pin patch (`part.set --pins`) would do.
+- `part.set` could not change one pin's kind (REF5025's TRIM/NR declared `input` raised `lint.floating_input`); the
+  agent re-sent the whole pin list with `part.create --replace`. Now `part.set --pins`
+  (`tests/parts_bom.rs` `part_set_changes_single_pins`).
 - The first spread placement put the USB ESD array so that the pair would cross between it and the MCU
-  (`route.diffpair` polarity failure); the run with regions did not, but nothing guarantees it.
-- `describe part.create` is 26 KB, almost all of it the `package_spec` schema.
-- `VCAP1` (the MCU's core regulator capacitor, outside any region hint) was routed over the analog ground and
-  stays a `drc.split_crossing` warning; hinting the MCU's passives with its region would have avoided it, which
-  suggests regions could pass from an IC to its decoupling capacitors.
+  (`route.diffpair` polarity failure). A flow-through part is now turned from its connections
+  (`tests/placement_quality.rs` `flow_through_part_keeps_its_pair_uncrossed`: seven outlines; 3 fail with the
+  orientation and breakout rule switched off).
+- `describe part.create` was 26 KB, almost all of it the `package_spec` schema: now 10.7 KB with that argument folded,
+  and `path` for one family (`tests/agent_ergonomics.rs` `describe_folds_large_schemas_and_gives_the_detail`;
+  `tests/agent_session4.rs` now holds `tools/list` under 42 KB).
+- `VCAP1` (the MCU's core regulator capacitor, outside any region hint) was routed over the analog ground, a
+  `drc.split_crossing` warning. Regions now pass from an IC to what goes with it; `tests/agent_session5.rs` checks C27
+  on the digital side and no crossing on VCAP1.
+
+This board stays close to the router's limit: small changes in placement can leave one or two connections unrouted.
 
 ### Session 6 (2026-11-01): 2.4 GHz sensor node, the electrical tools, through the MCP server
 

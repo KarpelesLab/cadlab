@@ -53,7 +53,13 @@ fn dispatch(registry: &'static Registry, g: &Globals, m: &ArgMatches) -> u8 {
     match sub {
         "mcp" => mcp::serve(registry, !sm.get_flag("no_autosave")),
         "config" => settings::run(sm, g.json),
-        "describe" => describe(registry, g, sm.get_one::<String>("command").map(String::as_str)),
+        "describe" => describe(
+            registry,
+            g,
+            sm.get_one::<String>("command").map(String::as_str),
+            sm.get_one::<String>("path").map(String::as_str),
+            sm.get_flag("full"),
+        ),
         "call" => {
             let name = sm.get_one::<String>("command").unwrap();
             let args = match sm.get_one::<String>("args").map(String::as_str) {
@@ -277,7 +283,7 @@ fn parse_batch(text: &str) -> Result<Vec<Step>, String> {
     Ok(steps)
 }
 
-fn describe(registry: &Registry, g: &Globals, name: Option<&str>) -> u8 {
+fn describe(registry: &Registry, g: &Globals, name: Option<&str>, path: Option<&str>, full: bool) -> u8 {
     let Some(name) = name else {
         let list: Vec<Value> =
             registry.iter().map(|e| json!({"name": e.name, "kind": e.kind, "summary": e.summary})).collect();
@@ -306,8 +312,42 @@ fn describe(registry: &Registry, g: &Globals, name: Option<&str>) -> u8 {
         }
         return exit::COMMAND_ERROR;
     }
+    if let Some(path) = path {
+        let [e] = entries[..] else {
+            let d = Diagnostic::error(
+                "describe.path_needs_command",
+                format!("`{name}` is a group: a path needs one command"),
+            )
+            .with_hint(format!("name the command: `cadlab describe {name}.<action> --path {path}`"));
+            if g.json {
+                println!("{}", json!({"ok": false, "error": d}));
+            } else {
+                eprintln!("{d}");
+            }
+            return exit::COMMAND_ERROR;
+        };
+        return match e.describe_path(path) {
+            Ok(v) if g.json => {
+                println!("{v}");
+                exit::OK
+            }
+            Ok(v) => {
+                println!("{}", describe_path_text(e, path, &v));
+                exit::OK
+            }
+            Err(err) => {
+                let d = err.diagnostic;
+                if g.json {
+                    println!("{}", json!({"ok": false, "error": d}));
+                } else {
+                    eprintln!("{d}");
+                }
+                exit::COMMAND_ERROR
+            }
+        };
+    }
     if g.json {
-        let v: Vec<Value> = entries.iter().map(|e| e.describe()).collect();
+        let v: Vec<Value> = entries.iter().map(|e| if full { e.describe() } else { e.describe_view(true) }).collect();
         println!("{}", if v.len() == 1 { v[0].clone() } else { Value::Array(v) });
     } else {
         for e in entries {
@@ -340,6 +380,29 @@ pub fn describe_text(e: &cadlab::command::Entry) -> String {
                 s += &format!("\n      {path}: {values}");
             }
         }
+    }
+    let view = e.describe_view(false);
+    if let Some(folded) = view["folded"].as_array() {
+        let names: Vec<&str> = folded.iter().filter_map(Value::as_str).collect();
+        s += &format!(
+            "\n  folded in the JSON schema (large; ask for one with `path`, e.g. \"{}\"): {}",
+            names.first().copied().unwrap_or(""),
+            names.join(", ")
+        );
+    }
+    s
+}
+
+/// Human-readable description of one part of a command's schema (`describe` with a `path`).
+pub fn describe_path_text(e: &cadlab::command::Entry, path: &str, view: &Value) -> String {
+    let mut s = format!("{} {path}:", e.name);
+    if let Some(sub) = e.schema_at(path) {
+        s += "\n";
+        s += &cadlab::command::schema_view::path_text(sub, &type_label);
+    }
+    if let Some(folded) = view["folded"].as_array() {
+        let names: Vec<&str> = folded.iter().filter_map(Value::as_str).collect();
+        s += &format!("\n  folded in the JSON schema (ask with `path`): {}", names.join(", "));
     }
     s
 }

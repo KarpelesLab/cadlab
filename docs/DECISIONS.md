@@ -1613,6 +1613,68 @@ uses no CPU (a server shows one idle thread per core after its first parallel ca
 fix above is a place where the number was right and the designer still could not get it, read it, or know what it
 meant.
 
+### D71. Items left by session 5: single pin changes, `describe` views, regions passed from ICs, flow-through parts by their connections, connectors along edges at no ratsnest cost, honest board use (2026-11-01)
+**Pins.** `part.set --pins {"TRIM": {"kind": "passive"}}` changes single pins (name, kind, group, side), keyed by
+number or by a name only one pin has (`part.pin_unknown`, `part.pin_ambiguous`, `part.pin_patch_empty`,
+`part.pin_patched_twice`). Nets go by number, so they keep their pins. A new type leaves the drawing alone; a new
+name, group or side lays the symbol out again with its sides kept. Imported symbols keep their drawing, and their
+pins' sides cannot change (`part.pin_side_imported`).
+**`describe`.** Registered schemas stay self-contained (CLI generation and argument checks read them);
+`describe` returns a view (`command::schema_view`). First, lossless: the length type (1019 uses in the command set,
+87 bytes of pattern each) and repeated subschemas move to `$defs`, which a test checks by expanding every schema
+of the command set back. Then, for a schema still over 6 KB, arguments over 2.5 KB are folded to their description,
+fields and variants (`x-folded`, listed in `folded`); `path` (`package_spec.qfn`, `pads.shape`, `output.stats`)
+returns the part asked for, an unknown step says what fits (`describe.unknown_path`), and `full` the schema as
+registered. Bytes over MCP: `part.create` 26 569 → 10 696 (one package family: 1.5 KB), `footprint.set`
+25 494 → 8 504, `footprint.generate` 21 679 → 5 781, `sim.sparams` 14 266 → 13 359, `impedance.calc` 11 187 → 10 512,
+all 169 describes 427 → 364 KB, the command listing 33 → 21 KB (summaries once, in the text). Flat lists of arguments
+(`sim.sparams`, `board.rules`) barely shrink: their descriptions are what an agent needs, so nothing there is folded.
+`tools/list`, what every agent pays up front: 50 900 → 41 923 bytes (shorter wording of the properties repeated in
+32 tools, the `describe` reminder moved to the instructions, `: string` left out of signatures, labels cut at 48
+characters with `...`).
+**Regions.** Passives (through their chain) and satellite ICs take the region of the anchor they go with unless they
+have their own region or an edge hint. An inherited region gives way when full (`place.region_full`, info, naming
+the parts) instead of leaving a part unplaced; an explicit one still does not. Session 5's VCAP1 capacitor stays
+on the digital side and its `drc.split_crossing` is gone.
+**Flow-through parts.** The first attempt, straight lines between the pads crossing or not, was wrong: a rotation
+does not change which way a pair's nets lie on leaving a package side (`board::place::pairs`). Each pad pair has a
+hand, the side of its way out the positive pad is on; two exits join uncrossed when their hands differ. So a
+rotation cannot create or remove a crossing; it decides whether the side that suits a neighbour faces it or the pair
+has to turn around the package, which fails where parts are close (the router then reports polarity) while the
+ratsnest barely sees it. With the anchors placed, a flow-through part takes the rotation with the fewest crossings, then room
+to break out, then the least turning (1 − cos of the angle off the way out, divided by the distance: a near neighbour
+leaves no room to turn), then length and pull. Its seat then stays, since improvement would pull it by its rails
+into the pair's room (session 5's VBUS, boxed between the pair's pads, lost its exit over 0.5 mm). When spreading,
+pair ends also keep their breakouts clear of each other, and improvement never moves one into more crossings. A
+crossing no placement can cure warns (`place.pair_crossing`; `board::place::pair_crossings`). Compact placement is
+unchanged. `flow_through_part_keeps_its_pair_uncrossed` routes a USB front on seven outlines: 3 of 7 failed
+with the orientation and breakout rule switched off, none with them.
+**Connectors along edges.** Why D67's attempts cost 10–17 %: a header across its edge reaches into the board, its
+pads on average half its length nearer what they connect to, and those attempts turned it where it stood. Now,
+after the group moves, each connector across its edge may take any place along any edge with its group turned
+rigidly around it, the one shortening the ratsnest most first, so that what one gains pays for the next; the result
+is kept only if the improved ratsnest ends no longer than without laying any (slack on the way of 12, 6, 3 and 0 %,
+since improvement wins some back; over 200 parts one attempt without slack, from the improved placement). Long
+connectors across their edge and ratsnest, before → after: STM32 100 × 75 mm 3 → 1, 1387 → 1370 mm (vias 76 → 70, 107
+of 109 routed before and after); STM32 60 × 45 mm 2 → 1, 893 → 863 mm (108 → 107 of 109 routed); channels 60 × 45 mm 4 → 0,
+394 → 371 mm; channels 100 × 80 mm 4 → 0, 529 → 509 mm; the ATtiny boards ±0.5 %. **The last header is not free:** the
+STM32 board's remaining one costs 9 % more ratsnest (1370 → 1497 mm, `place.auto --along-edges` lays them all), which is
+the geometry above, with the MCU at the center and ten pins, so it is left to the user. Tried and dropped: never
+letting the group moves increase how far a connector lies across (channels 100 × 80 mm 529 → 731 mm: rigid jumps
+near corners change the nearest edge), a relaxation again after laying (1370 → 1458 mm), crowding at full weight when
+choosing the place along the edge (STM32 60 × 45 mm 863 → 890 mm).
+**Board use.** The stats say where the parts are, not how good a placement is. Below 15 % fill (`sparse`) most windows are
+empty however well parts sit by their connections, and crowding reads 0 because the floor of a quarter of a window
+decides: `place.auto` now says so and to judge by the ratsnest; `fullest_window` says how dense the parts are where
+they are, on any board.
+*Why:* each of these was a workaround or a wrong signal for an agent: re-sending a pin list, paying 26 KB to read an
+argument it does not use, hinting every capacitor, a polarity failure that placement caused and could not see, a
+metric calling a better placement worse. Remaining: session 5's board stays close to the router's limit, its
+result moved by small placement changes (holding the flow-through part was needed for it to route; the other
+variations tried lost one or two connections); `big_board_spread_timing` measured 63 s under load (47 s in D67, not
+measured under the same conditions); the hand model takes a pair's way out as perpendicular to its pads, away from
+the part's center.
+
 ## Open questions
 
 
