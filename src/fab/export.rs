@@ -3,7 +3,6 @@
 //! never stored in the project: DECISIONS D12), a deterministic zip archive and `fab-lock.json`.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -436,19 +435,32 @@ pub fn cpl_csv(p: &Project, a: &Assembly) -> (String, Vec<AppliedOffset>) {
     (s, applied)
 }
 
-/// A zip archive of `files` in order, deflated, with fixed timestamps (1980-01-01) and
-/// permissions, so the same files always give the same bytes.
+/// A zip archive of `files` in order, deflated, with fixed timestamps (1980-01-01), owner
+/// 0:0 and permissions 0644, so the same files always give the same bytes (D75).
 pub fn zip(files: &[BundleFile]) -> std::io::Result<Vec<u8>> {
-    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let opts = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
+    use fstool::fs::Filesystem;
+    use fstool::fs::archive::zip::{ZipFormatOpts, ZipFs};
+    let err = |e: fstool::Error| std::io::Error::other(e.to_string());
+    // The writer needs a device of fixed size: room for every file stored (deflate falls
+    // back to that when it would grow), its headers and extras, and the directory.
+    let room: usize = files.iter().map(|f| f.content.len() + f.content.len() / 64 + 3 * f.name.len() + 256).sum();
+    let mut dev = fstool::block::MemoryBackend::new((room + 1024) as u64);
+    let mut z = ZipFs::format(&mut dev, &ZipFormatOpts::default()).map_err(err)?;
+    let dos_epoch = 315_532_800; // 1980-01-01T00:00:00Z, the earliest zip time.
+    let meta =
+        fstool::fs::FileMeta { mode: 0o644, uid: 0, gid: 0, mtime: dos_epoch, atime: dos_epoch, ctime: dos_epoch };
     for f in files {
-        w.start_file(f.name.as_str(), opts).map_err(std::io::Error::other)?;
-        w.write_all(&f.content)?;
+        let src = fstool::fs::FileSource::Reader {
+            reader: Box::new(std::io::Cursor::new(f.content.clone())),
+            len: f.content.len() as u64,
+        };
+        z.create_file(&mut dev, std::path::Path::new(&f.name), src, meta).map_err(err)?;
     }
-    Ok(w.finish().map_err(std::io::Error::other)?.into_inner())
+    z.flush(&mut dev).map_err(err)?;
+    let len = z.image_len().ok_or_else(|| std::io::Error::other("zip writer gave no archive length"))?;
+    let mut bytes = dev.as_slice().to_vec();
+    bytes.truncate(len as usize);
+    Ok(bytes)
 }
 
 /// What [`bundle`] needs besides the project.

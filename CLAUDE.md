@@ -25,7 +25,7 @@ Rules:
 
 Development:
 - Before every push run what CI runs: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-  `cargo test --all-features`, `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features` (CI also checks MSRV 1.89
+  `cargo test --all-features`, `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features` (CI also checks MSRV 1.95
   and `cargo-deny`).
 - Oracle tests: `CADLAB_ORACLES=1 CADLAB_ORACLE_KICAD_CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli cargo test`.
 - Golden files: `CADLAB_BLESS=1 cargo test` rewrites them; snapshots: `cargo insta review`.

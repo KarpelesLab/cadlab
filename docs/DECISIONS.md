@@ -1816,6 +1816,17 @@ the via centers (they change the shared mesh, and that run read |V2/V1| 0.09–0
 46 000 steps, not explained). Treating "structures out of the PML" as sufficient in general is not claimed: a small
 model with PEC walls on x and z diverged with a vacuum-only PML (unexplained, and not a configuration the export writes).
 
+### D75. Fab zip archives written with fstool; MSRV 1.95 (2026-11-04)
+The fab archive (D12 export) is written by `fstool`'s zip writer (the maintainer's own crate, MIT, features
+`archive` + `gzip` only) instead of the `zip` crate, and the fab tests read it back with fstool's reader. Members are
+deflated with every field fixed: 1980-01-01 mtime/atime, uid/gid 0, mode 0644, in the given order, so the same files
+give the same bytes on any OS and timezone. The bytes differ from archives written before this change (different
+deflate encoder and extras); file contents and names are unchanged. fstool needs Rust 1.95, so the MSRV moves from
+1.89 to 1.95. The writer currently needs a fixed-size in-memory device (its growable one isn't usable yet), so
+`fab::export::zip` sizes it from the contents and cuts at the reported archive length.
+*Why:* one less third-party dependency on the export path (and its extraction-side advisories), and archive
+handling stays in a crate the project's maintainer controls.
+
 ## Open questions
 
 

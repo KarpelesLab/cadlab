@@ -340,15 +340,16 @@ fn export_bundle_deterministic_zip_and_lock() {
     );
 
     // The zip holds exactly the fabrication files, flat, with the same contents.
-    let mut z = zip::ZipArchive::new(std::io::Cursor::new(a["p-jlcpcb.zip"].clone())).unwrap();
+    use fstool::fs::Filesystem;
+    let mut dev = fstool::block::MemoryBackend::from_bytes(a["p-jlcpcb.zip"].clone());
+    let mut z = fstool::fs::archive::zip::ZipFs::open(&mut dev).unwrap();
     let mut in_zip = Vec::new();
-    for i in 0..z.len() {
-        let mut f = z.by_index(i).unwrap();
-        let name = f.name().unwrap().to_string();
+    for e in z.list(&mut dev, std::path::Path::new("/")).unwrap() {
+        assert_eq!(e.kind, fstool::fs::EntryKind::Regular, "{} is not a flat file", e.name);
         let mut buf = Vec::new();
-        f.read_to_end(&mut buf).unwrap();
-        assert_eq!(&buf, &a[name.as_str()], "{name}");
-        in_zip.push(name);
+        z.read_file(&mut dev, std::path::Path::new(&format!("/{}", e.name))).unwrap().read_to_end(&mut buf).unwrap();
+        assert_eq!(&buf, &a[e.name.as_str()], "{}", e.name);
+        in_zip.push(e.name);
     }
     in_zip.sort();
     let mut fab_files: Vec<String> =

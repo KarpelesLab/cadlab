@@ -290,11 +290,11 @@ jobs:
           if-no-files-found: ignore
 
   msrv:
-    name: MSRV (1.89)
+    name: MSRV (1.95)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.95
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --all-features
 
