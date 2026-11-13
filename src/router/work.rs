@@ -38,6 +38,9 @@ pub(crate) const COMMIT_KEYS: u64 = 8;
 /// Work of optimizing one vertex of the final paths (exact checks).
 pub(crate) const POST_VERTEX: u64 = 800;
 
+/// Work of filling the pours again around the routing, per track and via.
+pub(crate) const POUR_ITEM: u64 = 150;
+
 /// Work of the verification DRC per track and via.
 pub(crate) const VERIFY_ITEM: u64 = 1000;
 

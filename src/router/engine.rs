@@ -85,6 +85,9 @@ pub(crate) struct Access {
 pub(crate) struct Island {
     pub terms: Vec<usize>,
     pub access: Vec<Access>,
+    /// The fills of the island's net that are part of it (indices into [`Engine::pours`]):
+    /// a connection to the island may end on them.
+    pub pours: Vec<u32>,
 }
 
 /// A connection to make: join island `a` with island `b`.
@@ -182,6 +185,12 @@ impl Default for NetRoute {
     }
 }
 
+/// How far from a connection's end a fill of the other side is a place to join it (and at
+/// least [`POUR_REACH_CELLS`] grid cells): a pad's via into a plane or track into a pour is
+/// short, and a longer way is found pad to pad.
+const POUR_REACH: f64 = 4_000_000.0;
+const POUR_REACH_CELLS: i32 = 16;
+
 /// Most nets routed in one batch.
 pub(crate) const MAX_BATCH: usize = 64;
 
@@ -262,6 +271,8 @@ pub(crate) struct Engine<'a> {
     pub any_angle: bool,
     /// Static reachability per profile (searches that cannot succeed are skipped).
     pub comps: super::components::Components,
+    /// Zone fills as cells a connection of their net may end on (`pours`).
+    pub pours: Vec<super::pours::Pour>,
 }
 
 /// Per-search working memory (one per thread).
@@ -435,6 +446,7 @@ impl<'a> Engine<'a> {
             grown: super::rooms::Grown::new(rb),
             any_angle: false,
             comps: super::components::Components::new(rb.profiles.len()),
+            pours: Vec::new(),
         }
     }
 
@@ -1514,6 +1526,30 @@ impl<'a> Engine<'a> {
         Ok(keys)
     }
 
+    /// Adds to `targets` the cells of the fills `pours` within [`POUR_REACH`] of `near` that the
+    /// net `nr` may use.
+    fn pour_targets(&self, nr: &NetRoute, pours: &[u32], near: P, targets: &mut Vec<u32>) {
+        if pours.is_empty() {
+            return;
+        }
+        let g = self.grid.g;
+        let (cx, cy) = (((near.x - self.grid.ox) / g).round() as i32, ((near.y - self.grid.oy) / g).round() as i32);
+        let reach = ((POUR_REACH / g).ceil() as i32).max(POUR_REACH_CELLS);
+        let mut cells = Vec::new();
+        for &pi in pours {
+            let pour = &self.pours[pi as usize];
+            cells.clear();
+            pour.cells_near(cx, cy, reach, &mut cells);
+            let map = &self.st.track[nr.prof][pour.slot];
+            targets.extend(
+                cells
+                    .iter()
+                    .filter(|&&(x, y)| self.st.ok(map[self.grid.didx(2 * x, 2 * y)], nr.net))
+                    .map(|&(x, y)| self.pack(pour.slot, x, y)),
+            );
+        }
+    }
+
     /// Routes every connection of a net (its wires are replaced, except, in negotiation, the
     /// ones `nr.keep` marks that still join its pads: see [`kept_wires`]). Connections whose
     /// islands are already joined by earlier or kept wires are skipped.
@@ -1538,6 +1574,8 @@ impl<'a> Engine<'a> {
         // as islands join: rebuilding them per connection was a third of the search time of
         // large nets (ground on glasgow-revC3).
         let mut sets: Vec<AccessSet<'_>> = nr.islands.iter().map(AccessSet::of).collect();
+        // The fills each joined group holds.
+        let mut pours: Vec<Vec<u32>> = nr.islands.iter().map(|i| i.pours.clone()).collect();
         // Kept wires (partial rip-up): their islands start joined, their nodes in the trees.
         if keep.len() == old.len() && matches!(mode, Mode::Negotiate(_)) {
             let kept = kept_wires(nr, old, &keep);
@@ -1550,6 +1588,8 @@ impl<'a> Engine<'a> {
                         let (ma, mb) = (std::mem::take(&mut sets[rb]), std::mem::take(&mut tree[rb]));
                         sets[ra].join(ma);
                         tree[ra].extend(mb);
+                        let mp = std::mem::take(&mut pours[rb]);
+                        pours[ra].extend(mp);
                         parent[rb] = ra;
                     }
                 }
@@ -1585,19 +1625,49 @@ impl<'a> Engine<'a> {
             sources.extend(sets[ra].src.iter().filter(|(k, v)| clear(**k, v.1)).map(|(k, v)| (*k, v.0)));
             let mut targets: Vec<u32> = tree[rb].clone();
             targets.extend(sets[rb].dst.iter().filter(|(k, st)| clear(**k, **st)).map(|(k, _)| *k));
+            // A side that holds fills can be joined anywhere on them near the other side's end
+            // (`pours`). When only the tree's side has fills the search runs from the other
+            // side, whose ends are few, and the path is turned around.
+            let flip = !pours[ra].is_empty() && pours[rb].is_empty();
+            if flip {
+                sources = tree[rb].iter().map(|&t| (t, 0.0)).collect();
+                sources.extend(sets[rb].src.iter().filter(|(k, v)| clear(**k, v.1)).map(|(k, v)| (*k, v.0)));
+                targets = tree[ra].clone();
+                targets.extend(sets[ra].dst.iter().filter(|(k, st)| clear(**k, **st)).map(|(k, _)| *k));
+            }
+            let (near, onto) = if flip { (nr.conns[ci].to_at, ra) } else { (nr.conns[ci].from_at, rb) };
+            self.pour_targets(nr, &pours[onto], near, &mut targets);
             if sources.is_empty() || targets.is_empty() {
                 nr.failed[ci] = Some(if had { FailKind::Congestion } else { FailKind::NoAccess });
                 continue;
             }
             match self.search(sc, nr.net, nr.prof, &sources, &targets, mode)? {
-                Some(path) => {
+                Some(mut path) => {
+                    if flip {
+                        path.reverse();
+                    }
                     let last = *path.last().expect("path");
-                    let start = if tree[ra].contains(&path[0]) { None } else { sets[ra].src[&path[0]].1.cloned() };
-                    let end = if tree[rb].contains(&last) { None } else { sets[rb].dst[&last].cloned() };
+                    // A node on a fill has no stub: the track ends on the fill's copper.
+                    let start = if tree[ra].contains(&path[0]) {
+                        None
+                    } else if flip {
+                        sets[ra].dst.get(&path[0]).and_then(|st| st.cloned())
+                    } else {
+                        sets[ra].src.get(&path[0]).and_then(|v| v.1.cloned())
+                    };
+                    let end = if tree[rb].contains(&last) {
+                        None
+                    } else if flip {
+                        sets[rb].src.get(&last).and_then(|v| v.1.cloned())
+                    } else {
+                        sets[rb].dst.get(&last).and_then(|st| st.cloned())
+                    };
                     let (ma, mb) = (std::mem::take(&mut sets[rb]), std::mem::take(&mut tree[rb]));
                     sets[ra].join(ma);
                     tree[ra].extend(mb);
                     tree[ra].extend(path.iter().copied());
+                    let mp = std::mem::take(&mut pours[rb]);
+                    pours[ra].extend(mp);
                     parent[rb] = ra;
                     let cells = self.cells() as u32;
                     for w in path.windows(2) {
@@ -1807,12 +1877,16 @@ mod tests {
         let acc = |node: u32, cost: f32, stub: Option<&Stub>| Access { node, stub: stub.cloned(), cost };
         // Node 5 in all three: equal costs and stubs decide by order; sizes differ so that both
         // merge directions run.
-        let a =
-            Island { terms: vec![], access: vec![acc(5, 1.0, Some(&s1)), acc(6, 1.0, None), acc(7, 3.0, Some(&s1))] };
-        let b = Island { terms: vec![], access: vec![acc(5, 1.0, None), acc(7, 2.0, Some(&s2))] };
+        let a = Island {
+            terms: vec![],
+            access: vec![acc(5, 1.0, Some(&s1)), acc(6, 1.0, None), acc(7, 3.0, Some(&s1))],
+            pours: vec![],
+        };
+        let b = Island { terms: vec![], access: vec![acc(5, 1.0, None), acc(7, 2.0, Some(&s2))], pours: vec![] };
         let c = Island {
             terms: vec![],
             access: vec![acc(5, 0.5, Some(&s2)), acc(8, 1.0, None), acc(9, 1.0, None), acc(10, 1.0, None)],
+            pours: vec![],
         };
         let view = |s: &AccessSet<'_>| {
             let src: Vec<_> = s.src.iter().map(|(k, v)| (*k, v.0, v.1.map(|t| t.len()))).collect();
@@ -1820,7 +1894,11 @@ mod tests {
             (src, dst)
         };
         for order in [[&a, &b, &c], [&c, &a, &b], [&b, &c, &a]] {
-            let whole = Island { terms: vec![], access: order.iter().flat_map(|i| i.access.iter().cloned()).collect() };
+            let whole = Island {
+                terms: vec![],
+                access: order.iter().flat_map(|i| i.access.iter().cloned()).collect(),
+                pours: vec![],
+            };
             let mut joined = AccessSet::of(order[0]);
             joined.join(AccessSet::of(order[1]));
             joined.join(AccessSet::of(order[2]));
@@ -1830,7 +1908,8 @@ mod tests {
 
     #[test]
     fn kept_wires_must_still_reach_the_pads() {
-        let isl = |node: u32| Island { terms: vec![], access: vec![Access { node, stub: None, cost: 0.0 }] };
+        let isl =
+            |node: u32| Island { terms: vec![], access: vec![Access { node, stub: None, cost: 0.0 }], pours: vec![] };
         let wire = |conn: usize, nodes: Vec<u32>| Wire { conn, nodes, start: None, end: None, geo: None };
         let nr = NetRoute { islands: vec![isl(1), isl(10), isl(20)], ..NetRoute::default() };
         // w0 joins islands 0 and 1; w1 starts on w0 and ends on island 2.

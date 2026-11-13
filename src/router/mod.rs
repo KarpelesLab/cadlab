@@ -62,6 +62,7 @@ mod index;
 mod model;
 mod pairs;
 mod post;
+mod pours;
 mod rooms;
 mod scoped;
 mod shove;
@@ -456,7 +457,7 @@ fn route_phases(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'
         }
     }
     let start = Instant::now();
-    let (mut first, missed) = route_run(p, scope, opts, hooks, Soft::No, &[], true)?;
+    let Run { result: mut first, missed } = route_run(p, scope, opts, hooks, Soft::No, &[], true)?;
     if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
         first = replan_boxed(p, scope, opts, hooks, first, &missed, start)?;
     }
@@ -563,7 +564,8 @@ fn replan_boxed(
     let keep_v: Vec<Via> = first.vias.iter().filter(|v| !mine(&v.net)).cloned().collect();
     apply_items(&mut q, &keep_t, &keep_v, &[], &[]);
     let sub = RouteOptions { budget: left, ..opts.clone() };
-    let (again, _) = route_run(&q, &Scope::Nets(group.iter().cloned().collect()), &sub, hooks, Soft::No, &prio, false)?;
+    let again =
+        route_run(&q, &Scope::Nets(group.iter().cloned().collect()), &sub, hooks, Soft::No, &prio, false)?.result;
     if failed(&again, &group) >= before {
         return Ok(first);
     }
@@ -892,7 +894,12 @@ fn shove_leftovers(
         let c = &out.connections[ci];
         let scope = Scope::Connection { from: c.from.clone(), to: c.to.clone() };
         let sub = RouteOptions { budget: left, ..opts.clone() };
-        let Some(r) = push_and_shove(&q, &scope, &sub, hooks)? else { continue };
+        // An end that is no pad of the board as given (a via of this run) cannot be named.
+        let r = match push_and_shove(&q, &scope, &sub, hooks) {
+            Ok(Some(r)) => r,
+            Ok(None) | Err(RouteError::Endpoint(_)) => continue,
+            Err(e) => return Err(e),
+        };
         let b = q.board_mut();
         b.tracks.retain(|t| !r.removed_tracks.contains(&t.id));
         b.vias.retain(|v| !r.removed_vias.contains(&v.id));
@@ -1372,7 +1379,7 @@ fn route_once(
     hooks: &Hooks<'_>,
     soft: Soft,
 ) -> Result<RouteResult, RouteError> {
-    Ok(route_run(p, scope, opts, hooks, soft, &[], false)?.0)
+    Ok(route_run(p, scope, opts, hooks, soft, &[], false)?.result)
 }
 
 /// Fewest connections of a net for partial rip-up in negotiation: such a net, when it is
@@ -1395,6 +1402,13 @@ const REPLAN_SETUPS: u32 = 2;
 /// fit the budget anyway, and the gridless phases keep their time.
 const REPLAN_SHARE: f64 = 0.25;
 
+/// What [`route_run`] returns.
+struct Run {
+    result: RouteResult,
+    /// The fine-pitch pads the escape planning left without an exit (labels).
+    missed: Vec<String>,
+}
+
 /// One routing run whose escape planning serves the pads `prio` (labels) first; also returns
 /// the fine-pitch pads its escape planning left without an exit. With `replan`, the
 /// gridless phases and via minimization stop early enough to leave the re-plan of those pads
@@ -1408,7 +1422,7 @@ fn route_run(
     soft: Soft,
     prio: &[String],
     replan: bool,
-) -> Result<(RouteResult, Vec<String>), RouteError> {
+) -> Result<Run, RouteError> {
     let start = Instant::now();
     let meter = &opts.work;
     let start_work = meter.used();
@@ -1484,6 +1498,11 @@ fn route_run(
     eng.any_angle = opts.any_angle;
     let mut sc = eng.scratch();
     let pool: std::sync::Mutex<Vec<Scratch>> = std::sync::Mutex::new(Vec::new());
+    // Fills: each island's connections may end on the fills that are part of it.
+    let mut term_island: Vec<usize> = rb.terminals.iter().map(|t| t.island).collect();
+    eng.pours = pours::build(&rb.fills, &rb, &eng.grid, &slots);
+    assign_pours(&eng, &mut routes, &term_island);
+    let poured = !rb.fills.is_empty() && !matches!(scope, Scope::Connection { .. }) && soft == Soft::No;
 
     (hooks.progress)(0, None, "access");
     // Static index for access stubs and exact checks.
@@ -1512,7 +1531,11 @@ fn route_run(
     let total_conns: usize = routes.iter().map(|r| r.conns.len()).sum();
     let tail = work::tail_estimate(total_conns, Span::since(start, meter, start_work));
     let budget_end = budget_end.before(tail);
-    *phase_end.lock().expect("deadline") = negotiate_end.before(tail.scaled(0.75));
+    let negotiate_limit = negotiate_end.before(tail.scaled(0.75));
+    *phase_end.lock().expect("deadline") = negotiate_limit.clone();
+    // With pours, a first negotiation still going at this point looks at what it cuts off.
+    let pour_first = Limit::share(opts.budget, start, meter, start_work, POUR_FIRST).before(tail.scaled(POUR_FIRST));
+    let mut mid_check = false;
     (hooks.progress)(0, None, "negotiation");
     // Setting up a run (fanout, board, grid, access) is most of what a re-plan of a few nets
     // costs.
@@ -1531,367 +1554,455 @@ fn route_run(
     let hist_fac = 0.5f32;
     let mut order: Vec<usize> = (0..routes.len()).collect();
     let mut reroute: Vec<usize> = order.clone();
-    let mut best: Option<Snapshot> = None;
-    let mut best_it = 0;
     let mut exhausted = false;
-    for it in 0..max_iter.max(1) {
-        stats.iterations = it + 1;
-        let mut k = 0;
-        for batch in engine::batches(&reroute, &routes) {
-            if (hooks.cancelled)() {
-                return Err(RouteError::Cancelled);
-            }
-            (hooks.progress)(
-                (it * nroutes + k) as u64,
-                None,
-                &format!("iteration {}: routing {}", it + 1, rb.nets[routes[batch[0]].net as usize]),
-            );
-            k += batch.len();
-            if route_batch(&mut eng, &mut routes, &batch, Mode::Negotiate(pres), &pool).is_err() {
-                exhausted = true;
-                for &ri in &batch {
-                    let r = &mut routes[ri];
-                    for (ci, f) in r.failed.iter_mut().enumerate() {
-                        if f.is_none() && !r.wires.iter().any(|w| w.conn == ci) {
-                            *f = Some(FailKind::Budget);
-                        }
-                    }
-                }
-                break;
-            }
-        }
-        // Overuse.
-        let mut points: Vec<(engine::Conflict, usize)> = Vec::new();
-        let mut net_conf = vec![0usize; routes.len()];
-        for (ri, r) in routes.iter().enumerate() {
-            let c = eng.conflicts(r);
-            net_conf[ri] = c.len();
-            points.extend(c.into_iter().map(|c| (c, ri)));
-        }
-        let total: usize = net_conf.iter().sum();
-        stats.overuse.push(total);
-        (hooks.progress)(
-            ((it + 1) * routes.len()) as u64,
-            None,
-            &format!("iteration {}: {total} overused points", it + 1),
-        );
-        if best.as_ref().is_none_or(|b| total < b.0) {
-            best = Some((
-                total,
-                routes.iter().map(|r| r.wires.clone()).collect(),
-                routes.iter().map(|r| r.failed.clone()).collect(),
-            ));
-            best_it = it;
-        }
-        if total == 0 || exhausted || stop() || it - best_it >= STAGNATION {
-            exhausted |= total > 0 && stop();
-            break;
-        }
-        for (c, _) in &points {
-            eng.add_history(*c, hist_fac);
-        }
-        // Capped: beyond it, sharing is already prohibitive and a higher factor only makes
-        // the searches of the nets still in conflict visit ever more of the board.
-        pres = (pres * 1.6).min(PRES_MAX);
-        // Reroute nets with overuse and nets whose routes are near an overused point.
-        let mut set: BTreeSet<usize> = BTreeSet::new();
-        for (c, ri) in &points {
-            set.insert(*ri);
-            let at = eng.conflict_pos(*c);
-            for (rj, r) in routes.iter().enumerate() {
-                if r.bbox.expand(reach).dist(at) == 0.0 {
-                    set.insert(rj);
-                }
-            }
-        }
-        reroute = order.iter().copied().filter(|r| set.contains(r)).collect();
-        // Nets with many connections rerouted only for being near the overuse (none of their
-        // own) keep the wires clear of it (partial rip-up).
-        let hot: Vec<P> = points.iter().map(|(c, _)| eng.conflict_pos(*c)).collect();
-        for &ri in &reroute {
-            let r = &mut routes[ri];
-            if r.conns.len() < PARTIAL_MIN || net_conf[ri] > 0 {
-                continue;
-            }
-            r.keep = r
-                .wires
-                .iter()
-                .map(|w| {
-                    let mut bb = BoxF::EMPTY;
-                    for &q in &w.nodes {
-                        let (_, x, y) = eng.unpack(q);
-                        bb.add(eng.grid.cell(x, y));
-                    }
-                    let bb = bb.expand(reach + PARTIAL_MARGIN * pitch);
-                    w.geo.is_none() && !w.nodes.is_empty() && !hot.iter().any(|&h| bb.dist(h) == 0.0)
-                })
-                .collect();
-        }
-        // Perturb the order a little (seeded) to break cycles.
-        for i in (1..reroute.len()).rev() {
-            if rng.next().is_multiple_of(4) {
-                let j = (rng.next() % (i as u64 + 1)) as usize;
-                reroute.swap(i, j);
-            }
-        }
-        order.sort_by_key(|&r| std::cmp::Reverse(net_conf[r]));
-        order.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length));
-    }
-    if (hooks.cancelled)() {
-        return Err(RouteError::Cancelled);
-    }
-    // Partial rip-up only applies to negotiation (a cut-short iteration leaves masks behind).
-    for r in routes.iter_mut() {
-        r.keep.clear();
-    }
-    // Restore the best iteration.
-    if let Some((bt, wires, failed)) = best {
-        let cur: usize = routes.iter().map(|r| eng.conflicts(r).len()).sum();
-        if bt < cur {
-            for r in routes.iter_mut() {
-                eng.uncommit(r);
-            }
-            for ((r, w), f) in routes.iter_mut().zip(wires).zip(failed) {
-                r.wires = w;
-                r.failed = f;
-                eng.commit(r);
-            }
-        }
-    }
-
-    // ---- legalization: rip what still conflicts, reroute without sharing ----
-    *phase_end.lock().expect("deadline") = budget_end.clone();
-    let mut ripped: Vec<usize> = Vec::new();
+    let mut pour_rounds = 0;
+    // Whether the phases after negotiation ran (they run once), and the pour rounds since.
+    let mut late = false;
+    let mut late_rounds = 0;
+    // Whether pour rounds go on, and the routing before the last one.
+    let mut pours_ok = poured;
+    let mut pending: Option<PourSnapshot> = None;
+    let mut iterations = 0;
     loop {
-        let conf: Vec<usize> = routes.iter().map(|r| eng.conflicts(r).len()).collect();
-        let Some((worst, _)) = conf
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| **c > 0)
-            .max_by(|a, b| a.1.cmp(b.1).then(routes[a.0].length.total_cmp(&routes[b.0].length)))
-        else {
-            break;
-        };
-        let r = &mut routes[worst];
-        eng.uncommit(r);
-        r.wires.clear();
-        ripped.push(worst);
-    }
-    ripped.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length).then(a.cmp(b)));
-    (hooks.progress)(0, None, &format!("legalizing {} nets", ripped.len()));
-    for ri in ripped {
-        if (hooks.cancelled)() {
-            return Err(RouteError::Cancelled);
-        }
-        let r = &mut routes[ri];
-        let res = eng.route_net(&mut sc, r, Mode::Hard);
-        eng.commit(r);
-        if res.is_err() {
-            if (hooks.cancelled)() {
-                return Err(RouteError::Cancelled);
-            }
-            exhausted = true;
-            for (ci, f) in r.failed.iter_mut().enumerate() {
-                if f.is_none() && !r.wires.iter().any(|w| w.conn == ci) {
-                    *f = Some(FailKind::Budget);
-                }
-            }
-        }
-    }
-    (hooks.progress)(0, None, "rip-up and retry");
-    // ---- rip-up and retry: a net that still fails takes the room of the nets in its way,
-    // which are routed again around it; kept only when fewer connections fail overall ----
-    let mut sideways = SIDEWAYS;
-    for _ in 0..RETRY_ROUNDS {
-        let mut improved = false;
-        let failing: Vec<usize> =
-            (0..routes.len()).filter(|&ri| routes[ri].failed.contains(&Some(FailKind::Congestion))).collect();
-        for fi in failing {
-            if (hooks.cancelled)() {
-                return Err(RouteError::Cancelled);
-            }
-            if stop() {
-                break;
-            }
-            let Some(ci) = routes[fi].failed.iter().position(|f| *f == Some(FailKind::Congestion)) else { continue };
-            let Ok(keys) = eng.blocking_keys(&mut sc, &routes[fi], ci) else { break };
-            let blockers: Vec<usize> = (0..routes.len())
-                .filter(|&j| j != fi && keys.iter().any(|k| routes[j].keys.binary_search(k).is_ok()))
-                .collect();
-            if blockers.is_empty() || blockers.len() > 8 {
-                continue;
-            }
-            let group: Vec<usize> = std::iter::once(fi).chain(blockers.iter().copied()).collect();
-            let fails = |routes: &[NetRoute]| -> usize {
-                group.iter().map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count()).sum()
-            };
-            let before = fails(&routes);
-            let saved: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)> =
-                group.iter().map(|&j| (routes[j].wires.clone(), routes[j].failed.clone())).collect();
-            for &j in &group {
-                eng.uncommit(&mut routes[j]);
-            }
-            let mut ok = true;
-            for &j in &group {
-                ok &= eng.route_net(&mut sc, &mut routes[j], Mode::Hard).is_ok();
-                eng.commit(&mut routes[j]);
-            }
-            // Kept when fewer connections fail, or (a few times) when as many fail but the
-            // failure moved to another net, which gets its own retry next.
-            let after = fails(&routes);
-            let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
-            if ok && (after < before || moved) {
-                sideways -= usize::from(moved);
-                improved = true;
-                continue;
-            }
-            for (&j, (w, f)) in group.iter().zip(saved) {
-                eng.uncommit(&mut routes[j]);
-                routes[j].wires = w;
-                routes[j].failed = f;
-                eng.commit(&mut routes[j]);
-            }
-            if !ok {
-                break;
-            }
-        }
-        if !improved {
-            break;
-        }
-    }
-    // Boxed pads whose connections still fail get their exits re-planned afterwards
-    // (`replan_boxed`), which needs time the gridless phases would otherwise take.
-    let reserve = setup.times(REPLAN_SETUPS);
-    if replan
-        && (opts.budget.is_some() || meter.limit().is_some())
-        && reserve.at_most_share(REPLAN_SHARE, opts.budget, meter, start_work)
-        && routes.iter().any(|r| {
-            r.conns
-                .iter()
-                .zip(&r.failed)
-                .any(|(c, f)| f.is_some() && (missed.contains(&c.from) || missed.contains(&c.to)))
-        })
-    {
-        *phase_end.lock().expect("deadline") = budget_end.before(reserve);
-    }
-    (hooks.progress)(0, None, "gridless pass");
-    // ---- `auto`: what the grid left unrouted, by exact gridless searches ----
-    if search == SearchKind::Auto {
-        for r in routes.iter_mut() {
-            if (hooks.cancelled)() {
-                return Err(RouteError::Cancelled);
-            }
-            if stop() {
-                break;
-            }
-            if !r.failed.iter().any(expansion::retryable) {
-                continue;
-            }
-            (hooks.progress)(0, None, &format!("gridless: {}", rb.nets[r.net as usize]));
-            eng.uncommit(r);
-            let res = expansion::route_failed(&eng, &mut sc, r);
-            eng.commit(r);
-            match res {
-                Ok(n) => stats.gridless += n,
-                Err(_) => {
-                    exhausted = true;
-                    break;
-                }
-            }
-        }
-    }
-    (hooks.progress)(0, None, "gridless rip-up and retry");
-    // ---- gridless rip-up and retry: a failed connection takes a path that keeps every static
-    // rule but may run through the routing of a few other nets (a probe), and those nets are
-    // routed again around it; kept only when fewer connections fail ----
-    if search != SearchKind::Grid {
-        let by_net: BTreeMap<u32, usize> = routes.iter().enumerate().map(|(ri, r)| (r.net, ri)).collect();
-        let mut sideways = SIDEWAYS;
-        for _ in 0..RETRY_ROUNDS {
-            let mut improved = false;
-            let failing: Vec<(usize, usize)> = routes
-                .iter()
-                .enumerate()
-                .flat_map(|(ri, r)| {
-                    r.failed.iter().enumerate().filter(|(_, f)| expansion::retryable(f)).map(move |(ci, _)| (ri, ci))
-                })
-                .collect();
-            for (fi, ci) in failing {
+        let mut best: Option<Snapshot> = None;
+        let mut best_it = 0;
+        // Whether this round's negotiation ended on the budget, or early for the pour rounds.
+        let mut cut = false;
+        let mut pause = false;
+        for it in 0..max_iter.max(1) {
+            iterations += 1;
+            stats.iterations = iterations;
+            let mut k = 0;
+            for batch in engine::batches(&reroute, &routes) {
                 if (hooks.cancelled)() {
                     return Err(RouteError::Cancelled);
                 }
-                if stop() {
-                    break;
-                }
-                if !expansion::retryable(&routes[fi].failed[ci]) {
-                    continue;
-                }
-                let fails = |routes: &[NetRoute], group: &[usize]| -> usize {
-                    group.iter().map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count()).sum()
-                };
-                eng.uncommit(&mut routes[fi]);
-                let Ok(probe) = expansion::probe(&eng, &mut sc, &mut routes[fi], ci) else {
-                    eng.commit(&mut routes[fi]);
-                    break;
-                };
-                let Some(path) = probe else {
-                    eng.commit(&mut routes[fi]);
-                    continue;
-                };
-                let blockers: Vec<usize> = eng
-                    .geo_blockers(routes[fi].net, &engine::Wire::gridless(ci, path.clone()))
-                    .iter()
-                    .filter_map(|n| by_net.get(n).copied())
-                    .filter(|&j| j != fi)
-                    .collect();
-                if blockers.len() > 8 {
-                    eng.commit(&mut routes[fi]);
-                    continue;
-                }
-                let group: Vec<usize> = std::iter::once(fi).chain(blockers.iter().copied()).collect();
-                let before = fails(&routes, &group);
-                let saved: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)> =
-                    group.iter().map(|&j| (routes[j].wires.clone(), routes[j].failed.clone())).collect();
-                for &j in &blockers {
-                    eng.uncommit(&mut routes[j]);
-                }
-                expansion::add_probe(&eng, &mut sc, &mut routes[fi], ci, path);
-                eng.commit(&mut routes[fi]);
-                let mut ok = true;
-                for &j in &blockers {
-                    ok &= eng.route_net(&mut sc, &mut routes[j], Mode::Hard).is_ok();
-                    if ok && routes[j].failed.iter().any(expansion::retryable) {
-                        ok &= expansion::route_failed(&eng, &mut sc, &mut routes[j]).is_ok();
+                (hooks.progress)(
+                    (it * nroutes + k) as u64,
+                    None,
+                    &format!("iteration {}: routing {}", it + 1, rb.nets[routes[batch[0]].net as usize]),
+                );
+                k += batch.len();
+                if route_batch(&mut eng, &mut routes, &batch, Mode::Negotiate(pres), &pool).is_err() {
+                    cut = true;
+                    for &ri in &batch {
+                        let r = &mut routes[ri];
+                        for (ci, f) in r.failed.iter_mut().enumerate() {
+                            if f.is_none() && !r.wires.iter().any(|w| w.conn == ci) {
+                                *f = Some(FailKind::Budget);
+                            }
+                        }
                     }
-                    eng.commit(&mut routes[j]);
-                }
-                let after = fails(&routes, &group);
-                let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
-                if ok && (after < before || moved) {
-                    sideways -= usize::from(moved);
-                    stats.gridless += 1;
-                    improved = true;
-                    continue;
-                }
-                for (&j, (w, f)) in group.iter().zip(saved) {
-                    eng.uncommit(&mut routes[j]);
-                    routes[j].wires = w;
-                    routes[j].failed = f;
-                    eng.commit(&mut routes[j]);
-                }
-                if !ok {
                     break;
                 }
             }
-            if !improved {
+            // Overuse.
+            let mut points: Vec<(engine::Conflict, usize)> = Vec::new();
+            let mut net_conf = vec![0usize; routes.len()];
+            for (ri, r) in routes.iter().enumerate() {
+                let c = eng.conflicts(r);
+                net_conf[ri] = c.len();
+                points.extend(c.into_iter().map(|c| (c, ri)));
+            }
+            let total: usize = net_conf.iter().sum();
+            stats.overuse.push(total);
+            (hooks.progress)(
+                ((it + 1) * routes.len()) as u64,
+                None,
+                &format!("iteration {}: {total} overused points", it + 1),
+            );
+            if best.as_ref().is_none_or(|b| total < b.0) {
+                best = Some((
+                    total,
+                    routes.iter().map(|r| r.wires.clone()).collect(),
+                    routes.iter().map(|r| r.failed.clone()).collect(),
+                ));
+                best_it = it;
+            }
+            // Pours, on a board whose first negotiation is still going late in its share of the
+            // budget: when the routing as it stands cuts enough pads off their fills, negotiation
+            // ends here, so that the pour rounds get the rest of its share; else it goes on.
+            if pours_ok && !mid_check && pour_rounds == 0 && !late && total > 0 && pour_first.passed() {
+                mid_check = true;
+                (hooks.progress)(0, None, "pours");
+                let truth = pour_truth(p, &rb, scope, &eng, &routes);
+                let n = cut_off(&rb, &term_island, &truth_islands(&rb, &truth));
+                (hooks.progress)(0, None, &format!("pours: {n} pads cut off"));
+                pause = n > 0 && n * POUR_PAUSE >= total_conns;
+            }
+            if total == 0 || cut || pause || stop() || it - best_it >= STAGNATION {
+                cut |= total > 0 && stop();
+                break;
+            }
+            for (c, _) in &points {
+                eng.add_history(*c, hist_fac);
+            }
+            // Capped: beyond it, sharing is already prohibitive and a higher factor only makes
+            // the searches of the nets still in conflict visit ever more of the board.
+            pres = (pres * 1.6).min(PRES_MAX);
+            // Reroute nets with overuse and nets whose routes are near an overused point.
+            let mut set: BTreeSet<usize> = BTreeSet::new();
+            for (c, ri) in &points {
+                set.insert(*ri);
+                let at = eng.conflict_pos(*c);
+                for (rj, r) in routes.iter().enumerate() {
+                    if r.bbox.expand(reach).dist(at) == 0.0 {
+                        set.insert(rj);
+                    }
+                }
+            }
+            reroute = order.iter().copied().filter(|r| set.contains(r)).collect();
+            // Nets with many connections rerouted only for being near the overuse (none of their
+            // own) keep the wires clear of it (partial rip-up).
+            let hot: Vec<P> = points.iter().map(|(c, _)| eng.conflict_pos(*c)).collect();
+            for &ri in &reroute {
+                let r = &mut routes[ri];
+                if r.conns.len() < PARTIAL_MIN || net_conf[ri] > 0 {
+                    continue;
+                }
+                r.keep = r
+                    .wires
+                    .iter()
+                    .map(|w| {
+                        let mut bb = BoxF::EMPTY;
+                        for &q in &w.nodes {
+                            let (_, x, y) = eng.unpack(q);
+                            bb.add(eng.grid.cell(x, y));
+                        }
+                        let bb = bb.expand(reach + PARTIAL_MARGIN * pitch);
+                        w.geo.is_none() && !w.nodes.is_empty() && !hot.iter().any(|&h| bb.dist(h) == 0.0)
+                    })
+                    .collect();
+            }
+            // Perturb the order a little (seeded) to break cycles.
+            for i in (1..reroute.len()).rev() {
+                if rng.next().is_multiple_of(4) {
+                    let j = (rng.next() % (i as u64 + 1)) as usize;
+                    reroute.swap(i, j);
+                }
+            }
+            order.sort_by_key(|&r| std::cmp::Reverse(net_conf[r]));
+            order.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length));
+        }
+        if (hooks.cancelled)() {
+            return Err(RouteError::Cancelled);
+        }
+        // Partial rip-up only applies to negotiation (a cut-short iteration leaves masks behind).
+        for r in routes.iter_mut() {
+            r.keep.clear();
+        }
+        exhausted |= cut;
+        // Restore the best iteration.
+        if let Some((bt, wires, failed)) = best {
+            let cur: usize = routes.iter().map(|r| eng.conflicts(r).len()).sum();
+            if bt < cur {
+                for r in routes.iter_mut() {
+                    eng.uncommit(r);
+                }
+                for ((r, w), f) in routes.iter_mut().zip(wires).zip(failed) {
+                    r.wires = w;
+                    r.failed = f;
+                    eng.commit(r);
+                }
+            }
+        }
+        // ---- legalization: rip what still conflicts, reroute without sharing ----
+        *phase_end.lock().expect("deadline") = budget_end.clone();
+        let mut ripped: Vec<usize> = Vec::new();
+        loop {
+            let conf: Vec<usize> = routes.iter().map(|r| eng.conflicts(r).len()).collect();
+            let Some((worst, _)) = conf
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c > 0)
+                .max_by(|a, b| a.1.cmp(b.1).then(routes[a.0].length.total_cmp(&routes[b.0].length)))
+            else {
+                break;
+            };
+            let r = &mut routes[worst];
+            eng.uncommit(r);
+            r.wires.clear();
+            ripped.push(worst);
+        }
+        ripped.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length).then(a.cmp(b)));
+        (hooks.progress)(0, None, &format!("legalizing {} nets", ripped.len()));
+        for ri in ripped {
+            if (hooks.cancelled)() {
+                return Err(RouteError::Cancelled);
+            }
+            let r = &mut routes[ri];
+            let res = eng.route_net(&mut sc, r, Mode::Hard);
+            eng.commit(r);
+            if res.is_err() {
+                if (hooks.cancelled)() {
+                    return Err(RouteError::Cancelled);
+                }
+                exhausted = true;
+                for (ci, f) in r.failed.iter_mut().enumerate() {
+                    if f.is_none() && !r.wires.iter().any(|w| w.conn == ci) {
+                        *f = Some(FailKind::Budget);
+                    }
+                }
+            }
+        }
+        if !late {
+            // Pours: the routing is legal now, so it is what the board would get. Nets whose fills
+            // it cut apart are planned again from what the fills still join and negotiate again, the
+            // other nets making room for them.
+            if pours_ok {
+                let may = pour_rounds < POUR_NEGOTIATIONS && !stop() && !negotiate_limit.passed();
+                (hooks.progress)(0, None, "pours");
+                let step = {
+                    let ck = Checker { rb: &rb, index: &index };
+                    pour_round(p, &rb, scope, &slots, &mut eng, &ck, &mut routes, &mut term_island, &mut pending, may)
+                };
+                match step {
+                    None => {
+                        (hooks.progress)(0, None, "pours: more connections open, back to the routing before");
+                        pours_ok = false;
+                    }
+                    Some(changed) => {
+                        (hooks.progress)(0, None, &format!("pours: {} nets planned again", changed.len()));
+                        if !changed.is_empty() {
+                            pour_rounds += 1;
+                            *phase_end.lock().expect("deadline") = negotiate_limit.clone();
+                            order = (0..routes.len()).collect();
+                            order.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length));
+                            reroute = changed;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            (hooks.progress)(0, None, "rip-up and retry");
+            // ---- rip-up and retry: a net that still fails takes the room of the nets in its way,
+            // which are routed again around it; kept only when fewer connections fail overall ----
+            let mut sideways = SIDEWAYS;
+            for _ in 0..RETRY_ROUNDS {
+                let mut improved = false;
+                let failing: Vec<usize> =
+                    (0..routes.len()).filter(|&ri| routes[ri].failed.contains(&Some(FailKind::Congestion))).collect();
+                for fi in failing {
+                    if (hooks.cancelled)() {
+                        return Err(RouteError::Cancelled);
+                    }
+                    if stop() {
+                        break;
+                    }
+                    let Some(ci) = routes[fi].failed.iter().position(|f| *f == Some(FailKind::Congestion)) else {
+                        continue;
+                    };
+                    let Ok(keys) = eng.blocking_keys(&mut sc, &routes[fi], ci) else { break };
+                    let blockers: Vec<usize> = (0..routes.len())
+                        .filter(|&j| j != fi && keys.iter().any(|k| routes[j].keys.binary_search(k).is_ok()))
+                        .collect();
+                    if blockers.is_empty() || blockers.len() > 8 {
+                        continue;
+                    }
+                    let group: Vec<usize> = std::iter::once(fi).chain(blockers.iter().copied()).collect();
+                    let fails = |routes: &[NetRoute]| -> usize {
+                        group.iter().map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count()).sum()
+                    };
+                    let before = fails(&routes);
+                    let saved: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)> =
+                        group.iter().map(|&j| (routes[j].wires.clone(), routes[j].failed.clone())).collect();
+                    for &j in &group {
+                        eng.uncommit(&mut routes[j]);
+                    }
+                    let mut ok = true;
+                    for &j in &group {
+                        ok &= eng.route_net(&mut sc, &mut routes[j], Mode::Hard).is_ok();
+                        eng.commit(&mut routes[j]);
+                    }
+                    // Kept when fewer connections fail, or (a few times) when as many fail but the
+                    // failure moved to another net, which gets its own retry next.
+                    let after = fails(&routes);
+                    let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
+                    if ok && (after < before || moved) {
+                        sideways -= usize::from(moved);
+                        improved = true;
+                        continue;
+                    }
+                    for (&j, (w, f)) in group.iter().zip(saved) {
+                        eng.uncommit(&mut routes[j]);
+                        routes[j].wires = w;
+                        routes[j].failed = f;
+                        eng.commit(&mut routes[j]);
+                    }
+                    if !ok {
+                        break;
+                    }
+                }
+                if !improved {
+                    break;
+                }
+            }
+            // Boxed pads whose connections still fail get their exits re-planned afterwards
+            // (`replan_boxed`), which needs time the gridless phases would otherwise take.
+            let reserve = setup.times(REPLAN_SETUPS);
+            if replan
+                && (opts.budget.is_some() || meter.limit().is_some())
+                && reserve.at_most_share(REPLAN_SHARE, opts.budget, meter, start_work)
+                && routes.iter().any(|r| {
+                    r.conns
+                        .iter()
+                        .zip(&r.failed)
+                        .any(|(c, f)| f.is_some() && (missed.contains(&c.from) || missed.contains(&c.to)))
+                })
+            {
+                *phase_end.lock().expect("deadline") = budget_end.before(reserve);
+            }
+            (hooks.progress)(0, None, "gridless pass");
+            // ---- `auto`: what the grid left unrouted, by exact gridless searches ----
+            if search == SearchKind::Auto {
+                for r in routes.iter_mut() {
+                    if (hooks.cancelled)() {
+                        return Err(RouteError::Cancelled);
+                    }
+                    if stop() {
+                        break;
+                    }
+                    if !r.failed.iter().any(expansion::retryable) {
+                        continue;
+                    }
+                    (hooks.progress)(0, None, &format!("gridless: {}", rb.nets[r.net as usize]));
+                    eng.uncommit(r);
+                    let res = expansion::route_failed(&eng, &mut sc, r);
+                    eng.commit(r);
+                    match res {
+                        Ok(n) => stats.gridless += n,
+                        Err(_) => {
+                            exhausted = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            (hooks.progress)(0, None, "gridless rip-up and retry");
+            // ---- gridless rip-up and retry: a failed connection takes a path that keeps every static
+            // rule but may run through the routing of a few other nets (a probe), and those nets are
+            // routed again around it; kept only when fewer connections fail ----
+            if search != SearchKind::Grid {
+                let by_net: BTreeMap<u32, usize> = routes.iter().enumerate().map(|(ri, r)| (r.net, ri)).collect();
+                let mut sideways = SIDEWAYS;
+                for _ in 0..RETRY_ROUNDS {
+                    let mut improved = false;
+                    let failing: Vec<(usize, usize)> = routes
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(ri, r)| {
+                            r.failed
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, f)| expansion::retryable(f))
+                                .map(move |(ci, _)| (ri, ci))
+                        })
+                        .collect();
+                    for (fi, ci) in failing {
+                        if (hooks.cancelled)() {
+                            return Err(RouteError::Cancelled);
+                        }
+                        if stop() {
+                            break;
+                        }
+                        if !expansion::retryable(&routes[fi].failed[ci]) {
+                            continue;
+                        }
+                        let fails = |routes: &[NetRoute], group: &[usize]| -> usize {
+                            group.iter().map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count()).sum()
+                        };
+                        eng.uncommit(&mut routes[fi]);
+                        let Ok(probe) = expansion::probe(&eng, &mut sc, &mut routes[fi], ci) else {
+                            eng.commit(&mut routes[fi]);
+                            break;
+                        };
+                        let Some(path) = probe else {
+                            eng.commit(&mut routes[fi]);
+                            continue;
+                        };
+                        let blockers: Vec<usize> = eng
+                            .geo_blockers(routes[fi].net, &engine::Wire::gridless(ci, path.clone()))
+                            .iter()
+                            .filter_map(|n| by_net.get(n).copied())
+                            .filter(|&j| j != fi)
+                            .collect();
+                        if blockers.len() > 8 {
+                            eng.commit(&mut routes[fi]);
+                            continue;
+                        }
+                        let group: Vec<usize> = std::iter::once(fi).chain(blockers.iter().copied()).collect();
+                        let before = fails(&routes, &group);
+                        let saved: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)> =
+                            group.iter().map(|&j| (routes[j].wires.clone(), routes[j].failed.clone())).collect();
+                        for &j in &blockers {
+                            eng.uncommit(&mut routes[j]);
+                        }
+                        expansion::add_probe(&eng, &mut sc, &mut routes[fi], ci, path);
+                        eng.commit(&mut routes[fi]);
+                        let mut ok = true;
+                        for &j in &blockers {
+                            ok &= eng.route_net(&mut sc, &mut routes[j], Mode::Hard).is_ok();
+                            if ok && routes[j].failed.iter().any(expansion::retryable) {
+                                ok &= expansion::route_failed(&eng, &mut sc, &mut routes[j]).is_ok();
+                            }
+                            eng.commit(&mut routes[j]);
+                        }
+                        let after = fails(&routes, &group);
+                        let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
+                        if ok && (after < before || moved) {
+                            sideways -= usize::from(moved);
+                            stats.gridless += 1;
+                            improved = true;
+                            continue;
+                        }
+                        for (&j, (w, f)) in group.iter().zip(saved) {
+                            eng.uncommit(&mut routes[j]);
+                            routes[j].wires = w;
+                            routes[j].failed = f;
+                            eng.commit(&mut routes[j]);
+                        }
+                        if !ok {
+                            break;
+                        }
+                    }
+                    if !improved {
+                        break;
+                    }
+                }
+            }
+            (hooks.progress)(0, None, "via minimization");
+            // ---- via minimization: nets with vias are routed again with dear vias ----
+            if !stop() {
+                stats.vias_removed += minimize_vias(&mut eng, &mut sc, &mut routes, &stop, hooks)?;
+            }
+            late = true;
+        }
+        // The retries and via minimization moved nets: the pours once more, negotiating again for
+        // what they cut off.
+        if !pours_ok {
+            break;
+        }
+        let may = late_rounds < POUR_ROUNDS && !stop();
+        (hooks.progress)(0, None, "pours");
+        let step = {
+            let ck = Checker { rb: &rb, index: &index };
+            pour_round(p, &rb, scope, &slots, &mut eng, &ck, &mut routes, &mut term_island, &mut pending, may)
+        };
+        match step {
+            Some(changed) if !changed.is_empty() => {
+                (hooks.progress)(0, None, &format!("pours: {} nets planned again", changed.len()));
+                late_rounds += 1;
+                order = (0..routes.len()).collect();
+                order.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length));
+                reroute = changed;
+            }
+            Some(_) => break,
+            None => {
+                (hooks.progress)(0, None, "pours: more connections open, back to the routing before");
                 break;
             }
         }
-    }
-    (hooks.progress)(0, None, "via minimization");
-    // ---- via minimization: nets with vias are routed again with dear vias ----
-    if !stop() {
-        stats.vias_removed += minimize_vias(&mut eng, &mut sc, &mut routes, &stop, hooks)?;
     }
     // Any phase that ended on the budget: what it would have done next is missing.
     stats.budget_exhausted = exhausted || stop();
@@ -2142,7 +2253,60 @@ fn route_run(
             reports.push(rep);
         }
     }
-    stats.connections = total_conns;
+    // Pours are filled again around the new copper: pads a pour joined when the run was planned
+    // and the routing then cut off from it are open connections no planned connection stands
+    // for. A net with more connections open on the routed board than it has failures reports
+    // the difference, from the board's ratsnest.
+    if poured {
+        let mut open: BTreeMap<String, Vec<geo_board::RatLine>> = BTreeMap::new();
+        for l in geo_board::ratsnest_from(&fitems, &fisl) {
+            let wanted = match scope {
+                Scope::Nets(list) => list.contains(&l.net),
+                _ => true,
+            };
+            if wanted && rb.fills.iter().any(|f| rb.nets[f.net as usize] == l.net) {
+                open.entry(l.net.clone()).or_default().push(l);
+            }
+        }
+        for (net, lines) in open {
+            let failed: Vec<(&str, &str)> = reports
+                .iter()
+                .filter(|r| r.net == net && r.status == ConnStatus::Failed)
+                .map(|r| (r.from.as_str(), r.to.as_str()))
+                .collect();
+            let more = lines.len().saturating_sub(failed.len());
+            let known = |l: &geo_board::RatLine| {
+                failed.contains(&(l.from.as_str(), l.to.as_str())) || failed.contains(&(l.to.as_str(), l.from.as_str()))
+            };
+            let extra: Vec<ConnectionReport> = lines
+                .iter()
+                .filter(|l| !known(l))
+                .take(more)
+                .map(|l| ConnectionReport {
+                    net: net.clone(),
+                    from: l.from.clone(),
+                    to: l.to.clone(),
+                    status: ConnStatus::Failed,
+                    reason: Some(format!(
+                        "{} is cut off from the pour of net {net}: the routing of other nets splits the fill around it",
+                        l.from
+                    )),
+                    at: Some(l.from_at),
+                    layer: None,
+                    hints: vec![
+                        format!(
+                            "add a via from {} to a pour of net {net} on another layer, or a track to {}",
+                            l.from, l.to
+                        ),
+                        "rip the routing that cuts the pour (route.rip) and route again".to_string(),
+                    ],
+                    subjects: vec![],
+                })
+                .collect();
+            reports.extend(extra);
+        }
+    }
+    stats.connections = reports.len();
     stats.routed = reports.iter().filter(|r| r.status == ConnStatus::Routed).count();
     stats.failed = stats.connections - stats.routed;
     stats.completion = if stats.connections == 0 {
@@ -2168,7 +2332,7 @@ fn route_run(
         rerouted: vec![],
         pairs: vec![],
     };
-    Ok((result, missed))
+    Ok(Run { result, missed })
 }
 
 /// Via cost of [`minimize_vias`] (grid steps; negotiation uses `Costs::via`).
@@ -2622,13 +2786,37 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
         if wanted.as_ref().is_some_and(|w| !w.contains(&net)) {
             continue;
         }
+        routes.extend(plan_net(rb, scope, net, isls));
+    }
+    if let Scope::Connection { from, to } = scope
+        && routes.is_empty()
+    {
+        let known = |l: &str| rb.terminals.iter().find(|t| t.label == l).map(|t| t.net);
+        return match (known(from), known(to)) {
+            (None, _) => Err(RouteError::Endpoint(format!("{from} is not a placed pad with a net"))),
+            (_, None) => Err(RouteError::Endpoint(format!("{to} is not a placed pad with a net"))),
+            (Some(a), Some(b)) if a != b => Err(RouteError::Endpoint(format!(
+                "{from} (net {}) and {to} (net {}) are on different nets",
+                rb.nets[a as usize], rb.nets[b as usize]
+            ))),
+            _ => Ok(routes), // already connected
+        };
+    }
+    // Short nets first: they have the least freedom.
+    routes.sort_by(|a, b| a.length.total_cmp(&b.length).then(a.net.cmp(&b.net)));
+    Ok(routes)
+}
+
+/// The islands and connections of one net: `isls` are its terminals by copper island.
+fn plan_net(rb: &RouterBoard, scope: &Scope, net: u32, isls: BTreeMap<usize, Vec<usize>>) -> Option<NetRoute> {
+    {
         // Islands with a pad or via (track-only copper is not a ratsnest endpoint).
         let islands: Vec<Vec<usize>> = isls
             .into_values()
             .filter(|ts| ts.iter().any(|&t| rb.terminals[t].pad || rb.terminals[t].label.starts_with("via#")))
             .collect();
         if islands.len() < 2 {
-            continue;
+            return None;
         }
         // Ratsnest anchors: the pads of an island (its vias when it has none).
         let anchors = |i: usize| -> Vec<usize> {
@@ -2647,7 +2835,7 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
                         .enumerate()
                         .find_map(|(i, ts)| ts.iter().find(|&&t| rb.terminals[t].label == label).map(|&t| (i, t)))
                 };
-                let (Some((ia, ta)), Some((ib, tb))) = (find(from), find(to)) else { continue };
+                let (Some((ia, ta)), Some((ib, tb))) = (find(from), find(to)) else { return None };
                 if ia != ib {
                     conns.push(Conn {
                         a: ia,
@@ -2692,7 +2880,7 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
             }
         }
         if conns.is_empty() {
-            continue;
+            return None;
         }
         let length = conns.iter().map(|c| c.from_at.dist(c.to_at)).sum();
         let mut region = BoxF::EMPTY;
@@ -2701,10 +2889,10 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
         }
         let side = (region.max.x - region.min.x).max(region.max.y - region.min.y);
         let region = region.expand(REGION_MARGIN + 0.25 * side);
-        routes.push(NetRoute {
+        Some(NetRoute {
             net,
             prof: rb.net_profile[net as usize],
-            islands: islands.into_iter().map(|terms| Island { terms, access: vec![] }).collect(),
+            islands: islands.into_iter().map(|terms| Island { terms, access: vec![], pours: vec![] }).collect(),
             failed: vec![None; conns.len()],
             conns,
             wires: vec![],
@@ -2715,27 +2903,278 @@ fn plan(rb: &RouterBoard, scope: &Scope) -> Result<Vec<NetRoute>, RouteError> {
             dyn_ids: vec![],
             rooms: None,
             keep: vec![],
-        });
+        })
     }
-    if let Scope::Connection { from, to } = scope
-        && routes.is_empty()
-    {
-        let known = |l: &str| rb.terminals.iter().find(|t| t.label == l).map(|t| t.net);
-        return match (known(from), known(to)) {
-            (None, _) => Err(RouteError::Endpoint(format!("{from} is not a placed pad with a net"))),
-            (_, None) => Err(RouteError::Endpoint(format!("{to} is not a placed pad with a net"))),
-            (Some(a), Some(b)) if a != b => Err(RouteError::Endpoint(format!(
-                "{from} (net {}) and {to} (net {}) are on different nets",
-                rb.nets[a as usize], rb.nets[b as usize]
-            ))),
-            _ => Ok(routes), // already connected
-        };
-    }
-    // Short nets first: they have the least freedom.
-    routes.sort_by(|a, b| a.length.total_cmp(&b.length).then(a.net.cmp(&b.net)));
-    Ok(routes)
 }
 
+/// Most times negotiation starts again for nets whose fills the routing cut apart, before the
+/// retries and via minimization ([`pour_round`]).
+const POUR_NEGOTIATIONS: usize = 3;
+
+/// Most pour rounds after the retries and via minimization.
+const POUR_ROUNDS: usize = 2;
+
+/// Share of the budget at which a first negotiation that is still going (it ends at 0.75) looks
+/// at what it cuts off from the pours, and ends there when that is one pad per [`POUR_PAUSE`]
+/// connections or more: the pour rounds then get the rest of its share.
+const POUR_FIRST: f64 = 0.55;
+const POUR_PAUSE: usize = 100;
+
+/// Gives every island of `routes` the fills that are part of it (`term_island`: the copper
+/// island of each terminal).
+fn assign_pours(eng: &Engine<'_>, routes: &mut [NetRoute], term_island: &[usize]) {
+    let mut by_island: BTreeMap<(u32, usize), Vec<u32>> = BTreeMap::new();
+    for (i, f) in eng.pours.iter().enumerate() {
+        by_island.entry((f.net, f.island)).or_default().push(i as u32);
+    }
+    for r in routes {
+        for island in &mut r.islands {
+            island.pours = island
+                .terms
+                .first()
+                .and_then(|&t| by_island.get(&(r.net, term_island[t])))
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
+}
+
+/// The board as the routing would leave it, with the pours filled again around the new copper.
+struct PourTruth {
+    /// The copper items without the run's new tracks and vias (fills included), and their
+    /// islands: what the fills alone still join.
+    items: Vec<geo_board::CopperItem>,
+    isl: Vec<usize>,
+    /// Per route: one of its connections is routed and yet open (a track that ends on a piece
+    /// of a pour that other nets cut off).
+    dangling: Vec<bool>,
+    /// Connections open on that board: the ratsnest lines of the nets in scope.
+    open: usize,
+}
+
+/// Fills the pours for the routing as it stands ([`PourTruth`]).
+fn pour_truth(p: &Project, rb: &RouterBoard, scope: &Scope, eng: &Engine<'_>, routes: &[NetRoute]) -> PourTruth {
+    use geo_board::ItemRef;
+    let geoms: Vec<post::NetGeom> = routes.iter().map(|r| post::geometry(eng, r)).collect();
+    let out = build_items(p, rb, routes, &geoms);
+    let mut proj = p.clone();
+    proj.board_mut().tracks.extend(out.tracks.iter().cloned());
+    proj.board_mut().vias.extend(out.vias.iter().cloned());
+    let mut items = geo_board::copper_items(&proj);
+    eng.work.charge(work::POUR_ITEM * (proj.board().tracks.len() + proj.board().vias.len()) as u64);
+    let isl = geo_board::islands(&items);
+    let open = geo_board::ratsnest_from(&items, &isl)
+        .iter()
+        .filter(|l| match scope {
+            Scope::Nets(list) => list.contains(&l.net),
+            _ => true,
+        })
+        .count();
+    let mut island_of: BTreeMap<String, Vec<(P, usize)>> = BTreeMap::new();
+    for (it, &k) in items.iter().zip(&isl) {
+        island_of.entry(it.item.to_string()).or_default().push((P::of(it.anchor), k));
+    }
+    let island_at = |label: &str, at: P| -> Option<usize> {
+        let mut best: Option<(f64, usize)> = None;
+        for &(q, k) in island_of.get(label)? {
+            let d = q.dist(at);
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, k));
+            }
+        }
+        best.map(|b| b.1)
+    };
+    let dangling = routes
+        .iter()
+        .map(|r| {
+            r.conns
+                .iter()
+                .zip(&r.failed)
+                .any(|(c, f)| f.is_none() && island_at(&c.from, c.from_at) != island_at(&c.to, c.to_at))
+        })
+        .collect();
+    items.retain(|it| match &it.item {
+        ItemRef::Track(id) => !out.owner.contains_key(&("track".to_string(), id.0)),
+        ItemRef::Via(id) => !out.owner.contains_key(&("via".to_string(), id.0)),
+        _ => true,
+    });
+    let isl = geo_board::islands(&items);
+    PourTruth { items, isl, dangling, open }
+}
+
+/// The copper island of every terminal on the board of `truth`: what the fills alone join.
+fn truth_islands(rb: &RouterBoard, truth: &PourTruth) -> Vec<usize> {
+    use geo_board::ItemRef;
+    let mut at: BTreeMap<(String, i64, i64), usize> = BTreeMap::new();
+    for (it, &k) in truth.items.iter().zip(&truth.isl) {
+        if it.net.is_some() && !matches!(it.item, ItemRef::Zone(..)) {
+            at.insert((it.item.to_string(), it.anchor.x.0, it.anchor.y.0), k);
+        }
+    }
+    // A terminal the board no longer has (none should be missing) is on its own.
+    rb.terminals
+        .iter()
+        .enumerate()
+        .map(|(t, term)| {
+            at.get(&(term.label.clone(), term.at.x.round() as i64, term.at.y.round() as i64))
+                .copied()
+                .unwrap_or(usize::MAX - t)
+        })
+        .collect()
+}
+
+/// How many more pieces the pads of the nets with fills are in with the islands `now` than with
+/// `before`: the pads (or groups of pads) the routing cut off from their pours.
+fn cut_off(rb: &RouterBoard, before: &[usize], now: &[usize]) -> usize {
+    let nets: BTreeSet<u32> = rb.fills.iter().map(|f| f.net).collect();
+    let pieces = |isl: &[usize]| -> usize {
+        let set: BTreeSet<(u32, usize)> = rb
+            .terminals
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.pad && nets.contains(&t.net))
+            .map(|(i, t)| (t.net, isl[i]))
+            .collect();
+        set.len()
+    };
+    pieces(now).saturating_sub(pieces(before))
+}
+
+/// Pours are filled again around new copper, so what a fill joined when the run was planned
+/// may be cut apart by the routing: pads in a piece of a pour that tracks of other nets cut off,
+/// or a track that ends on such a piece. Every net with fills whose pads they no longer join
+/// as planned, or with a connection that is routed and yet open, is planned again from what
+/// the fills still join (`truth`; its routing is dropped), to be routed onto the new fills
+/// where they are near (`pours`). Returns the nets planned again (indices into `routes`),
+/// shortest first, for negotiation to route, and the plans they replace.
+#[allow(clippy::too_many_arguments)]
+fn replan_pours(
+    rb: &RouterBoard,
+    scope: &Scope,
+    slots: &[usize],
+    eng: &mut Engine<'_>,
+    ck: &Checker<'_>,
+    routes: &mut Vec<NetRoute>,
+    term_island: &mut [usize],
+    truth: &PourTruth,
+) -> (Vec<usize>, Vec<(usize, NetRoute)>) {
+    let (items, isl, dangling) = (&truth.items, &truth.isl, &truth.dangling);
+    term_island.copy_from_slice(&truth_islands(rb, truth));
+    let fills = model::fills_of(items, isl, &rb.net_ids, &rb.layer_names);
+    let mut nets: BTreeSet<u32> = rb.fills.iter().chain(&fills).map(|f| f.net).collect();
+    if let Scope::Nets(list) = scope {
+        nets.retain(|&n| list.contains(&rb.nets[n as usize]));
+    }
+    eng.pours = pours::build(&fills, rb, &eng.grid, slots);
+    let mut by_net: BTreeMap<u32, BTreeMap<usize, Vec<usize>>> = BTreeMap::new();
+    for (ti, t) in rb.terminals.iter().enumerate() {
+        if nets.contains(&t.net) {
+            by_net.entry(t.net).or_default().entry(term_island[ti]).or_default().push(ti);
+        }
+    }
+    let mut changed: Vec<usize> = Vec::new();
+    let mut replaced: Vec<(usize, NetRoute)> = Vec::new();
+    for (net, isls) in by_net {
+        let old = routes.iter().position(|r| r.net == net);
+        let Some(mut nr) = plan_net(rb, scope, net, isls) else { continue };
+        if eng.act[nr.prof] == usize::MAX {
+            continue; // no occupancy maps for its rules: reported as cut off
+        }
+        // Planned again when the fills no longer join an island of the plan (fills joining
+        // more than planned leave it valid).
+        if let Some(ri) = old
+            && !dangling[ri]
+            && routes[ri].islands.iter().all(|i| i.terms.iter().all(|&t| term_island[t] == term_island[i.terms[0]]))
+        {
+            continue;
+        }
+        for island in &mut nr.islands {
+            for &t in &island.terms {
+                island.access.extend(eng.access(t, ck));
+            }
+        }
+        match old {
+            Some(ri) => {
+                eng.uncommit(&mut routes[ri]);
+                replaced.push((ri, std::mem::replace(&mut routes[ri], nr)));
+                changed.push(ri);
+            }
+            None => {
+                routes.push(nr);
+                changed.push(routes.len() - 1);
+            }
+        }
+    }
+    assign_pours(eng, routes, term_island);
+    changed.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length).then(a.cmp(b)));
+    (changed, replaced)
+}
+
+/// The routing before nets were planned again for their pours ([`pour_round`]), to go back to
+/// when routing them leaves more connections open than there were.
+struct PourSnapshot {
+    /// Connections open on the board then.
+    open: usize,
+    /// Wires and failures of every net.
+    state: Vec<(Vec<engine::Wire>, Vec<Option<FailKind>>)>,
+    /// The plans that were replaced.
+    replaced: Vec<(usize, NetRoute)>,
+    term_island: Vec<usize>,
+    pours: Vec<pours::Pour>,
+}
+
+/// One step of the pour rounds, on a legal routing. When nets were planned again before
+/// (`pending`), the board is filled for what negotiation made of them: with more connections
+/// open than before, everything goes back to the routing before that plan and `None` is
+/// returned (no more rounds). Otherwise, when `may_plan`, the nets the routing cut off from
+/// their pours are planned again ([`replan_pours`]) and returned for negotiation.
+#[allow(clippy::too_many_arguments)]
+fn pour_round(
+    p: &Project,
+    rb: &RouterBoard,
+    scope: &Scope,
+    slots: &[usize],
+    eng: &mut Engine<'_>,
+    ck: &Checker<'_>,
+    routes: &mut Vec<NetRoute>,
+    term_island: &mut Vec<usize>,
+    pending: &mut Option<PourSnapshot>,
+    may_plan: bool,
+) -> Option<Vec<usize>> {
+    if pending.is_none() && !may_plan {
+        return Some(vec![]);
+    }
+    let truth = pour_truth(p, rb, scope, eng, routes);
+    if let Some(snap) = pending.take()
+        && truth.open > snap.open
+    {
+        for r in routes.iter_mut() {
+            eng.uncommit(r);
+        }
+        routes.truncate(snap.state.len());
+        for (ri, old) in snap.replaced {
+            routes[ri] = old;
+        }
+        for (r, (w, f)) in routes.iter_mut().zip(snap.state) {
+            r.wires = w;
+            r.failed = f;
+            eng.commit(r);
+        }
+        *term_island = snap.term_island;
+        eng.pours = snap.pours;
+        return None;
+    }
+    if !may_plan {
+        return Some(vec![]);
+    }
+    let state = routes.iter().map(|r| (r.wires.clone(), r.failed.clone())).collect();
+    let (old_islands, old_pours) = (term_island.clone(), eng.pours.clone());
+    let (changed, replaced) = replan_pours(rb, scope, slots, eng, ck, routes, term_island, &truth);
+    if !changed.is_empty() {
+        *pending = Some(PourSnapshot { open: truth.open, state, replaced, term_island: old_islands, pours: old_pours });
+    }
+    Some(changed)
+}
 struct Built {
     tracks: Vec<Track>,
     vias: Vec<Via>,

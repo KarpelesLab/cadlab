@@ -1208,3 +1208,59 @@ fn keepout_net_exceptions() {
     assert_eq!((o["output"]["segments"].as_u64(), o["output"]["walked"].as_bool()), (Some(1), Some(false)));
     assert!(drc_errors(&s).iter().all(|e| !e.starts_with("drc.keepout")));
 }
+
+/// Pours are filled again around new copper (D80). Six tracks between two rows of tall pads cut
+/// the top-layer GND pour into strips closed at both ends, each holding the GND pad of one
+/// capacitor: on the empty board the pour joins the three pads, so nothing is planned for GND.
+/// The router sees the cut, plans GND again from what the fill still joins and routes it.
+#[test]
+fn pads_cut_off_from_their_pour_are_routed() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    exec(
+        &r,
+        &mut s,
+        "footprint.create",
+        json!({
+            "name": "WALL6",
+            "pads": [{"number": "1", "at": ["0mm", "-5mm"], "size": ["1.2mm", "1.7mm"], "shape": "rect",
+                      "count": 6, "pitch": ["0mm", "2mm"]}]
+        }),
+    );
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "WALL6", "category": "connector", "footprint": "WALL6", "pins": numbered_pins(6)}),
+    );
+    exec(&r, &mut s, "circuit.add", json!({"part": "WALL6", "refdes": "J1"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "WALL6", "refdes": "J2"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 1uF 16V X5R 0402", "count": 3}));
+    for i in 1..=6 {
+        let mut pins = vec![format!("J1.{i}"), format!("J2.{i}")];
+        if (2..=4).contains(&i) {
+            pins.push(format!("C{}.1", i - 1));
+        }
+        exec(&r, &mut s, "net.connect", json!({"net": format!("S{i}"), "pins": pins}));
+    }
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["C1.2", "C2.2", "C3.2"]}));
+    exec(&r, &mut s, "board.outline", json!({"width": "30mm", "height": "16mm"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J1", "at": ["4mm", "8mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J2", "at": ["26mm", "8mm"]}));
+    // Each capacitor between two tracks: pad 1 beside its own track, pad 2 (GND) in the strip.
+    for (i, x) in [(1, "10mm"), (2, "15mm"), (3, "20mm")] {
+        let y = format!("{}mm", 4 + 2 * i);
+        exec(&r, &mut s, "place.set", json!({"refdes": format!("C{i}"), "at": [x, y]}));
+    }
+    exec(&r, &mut s, "zone.add", json!({"name": "gnd", "net": "GND", "layers": ["F.Cu"], "outline": "board"}));
+    assert_eq!(unrouted(&r, &mut s, "GND"), 0, "the pour joins the GND pads of the empty board");
+    let o = exec(&r, &mut s, "route.all", json!({"seed": 1}));
+    report("pour cut", &o, 0);
+    render(&r, &mut s, "pour_cut");
+    assert_eq!(o["output"]["stats"]["failed"], 0, "{o}");
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    // The pour alone no longer joins them: without GND's own routing they are apart.
+    exec(&r, &mut s, "route.rip", json!({"nets": ["GND"]}));
+    assert!(unrouted(&r, &mut s, "GND") >= 1, "the signal tracks were expected to cut the pour");
+}

@@ -142,6 +142,20 @@ pub(crate) struct Terminal {
     pub at: P,
 }
 
+/// A zone fill island of a net on one layer: copper a connection of the net may end on
+/// (`pours`). Not an obstacle: fills are refilled around new copper.
+#[derive(Clone, Debug)]
+pub(crate) struct Fill {
+    pub net: u32,
+    /// Stackup layer index.
+    pub layer: usize,
+    /// Copper island (as [`Terminal::island`]).
+    pub island: usize,
+    /// Outer rings and holes of the fill's polygons (inside by the even-odd rule).
+    pub rings: Vec<Vec<P>>,
+    pub bbox: BoxF,
+}
+
 /// The router's board.
 pub(crate) struct RouterBoard {
     pub layer_names: Vec<String>,
@@ -160,6 +174,8 @@ pub(crate) struct RouterBoard {
     pub h2h: f64,
     pub rules: Rules,
     pub terminals: Vec<Terminal>,
+    /// Zone fills of nets, per island and layer.
+    pub fills: Vec<Fill>,
     /// Custom clearance rules, local clearances and the hole clearance, for new copper.
     pub scoped: Scoped,
 }
@@ -190,6 +206,36 @@ pub(crate) fn layer_mask(names: &[String], layers: &[String]) -> u64 {
 
 fn ring_p(r: &[polyclip::Point]) -> Vec<P> {
     r.iter().map(|q| P::new(q.x as f64, q.y as f64)).collect()
+}
+
+/// The zone fills among `items` (with their islands `isl`) that have a net.
+pub(crate) fn fills_of(
+    items: &[CopperItem],
+    isl: &[usize],
+    net_ids: &BTreeMap<String, u32>,
+    layer_names: &[String],
+) -> Vec<Fill> {
+    let mut fills = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        if !matches!(it.item, ItemRef::Zone(..)) {
+            continue;
+        }
+        let net = it.net.as_ref().and_then(|n| net_ids.get(n)).copied();
+        let layer = it.layers.first().and_then(|l| layer_names.iter().position(|n| n == l));
+        if let (Some(net), Some(layer)) = (net, layer) {
+            let mut rings: Vec<Vec<P>> = Vec::new();
+            let mut bbox = BoxF::EMPTY;
+            for pg in it.shape.iter() {
+                for r in std::iter::once(&pg.outer).chain(pg.holes.iter()) {
+                    let ring = ring_p(&r.0);
+                    ring.iter().for_each(|&q| bbox.add(q));
+                    rings.push(ring);
+                }
+            }
+            fills.push(Fill { net, layer, island: isl[i], rings, bbox });
+        }
+    }
+    fills
 }
 
 impl RouterBoard {
@@ -230,10 +276,13 @@ impl RouterBoard {
         let scoped = Scoped::new(p, items, &layer_names);
         let mut obstacles = Vec::new();
         let mut terminals = Vec::new();
+        let fills = fills_of(items, isl, &net_ids, &layer_names);
         let pads = geo::placed_pads(p);
         for (i, it) in items.iter().enumerate() {
             if matches!(it.item, ItemRef::Zone(..)) {
-                continue; // fills are derived: they make room for new tracks when refilled
+                // Fills are derived: they make room for new tracks when refilled. Their net's
+                // connections may end on them (`fills_of`).
+                continue;
             }
             let mut movable = None;
             let (shape, anchor) = match &it.item {
@@ -456,6 +505,7 @@ impl RouterBoard {
             h2h: rules.hole_to_hole.0 as f64,
             rules,
             terminals,
+            fills,
             scoped,
         }
     }
