@@ -220,9 +220,11 @@ Design standards used as rule and geometry sources (from the standards themselve
 implementation):
 
 - **IPC-7351B**: land patterns and naming convention (`QFN50P500X500X80-33N`) for generated footprints.
-- **IPC-2221B / IPC-2152**: spacing and current-capacity guidance (width/clearance calculators, M8).
-- **IPC-6012** classes as rule presets (`board.rules --preset ipc2|ipc3`; values, sources and their unverified
-  status in [BOARD.md](BOARD.md), "Rule presets").
+- **IPC-2221B / IPC-2152**: spacing and current-capacity guidance (width/clearance calculators, M8; the
+  IPC-2152 fit and what it was checked against in [ELECTRICAL.md](ELECTRICAL.md)).
+- **IPC-6012** classes as rule presets (`board.rules --preset ipc2|ipc3`; values, sources and verification
+  status in `rule-presets/ipc.toml`, explained in [BOARD.md](BOARD.md), "Rule presets"; confirmed on secondary
+  sources 2026-11-13, D79).
 
 ### KiCad formats
 

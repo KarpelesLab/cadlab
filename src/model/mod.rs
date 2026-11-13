@@ -12,6 +12,7 @@ pub mod model3d;
 pub mod part;
 mod project;
 mod raw;
+pub mod rule_presets;
 pub mod sections;
 
 pub use error::ModelError;

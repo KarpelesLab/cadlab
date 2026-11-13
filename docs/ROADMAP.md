@@ -94,7 +94,7 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Mounting holes, outline cutouts (`board.hole`, `board.cutout`; seen by DRC, zones, rendering, outputs)
 - [x] Design rules: clearances, widths, via/drill limits, per net class, IPC class 2/3 presets
       (`board.rules` presets `ipc2`/`ipc3` and rules derived from a fab profile, `netclass.show`, DRC class via
-      and class-vs-minimum checks; IPC numbers from secondary sources, marked unverified in BOARD.md, D26)
+      and class-vs-minimum checks; IPC numbers in `rule-presets/ipc.toml`, confirmed on secondary sources, D26, D79)
 - [x] Fab profiles ([MANUFACTURING.md](MANUFACTURING.md)): JLCPCB and PCBWay, verified from their published
       capabilities (2026-10-04), plus a generic IPC class 2 profile; user overrides (`fab-profiles/`, `src/fab/`)
 - [x] Provider-agnostic flow: compatibility targets, `fab check`, `fab compare`, `export fab --fab`, per-fab part
@@ -233,7 +233,7 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] SPICE netlist export (ngspice), simulation hooks (`export.spice`: supplies, analysis and `.control` lines;
       ngspice oracle in `tests/electrical.rs`)
 - [x] Current/thermal checks (IPC-2152 trace width): `net.set --current`, `current.width`, `drc.current_width`
-      (chart curve fit, approximate)
+      (curve fit of the universal chart, approximate: +2.6 % / −1.3 % at the one published point, D79)
 - [x] Design lint beyond ERC: missing decoupling, missing pull-ups on I²C, unterminated high-speed nets
       (`circuit.lint`, `circuit.erc --lint`: decoupling, I²C pull-ups, USB ESD, clock termination, floating inputs)
 

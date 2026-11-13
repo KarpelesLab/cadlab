@@ -467,7 +467,21 @@ impl Command for SetRules {
     fn run(self, ctx: &mut Context<'_>) -> Result<RulesResult, CommandError> {
         let before = ctx.project()?.board().rules.clone();
         let mut r = match self.preset {
-            Some(p) => Rules::preset(p),
+            Some(p) => {
+                let presets = crate::model::rule_presets::RulePresets::builtin();
+                for (field, refs) in presets.unverified(p) {
+                    let ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
+                    let sources: Vec<&str> = refs.iter().flat_map(|r| &r.sources).map(String::as_str).collect();
+                    ctx.report(
+                        Diagnostic::warning(
+                            "board.rules_unverified",
+                            format!("the preset's {field} rests on unverified values ({})", ids.join(", ")),
+                        )
+                        .with_hint(format!("check them against the standard or its sources ({})", sources.join(" "))),
+                    );
+                }
+                presets.rules(p)
+            }
             None => before.clone(),
         };
         let mut derived = Vec::new();

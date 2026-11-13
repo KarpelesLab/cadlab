@@ -265,15 +265,31 @@ targets are not checked by the DRC (pair geometry belongs to the router).
 
 Required cross-section A for a current I (RMS) and a temperature rise ΔT:
 
-- **IPC-2152 (default)**: curve fit of the standard's universal chart (Figure 5-2: internal conductors in a
-  0.070" thick polyimide board without planes, which IPC-2152 gives as a conservative chart for internal and
-  external conductors):
+- **IPC-2152 (default)**: curve fit of the standard's *universal* chart (Figure 5-2: the baseline, 3 oz
+  conductors in a 0.070" thick polyimide board without planes, in still air, which IPC-2152 recommends for
+  internal and external conductors):
   `A [mil²] = (117.555 · ΔT^−0.913 + 1.15) · I^(0.84 · ΔT^−0.108 + 1.159)`.
-  Source: <https://smps.us/pcb-calculator.html> (coefficients fitted to chart points provided by Jack Olson),
-  stated within 3 % of the chart, e.g. 10 A at 20 °C: 513 mil² against 500 mil² read from the chart (our unit
-  test reproduces 513.1). **Approximate**: it is a fit of a chart, the standard itself was not read (it is
-  paywalled), and IPC-2152's modifiers for board thickness, copper planes and copper weight are not applied,
-  which keeps the result on the conservative (wider) side for most boards.
+  Source: <https://smps.us/pcb-calculator.html> (coefficients by Jack Olson; interpolated between 2 and 100 °C,
+  the tests behind the chart go up to 30 A). **Approximate**: a fit of a chart; the standard itself was not read
+  (it is paywalled). Checked on 2026-11-13 (D79):
+  - *Error band.* Only one point of the universal chart was found with published readings, 10 A at 20 °C, read
+    twice: 500 mil² (smps.us) and about 520 mil² (Olson, <https://frontdoor.biz/PCBportal/HowTo2152.pdf>). The
+    fit gives 513.1 mil² (unit test): **+2.6 % and −1.3 %**, inside the 4 % the two readings differ by. No
+    table of chart points is published, so the error elsewhere on the chart is **not known**. As a plausibility
+    check only (another chart: 2 oz external), the fit Brooks and Adam digitized from IPC-2152,
+    ΔT = 215.3 · I² · W^−1.15 · Th^−1 (mil;
+    <https://pcdandf.com/pcdesign/index.php/editorial/menu-features/10122-thermal-management-1506>), gives areas
+    that ours are 0.5 % below to 6.6 % above at six points between 2 A / 10 °C and 20 A / 40 °C.
+  - *Not the conservative chart.* IPC-2152 keeps the IPC-2221 internal chart as its conservative chart (a
+    conductor in free air; M. Jouppi, <https://www.electronics.org/system/files/technical_resource/E7&S22_03.pdf>),
+    which reads 680 mil² at 10 A and 20 °C and 300 mil² at 4 A and 10 °C (Olson), where our fit gives 513 and
+    192 mil²: a third to a half more copper. For that chart use `--method ipc2221`, whose internal-layer
+    formula gives 666.7 and 286.9 mil² at those points (−2.0 %, −4.4 %).
+  - *No modifiers.* The universal chart is for the baseline board, and Olson limits it to boards larger than
+    3 × 3 in. His worked example multiplies the chart value by 0.84 for 1 oz copper, 1.08 for a 0.062" board,
+    1.02 for FR-4 and 0.47 for a 1 oz plane 20 mil away. cadlab applies none: on a 1.6 mm FR-4 board with 1 oz
+    copper and no plane the result is about 7 % wider than those factors give, with a plane it is far wider;
+    with 3 oz copper on a thinner board without planes it is about 10 % too narrow.
 - **IPC-2221 (`--method ipc2221`)**: the long-published legacy formula `I = k · ΔT^0.44 · A^0.725`
   (A in mil², k = 0.048 external, 0.024 internal). 1 A, 10 °C, 1 oz external → 0.30 mm.
 

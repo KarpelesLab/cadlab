@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn validation_errors() {
         let base = include_str!("../../fab-profiles/generic.toml");
-        let bad = base.replace("verified_at = \"2026-10-04\"", "verified_at = \"Oct 4\"");
+        let bad = base.replace("verified_at = \"2026-11-13\"", "verified_at = \"Oct 4\"");
         assert!(FabProfile::parse(&bad, "t").unwrap_err().to_string().contains("YYYY-MM-DD"));
         let bad = format!("{base}\nunknown_key = 1\n");
         assert!(FabProfile::parse(&bad, "t").is_err());

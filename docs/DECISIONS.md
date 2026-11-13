@@ -1886,6 +1886,47 @@ are as authoritative as its tables and are the only place the assembly layouts a
 publishes nothing, "still unverified" with the pages that were read is the honest state, and the stricter stored
 value keeps `fab.check` on the safe side.
 
+### D79. IPC rule values confirmed on secondary sources and kept in a data file; the IPC-2152 fit is the universal chart (2026-11-13)
+The IPC numbers behind `board.rules --preset ipc2|ipc3` (D26) were marked unverified. They were checked on
+2026-11-13 against sources that can be read freely; the standards themselves stay unread (paywalled). A value
+counts as **confirmed** when at least two independent sources attributing it to the standard were read and
+agree; pages that say otherwise are recorded as dissent next to it. Results (table with sources in
+docs/BOARD.md, "Rule presets"):
+- IPC-6012 Table 3-9, class 3 ring 0.050 mm external / 0.025 mm internal and class 2 breakout to 90°: confirmed,
+  unchanged.
+- IPC-2221A/B Table 9-1 fabrication allowance: **corrected** to 0.4 / 0.25 / 0.2 mm for levels A / B / C. The
+  0.6 / 0.5 / 0.4 mm written before appears in one article without table or revision; five other sources,
+  including the page cited before, give the corrected set. Table 9-2 (0.05 / 0.025 mm design ring): confirmed.
+- IPC-2221B Table 6-1 up to 15 V: values confirmed, one **label corrected**: 0.13 mm is A5/A6 (conformal coating,
+  uncoated component leads), permanent polymer coating (B4) is 0.05 mm.
+
+The values and the presets move from Rust into `rule-presets/ipc.toml` (`model::rule_presets`): references with
+standard, value, status, sources and dissent, and per preset the rule fields that differ from `Rules::default`
+with the references each is built from. `Rules::preset` reads it; `board.rules --preset` warns
+`board.rules_unverified` for a preset value resting on an unverified reference (none today; the code was
+emitted before only for fab-derived values). The generic fab profile keeps its limits, which are cadlab's own
+choices and so carry no `unverified` entries; its header now says how they sit against the IPC values.
+
+The `ipc3` preset keeps its numbers (ring 0.25 mm, via 0.3 / 0.8 mm) with a corrected derivation: class 3
+external minimum plus half the **level A** allowance (0.05 + 0.4 / 2). It had been described as level C with
+the wrong allowance; the true level C gives 0.15 mm, level B 0.175 mm.
+
+`current.width`'s IPC-2152 fit was described as the standard's conservative chart. It is a fit of the
+**universal** chart (Figure 5-2, the 3 oz baseline); the conservative chart is the IPC-2221 internal chart
+(Jouppi's IPC paper, Olson's tutorial) and asks for a third to a half more copper at the two points with published readings. Error band of the fit: +2.6 %
+and −1.3 % against the two published readings of the one point found (10 A, 20 °C: 500 and about 520 mil²);
+unknown elsewhere, since no table of chart points is published. The IPC-2221 internal formula is within 2.0 %
+and 4.4 % of the two published readings of the conservative chart. Code unchanged; docs, help text and unit
+tests state this (docs/ELECTRICAL.md).
+*Why:* a preset is advice the user cannot check without buying the standards, so each number needs a trail that
+can be re-read and a status that does not claim more than was done. Keeping `ipc3` at level A avoids silently
+loosening a class 3 rule on existing users and is the standard's preferred producibility level; a tighter
+level is one line in the data file or an explicit `min_annular_ring`. `ipc2`'s 0.13 mm ring stays cadlab's own
+choice below the IPC-2221 level C design land (0.15 mm), relying on class 2 accepting breakout: changing the
+default rule set of every new project was left out of a verification pass. Applying the IPC-2152 modifiers
+(copper weight, board thickness, planes) was left out for the same reason: their charts are published only as
+images, and a fit of them could not be checked against numbers.
+
 ## Open questions
 
 

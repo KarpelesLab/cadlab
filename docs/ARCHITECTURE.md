@@ -19,6 +19,7 @@ cadlab/
 │   └── bin/cadlab/            # the binary: main.rs, cli.rs (schema → clap), mcp.rs (MCP server)
 ├── tests/                     # integration tests; common/ (golden files, oracles), golden/, snapshots/
 ├── fab-profiles/              # JLCPCB, PCBWay, ... (TOML, with sources and verification dates), from M4
+├── rule-presets/              # IPC rule presets and the reference values behind them (TOML, sources, status)
 └── docs/
 ```
 

@@ -1,0 +1,214 @@
+# IPC-derived design rule presets (`board.rules --preset ipc2|ipc3`, docs/BOARD.md "Rule presets").
+#
+# The IPC standards are paywalled and were not read. A `[[reference]]` value is `status = "confirmed"`
+# when at least two independent sources that attribute it to the standard were read on `verified_at`
+# and agree; `sources` lists them, `dissent` lists pages read that say otherwise. Anything else is
+# `status = "unverified"`. A preset names under `derived` the references each of its values is built
+# from: applying a preset with a value that rests on an unverified reference warns
+# `board.rules_unverified`.
+#
+# A preset holds only the rule fields that differ from cadlab's default rules (`Rules::default`,
+# which are cadlab's own conservative choices, not IPC numbers).
+
+verified_at = "2026-11-13"
+
+# ---------------------------------------------------------------------------------------------
+# Reference values
+# ---------------------------------------------------------------------------------------------
+
+[[reference]]
+id = "ipc6012.class3.external_ring"
+standard = "IPC-6012 (rev. D/E/F), 3.4.2 and Table 3-9 \"Minimum Annular Ring\""
+what = "Minimum external annular ring of a plated hole on the finished board, class 3; no breakout"
+value = "0.05mm"
+status = "confirmed"
+sources = [
+    "https://summitinterconnect.com/blog/article/pcb-design-annular-ring/",          # fabricator; rev. E Table 3-9: 0.001969 in
+    "https://iconnect007.com/article/133540/fresh-pcb-concepts-how-large-does-that-pad-really-need-to-be/133543/pcb",  # NCAB: 0.002 in external for class 3
+    "https://sllpcb.com/annular-ring-pcb/",                                           # rev. F: 50 um
+    "https://resources.altium.com/p/meeting-standards-ipc-6012-class-3-annular-ring", # 2 mil
+    "https://www.electronics.org/TOC/IPC-6012D.pdf",                                  # IPC's table of contents: section and table titles only
+]
+dissent = [
+    "https://www.ultralibrarian.com/ipc-2221-pcb-design-standards",  # internal ring 0.025 mm for class 2, 0.05 mm for class 3; no table cited
+    "https://wellerpcb.com/high-quality-printed-circuit-boards-manufacturing-ipc-class-2-and-3",  # 50/25 um and 90 deg breakout given for class 2 and 3 alike
+]
+
+[[reference]]
+id = "ipc6012.class3.internal_ring"
+standard = "IPC-6012 (rev. D/E/F), Table 3-9; IPC-A-600"
+what = "Minimum internal annular ring of a plated hole, class 3"
+value = "0.025mm"
+status = "confirmed"
+sources = [
+    "https://www.zvei.org/fileadmin/user_upload/Verband/Fachverbaende/PCB_and_Electronic_Systems/Schlau_entwickelt_clever_produziert._Leiterplatten_aus_Europa/pdf/Engl_2021/ZVEI_Recommendations_annular_ring_requirement_2021_06.pdf",  # industry association: class 3 >= 25 um
+    "https://summitinterconnect.com/blog/article/pcb-design-annular-ring/",           # 0.000975 in
+    "https://iconnect007.com/article/133540/fresh-pcb-concepts-how-large-does-that-pad-really-need-to-be/133543/pcb",  # 0.001 in
+    "https://sllpcb.com/annular-ring-pcb/",
+]
+dissent = ["https://www.ultralibrarian.com/ipc-2221-pcb-design-standards"]
+
+[[reference]]
+id = "ipc6012.class2.breakout"
+standard = "IPC-6012 (rev. D/E/F), 3.4.2 and Table 3-9; IPC-A-600"
+what = "Class 2: hole breakout of the land up to 90 degrees is accepted (no minimum ring), provided the land/conductor junction is not reduced by more than 20 % of the minimum conductor width"
+value = "90deg"
+status = "confirmed"
+sources = [
+    "https://www.zvei.org/fileadmin/user_upload/Verband/Fachverbaende/PCB_and_Electronic_Systems/Schlau_entwickelt_clever_produziert._Leiterplatten_aus_Europa/pdf/Engl_2021/ZVEI_Recommendations_annular_ring_requirement_2021_06.pdf",  # inner layers, with the 20 % condition
+    "https://summitinterconnect.com/blog/article/pcb-design-annular-ring/",
+    "https://pcdandf.com/pcdesign/images/stories/mag/0709/0709white_table1.pdf",
+    "https://resources.altium.com/p/meeting-standards-ipc-6012-class-3-annular-ring",
+    "https://www.protoexpress.com/blog/ipc-class-2-vs-class-3-different-design-rules/",
+]
+
+[[reference]]
+id = "ipc2221.ring.external"
+standard = "IPC-2221A/B, 9.1.2 and Table 9-2 \"Annular Rings (Minimum)\" (Table 9-1 in IPC-2221C)"
+what = "Design minimum annular ring, external, supported hole, all classes (b in the land formula)"
+value = "0.05mm"
+status = "confirmed"
+sources = [
+    "https://resources.altium.com/p/pcb-size-and-pad-size-guidelines",                  # 2 mil external, 1 mil internal, classes 1-3
+    "https://www.edn.com/standards-for-pth-hole-and-pad-diameter-sizes/",              # 0.05 mm external supported
+    "https://www.pcblibraries.com/forum/ipc2221-2222-and-throughhole-pad-stacks_topic2586.html",  # 0.05 mm external, 0.025 mm inner
+    "https://www.electronics.org/TOC/IPC-2221B.pdf",                                   # table titles only
+]
+
+[[reference]]
+id = "ipc2221.ring.internal"
+standard = "IPC-2221A/B, Table 9-2"
+what = "Design minimum annular ring, internal, supported hole, all classes"
+value = "0.025mm"
+status = "confirmed"
+sources = [
+    "https://resources.altium.com/p/pcb-size-and-pad-size-guidelines",
+    "https://www.pcblibraries.com/forum/ipc2221-2222-and-throughhole-pad-stacks_topic2586.html",
+]
+
+# Land size, minimum = a + 2b + c (IPC-2221A/B 9.1.1): a = finished hole (drilled hole on internal
+# layers), b = minimum annular ring, c = the allowance below. Add 0.05 mm to c for boards of more
+# than 8 layers and per oz/ft2 of copper above 1 oz. IPC-2221C's table of contents no longer lists
+# this table (its Table 9-1 is "Annular Rings (Minimum)").
+[[reference]]
+id = "ipc2221.allowance.level_a"
+standard = "IPC-2221A/B, 9.1.1 and Table 9-1 \"Minimum Standard Fabrication Allowance for Interconnection Lands\""
+what = "Fabrication allowance c, producibility level A (general, preferred)"
+value = "0.4mm"
+status = "confirmed"
+sources = [
+    "https://wellerpcb.com/high-quality-printed-circuit-boards-manufacturing-ipc-class-2-and-3",  # the table: 0.40 / 0.25 / 0.20 mm and both footnotes
+    "https://resources.altium.com/p/pcb-size-and-pad-size-guidelines",                             # 16 / 10 / 8 mil
+    "https://www.electronics.org/TOC/IPC-2221B.pdf",                                              # table title only
+]
+dissent = ["https://www.edn.com/standards-for-pth-hole-and-pad-diameter-sizes/"]  # 0.6 / 0.5 / 0.4 mm, no table or revision cited
+
+[[reference]]
+id = "ipc2221.allowance.level_b"
+standard = "IPC-2221A/B, Table 9-1"
+what = "Fabrication allowance c, producibility level B (moderate, standard)"
+value = "0.25mm"
+status = "confirmed"
+sources = [
+    "https://wellerpcb.com/high-quality-printed-circuit-boards-manufacturing-ipc-class-2-and-3",
+    "https://iconnect007.com/article/133540/fresh-pcb-concepts-how-large-does-that-pad-really-need-to-be/133543/pcb",  # NCAB: level B 0.00984 in, +0.00197 in footnotes
+    "https://resources.altium.com/p/pcb-size-and-pad-size-guidelines",
+]
+dissent = ["https://www.edn.com/standards-for-pth-hole-and-pad-diameter-sizes/"]
+
+[[reference]]
+id = "ipc2221.allowance.level_c"
+standard = "IPC-2221A/B, Table 9-1"
+what = "Fabrication allowance c, producibility level C (high, reduced producibility)"
+value = "0.2mm"
+status = "confirmed"
+sources = [
+    "https://wellerpcb.com/high-quality-printed-circuit-boards-manufacturing-ipc-class-2-and-3",
+    "https://pcdandf.com/pcdesign/images/stories/mag/0709/0709white_table1.pdf",   # PCD&F 9/2007, IPC-2221A 9.1.1: level C 0.0079 in
+    "https://www.protoexpress.com/blog/ipc-class-2-vs-class-3-different-design-rules/",  # 8 mil
+    "https://resources.altium.com/p/pcb-size-and-pad-size-guidelines",
+]
+dissent = ["https://www.edn.com/standards-for-pth-hole-and-pad-diameter-sizes/"]
+
+# Table 6-1, row 0-15 V (DC or AC peak). The three pages reproduce the IPC-2221B table and agree
+# on this row and on 16-30 V (same values except A6 0.25 mm); from 31 V up B2 is 0.6 mm. They
+# disagree in one cell of a higher row (B2 at 251-300 V: 1.25 or 2.5 mm), which nothing here uses.
+[[reference]]
+id = "ipc2221.spacing.15v.b1"
+standard = "IPC-2221B, 6.3 and Table 6-1 \"Electrical Conductor Spacing\""
+what = "Minimum spacing up to 15 V, B1: internal conductors"
+value = "0.05mm"
+status = "confirmed"
+sources = [
+    "https://www.sfcircuits.com/pcb-school/pcb-line-spacing",                            # fabricator
+    "https://www.ema-eda.com/ema-resources/blog/pcb-clearance-and-creepage-distance-table/",
+    "https://philipmcgaw.com/creepage-and-clearance/",
+    "https://www.electronics.org/TOC/IPC-2221B.pdf",                                     # table title only
+]
+
+[[reference]]
+id = "ipc2221.spacing.15v.b2"
+standard = "IPC-2221B, Table 6-1"
+what = "Minimum spacing up to 15 V, B2: external conductors, uncoated, sea level to 3050 m (solder mask is not a coating here)"
+value = "0.1mm"
+status = "confirmed"
+sources = [
+    "https://www.sfcircuits.com/pcb-school/pcb-line-spacing",
+    "https://www.ema-eda.com/ema-resources/blog/pcb-clearance-and-creepage-distance-table/",
+    "https://philipmcgaw.com/creepage-and-clearance/",
+]
+
+[[reference]]
+id = "ipc2221.spacing.15v.b4"
+standard = "IPC-2221B, Table 6-1"
+what = "Minimum spacing up to 15 V, B4: external conductors with permanent polymer coating"
+value = "0.05mm"
+status = "confirmed"
+sources = [
+    "https://www.sfcircuits.com/pcb-school/pcb-line-spacing",
+    "https://www.ema-eda.com/ema-resources/blog/pcb-clearance-and-creepage-distance-table/",
+    "https://philipmcgaw.com/creepage-and-clearance/",
+]
+
+[[reference]]
+id = "ipc2221.spacing.15v.a5"
+standard = "IPC-2221B, Table 6-1"
+what = "Minimum spacing up to 15 V, A5: external conductors with conformal coating over the assembly"
+value = "0.13mm"
+status = "confirmed"
+sources = [
+    "https://www.sfcircuits.com/pcb-school/pcb-line-spacing",
+    "https://www.ema-eda.com/ema-resources/blog/pcb-clearance-and-creepage-distance-table/",
+    "https://philipmcgaw.com/creepage-and-clearance/",
+]
+
+[[reference]]
+id = "ipc2221.spacing.15v.a6"
+standard = "IPC-2221B, Table 6-1"
+what = "Minimum spacing up to 15 V, A6: external component lead or termination, uncoated, sea level to 3050 m"
+value = "0.13mm"
+status = "confirmed"
+sources = [
+    "https://www.sfcircuits.com/pcb-school/pcb-line-spacing",
+    "https://www.ema-eda.com/ema-resources/blog/pcb-clearance-and-creepage-distance-table/",
+    "https://philipmcgaw.com/creepage-and-clearance/",
+]
+
+# ---------------------------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------------------------
+
+# Class 2: cadlab's default rules, unchanged. Its 0.13 mm ring is cadlab's own choice: IPC-6012
+# class 2 accepts breakout, while the IPC-2221 level C design land asks for 0.05 + 0.2 / 2 = 0.15 mm.
+[preset.ipc2]
+ipc_class = 2
+
+# Class 3: annular ring = class 3 external minimum + half the level A allowance (preferred
+# producibility; not raised for more than 8 layers or copper above 1 oz), default via sized for it.
+[preset.ipc3]
+ipc_class = 3
+min_annular_ring = "0.25mm"
+via_diameter = "0.8mm"
+[preset.ipc3.derived]
+min_annular_ring = ["ipc6012.class3.external_ring", "ipc2221.allowance.level_a"]
+via_diameter = ["ipc6012.class3.external_ring", "ipc2221.allowance.level_a"]

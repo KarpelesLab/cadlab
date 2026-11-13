@@ -352,20 +352,10 @@ impl Rules {
         })
     }
 
-    /// The rule set of a preset (see [`RulePreset`]).
+    /// The rule set of a preset (see [`RulePreset`]): the default rules with the values of
+    /// `rule-presets/ipc.toml` ([`super::rule_presets`]; sources in docs/BOARD.md, "Rule presets").
     pub fn preset(preset: RulePreset) -> Rules {
-        match preset {
-            RulePreset::Ipc2 => Rules::default(),
-            // Class 3: annular ring = IPC-6012 class 3 external minimum (0.05 mm) plus half the
-            // IPC-2221 level C fabrication allowance (0.4 mm / 2); default vias sized to match.
-            // Sources and verification status: docs/BOARD.md, "Rule presets".
-            RulePreset::Ipc3 => Rules {
-                via_diameter: Nm::from_um(800),
-                min_annular_ring: Nm::from_um(250),
-                ipc_class: 3,
-                ..Rules::default()
-            },
-        }
+        super::rule_presets::RulePresets::builtin().rules(preset)
     }
 }
 
@@ -480,8 +470,8 @@ impl CustomRule {
     }
 }
 
-/// Built-in design rule presets: engineering intent, not a fab's limits (sources in
-/// `docs/BOARD.md`, "Rule presets").
+/// Built-in design rule presets: engineering intent, not a fab's limits (values and sources in
+/// `rule-presets/ipc.toml`, explained in `docs/BOARD.md`, "Rule presets").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RulePreset {

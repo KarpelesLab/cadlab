@@ -242,26 +242,36 @@ nets, warns about tracks and vias smaller than their class asks (`drc.track_widt
 | silk to pad, silk width, zone minimum width | 0.15, 0.15, 0.20 mm | 0.15, 0.15, 0.20 mm |
 | `ipc_class` | 2 | 3 |
 
-Sources and status. The IPC standards are paywalled and were **not read**; the numbers below come from
-secondary sources (fab and EDA vendor articles quoting the standards, checked 2026-10-04) and are marked
-**unverified** until checked against the documents themselves:
+Sources and status. The preset values and the IPC numbers behind them live in `rule-presets/ipc.toml`
+(built into the library, read by `Rules::preset`), each reference with its standard and table, its sources, the
+pages that disagree and a status. The IPC standards are paywalled and were **not read**: a reference is
+*confirmed* when at least two independent sources that attribute it to the standard were read and agree
+(fabricators' engineering articles, an industry association, EDA vendors; IPC's free tables of contents give
+only section and table titles), otherwise *unverified*. A preset value built on an unverified reference gives a
+`board.rules_unverified` warning when the preset is applied. Checked 2026-11-13 (D79); none is unverified now:
 
-- IPC-6012 minimum external annular ring of the finished board: class 2 allows 90° breakout; class 3 requires
-  0.050 mm (internal layers 0.025 mm), no breakout. *Unverified* (e.g.
-  <https://resources.altium.com/p/meeting-standards-ipc-6012-class-3-annular-ring>,
-  <https://www.protoexpress.com/kb/ipc-class-3-pcb-design-and-manufacturing-standards/>).
-- IPC-2221 land size: land = finished hole + 2 × (minimum annular ring) + fabrication allowance, the allowance
-  being 0.6 / 0.5 / 0.4 mm for producibility levels A / B / C. *Unverified*
-  (<https://resources.altium.com/p/pcb-size-and-pad-size-guidelines>, pcblibraries.com forum).
-- IPC-2221 Table 6-1 conductor spacing up to 15 V: 0.05 mm internal (B1), 0.1 mm external uncoated (B2),
-  0.13 mm external with permanent polymer coating (A6). *Unverified*.
+| Value | Standard | Status | Sources (dissent) |
+|---|---|---|---|
+| Finished board, class 3: external annular ring ≥ 0.050 mm, internal ≥ 0.025 mm, no breakout | IPC-6012 (rev. D to F) 3.4.2, Table 3-9; IPC-A-600 | confirmed | [Summit Interconnect](https://summitinterconnect.com/blog/article/pcb-design-annular-ring/) (rev. E Table 3-9), [NCAB](https://iconnect007.com/article/133540/fresh-pcb-concepts-how-large-does-that-pad-really-need-to-be/133543/pcb), [SLL](https://sllpcb.com/annular-ring-pcb/) (rev. F), [Altium](https://resources.altium.com/p/meeting-standards-ipc-6012-class-3-annular-ring), [ZVEI](https://www.zvei.org/fileadmin/user_upload/Verband/Fachverbaende/PCB_and_Electronic_Systems/Schlau_entwickelt_clever_produziert._Leiterplatten_aus_Europa/pdf/Engl_2021/ZVEI_Recommendations_annular_ring_requirement_2021_06.pdf) (internal). (Dissent: [Ultra Librarian](https://www.ultralibrarian.com/ipc-2221-pcb-design-standards) gives internal 0.025 mm for class 2 and 0.05 mm for class 3; [Weller](https://wellerpcb.com/high-quality-printed-circuit-boards-manufacturing-ipc-class-2-and-3) gives 50 / 25 µm and 90° breakout for classes 2 and 3 alike; neither cites the table of a current revision) |
+| Finished board, class 2: breakout up to 90° accepted, if the land/conductor junction is not reduced by more than 20 % of the minimum conductor width | same | confirmed | ZVEI, Summit Interconnect, Altium (above), [PCD&F 9/2007](https://pcdandf.com/pcdesign/images/stories/mag/0709/0709white_table1.pdf), [Sierra Circuits](https://www.protoexpress.com/blog/ipc-class-2-vs-class-3-different-design-rules/) |
+| Design minimum annular ring, all classes: external 0.05 mm, internal 0.025 mm (supported holes) | IPC-2221A/B 9.1.2, Table 9-2 | confirmed | [Altium](https://resources.altium.com/p/pcb-size-and-pad-size-guidelines), [EDN](https://www.edn.com/standards-for-pth-hole-and-pad-diameter-sizes/) (external), [PCB Libraries forum](https://www.pcblibraries.com/forum/ipc2221-2222-and-throughhole-pad-stacks_topic2586.html) |
+| Land size, minimum = a + 2b + c: a finished hole (drilled hole on internal layers), b minimum annular ring, c fabrication allowance **0.4 / 0.25 / 0.2 mm** for producibility levels A / B / C; + 0.05 mm for more than 8 layers and per oz of copper above 1 oz | IPC-2221A/B 9.1.1, Table 9-1 (the table is no longer in IPC-2221C's table of contents) | confirmed, **corrected** (was 0.6 / 0.5 / 0.4 mm) | [Weller](https://wellerpcb.com/high-quality-printed-circuit-boards-manufacturing-ipc-class-2-and-3) (the table and footnotes), Altium (16 / 10 / 8 mil), NCAB (level B 0.00984 in), PCD&F 9/2007 (level C 0.0079 in), Sierra Circuits (level C 8 mil). (Dissent: EDN gives 0.6 / 0.5 / 0.4 mm without table or revision, the numbers this page had before) |
+| Conductor spacing up to 15 V (DC or AC peak): 0.05 mm internal (B1), 0.1 mm external uncoated (B2), 0.05 mm external with permanent polymer coating (B4), 0.13 mm external with conformal coating over the assembly (A5), 0.13 mm uncoated component lead or termination (A6) | IPC-2221B 6.3, Table 6-1 | confirmed, **corrected** (0.13 mm had been given as the polymer coating value) | [San Francisco Circuits](https://www.sfcircuits.com/pcb-school/pcb-line-spacing), [EMA](https://www.ema-eda.com/ema-resources/blog/pcb-clearance-and-creepage-distance-table/), [P. McGaw](https://philipmcgaw.com/creepage-and-clearance/). The same pages give the same values for 16 to 30 V except A6 0.25 mm, and B2 0.6 mm from 31 V. They disagree in one cell of a higher row (B2 at 251 to 300 V: 1.25 or 2.5 mm), which stays unverified and is not used |
 
-How the presets use them: `ipc3`'s annular ring is the class 3 external minimum plus half the level C
-allowance (0.05 + 0.4 / 2 = 0.25 mm), with default vias sized to give that ring (0.3 / 0.8 mm). Everything
-else in both presets is cadlab's own conservative choice, not an IPC number: the 0.20 mm clearance is above
-the Table 6-1 low-voltage values (higher voltages need more, M8 adds a calculator), and `ipc2`'s 0.13 mm ring
-leaves margin over the breakout allowance that mainstream fabs' published via capabilities (0.05 to 0.15 mm)
-show is enough. Fab-specific limits always come from fab profiles, not from these presets.
+Checked without result: IPC's tables of contents for IPC-2221A/B/C and IPC-6012D (titles only), the ANSI
+webstore previews of IPC-2222 (not served), and searches for NASA, ECSS and MIL documents quoting these tables
+(none found). Several fabricator blog tables give 0.075 / 0.05 mm rings for class 3; they cite no table and are
+taken as the fab's own design margins.
+
+How the presets use them: `ipc3`'s annular ring is the class 3 external minimum plus half the level A
+(preferred producibility) allowance, 0.05 + 0.4 / 2 = 0.25 mm, with default vias sized to give that ring
+(0.3 / 0.8 mm). Levels B and C would give 0.175 and 0.15 mm; the additions for more than 8 layers or heavier
+copper are not applied. Everything else in both presets is cadlab's own conservative choice, not an IPC number:
+the 0.20 mm clearance is above every Table 6-1 value up to 30 V except uncoated component leads above 15 V
+(0.25 mm; higher voltages need more), and `ipc2`'s 0.13 mm ring relies on class 2 accepting breakout: it is
+under the IPC-2221 level C design land (0.05 + 0.2 / 2 = 0.15 mm), a margin that mainstream fabs' published via
+capabilities (0.05 to 0.15 mm) show is enough. Fab-specific limits always come from fab profiles, not from
+these presets.
 
 ### Rules from a fab profile (`board.rules --fab <id> [--process P] [--margin M]`)
 
