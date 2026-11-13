@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/KarpelesLab/cadlab/compare/v0.0.3...v0.0.4) - 2026-11-13
+
+### Other
+
+- Silkscreen DRC: drawings against drawings, texts drawn where KiCad draws them, corpus compared without allowances (D83)
+- corpus re-route after D84, the residuals diagnosed, the M5 exit as measured (D84)
+- grid lines along the finest rows, exits off the grid lines, finer grids after a run that leaves a few connections (D84)
+- list the copper around a component, plan the fanout alone
+- edge and overlap DRC rules, reference designators arranged and kept in the board (D82)
+- corpus re-route with pours, the router's exit criteria as measured (D80)
+- pours are places to connect to, re-planned where the routing cuts them, failures counted on the refilled board (D80)
+- list the connections a corpus project's own routing leaves open
+- the demo board's KiCad DRC oracle runs in the oracles job
+- fillet tables compared with published IPC-7351B reproductions, BGA lands from the land table (D78)
+- Milestone exits: M1 and M3 shown by tests, M4 demo board with both fab bundles, exit lines for M7-M9 (D81)
+- net exceptions, honored by DRC, zone fill, router and route.track; reported by DSN, IDF, IDX and KiCad exports (D76)
+- IPC rule presets: values confirmed on secondary sources and moved to a data file; IPC-2152 fit is the universal chart (D79)
+- Clippy 1.100: needless_range_loop and needless_bool
+- Fab profiles: re-checked against the fabs' pages, unverified values closed where published (D77)
+
 ## [0.0.3](https://github.com/KarpelesLab/cadlab/compare/v0.0.2...v0.0.3) - 2026-11-04
 
 ### Other
