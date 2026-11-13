@@ -177,11 +177,16 @@ Details in [ROUTER.md](ROUTER.md).
 - [x] `route` commands: whole board, net, net class, between two pads; keep or rip existing tracks
 
 **Exit:** routes typical 2- and 4-layer hobby boards (≤ 200 nets) to 100% with zero DRC errors.
-*Measured 2026-11-13 (D80), not closed:* the generated 2- and 4-layer boards (ATtiny, SOIC grids, STM32) and
-three of the five small corpus boards (buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight) route to 100 %
-with zero DRC errors, pours refilled. Gap: nrfmicro 97.6 % (83 of 85, the USB-C D+/D− crossing, seeds 1–3; the
-original board routes it). sweep-v2.2's 3 open connections are open in the original board too (its two halves
-are not joined on the board), so no router closes them.
+*Measured 2026-11-13 (D84, `CADLAB_BENCH_WORK=200000000 route_bench --corpus`, seeds 1–3), not closed:* the
+generated 2- and 4-layer boards (ATtiny, SOIC grids, STM32) and four of the five small corpus boards
+(nrfmicro, buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight) route to 100 % on all three seeds with zero
+DRC errors, pours refilled; nrfmicro's 2–3 open connections (the USB-C D+/D− crossing) are closed (D84).
+sweep-v2.2's 3 open connections are open in the original board too (its two halves are not joined on the
+board), so no router closes them. Gap: the three denser corpus boards that are also 2- or 4-layer with at most
+200 nets do not reach 100 %: corne-cherry (2 layers, 152 nets of two pads or more) 2/5/2 of 443 open, buspirate5-rev10 (4 layers,
+183 nets) 2/4/1 of 538, tinytapeout-demo (4 layers, 137 nets) 25/10/13 of 403. They end on the 200 M budget or
+close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo's in seed 1) and congestion
+(ROUTER.md, "Corpus re-route, D84"). Whether a larger budget closes them was not measured.
 
 ## M6 — Autorouter v2: freerouting parity (XL)
 
@@ -219,15 +224,19 @@ are not joined on the board), so no router closes them.
       places to connect to, the run fills the pours for its routing and negotiates again for the nets it cut
       off, and what stays cut off is reported as failed (open connections over seeds 1–3: 480/468/457 →
       254/251/297; buspirate5-rev10 66/63/64 → 4/0/7, lumenpnp-mobo 69/62/61 → 8/14/14; DECISIONS D80)
+- [x] Corpus residuals of D80, diagnosed: finer grids after a run that leaves a few connections (nrfmicro's
+      USB-C corner is fitted to 10 µm, off the 0.2 mm grid), grid lines along the finest rows, exits turning by
+      less than onto a line (open connections over seeds 1–3: 254/251/297 → 227/236/222; nrfmicro 2/2/3 → 0/0/0,
+      tinytapeout-demo 29/23/28 → 25/10/13; pads cut off from pours diagnosed and left; DECISIONS D84)
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
-*Measured 2026-11-13 (D80):* met on the generated benchmark suite, where all seven comparable boards route to
+*Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
 100 % with zero DRC errors (freerouting 2.4.1 as recorded in ROUTER.md: 95.0–100 % in 3.7–154 s, cadlab 100 % in 0.02–8.3 s;
-not run again here). Not shown on the open-source corpus: freerouting has never been run on those boards, and
-cadlab's own re-route at a 200 M work budget leaves connections open on nine of the twelve boards (seed 1:
-nrfmicro 2 of 85, buspirate5-rev10 4 of 540, lumenpnp-mobo 8 of 521, sweep-v2.2 3 of 49, corne-cherry 4 of 445,
-glasgow-revC3 35 of 739, glasgow-revD1 137 of 1701, cynthion 32 of 722, tinytapeout-demo 29 of 393; zero DRC
-errors), so the line stays open until that comparison exists.
+not run again here; cadlab's side is checked against `tests/golden/bench/route.json`). Not shown on the open-source
+corpus: freerouting has never been run on those boards, and cadlab's own re-route at a 200 M work budget leaves
+connections open on eight of the twelve boards (seed 1: buspirate5-rev10 2 of 538, lumenpnp-mobo 8 of 521,
+sweep-v2.2 3 of 49, corne-cherry 2 of 443, glasgow-revC3 35 of 744, glasgow-revD1 122 of 1703, cynthion 30 of 722,
+tinytapeout-demo 25 of 403; zero DRC errors), so the line stays open until that comparison exists.
 
 ## M7 — KiCad import and more fabs (M)
 

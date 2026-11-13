@@ -2166,6 +2166,82 @@ though nothing electrical depends on it, and the tool that placed the parts is t
 room is. Storing the result keeps every output and both DRCs talking about the same text, and leaves the last
 word to whoever sets one by hand.
 
+### D84. Router: the residuals D80 left, diagnosed; grid lines along the finest rows, exits off the grid lines, finer grids after a run that leaves a few connections (2026-11-13)
+D80 left three groups of failures the router could be blamed for. Each was reproduced at the 200 M work budget (seeds
+1–3, D80's numbers to the connection), looked at in place (`route_bench`'s new `CADLAB_BENCH_DUMP` and
+`CADLAB_BENCH_FANOUT=only`, the original board's copper read as geometry from its `.kicad_pcb`), and named.
+**nrfmicro's D+/D− crossing (2–3 of 85 open).** Not the crossover: D+ and D− routed alone join their pads, and the
+failures appear as CC1, CC2, VBUS and the diode's net are added. D− has to loop around the D+ crossover via, and a
+diode pad 1.9 mm behind the receptacle leaves that loop 0.18 mm where 0.2 mm is asked. The original fits its
+tracks there within 10 µm of the rules (0.608 and 0.605 mm from via centers where 0.6 mm is asked), through lanes
+0.15 mm wide that the 0.2 mm grid does not hit, and negotiation never settles. *Decision:* a whole run that leaves a
+few connections unrouted (at most 4, or a tenth) without ending on its budget is made again at 1/1.5, 1/2 and 1/3 of
+its pitch, then the same with the next seed, until one routes everything; the best is kept. Only when other nets'
+routing was in the way of a connection it left (a wall or a pad no track leaves fails on any grid), or with the
+grid search alone. A finer run needs four times the first run's cost left in the budget (then twice the
+costliest so far), and an explicit `grid` is used as given. nrfmicro: 0 open for seeds 1 to 12.
+**Fine-pitch pads with no exit (9).** *tinytapeout-demo's QFN-80 (7):* the grid origin followed the majority of
+all pad centers, which left the QFN's rows 0.0925 mm off the grid lines. Every pad then turns onto a line inside
+the row, and no assignment serves all of them: two neighbors turning the same way at the same depth are 0.28 mm
+apart on their diagonals (0.385 mm needed for two 0.185 mm tracks at 0.2 mm), two turning towards each other end
+on adjacent lines. The original leaves every pad straight for 0.8 to 1.1 mm and fans out at 45° beyond, which is
+the grid's own behavior once the rows are on its lines. *Decision:* per axis, the origin puts the most pads of
+the finest rows along that axis on lines (rows that would need escapes off them, pad pitch a multiple of the
+grid's), then the most pad centers. The QFN needs 110 escapes instead of 150 and loses none. *corne-cherry's CC1
+(1):* between a no-connect pad and the D− exit turning towards it, it has to turn away by 0.25 mm before that exit
+does, and no grid line lies there. *Decision:* a pad with no candidate may turn by a multiple of 50 µm, run on,
+and take a stub onto a cell further out. *lumenpnp-mobo's U5.10 (1):* not fixed, see below.
+**Pads still cut off from a pour (6).** Diagnosed, not fixed (below).
+**Result** (seeds 1/2/3, zero DRC errors other than unrouted before and after, identical on 1 and 4 threads on the
+boards checked): open connections 254/251/297 → 227/236/222, 802 → 685 over the seeds. nrfmicro 2/2/3 → 0/0/0,
+tinytapeout-demo 29/23/28 → 25/10/13, corne-cherry 4/5/5 → 2/5/2, glasgow-revD1 137/145/170 → 122/131/124,
+buspirate5-rev10 4/0/7 → 2/4/1; glasgow-revC3 35/32/34 → 35/35/34 and cynthion 32/27/33 → 30/34/31, each 3 worse
+over the seeds; lumenpnp-mobo, sweep-v2.2 and the three small boards unchanged. The four boards in the middle of
+that list (revD1, revC3, cynthion, buspirate5) changed only because their grid origin moved by 0.03 to 0.1 mm: that
+is another negotiation, and their differences are its spread, not gains or losses of a mechanism, except one
+loss that is real: a net-tie pad of revD1 (NT1.2) had grid access at the old origin and has none at the new one
+(2 connections in every seed). Generated benchmark: every board routes exactly as on the commit before, so the
+goldens are not blessed (stm32-4l, qfp-qfn-4l, fine-4l and bga144-4l sit within tolerance of them as they did).
+**Exit criteria.** *M5* is not marked done. nrfmicro now meets it, with buspirate-flash-sop, buspirate-rs232 and
+lumenpnp-ringlight; sweep-v2.2's 3 are the design's. But the line says 2- and 4-layer boards of at most 200 nets,
+and counting nets (D80 named only the five small boards) three more corpus boards qualify and do not route to
+100 %: corne-cherry (2 layers, 152 nets of two pads or more, 2/5/2 open), buspirate5-rev10 (4 layers, 183 nets, 2/4/1) and
+tinytapeout-demo (4 layers, 137 nets, 25/10/13). lumenpnp-mobo has 206 such nets and glasgow-revC3 226,
+just over the line. Whether "typical hobby board" includes a 0.4 mm QFN-80 or a
+440-connection keyboard is a judgment the line does not make, so the gap is stated instead. *M6* unchanged.
+**Tried and dropped.** A crossover for the case where the loop has no room (both pads of one net get vias, both
+exits of the other go on past them and the pad behind): alone it moved nrfmicro's failures to three other nets
+(4/3/2 failed), and with the finer grids it routed 11 of 12 seeds where they alone route 12. Escape assignment
+tried again with every pad's candidates ordered to turn the same way, keeping the better: as many exits and the
+same pads missed on all eight boards with fanout. More negotiation iterations on nrfmicro, with that crossover
+(120 with stagnation at 30: 2/3/1 failed; 300 at 60: 3/0/1). The grid origin following every fine-pitch row,
+also those not commensurate with the pitch: stm32-2l went from 58 to 72 vias.
+**Known residuals.** *Pours:* a pour round plans the cut-off net again whole, and its new routing cuts other
+places. On tinytapeout-demo, seed 1, four rounds each planned two nets again (what is open is GND and +3V3) and
+the last was undone, leaving 25 open with nothing failed in the plan; on lumenpnp-mobo the single round ends with
+negotiation's share of the budget; on buspirate5-rev10, seed 2, the third check found more open than the second.
+The likely fix is to add connections for the cut-off pieces and keep the net's routing (incremental, where D80's
+follow-up run was whole); not built, so not shown. *U5.10 of lumenpnp-mobo:* a GND pad the pour joined when the
+fanout was planned, so no exit was reserved for it; 0.06 mm off its grid line (a track along the line passes
+0.165 mm from the next pad, 0.2 mm asked), it has no grid access once its neighbors' tracks cut the pour. Why the
+exact gridless search does not reach it either was not established; the retry that moves other nets starts at
+186 M of the 200 M. *NT1.2 of glasgow-revD1*, above. *Cost of the finer grids:* a board that congestion leaves a
+few connections short now spends the rest of its budget on runs that may change nothing (the QFN-40 of
+`tests/route.rs`: 39 of 40 either way, 44 s of the 60 s budget in a release build instead of a few seconds; nrfmicro
+seed 1: 99 M units instead of 8 M, for 85 of 85). The default budget is a time, so this is bounded by what the
+user allowed, but an agent that routes, looks and moves parts waits longer for each incomplete answer; whether
+that trade is right outside the corpus is a judgment this pass does not settle. *Work count:* on glasgow-revC3,
+seed 1, `stats.work` differs by 1108 units of 201 M between 1 or 2 threads and 4 or 8 (tracks, vias, length and
+every iteration's overuse identical); the version before does not show it on revC3 (seeds 1 to 3) or cynthion
+(seed 1). Nothing in this change touches the meter or the batches, so it is taken for a latent property of a
+budget that ends inside a parallel batch, met by this run; not diagnosed. The rest is congestion at the budget
+on the seven large boards.
+*Why:* the three groups were not one problem and none was what it had been taken for: nrfmicro's was a grid too
+coarse for a hand-fitted corner, not a missing crossover; the QFN's was the grid's origin, not the assignment;
+the pours' is the granularity of the re-plan. A fix was kept only where the corpus and the generated benchmark
+both showed it, and the mechanism built for the first diagnosis was removed when the measurement said the
+simpler one did the work.
+
 
 ## Open questions
 

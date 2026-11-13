@@ -87,8 +87,14 @@ parallel tracks fit at two cells. When the pad pitch most fine-pitch rows share 
 parts, no track between neighbors) is `2m` times a pitch at most 6 % coarser, the grid takes that pitch instead:
 every pad of such a row then sits at the same offset from the grid, so the escapes of neighbors stay a pad pitch
 apart (with a drifting offset, two neighbors end up one grid line apart somewhere along each row, and one of them
-is walled in: half the pads of corne-cherry's 0.4 mm QFNs had no escape at 0.195 mm). The origin is shifted to put
-the most pad centers on cell centers. Maps are
+is walled in: half the pads of corne-cherry's 0.4 mm QFNs had no escape at 0.195 mm). The origin is shifted, per
+axis, to put on grid lines the most pads of the finest rows running along that axis (rows that would need
+escapes off the lines and whose pad pitch is a multiple of the grid's, so one offset serves the whole row), then
+the most pad centers on cell centers (D84: the majority of all pads used to decide alone, which left
+tinytapeout-demo's QFN-80 0.0925 mm off the lines; every pad then has to turn onto a line within the row, two
+neighbors turning the same way at the same depth are 0.28 mm apart on their diagonals where 0.385 mm is needed,
+two turning towards each other end on adjacent lines, and 10 of its 75 pads got no exit. Other pads are reached
+by a stub from any cell, so they only break ties). Maps are
 sampled on the *double grid* (half pitch): even/even = cells, odd = midpoints of orthogonal and diagonal moves. A
 move is legal when its three samples are legal. Static obstacles are inflated by
 `δ = √(r² + s²/4) − r` (r: required distance, s: sample spacing, at most ~10 µm), which makes the sampling exact:
@@ -120,7 +126,10 @@ pad gains an exit. Two candidates clash when their tracks break a clearance or o
 router samples it. A greedy pass in pad order walls in every other pad of a tight row: the 0.4 mm QFN-80 of
 tinytapeout-demo got 50 exits for 75 pads, now 65; an RP2040 of corne-cherry 22 of 28, now 27. A pad with no such
 candidate tries the turn earlier, then straight on to the cell (D69: a neighbor's exit turning towards it further
-out leaves it no room to turn at the cell's depth). Every stub and via
+out leaves it no room to turn at the cell's depth), and one still without tries a turn by less than onto a grid
+line (multiples of 50 µm to either side), then straight on and a stub onto a cell further out with five free
+cells ahead (D84: corne-cherry's CC1 between a no-connect pad and the D− exit turning towards it gets out with a
+turn by 0.25 mm, which ends on no grid line). Every stub and via
 is checked exactly against everything placed so far, including the router's own sampling margin between escapes,
 so the fanout is DRC-clean by construction. *Crossover vias*: in a row of fine-pitch single-layer pads, two nets whose pads interleave tightly
 (`X Y X Y`, the D+/D− pairs of a USB-C receptacle) cannot both join their pads on that layer: whichever joins
@@ -130,7 +139,10 @@ as late as the via allows) and the pads beyond those neighbors can still turn aw
 towards them (D69: on corne-cherry's receptacles the shallowest via walled in CC1 and the D+ pad beyond the
 crossing); those exits are reserved as escapes, and the net's other pad, beyond one of them, gets an exit of its own that
 keeps clear of it and ends in a via when the router could not reach it from a grid cell otherwise. The other net then joins its pads around the via on the pad layer, and this
-one joins its two vias on another layer (the way such receptacles are routed by hand). Fanout copper then counts
+one joins its two vias on another layer (the way such receptacles are routed by hand). That loop is not checked:
+on nrfmicro a diode pad 1.9 mm behind the receptacle's pads leaves 0.18 mm between a 0.2 mm track around the via
+and itself, 0.2 mm asked, and the router has to find another way (it does on a finer grid, see "Finer grids";
+planning vias for both nets there was tried and dropped, D84). Fanout copper then counts
 as existing copper of its net for the run. In the output an escape is
 absorbed into the routed path that uses it (so post-processing smooths the junction); fanouts that end up joining
 their pad to nothing else are dropped.
@@ -353,6 +365,25 @@ export writes them as chords within 1 µm. Lengths (`route.status`, stats, bench
 **Verification.** `drc::check_copper`, the checks of `drc::check` that can flag a track or via (the same errors about
 them, D72), runs on the project with the result; any new track or via in an error has its wire ripped and reported. The final status of every connection is read from the copper
 islands of the verified board.
+
+**Finer grids** (D84; `route.all`, `route.nets`). The default pitch holds the paths that lie on its lines. Between
+parts placed for hand routing the passages are often narrower than a pitch and off those lines, and negotiation
+then never settles: nrfmicro (85 connections, 0.2 mm tracks at 0.2 mm) still shares 20 to 40 points after 25 to 40
+iterations at 0.2 mm, and legalization leaves 2 to 3 connections whatever the seed. A whole run (with the re-plan
+of boxed pads and the push-and-shove of leftovers) that leaves a few connections unrouted (at most 4, or a tenth)
+without having ended on its budget is made again at a pitch of 1/1.5, 1/2 and 1/3 of its own, then the same three
+with the next seed, until one routes everything; the run with the fewest failed connections is kept, the earlier
+among equals. Only when the run left a connection with other nets' routing in its way ("no room left": a keep-out
+across the board or a pad no track leaves fails on any grid, and the exact gridless search has been there
+already), or with `router: grid`, which has no other way off its lines. The first of them needs four times what
+the first run took left in the budget, each further one twice what the costliest so far took, so a board that
+ends near its budget gets none, and neither does one with an explicit `grid`. Which pitch settles is chaotic (of
+seeds 1 to 8, a pitch of 0.133 mm alone routes nrfmicro completely for 2 and 0.1 mm for 6, not the same ones),
+hence several: nrfmicro routes to 100 % for seeds 1 to 12, in 15 to 99 M units of work (2 to 12 s on the loaded
+development machine) where one run took 8 to 28 M. *The cost:* a board with a few connections that congestion
+really leaves no room for now spends the rest of its budget on runs that change nothing. The 0.4 mm QFN-40 of
+`tests/route.rs` (39 of 40 routed) takes 44 s of its 60 s budget in a release build instead of a few seconds, for the
+same 39; a shorter `budget` is the way to a quick answer.
 
 **Failure reports.** A failed connection is re-searched with obstacles passable at a penalty; what that path runs
 through (exact checks) names the blockers: `no path from C2.1 to U1.5: blocked by keep-out `wall` on F.Cu`, with a
@@ -791,7 +822,10 @@ the JVM start and file exchange) and imported through `route.import_ses`, then m
 prints a timeline of the router's phases and negotiation iterations (time and work), `CADLAB_BENCH_NETS=a,b` routes only
 those nets, `CADLAB_BENCH_ORIGINAL=1` lists the connections each project's own routing leaves open instead of
 routing (the reference for residuals), `CADLAB_BENCH_WORK=<units>` uses a work budget (repeatable: compare builds this way, not on time; the job
-`corpus-route` of CI does it for three seeds) and `CADLAB_BENCH_SEED=<n>` sets the seed.
+`corpus-route` of CI does it for three seeds) and `CADLAB_BENCH_SEED=<n>` sets the seed. For one place on a board,
+`CADLAB_BENCH_DUMP=<refdes>[.<pad>][,<margin mm>]` lists the pads, tracks and vias of the result around a component
+or pad (coordinates to compare with the original board's copper), and `CADLAB_BENCH_FANOUT=only` plans the fanout
+alone and lists that.
 
 **Results** (release build, 16-core macOS development machine, freerouting 2.4.1 on Java 25). *M5* is the router
 at the start of M6, *phase 1* the first M6 version (fanout, batches, rip-up and retry), *phase 2* the second (escape
@@ -1074,6 +1108,84 @@ What is left, by cause (seed 1; `CADLAB_BENCH_VERBOSE=1` lists every connection)
 - *Congestion and budget*: the rest (glasgow-revC3 41, glasgow-revD1 139, cynthion about 20, tinytapeout-demo about 20, mobo 8,
   corne-cherry 3, buspirate5 3). Both glasgow boards and cynthion, tinytapeout-demo, mobo and corne-cherry end on the 200 M
   budget with negotiation unfinished; whether more budget closes them was not measured in this pass.
+
+**Corpus re-route, D84** (grid lines along the finest rows, exits that turn by less than onto a line, finer grids
+after a run that leaves a few connections; same command, budget, seeds, threads
+and machine as D80, whose *after* is the *before* here: reproduced first, to the connection. Both repeat exactly.
+On 1 thread the result is the same, work included, for nrfmicro (seeds 1 to 3), lumenpnp-ringlight (1),
+buspirate5-rev10 (1, 2), corne-cherry (1, 3), tinytapeout-demo (1, 2), cynthion (2), lumenpnp-mobo (1) and
+glasgow-revD1 (1); on glasgow-revC3 (1) tracks, vias and length are the same and `stats.work` differs by 1108 units
+of 201 M between 1 or 2 threads and 4 or 8, which the version before does not show there (not diagnosed, D84).
+DRC errors other than unrouted: 0 on every board and seed, before and after.)
+
+| board | layers | nets (two pads or more) | connections (seed 1) | open before | open after | failed before | failed after | vias (seed 1) | length (seed 1) | work (seed 1) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| nrfmicro | 2 | 41 | 85 | 2/2/3 | **0/0/0** | 2/2/3 | 0/0/0 | 37 → 46 | 447.8 → 453.6 mm | 7.9 → 99.0 M |
+| buspirate-flash-sop | 2 | 13 | 47 | 0/0/0 | 0/0/0 | 0/0/0 | 0/0/0 | 4 | 460.2 mm | 1.6 M |
+| buspirate-rs232 | 2 | 33 | 43 | 0/0/0 | 0/0/0 | 0/0/0 | 0/0/0 | 10 | 280.9 mm | 1.9 M |
+| buspirate5-rev10 | 4 | 183 | 540 → 538 | 4/0/7 | 2/4/1 | 4/0/7 | 2/3/5 | 304 → 313 | 3044 → 3053 mm | 173.1 → 176.6 M |
+| lumenpnp-ringlight | 2 | 12 | 39 | 0/0/0 | 0/0/0 | 0/0/0 | 0/0/0 | 2 | 180.4 mm | 1.4 M |
+| lumenpnp-mobo | 4 | 206 | 521 | 8/14/14 | 8/14/14 | 10/16/17 | 10/16/17 | 341 | 5518 mm | 204 M (budget) |
+| sweep-v2.2 | 2 | 43 | 49 | 3/3/3 | 3/3/3 | 3/3/3 | 3/3/3 | 21 | 2161 mm | 128.9 M |
+| corne-cherry | 2 | 152 | 445 → 443 | 4/5/5 | **2/5/2** | 4/5/5 | 2/5/2 | 488 → 464 | 8393 → 8117 mm | 211 → 213 M (budget) |
+| glasgow-revC3 | 4 | 226 | 739 → 744 | 35/32/34 | 35/35/34 | 41/37/41 | 36/39/35 | 422 → 413 | 3398 → 3424 mm | 210 → 201 M (budget) |
+| glasgow-revD1 | 6 | 561 | 1701 → 1703 | 137/145/170 | **122/131/124** | 139/147/173 | 131/135/128 | 1035 → 1045 | 8663 → 8813 mm | 221 → 221 M (budget) |
+| cynthion | 4 | 337 | 722 | 32/27/33 | 30/34/31 | 33/27/35 | 30/34/31 | 467 → 481 | 3166 → 3201 mm | 202 → 213 M (budget) |
+| tinytapeout-demo | 4 | 137 | 393 → 403 | 29/23/28 | **25/10/13** | 29/23/29 | 26/14/18 | 265 → 241 | 4384 → 4884 mm | 200 → 204 M (budget) |
+| all twelve | | | | 254/251/297 | **227/236/222** | 265/260/313 | 240/249/239 | | | |
+
+Open connections over the three seeds: 802 → 685 (−15 %). By mechanism:
+
+- *nrfmicro, 7 → 0: the finer grids.* The diagnosis first. Routed alone, D+ and D− join their pads (6 of 6);
+  with CC1 and CC2 one D+ connection fails, with VBUS and the diode's net two: the crossover is not what fails,
+  the room behind the receptacle is. D− should loop around the D+ crossover via, and the diode pad D1.1, 1.9 mm
+  behind the receptacle's pads, leaves that loop 0.18 mm where 0.2 mm is asked; the way around the diode pad
+  encloses it. What the designer routed there is fitted to within 10 µm (in the original, a D− track passes
+  0.608 mm from the center of a D+ via and the diode's track 0.605 mm from a D− via, 0.6 mm asked; the lanes on
+  both sides of the diode pad are 0.15 mm wide for a track's center, one of them between two lines of the 0.2 mm
+  grid), with D+ joined right under the pads on the back and D− taken past the diode to two vias 2.75 mm out. The
+  0.2 mm grid cannot hold that, negotiation never settles (20 to 40 points still shared when it stops), the
+  gridless retry finds a path through CC1 and D+ and fails one more connection routing them again. On a grid of
+  0.133, 0.1 or 0.067 mm it settles: seeds 1 to 12 all route to 100 % (2 to 12 s, 15 to 99 M). *Tried and
+  dropped:* a crossover that gives both D+ pads a via and takes both D− exits past them and the diode pad when
+  the loop has no room. Alone it moved the failures to the diode's net, VBUS and VBAT (4/3/2 failed over seeds 1
+  to 3); with the finer grids it routed 11 of 12 seeds, where the finer grids alone route 12. It is not in the code.
+- *tinytapeout-demo, 80 → 48.* The QFN-80's rows are on grid lines now (the board gets 110 fanout items instead of
+  150; before, 10 of the QFN's 75 pads had no exit and 5 to 7 connections failed on them in every seed, now none).
+  One pad of the USB receptacle (J1.B7) that the escape planning served before is missed at the new origin; it
+  routes in all three seeds. What is left in seed 1 is pours: the 25 open connections are all on GND and +3V3.
+- *corne-cherry, 14 → 9.* CC1 of the right receptacle gets out in every seed (an exit that turns by 0.25 mm, onto
+  no grid line, and takes a stub to a cell).
+- *glasgow-revD1, 452 → 377; glasgow-revC3, 101 → 104; cynthion, 92 → 95; buspirate5-rev10, 11 → 7.* Their grid
+  origins moved by 0.03 to 0.1 mm along x (rows whose pitch is a multiple of the grid's), which is another
+  negotiation from the first iteration on. Nothing else in this pass touches them, so these four are the spread of
+  such a change, not a gain or a loss to count on: revC3 and cynthion end 3 connections worse, each inside what
+  their three seeds span (32 to 35 and 27 to 34). One thing on revD1 is a real loss: the net-tie pad NT1.2 had grid
+  access at the old origin and has none at the new one (2 connections in every seed, "no legal way out").
+- lumenpnp-mobo, sweep-v2.2 and the three small boards route exactly as before.
+
+What is left, by cause:
+
+- *Open in the original too* (sweep-v2.2, 3) and *infeasible under the board's rules* (cynthion, 8): as under D80.
+- *Pours* (seed 1/2/3: tinytapeout-demo 25/0/0, lumenpnp-mobo 1/2/2, buspirate5-rev10 0/2/0, cynthion 1/0/0,
+  corne-cherry 0/0/1 reported as cut off; more of the "no path" lines are tracks ending on a cut-off piece).
+  Looked at with the phase timeline (`CADLAB_BENCH_TRACE`), not fixed. A pour round plans the cut-off net again
+  whole, so its new routing cuts other places: on tinytapeout-demo, seed 1, three rounds each planned two nets
+  again (what is open is GND and +3V3) and a fourth, after the retries, was undone for leaving more open, at 25
+  open connections with none failed in the plan. On lumenpnp-mobo the one round ends where negotiation's share of the budget does
+  (149 M of 200 M) with 9 open, and nothing later may plan again. On buspirate5-rev10, seed 2, the third check
+  finds more open than the second and ends the rounds, at 10 open before optimization (4 at the end of the run).
+  Ruled out as the cause on tinytapeout-demo, seed 1: optimization after the last check (25 open before it, 25 at
+  the end). The likely fix is adding connections for the cut-off pieces and keeping the net's routing; it was not
+  built, and D80 dropped the nearest thing it tried (a follow-up run of the whole router on the routed board).
+- *A fine-pitch pad with no exit* (lumenpnp-mobo's U5.10, seed 1; D80 listed 9 such pads, the other 8 are gone):
+  a GND pad of the LQFP that the F.Cu pour joined when the fanout was planned, so no exit was reserved for it. It
+  lies 0.06 mm off its grid line (a track along the line would pass 0.165 mm from U5.11, 0.2 mm asked), so once
+  its neighbors' tracks cut the pour it has no grid access. Why the exact gridless search does not reach it either
+  was not established; the retry that moves other nets starts at 186 M of the 200 M budget.
+- *Congestion and budget*: the rest (glasgow-revD1 about 125, glasgow-revC3 35, cynthion about 22, tinytapeout-demo
+  10 to 13 in seeds 2 and 3, lumenpnp-mobo 6 to 12, corne-cherry 2 to 5, buspirate5-rev10 1 to 2). All seven end on
+  the 200 M budget or within 12 % of it.
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).
