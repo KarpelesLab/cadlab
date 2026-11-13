@@ -17,7 +17,8 @@
 //! under any load and with any number of threads, so two builds can be compared exactly (with
 //! `CADLAB_BENCH_SEED=<n>` for the seed, default 1: negotiation is chaotic, so compare several).
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
-//! `CADLAB_BENCH_NETS=a,b` routes only those nets.
+//! `CADLAB_BENCH_NETS=a,b` routes only those nets. `CADLAB_BENCH_ORIGINAL=1` lists the connections
+//! the projects' own routing leaves open instead (the reference for residual failures).
 
 #[path = "../tests/common/routebench.rs"]
 mod routebench;
@@ -105,6 +106,16 @@ fn corpus(filters: &[String]) {
             BoardImportOptions { file_name: e.pcb.clone(), rules: k, origin: OriginMode::Aux, ..Default::default() };
         if let Err(err) = kicad_import::import(&mut p, &text, &opts) {
             eprintln!("{}: import failed: {}", e.name, err.message);
+            continue;
+        }
+        // `CADLAB_BENCH_ORIGINAL=1`: the connections the project's own routing leaves open, instead
+        // of a re-route (what no router is asked to do better than the designer did).
+        if std::env::var_os("CADLAB_BENCH_ORIGINAL").is_some() {
+            let open = cadlab::board::ratsnest(&p);
+            println!("{}: {} connections open in the original routing", e.name, open.len());
+            for l in &open {
+                println!("  {} {} -> {} ({:.2} mm)", l.net, l.from, l.to, l.length.0 as f64 / 1e6);
+            }
             continue;
         }
         p.board_mut().tracks.clear();

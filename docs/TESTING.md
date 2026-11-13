@@ -222,7 +222,9 @@ Per project, on a copy of the checkout:
    (circuit built from the board) and prints completion, vias, length, time and DRC errors per board with the
    failures grouped by reason (`CADLAB_BENCH_ROUTER`, `CADLAB_BENCH_BUDGET_MS`, `CADLAB_BENCH_WORK`, `CADLAB_BENCH_SEED`,
    `CADLAB_BENCH_VERBOSE`,
-   `CADLAB_ROUTE_RENDER`; docs/ROUTER.md, "Benchmarks").
+   `CADLAB_ROUTE_RENDER`; docs/ROUTER.md, "Benchmarks"). `CADLAB_BENCH_ORIGINAL=1` lists the connections each
+   project's own routing leaves open instead of routing: the reference for what no re-route is asked to close
+   (sweep-v2.2 has three).
 
 Allowances, each with its reason, on top of the cross-check's (`drc_compare::ALLOW`):
 
