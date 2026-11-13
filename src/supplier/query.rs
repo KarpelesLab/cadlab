@@ -169,10 +169,7 @@ impl SearchQuery {
                 _ => return false,
             }
         }
-        if !self.include_obsolete && matches!(c.lifecycle, Lifecycle::Obsolete | Lifecycle::LastTimeBuy) {
-            return false;
-        }
-        true
+        self.include_obsolete || !matches!(c.lifecycle, Lifecycle::Obsolete | Lifecycle::LastTimeBuy)
     }
 
     /// Sorts best first: in stock, active, cheapest at the quantity, most stock.

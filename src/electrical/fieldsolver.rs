@@ -1357,10 +1357,10 @@ pub fn solve(cs: &CrossSection, acc: Accuracy) -> Result<Capacitance, SolveError
                 Sym::Right(partner) => {
                     let pn = sig(partner).expect("signal");
                     let ko = odd.iter().position(|(x, _)| x == h).expect("odd");
-                    for i in 0..cs.conductors.len() {
+                    for (i, sym_i) in pr.sym.iter().enumerate().take(cs.conductors.len()) {
                         let Some(n) = sig(i) else { continue };
                         let qe_i = full_q(&qe[k], i, 1.0);
-                        if matches!(pr.sym[i], Sym::Centered) {
+                        if matches!(sym_i, Sym::Centered) {
                             c[n][sn] = qe_i / 2.0;
                             c[n][pn] = qe_i / 2.0;
                         } else {

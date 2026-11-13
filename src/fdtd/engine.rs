@@ -1614,8 +1614,8 @@ impl Simulation {
                 }
                 let dims = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
                 let (mut pb, mut pc, mut pk) = (Vec::new(), Vec::new(), Vec::new());
-                for i in lo[w]..hi[w] {
-                    let pos = if is_e { x(i) } else { x(i) + self.d[w][i] / 2.0 };
+                for (i, d) in self.d[w].iter().enumerate().take(hi[w]).skip(lo[w]) {
+                    let pos = if is_e { x(i) } else { x(i) + d / 2.0 };
                     let (b, c, k) = profile(pos);
                     pb.push(b);
                     pc.push(c);

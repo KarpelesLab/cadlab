@@ -1280,11 +1280,11 @@ impl<'a> Engine<'a> {
                 }
                 let c0 = gu + (self.costs.via + self.hist_v[cell]) * (1.0 + pres * occ) + pen;
                 let k = k0 as usize;
-                for s2 in 0..ns {
+                for (s2, track) in self.st.track[prof].iter().enumerate().take(ns) {
                     if s2 == s {
                         continue;
                     }
-                    if !ok(self.st.track[prof][s2][k], net) && mode != Mode::Explain {
+                    if !ok(track[k], net) && mode != Mode::Explain {
                         continue;
                     }
                     let v = (s2 * cells) as u32 + cell as u32;
