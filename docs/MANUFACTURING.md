@@ -413,3 +413,53 @@ Support as many as practical, in this order:
 
 Adding a fab should only need a profile file and, if needed, a small output-format adapter (BOM/CPL layout), with no
 core code changes.
+
+### Demo board: two bundles from one project, and the upload checklist
+
+The M4 exit ([ROADMAP.md](ROADMAP.md)) asks that one unmodified project exports bundles both JLCPCB's and PCBWay's
+online checks accept. The board is `examples/demo-board/board.jsonl`: agent session 1's design (two layers,
+50 × 40 mm, ATmega328P, USB-C power input with a TVS diode, 3.3 V LDO, crystal, ISP and I2C headers, two LEDs) as a
+batch of commands, on cadlab's own IPC class 2 rules, routed with a work budget so that every machine gets the
+same tracks. From the repository root, with a built `cadlab`:
+
+```
+cadlab project new demo --targets jlcpcb,pcbway
+cadlab -p demo batch examples/demo-board/board.jsonl
+cadlab -p demo drc                    # "DRC clean": cadlab's rules and both targets' limits
+cadlab -p demo fab export jlcpcb      # demo/out/fab/jlcpcb/
+cadlab -p demo fab export pcbway      # demo/out/fab/pcbway/
+```
+
+Each export warns `fab.no_suppliers` (parts availability is not checked without a catalog) and nothing else.
+`tests/demo_board.rs` runs these lines and checks what a program can: ERC, lint and DRC clean, both bundles complete,
+the fabrication data byte-identical under the two fabs' file names, the project files unchanged by the exports and
+naming no fab outside `targets`, the archives identical between two builds. KiCad's DRC of the same board is the
+oracle test `kicad_drc_clean_demo_board` (CI's `oracles` job).
+
+What no program here can check is the fabs' own review of the upload. **That part is manual and needs an account
+at each fab; cadlab never uploads anything.** Uploading and reading the result orders nothing: stop before
+payment.
+
+| | JLCPCB | PCBWay |
+|---|---|---|
+| Upload | `demo/out/fab/jlcpcb/demo-jlcpcb.zip`, as the Gerber file of a new PCB order | `demo/out/fab/pcbway/demo-pcbway.zip`, as the Gerber file of a new PCB quote |
+| The site must find by itself | 2 layers, 50 × 40 mm | 2 layers, 50 × 40 mm |
+| In its Gerber viewer | top and bottom copper, both masks, top silkscreen, the outline with 1 mm corners, and the drills on their pads: 12 component holes of 1.0 mm (J2, J3, the USB-C shell) and the 0.3 mm vias `cadlab -p demo route status` counts | the same |
+| Must not appear | a failed or partial parse, a missing outline or drill file, a layer assigned to the wrong side, a board size other than 50 × 40 mm, a design-rule or manufacturability remark | the same; PCBWay's engineers also review files after an order is placed, which this check does not reach |
+| Assembly (optional) | `demo-BOM-jlcpcb.csv` and `demo-CPL-jlcpcb.csv`: the files are read without a column error, and the placement preview shows every part on its pads, pin 1 where the silkscreen dot is | `demo-BOM-pcbway.csv` and `demo-CPL-pcbway.csv`, attached to the assembly quote |
+
+Read the assembly row knowing what the files do not have: the demo's passives and LEDs are generic parts, so the
+BOMs carry no fab part numbers until a catalog is configured (`catalog.import`, then `fab.export` again), and
+the fab's part matching is by hand until then. A placement preview that is offset as a whole, or parts turned by a
+multiple of 90°, are the two profile values cadlab could not verify from the fabs' pages (`cpl.origin`, and
+rotation offsets, of which none are shipped, D21): report either with the package it shows on, since the fix is a
+profile value, not a design change.
+
+Record the outcome on the M4 exit line of [ROADMAP.md](ROADMAP.md) with the date, the fab and what its page said;
+a remark from a fab goes there as an open item with the page's wording. The bundles uploaded are identified by
+the SHA-256 of each file in `fab-lock.json`, next to the archive.
+
+| Date | Fab | Archive SHA-256 | Result |
+|---|---|---|---|
+| | JLCPCB | | not uploaded yet |
+| | PCBWay | | not uploaded yet |

@@ -29,10 +29,13 @@ fn mpns(v: &Value) -> Vec<String> {
     v.as_array().unwrap().iter().map(|c| c["mpn"].as_str().unwrap().to_string()).collect()
 }
 
-/// The M1 exit scenario: "a 3.3 V LDO, 500 mA, SOT-23-5, in stock" to a concrete part in the BOM.
+/// The M1 exit (docs/ROADMAP.md): from "a 3.3 V LDO, 500 mA, SOT-23-5, in stock" to a concrete
+/// part in the BOM with symbol and footprint attached, through the command registry with the
+/// offline catalog as the only provider (no network). The agent's part is the choice among the
+/// candidates and the pin list from the datasheet; everything else comes from the commands.
 #[test]
 fn ldo_from_requirement_to_bom() {
-    let (_d, r, mut s) = setup();
+    let (dir, r, mut s) = setup();
     let o = exec(
         &r,
         &mut s,
@@ -41,6 +44,16 @@ fn ldo_from_requirement_to_bom() {
     );
     // XC6206 (200 mA, SOT-23), the obsolete part and the out-of-stock one are excluded; cheapest first.
     assert_eq!(mpns(&o["output"]["candidates"]), ["ME6211C33M5G-N", "AP2112K-3.3TRG1"]);
+    // Every candidate meets the requirement as stated, from the catalog file.
+    for c in o["output"]["candidates"].as_array().unwrap() {
+        assert_eq!(
+            (&c["provider"], &c["package"], &c["params"]["voltage_out"]),
+            (&json!("testcat"), &json!("SOT-23-5"), &json!("3.3V"))
+        );
+        assert!(c["stock"].as_u64().unwrap() > 0 && c["lifecycle"] == "active", "{c}");
+        let ma: f64 = c["params"]["current_out"].as_str().unwrap().trim_end_matches("mA").parse().unwrap();
+        assert!(ma >= 500.0, "{c}");
+    }
 
     let pins = json!([
         {"number": "1", "name": "VIN", "kind": "power_in"},
@@ -65,6 +78,50 @@ fn ldo_from_requirement_to_bom() {
     let o = exec(&r, &mut s, "bom.list", json!({}));
     assert_eq!(o["output"]["lines"][0]["refdes"], json!(["U1"]));
     assert_eq!(o["output"]["lines"][0]["footprint"], "SOT95P280X145-5N");
+
+    // The BOM has one line and it is concrete: a manufacturer and an MPN, nothing left to source.
+    let lines = o["output"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!((&lines[0]["manufacturer"], &lines[0]["mpn"]), (&json!("Diodes"), &json!("AP2112K-3.3TRG1")));
+    assert_eq!((&lines[0]["package"], &lines[0]["quantity"]), (&json!("SOT-23-5"), &json!(1)));
+    assert_eq!(o["output"]["unsourced"], json!([]));
+    // ... and the catalog has it in stock for the build.
+    let check = exec(&r, &mut s, "bom.check", json!({}));
+    assert_eq!(check["output"]["lines"][0]["status"], "ok", "{check}");
+    assert!(check["diagnostics"].as_array().unwrap().iter().all(|d| d["severity"] != "error"), "{check}");
+
+    // Symbol, footprint and pin↔pad map, in the project saved to disk and opened again.
+    s.save().unwrap();
+    let (s2, _) = Session::open(&dir.path().join("p")).unwrap();
+    let p = s2.project.as_ref().unwrap();
+    let comp = &p.circuit().components["U1"];
+    let part = &p.library().parts[&comp.part];
+    assert!(part.is_concrete());
+    let names: Vec<(&str, &str)> =
+        part.symbol.pins.iter().map(|pin| (pin.number.as_str(), pin.name.as_str())).collect();
+    assert_eq!(names, [("1", "VIN"), ("2", "GND"), ("3", "EN"), ("4", "NC"), ("5", "VOUT")]);
+    assert!(part.symbol.pins.iter().all(|pin| pin.at.is_some() && pin.side.is_some()), "symbol pins are drawn");
+    assert_eq!(part.footprints.len(), 1);
+    let fp = &p.library().footprints[&part.footprints[0].footprint];
+    assert_eq!(fp.name, "SOT95P280X145-5N");
+    let pads: Vec<&str> = fp.pads.iter().map(|pad| pad.number.as_str()).collect();
+    assert_eq!(pads, ["1", "2", "3", "4", "5"]);
+    // Each pin lands on exactly one pad of the footprint, each pad takes exactly one pin.
+    let mut used = std::collections::BTreeSet::new();
+    for pin in &part.symbol.pins {
+        let on = part.footprints[0].pads_for(&pin.number);
+        assert_eq!(on.len(), 1, "pin {} on pads {on:?}", pin.number);
+        assert!(pads.contains(&on[0].as_str()), "pin {} on a pad the footprint lacks: {on:?}", pin.number);
+        assert!(used.insert(on[0].clone()), "pad {} takes two pins", on[0]);
+    }
+    assert_eq!(used.len(), pads.len());
+    // Pin 1 (VIN) is where SOT-23-5 has it: the first pad of the three-lead side.
+    let at = |n: &str| fp.pads.iter().find(|pad| pad.number == n).unwrap().at;
+    assert!(at("1").x == at("2").x && at("2").x == at("3").x && at("4").x == at("5").x && at("1").x < at("5").x);
+    // Both render as drawings.
+    exec(&r, &mut s, "render.symbol", json!({"part": "AP2112K-3.3TRG1", "path": "sym.svg"}));
+    exec(&r, &mut s, "render.footprint", json!({"name": "AP2112K-3.3TRG1", "path": "fp.svg"}));
+    assert!(dir.path().join("p/sym.svg").is_file() && dir.path().join("p/fp.svg").is_file());
 }
 
 #[test]

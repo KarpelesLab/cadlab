@@ -1,0 +1,82 @@
+# The M4 demo board (docs/ROADMAP.md, M4 exit): a two-layer 50 x 40 mm board with an ATmega328P, a USB-C
+# power input with a TVS diode, a 3.3 V LDO, a crystal, ISP and I2C headers and two status LEDs, built with
+# nothing but commands. It is agent session 1's design (docs/TESTING.md) as a batch.
+#
+#     cadlab project new demo --targets jlcpcb,pcbway
+#     cadlab -p demo batch examples/demo-board/board.jsonl
+#     cadlab -p demo drc
+#     cadlab -p demo fab export jlcpcb
+#     cadlab -p demo fab export pcbway
+#
+# The project names no fab: both exports come from the same files (docs/MANUFACTURING.md, "Demo board").
+# Replayed by tests/demo_board.rs.
+
+# Parts. No supplier is needed: parts come from pin lists and generic specs.
+{"cmd": "part.create", "args": {"category": "mcu", "mpn": "ATMEGA328P-AU", "manufacturer": "Microchip", "description": "8-bit AVR MCU, 32KB flash", "package": "TQFP-32", "pins": [{"number": "1", "name": "PD3", "kind": "bidirectional"}, {"number": "2", "name": "PD4", "kind": "bidirectional"}, {"number": "3", "name": "GND", "kind": "power_in"}, {"number": "4", "name": "VCC", "kind": "power_in"}, {"number": "5", "name": "GND", "kind": "power_in"}, {"number": "6", "name": "VCC", "kind": "power_in"}, {"number": "7", "name": "XTAL1", "kind": "input"}, {"number": "8", "name": "XTAL2", "kind": "output"}, {"number": "9", "name": "PD5", "kind": "bidirectional"}, {"number": "10", "name": "PD6", "kind": "bidirectional"}, {"number": "11", "name": "PD7", "kind": "bidirectional"}, {"number": "12", "name": "PB0", "kind": "bidirectional"}, {"number": "13", "name": "PB1", "kind": "bidirectional"}, {"number": "14", "name": "PB2", "kind": "bidirectional"}, {"number": "15", "name": "MOSI", "kind": "bidirectional"}, {"number": "16", "name": "MISO", "kind": "bidirectional"}, {"number": "17", "name": "SCK", "kind": "bidirectional"}, {"number": "18", "name": "AVCC", "kind": "power_in"}, {"number": "19", "name": "ADC6", "kind": "input"}, {"number": "20", "name": "AREF", "kind": "passive"}, {"number": "21", "name": "GND", "kind": "power_in"}, {"number": "22", "name": "ADC7", "kind": "input"}, {"number": "23", "name": "PC0", "kind": "bidirectional"}, {"number": "24", "name": "PC1", "kind": "bidirectional"}, {"number": "25", "name": "PC2", "kind": "bidirectional"}, {"number": "26", "name": "PC3", "kind": "bidirectional"}, {"number": "27", "name": "SDA", "kind": "bidirectional"}, {"number": "28", "name": "SCL", "kind": "bidirectional"}, {"number": "29", "name": "RESET", "kind": "input"}, {"number": "30", "name": "PD0", "kind": "bidirectional"}, {"number": "31", "name": "PD1", "kind": "bidirectional"}, {"number": "32", "name": "PD2", "kind": "bidirectional"}]}}
+{"cmd": "part.create", "args": {"category": "ldo", "mpn": "AP2112K-3.3TRG1", "manufacturer": "Diodes", "description": "LDO 3.3V 600mA", "package": "SOT-23-5", "params": {"voltage_out": "3.3V", "current_out": "600mA"}, "pins": [{"number": "1", "name": "VIN", "kind": "power_in"}, {"number": "2", "name": "GND", "kind": "power_in"}, {"number": "3", "name": "EN", "kind": "input"}, {"number": "4", "name": "NC", "kind": "no_connect"}, {"number": "5", "name": "VOUT", "kind": "power_out"}]}}
+{"cmd": "part.create", "args": {"category": "diode", "mpn": "SMF5.0A", "description": "TVS 5V unidirectional", "package": "SOD-123F", "pins": [{"number": "1", "name": "K"}, {"number": "2", "name": "A"}]}}
+{"cmd": "part.create", "args": {"category": "connector", "id": "ISP_2x3", "description": "AVR ISP header 2x3", "package": "PinHeader 2x03", "pins": [{"number": "1", "name": "MISO"}, {"number": "2", "name": "VCC"}, {"number": "3", "name": "SCK"}, {"number": "4", "name": "MOSI"}, {"number": "5", "name": "RESET"}, {"number": "6", "name": "GND"}]}}
+{"cmd": "part.create", "args": {"category": "connector", "id": "I2C_1x4", "description": "I2C header", "package": "PinHeader 1x04", "pins": [{"number": "1", "name": "VCC"}, {"number": "2", "name": "GND"}, {"number": "3", "name": "SCL"}, {"number": "4", "name": "SDA"}]}}
+{"cmd": "part.create", "args": {"category": "crystal", "id": "XTAL_8MHz_3225", "description": "8 MHz crystal 3.2x2.5mm", "params": {"frequency": "8MHz"}, "package": "DFN-4 3.2x2.5mm P1.6mm", "pins": [{"number": "1", "name": "X1"}, {"number": "2", "name": "GND"}, {"number": "3", "name": "X2"}, {"number": "4", "name": "GND"}]}}
+# No generator covers USB-C: the land pattern from a pad list, body centered on the origin; the shell pads are
+# one SHIELD pin, grounded.
+{"cmd": "footprint.create", "args": {"name": "USB_C_6P", "pads": [{"number": "A12", "at": ["-2.5mm", "2.5mm"], "size": ["0.7mm", "1.2mm"], "shape": "rect"}, {"number": "A9", "at": ["-1.5mm", "2.5mm"], "size": ["0.7mm", "1.2mm"], "shape": "rect"}, {"number": "A5", "at": ["-0.5mm", "2.5mm"], "size": ["0.7mm", "1.2mm"], "shape": "rect"}, {"number": "B5", "at": ["0.5mm", "2.5mm"], "size": ["0.7mm", "1.2mm"], "shape": "rect"}, {"number": "B9", "at": ["1.5mm", "2.5mm"], "size": ["0.7mm", "1.2mm"], "shape": "rect"}, {"number": "B12", "at": ["2.5mm", "2.5mm"], "size": ["0.7mm", "1.2mm"], "shape": "rect"}, {"number": "S1", "at": ["-4.3mm", "-0.5mm"], "size": ["1.6mm", "1.6mm"], "drill": "1mm"}, {"number": "S2", "at": ["4.3mm", "-0.5mm"], "size": ["1.6mm", "1.6mm"], "drill": "1mm"}], "body": {"width": "8.94mm", "length": "6.6mm", "height": "3.2mm"}, "description": "USB-C receptacle, power only (6 pin)"}}
+{"cmd": "part.create", "args": {"category": "connector", "mpn": "USB-C-6P", "description": "USB-C receptacle, power only (6 pin)", "footprint": "USB_C_6P", "pins": [{"number": "A5", "name": "CC1"}, {"number": "B5", "name": "CC2"}, {"number": "A9", "name": "VBUS", "kind": "power_out"}, {"number": "B9", "name": "VBUS", "kind": "power_out"}, {"number": "A12", "name": "GND", "kind": "power_out"}, {"number": "B12", "name": "GND", "kind": "power_out"}, {"number": "SH", "name": "SHIELD", "kind": "passive"}], "pin_map": {"SH": ["S1", "S2"]}}}
+
+# Components.
+{"cmd": "circuit.add", "args": {"part": "USB-C-6P", "refdes": "J1"}}
+{"cmd": "circuit.add", "args": {"part": "SMF5.0A", "refdes": "D1"}}
+{"cmd": "circuit.add", "args": {"part": "AP2112K-3.3TRG1", "refdes": "U1"}}
+{"cmd": "circuit.add", "args": {"part": "ATMEGA328P-AU", "refdes": "U2"}}
+{"cmd": "circuit.add", "args": {"part": "XTAL_8MHz_3225", "refdes": "Y1"}}
+{"cmd": "circuit.add", "args": {"part": "ISP_2x3", "refdes": "J2"}}
+{"cmd": "circuit.add", "args": {"part": "I2C_1x4", "refdes": "J3"}}
+# R1, R2: CC pull-downs
+{"cmd": "circuit.add", "args": {"part": "R 5.1k 1% 0402", "count": 2}}
+# R3: reset pull-up
+{"cmd": "circuit.add", "args": {"part": "R 10k 1% 0402", "count": 1}}
+# R4, R5: I2C pull-ups
+{"cmd": "circuit.add", "args": {"part": "R 4.7k 1% 0402", "count": 2}}
+# R6, R7: LED resistors
+{"cmd": "circuit.add", "args": {"part": "R 1k 1% 0402", "count": 2}}
+# C1, C2: LDO input and output
+{"cmd": "circuit.add", "args": {"part": "C 1uF 16V X7R 0402", "count": 2}}
+# C3..C5: decoupling, C6: AREF
+{"cmd": "circuit.add", "args": {"part": "C 100nF 16V X7R 0402", "count": 4}}
+# C7, C8: crystal loads
+{"cmd": "circuit.add", "args": {"part": "C 22pF 50V C0G 0402", "count": 2}}
+# D2
+{"cmd": "circuit.add", "args": {"part": "LED green 0603", "count": 1}}
+# D3
+{"cmd": "circuit.add", "args": {"part": "LED red 0603", "count": 1}}
+
+# Nets.
+{"cmd": "net.connect", "args": {"net": "VBUS", "pins": ["J1.VBUS", "D1.K", "U1.VIN", "U1.EN", "C1.1"]}}
+{"cmd": "net.connect", "args": {"net": "GND", "pins": ["J1.GND", "J1.SHIELD", "D1.A", "U1.GND", "C1.2", "C2.2", "U2.GND", "C3.2", "C4.2", "C5.2", "C6.2", "C7.2", "C8.2", "Y1.GND", "R1.2", "R2.2", "J2.GND", "J3.GND", "D2.K", "D3.K"]}}
+{"cmd": "net.connect", "args": {"net": "CC1", "pins": ["J1.CC1", "R1.1"]}}
+{"cmd": "net.connect", "args": {"net": "CC2", "pins": ["J1.CC2", "R2.1"]}}
+{"cmd": "net.connect", "args": {"net": "+3V3", "pins": ["U1.VOUT", "C2.1", "U2.VCC", "U2.AVCC", "C3.1", "C4.1", "C5.1", "R3.1", "R4.1", "R5.1", "J2.VCC", "J3.VCC"]}}
+{"cmd": "net.connect", "args": {"net": "AREF", "pins": ["U2.AREF", "C6.1"]}}
+{"cmd": "net.connect", "args": {"net": "XTAL1", "pins": ["U2.XTAL1", "Y1.X1", "C7.1"]}}
+{"cmd": "net.connect", "args": {"net": "XTAL2", "pins": ["U2.XTAL2", "Y1.X2", "C8.1"]}}
+{"cmd": "net.connect", "args": {"net": "RESET", "pins": ["U2.RESET", "R3.2", "J2.RESET"]}}
+{"cmd": "net.connect", "args": {"net": "MOSI", "pins": ["U2.MOSI", "J2.MOSI"]}}
+{"cmd": "net.connect", "args": {"net": "MISO", "pins": ["U2.MISO", "J2.MISO"]}}
+{"cmd": "net.connect", "args": {"net": "SCK", "pins": ["U2.SCK", "J2.SCK"]}}
+{"cmd": "net.connect", "args": {"net": "SDA", "pins": ["U2.SDA", "R5.2", "J3.SDA"]}}
+{"cmd": "net.connect", "args": {"net": "SCL", "pins": ["U2.SCL", "R4.2", "J3.SCL"]}}
+{"cmd": "net.connect", "args": {"net": "LED_G", "pins": ["U2.PD6", "R6.1"]}}
+{"cmd": "net.connect", "args": {"net": "LED_R", "pins": ["U2.PD7", "R7.1"]}}
+{"cmd": "net.connect", "args": {"net": "LED_G_K", "pins": ["R6.2", "D2.A"]}}
+{"cmd": "net.connect", "args": {"net": "LED_R_K", "pins": ["R7.2", "D3.A"]}}
+{"cmd": "net.no_connect", "args": {"pins": ["U1.NC", "U2.PD3..PD5", "U2.PB0..PB2", "U2.ADC6", "U2.ADC7", "U2.PC0..PC3", "U2.PD0..PD2"]}}
+
+# Board: two layers, 1.6 mm, cadlab's own IPC class 2 rules (no fab's numbers are stored). The USB-C pads sit
+# 2.5 mm from the footprint origin: at y = 36 mm the body reaches the top edge.
+{"cmd": "board.setup", "args": {"layers": 2, "thickness": "1.6mm"}}
+{"cmd": "board.outline", "args": {"width": "50mm", "height": "40mm", "corner_radius": "1mm"}}
+{"cmd": "place.set", "args": {"refdes": "J1", "at": ["25mm", "36mm"], "rotation": 180}}
+{"cmd": "place.lock", "args": {"refdes": ["J1"]}}
+{"cmd": "place.auto", "args": {}}
+# A work budget, not a time budget: the same tracks on any machine.
+{"cmd": "route.all", "args": {"work_budget": 20000000}}

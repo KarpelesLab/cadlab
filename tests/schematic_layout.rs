@@ -5,7 +5,15 @@
 
 mod common;
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use cadlab::Point;
 use cadlab::command::{Registry, RunOptions, Session};
+use cadlab::model::Project;
+use cadlab::model::circuit::PinRef;
+use cadlab::render::{Prim, Scene, View};
+use cadlab::schematic::SheetLayout;
+use cadlab::schematic::symbol::{pin_ends, symbol_of};
 use common::boards::{build_board, build_stm32_board};
 use serde_json::{Value, json};
 
@@ -184,4 +192,214 @@ fn no_overlapping_elements() {
         assert_eq!(placed, p.circuit().components.len(), "{name}");
         assert_eq!(sheets.last().unwrap().placements.len(), p.circuit().components.len(), "{name}");
     }
+}
+
+/// Bounding box (min x, min y, max x, max y) of a drawing primitive, stroke width included.
+fn prim_box(p: &Prim) -> (f64, f64, f64, f64) {
+    let mut one = Scene::default();
+    one.prims.push(p.clone());
+    one.bounds().unwrap()
+}
+
+/// A group of pins drawn as one net, with the net names drawn on it.
+type DrawnNet = (BTreeSet<String>, BTreeSet<PinRef>);
+
+/// The nets a reader recovers from a drawn sheet: pins joined by wires (a pin or wire end on a
+/// wire connects to it) and by labels and power symbols carrying the same name.
+fn drawn_nets(p: &Project, l: &SheetLayout) -> Vec<DrawnNet> {
+    let on_wire = |pt: Point, (a, b): (Point, Point)| {
+        let (x, y) = (pt.x.0, pt.y.0);
+        let within = |v: i64, s: i64, e: i64| v >= s.min(e) && v <= s.max(e);
+        (a.x == b.x && x == a.x.0 && within(y, a.y.0, b.y.0)) || (a.y == b.y && y == a.y.0 && within(x, a.x.0, b.x.0))
+    };
+    // Nodes: wires first, then pins, then labels.
+    let mut pins: Vec<(PinRef, Point)> = Vec::new();
+    for (r, pl) in &l.placements {
+        let part = &p.library().parts[&p.circuit().components[r].part];
+        for (number, end, _) in pin_ends(&symbol_of(part), pl) {
+            pins.push((PinRef::new(r.clone(), number), end));
+        }
+    }
+    let (nw, np) = (l.wires.len(), pins.len());
+    let mut parent: Vec<usize> = (0..nw + np + l.labels.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut join = |a: usize, b: usize| {
+        let (a, b) = (find(&mut parent, a), find(&mut parent, b));
+        parent[a.max(b)] = a.min(b);
+    };
+    for (i, w) in l.wires.iter().enumerate() {
+        assert!(w.0.x == w.1.x || w.0.y == w.1.y, "wire {i} is neither horizontal nor vertical");
+        for (j, v) in l.wires.iter().enumerate().skip(i + 1) {
+            if [v.0, v.1].into_iter().any(|e| on_wire(e, *w)) || [w.0, w.1].into_iter().any(|e| on_wire(e, *v)) {
+                join(i, j);
+            }
+        }
+        for (k, (_, at)) in pins.iter().enumerate() {
+            if on_wire(*at, *w) {
+                join(i, nw + k);
+            }
+        }
+        for (k, lb) in l.labels.iter().enumerate() {
+            if on_wire(lb.at, *w) {
+                join(i, nw + np + k);
+            }
+        }
+    }
+    for (k, (_, at)) in pins.iter().enumerate() {
+        for (m, (_, other)) in pins.iter().enumerate().skip(k + 1) {
+            if at == other {
+                join(nw + k, nw + m);
+            }
+        }
+        for (m, lb) in l.labels.iter().enumerate() {
+            if lb.at == *at {
+                join(nw + k, nw + np + m);
+            }
+        }
+    }
+    for (k, lb) in l.labels.iter().enumerate() {
+        for (m, other) in l.labels.iter().enumerate().skip(k + 1) {
+            if lb.net == other.net {
+                join(nw + np + k, nw + np + m);
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, DrawnNet> = BTreeMap::new();
+    for (k, (pin, _)) in pins.iter().enumerate() {
+        groups.entry(find(&mut parent, nw + k)).or_default().1.insert(pin.clone());
+    }
+    for (k, lb) in l.labels.iter().enumerate() {
+        let root = find(&mut parent, nw + np + k);
+        let g = groups.get_mut(&root).unwrap_or_else(|| panic!("label {} at {:?} names no pin", lb.net, lb.at));
+        g.0.insert(lb.net.clone());
+    }
+    groups.into_values().collect()
+}
+
+/// M3 exit: `render.schematic` writes a readable schematic of the M2 board (the ERC-clean ATtiny85
+/// board of `tests/circuit.rs`) as PNG and as SVG. Readable, measured:
+///
+/// - every component is drawn, once, with its designator and value;
+/// - the drawing says what the circuit says: the nets read back from the sheet (wires, and
+///   labels or power symbols sharing a name) are the circuit's nets, pin for pin, and every
+///   label names the net of the pins it sits on (so a net that is not wired from end to end
+///   carries its name at each piece);
+/// - no two drawn elements overlap, and nothing but the title block is in the title block;
+/// - everything drawn, text included (the stroke font's lines), is inside the sheet frame;
+/// - the PNG is the same sheet (size, ink at every symbol and label) and both outputs are
+///   deterministic: byte-identical from a second, separately built project, and the SVG equal
+///   to the golden file (without the title block, whose text carries the crate version).
+#[test]
+fn attiny_schematic_png_and_svg_are_readable() {
+    let (dir, r, mut s) = attiny();
+    let erc = exec(&r, &mut s, "circuit.erc", json!({}));
+    assert_eq!(erc["output"], json!({"errors": 0, "warnings": 0}), "the M2 board, ERC clean");
+
+    let png = exec(&r, &mut s, "render.schematic", json!({"path": "sch.png"}));
+    let svg = exec(&r, &mut s, "render.schematic", json!({"path": "sch.svg"}));
+    assert_eq!((&png["output"]["format"], &svg["output"]["format"]), (&json!("png"), &json!("svg")));
+    assert!(png["output"]["pages"].is_null() && svg["output"]["pages"].is_null(), "one sheet");
+    let png_bytes = std::fs::read(dir.path().join("p/sch.png")).unwrap();
+    let svg_text = std::fs::read_to_string(dir.path().join("p/sch.svg")).unwrap();
+
+    let p = s.project.as_ref().unwrap();
+    let c = p.circuit();
+    let sheets = cadlab::schematic::layout_sheets(p, &Default::default());
+    assert_eq!(sheets.len(), 1);
+    let sheet = &sheets[0];
+    let (w, h) = (sheet.size.0.0 as f64 / 1e6, sheet.size.1.0 as f64 / 1e6);
+    assert_eq!((sheet.paper.as_str(), w, h), ("A4", 297.0, 210.0));
+
+    // Every component, once, with a designator and a value to print.
+    assert_eq!(sheet.placements.keys().collect::<Vec<_>>(), c.components.keys().collect::<Vec<_>>());
+    for (refdes, comp) in &c.components {
+        assert!(!refdes.is_empty() && !p.library().parts[&comp.part].value().is_empty(), "{refdes}");
+    }
+
+    // The drawing reads back as the circuit.
+    let drawn = drawn_nets(p, sheet);
+    let mut whole: BTreeSet<&str> = BTreeSet::new();
+    for (names, pins) in &drawn {
+        let nets: Vec<&str> =
+            c.nets.iter().filter(|(_, n)| !n.pins.is_disjoint(pins)).map(|(k, _)| k.as_str()).collect();
+        match nets[..] {
+            [] => assert!(names.is_empty() && pins.len() == 1, "unconnected pins drawn joined or named: {pins:?}"),
+            [net] => {
+                assert!(names.iter().all(|n| n == net), "pins of {net} carry the label(s) {names:?}");
+                assert_eq!(*pins, c.nets[net].pins, "{net} as drawn (labels {names:?}) against the circuit");
+                whole.insert(net);
+            }
+            _ => panic!("pins of {nets:?} are drawn joined: {pins:?}"),
+        }
+    }
+    assert_eq!(whole.into_iter().collect::<Vec<_>>(), c.nets.keys().collect::<Vec<_>>(), "every net is drawn");
+    for pin in &c.no_connect {
+        let (names, pins) = drawn.iter().find(|(_, pins)| pins.contains(pin)).expect("no-connect pin drawn");
+        assert!(names.is_empty() && pins.len() == 1, "{pin:?} is marked no-connect but drawn connected");
+    }
+    assert_eq!(sheet.no_connects.len(), c.no_connect.len(), "one marker per no-connect pin");
+
+    // No overlapping elements.
+    let o = cadlab::schematic::overlaps(p, sheet);
+    assert!(o.is_empty(), "{}", o.join("\n"));
+
+    // Everything inside the frame; the title block holds only its own text. The frame and title
+    // block are the primitives an empty sheet has, drawn first.
+    let scene = cadlab::schematic::draw(p, sheet);
+    let empty = SheetLayout { paper: sheet.paper.clone(), size: sheet.size, sheet: 1, sheets: 1, ..Default::default() };
+    let title = cadlab::schematic::draw(p, &empty);
+    assert!(scene.prims.len() > title.prims.len() && scene.prims[..title.prims.len()] == title.prims[..]);
+    let pad = 0.11; // half the frame's line
+    let block = (w - 5.0 - 90.0, 5.0, w - 5.0, 5.0 + 14.0);
+    for (i, prim) in scene.prims.iter().enumerate() {
+        let (x0, y0, x1, y1) = prim_box(prim);
+        assert!(x0 >= 5.0 - pad && y0 >= 5.0 - pad && x1 <= w - 5.0 + pad && y1 <= h - 5.0 + pad, "outside: {prim:?}");
+        if i >= title.prims.len() {
+            let apart = x1 < block.0 || x0 > block.2 || y1 < block.1 || y0 > block.3;
+            assert!(apart, "drawn over the title block: {prim:?}");
+        }
+    }
+
+    // The PNG is that sheet at 10 px/mm, with ink at every symbol and label.
+    let pm = tiny_skia::Pixmap::decode_png(&png_bytes).unwrap();
+    assert_eq!((pm.width(), pm.height()), (2970, 2100));
+    assert_eq!((png["output"]["width"].as_f64(), png["output"]["height"].as_f64()), (Some(2970.0), Some(2100.0)));
+    let ink = |at: Point, reach: f64| {
+        let (cx, cy) = (at.x.0 as f64 / 1e5, (h * 1e6 - at.y.0 as f64) / 1e5);
+        let px = |v: f64, max: u32| (v.max(0.0) as u32).min(max - 1);
+        let (x0, x1) = (px(cx - reach * 10.0, pm.width()), px(cx + reach * 10.0, pm.width()));
+        let (y0, y1) = (px(cy - reach * 10.0, pm.height()), px(cy + reach * 10.0, pm.height()));
+        (y0..=y1).flat_map(|y| (x0..=x1).map(move |x| (x, y))).any(|(x, y)| {
+            let c = pm.pixel(x, y).unwrap();
+            (c.red(), c.green(), c.blue()) != (255, 255, 255)
+        })
+    };
+    for (refdes, pl) in &sheet.placements {
+        assert!(ink(pl.at, 2.0), "{refdes}: nothing drawn at its place in the PNG");
+    }
+    for lb in &sheet.labels {
+        assert!(ink(lb.at, 1.0), "label {}: nothing drawn at its place in the PNG", lb.net);
+    }
+
+    // Deterministic: a second project built from scratch gives the same bytes.
+    let (dir2, r2, mut s2) = attiny();
+    exec(&r2, &mut s2, "render.schematic", json!({"path": "sch.png"}));
+    exec(&r2, &mut s2, "render.schematic", json!({"path": "sch.svg"}));
+    assert!(png_bytes == std::fs::read(dir2.path().join("p/sch.png")).unwrap(), "PNG differs between runs");
+    assert_eq!(svg_text, std::fs::read_to_string(dir2.path().join("p/sch.svg")).unwrap());
+
+    // Golden SVG. The command's file is the scene on the sheet; the golden file leaves out the
+    // title block's lines (the crate version is drawn there).
+    let view = View { area: (0.0, 0.0, w, h), px_per_mm: 10.0 };
+    assert!(svg_text == cadlab::render::to_svg(&scene, &view), "render.schematic writes the sheet's scene");
+    let mut body = scene.clone();
+    body.prims.drain(..title.prims.len());
+    let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/attiny85/schematic.svg");
+    common::golden::assert_golden(&golden, &cadlab::render::to_svg(&body, &view));
 }

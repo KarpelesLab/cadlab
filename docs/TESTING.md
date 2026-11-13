@@ -407,6 +407,26 @@ timing rule).
   (`tests/corpus/projects.toml`, `scripts/fetch-corpus.sh`; see "Open-source corpus" above, D35).
 - **Router benchmarks:** DSN files from the generated designs plus fetched projects; synthetic stress cases.
 
+## Milestone exits
+
+Each milestone's **Exit:** line in [ROADMAP.md](ROADMAP.md) names the test that shows it (D81). The ones written
+for an exit:
+
+| Exit | Test | Runs |
+|---|---|---|
+| M1 | `tests/sourcing.rs`, `ldo_from_requirement_to_bom` (offline catalog `tests/fixtures/catalog.json`) | always |
+| M2 | `tests/circuit.rs`, `attiny_board_erc_clean_and_netlist` | always |
+| M3 | `tests/schematic_layout.rs`, `attiny_schematic_png_and_svg_are_readable` | always |
+| M4 | `tests/demo_board.rs`, `demo_board_passes_drc_and_exports_for_both_fabs`, `documented_commands_write_the_same_bundles` | always |
+| M4 | `tests/demo_board.rs`, `kicad_drc_clean_demo_board` | `CADLAB_ORACLES=1` (CI's `oracles` job) |
+| M4 | the fabs' online checks of the two archives | by hand (MANUFACTURING.md, "Demo board") |
+
+The M3 test reads the schematic back: wires join the pins and wire ends lying on them, labels and power symbols
+join by name, and the groups of pins that result must be the circuit's nets, so a missing label, a wire to the
+wrong pin or two nets drawn touching fails it. The M4 board is `examples/demo-board/board.jsonl`; the oracle test
+keeps the export and KiCad's report in `$CARGO_TARGET_TMPDIR/demo_board/`, and compares with the cross-check's
+matching and allowances (above, "Cross-checks") except those for dangling tracks and vias.
+
 ## Agent sessions
 
 The roadmap's "agent ergonomics" item: an agent designs a board from a prompt using only the built `cadlab` binary

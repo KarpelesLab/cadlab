@@ -54,7 +54,11 @@ Details in [PARTS.md](PARTS.md).
 - [x] BOM cost rollup at build quantity (`bom.cost`), availability check (`bom.check`)
 
 **Exit:** an agent can go from "I need a 3.3 V LDO, 500 mA, SOT-23-5, in stock" to a concrete part in the BOM with
-symbol and footprint attached.
+symbol and footprint attached. **Done 2026-11-13** (`tests/sourcing.rs`, `ldo_from_requirement_to_bom`: through
+the registry with the offline catalog as the only provider, `part.search` → `part.create --fill-from-suppliers` →
+`circuit.add`; the BOM line ends with manufacturer and MPN, in stock per `bom.check`, and the saved part has its
+symbol, the generated SOT-23-5 footprint and a one-to-one pin↔pad map. The pin list is the agent's input, read
+from the datasheet: no provider supplies pinouts.)
 
 ## M2 — Circuit and ERC (M)
 
@@ -85,7 +89,13 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] Optional manual hints (`schematic.place/unplace`) persisted in `schematic.json`
 - [x] KiCad `.kicad_sch` export (`schematic.export`): lets `kicad-cli` run ERC as an oracle, and lets humans open it if they want
 
-**Exit:** `cadlab render schematic -o sch.png` produces a readable schematic of the M2 board.
+**Exit:** `cadlab render schematic -o sch.png` produces a readable schematic of the M2 board. **Done 2026-11-13**
+(`tests/schematic_layout.rs`, `attiny_schematic_png_and_svg_are_readable`: `render.schematic` of the ATtiny85
+board to PNG and SVG, with "readable" measured: every component drawn once, the nets read back from the sheet's
+wires, labels and power symbols equal to the circuit's pin for pin, no overlapping elements, everything inside
+the frame and off the title block, ink in the PNG at every symbol and label, both files byte-identical from a
+second build, the SVG against `tests/golden/attiny85/schematic.svg`. The path is positional or `--path`; there is
+no `-o`.)
 
 ## M4 — Board setup, placement, DRC, fab outputs (L)
 
@@ -127,7 +137,17 @@ Details in [RENDERING.md](RENDERING.md).
 - [x] gerbv oracle: our Gerbers parse and render as expected (`tests/gerber_oracle.rs`, pixel probes)
 
 **Exit:** the target demo board passes cadlab DRC and the KiCad DRC oracle, and the *same unmodified project*
-exports bundles that pass both JLCPCB's and PCBWay's online checks.
+exports bundles that pass both JLCPCB's and PCBWay's online checks. **Not done yet: two of its four parts are
+shown, two are waiting** (audit of 2026-11-13, D81). The board is `examples/demo-board/board.jsonl` (agent session
+1's ATmega328P + USB-C + LDO + LEDs board as a batch, both fabs as targets, cadlab's own rules).
+- Shown 2026-11-13: cadlab DRC clean (ERC and lint too), and one project, unchanged by the exports and naming no
+  fab outside `targets`, exports a complete JLCPCB bundle and a complete PCBWay bundle with byte-identical
+  fabrication data, the same archives from the documented command lines (`tests/demo_board.rs`,
+  `demo_board_passes_drc_and_exports_for_both_fabs`, `documented_commands_write_the_same_bundles`).
+- Written, never run: the KiCad DRC oracle on this board (`tests/demo_board.rs`, `kicad_drc_clean_demo_board`). It
+  needs `kicad-cli`, so it runs in CI's `oracles` job only; its first CI result decides this part.
+- Pending, manual: the two fabs' online checks. They need a person with accounts; the bundles, what to upload
+  where and what to look at are in [MANUFACTURING.md](MANUFACTURING.md), "Demo board", with a table for the result.
 
 ## M5 — Autorouter v1 (L)
 
@@ -223,6 +243,18 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
 - [x] Fab profiles re-checked against the fabs' pages 2026-11-13: unverified values closed where published,
   JLCPCB minimum package and PCBWay/Eurocircuits/NextPCB assembly layouts corrected (D77)
 
+**Exit:** a design made in KiCad moves into cadlab and goes on from there: its netlist, board, rules and libraries
+import into a project that reads the same and checks the same, a change is made, the affected nets are rerouted,
+DRC passes, and the result exports for any built-in fab and back to KiCad. **Done 2026-11-13 on KiCad files cadlab
+wrote and on the format fixtures** (`tests/agent_session4.rs`, `migration_of_a_cadlab_board`: the whole migration
+through the MCP server, to a JLCPCB and a PCBWay bundle and a KiCad re-export; `tests/kicad_pcb_import.rs`,
+`round_trip_into_an_empty_project` and `round_trip_larger_boards`: model and DRC equal after the round trip;
+`tests/netlist_import.rs`, `kicad_project_netlist`; `tests/kicad_lib_import.rs`, `symbols_become_parts` and
+`footprints_from_a_pretty_directory`; `tests/fab_profile.rs`, `every_builtin_profile_checks_and_exports`). On
+projects other people drew in KiCad, the same is shown by `tests/corpus.rs` (12 pinned projects) and
+`tests/agent_session4.rs`, `migration_of_the_lumenpnp_ring_light`: they need the fetched corpus and `kicad-cli`, so
+they run in CI's `corpus` and `oracles` jobs only and were not run in the audit of 2026-11-13 (D81).
+
 ## M8 — Advanced electrical (L)
 
 - [x] Differential pairs (routing + rules), length/skew matching with meanders (`diffpair.*`, `lengthgroup.*`,
@@ -236,6 +268,14 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
       (curve fit of the universal chart, approximate: +2.6 % / −1.3 % at the one published point, D79)
 - [x] Design lint beyond ERC: missing decoupling, missing pull-ups on I²C, unterminated high-speed nets
       (`circuit.lint`, `circuit.erc --lint`: decoupling, I²C pull-ups, USB ESD, clock termination, floating inputs)
+
+**Exit:** a board with a controlled-impedance interface is designed from its electrical requirements: the pair's
+width and gap solved from the fab's stackup, the pair routed coupled and its skew tuned, impedance, pair and
+current limits checked by DRC, the circuit linted, and a SPICE netlist written for simulation. **Done 2026-11-13**
+(`tests/agent_session3.rs`, `stm32_usb_device_four_layers_from_a_prompt`: the USB device on JLCPCB's four-layer
+stackup, 90 Ω pair solved, routed first and tuned inside its skew limit, ERC, lint and DRC clean;
+`tests/electrical.rs`, `current_and_impedance_drc`, `spice_export_divider` and `lint_findings`; `tests/diffpair.rs`,
+`length_group_tuned_with_trombones`). That ngspice runs the exported netlist is an oracle check, in CI only.
 
 ## M9 — 3D and advanced rendering (M)
 
@@ -266,6 +306,21 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
       added and removed components since the baseline and later messages, one transaction each) and
       `place.import_idx` (applies MCAD's accepted moves, writes the response with `Accept` and comments);
       validated against the published schema (D47). Changes of the outline, holes and keep-outs: a new baseline
+
+**Exit:** the assembled board leaves cadlab in three dimensions and comes back from mechanical design: a 3D view
+with generated or imported bodies, a STEP assembly, IDF and IDX for MCAD with placement changes exchanged in both
+directions, and IPC-2581 as the single-file manufacturing hand-off. **Done 2026-11-13** (`tests/exchange.rs`,
+`export_commands`, `golden_files`, `step_structure`, `ipc2581_structure`, `idf_structure`, `idx_structure` and
+`idx_change_and_response`: every format written through the registry, parsed back and compared with the board, a
+moved part exported as an IDX change and MCAD's move applied; `tests/render_board3d.rs`,
+`deterministic_with_bodies_where_parts_are`; `tests/models3d.rs`, `render_uses_models_instead_of_bodies` and
+`step_writes_models_as_faceted_breps`; `tests/agent_session3.rs` renders the 3D view of a designed board and
+exports its STEP).
+- [ ] Open (found by the audit of 2026-11-13, D81): no other program reads these files in any automatic run. The
+      checks above are cadlab's own readers. FreeCAD reading the STEP files and `xmllint` validating IPC-2581 and
+      IDX against the published schemas are optional oracles (`CADLAB_ORACLE_FREECAD`, `CADLAB_IPC2581_XSD`,
+      `CADLAB_IDX_XSD`) that skip when the tool or schema is missing, and CI installs neither; they were last run
+      by hand (TESTING.md, "Exchange outputs"). To close: FreeCAD and the two schemas in the `oracles` job.
 
 ## Stretch goals (XL)
 

@@ -1974,6 +1974,44 @@ default rule set of every new project was left out of a verification pass. Apply
 (copper weight, board thickness, planes) was left out for the same reason: their charts are published only as
 images, and a fit of them could not be checked against numbers.
 
+### D81. Milestone exits: an exit is done when a named test that was run shows it (2026-11-13)
+Every roadmap checkbox was ticked while only M0 and M2 had a dated exit. The audit went through the others (M5 and
+M6, the router's, are handled separately) and wrote on each **Exit:** line the test that shows it, or what is missing.
+- **M1, done:** `tests/sourcing.rs` `ldo_from_requirement_to_bom`, which existed but stopped at the footprint's name;
+  it now ends at a concrete BOM line in stock and at the saved part's symbol, footprint and one-to-one pin↔pad map.
+- **M3, done:** `tests/schematic_layout.rs` `attiny_schematic_png_and_svg_are_readable`. "Readable" is measured: the
+  netlist read back from the drawn sheet (wires, labels and power symbols by name) equals the circuit's, nothing
+  overlaps, everything is inside the frame, the PNG has ink at every symbol and label, the output repeats.
+- **M4, not done:** the demo board is `examples/demo-board/board.jsonl` (session 1's board as a batch) and
+  `tests/demo_board.rs` shows cadlab DRC and both bundles from one unchanged project. The KiCad DRC oracle on it is
+  written and has never run (no `kicad-cli` outside CI), and the fabs' online checks need a person: checklist and
+  result table in MANUFACTURING.md, "Demo board".
+- **M7, M8, M9** had no exit; each now states what its items add up to and names existing tests. M7 is done on KiCad
+  files cadlab wrote and on fixtures, and rests on CI's corpus job for third-party projects. M9 gained an open item:
+  FreeCAD and the IPC-2581 and IDX schema validations are optional oracles no automatic run includes.
+No defect in the library came out of the audit; no check was loosened.
+
+Choices made on the way:
+- **The demo board is a batch file, not Rust.** The file a user runs with `cadlab batch` is the file the tests run,
+  so the documented command sequence cannot drift from what is tested, and it goes through the registry like any
+  session. It differs from session 1's replay in three ways: both fabs are `targets`; the rules are cadlab's
+  defaults instead of `board.rules --fab jlcpcb`, because rules derived from one fab would put that fab's numbers in
+  a project meant for two (D12); and the USB-C shell pads are a grounded SHIELD pin, as `part.unmapped_shield` asks.
+  `tests/agent_session.rs` stays as it is: it replays what the agent typed.
+- **No golden bundle.** The archives are compared between two builds (registry and CLI), not with checked-in
+  hashes: they follow the router's output, which is still being worked on, and a golden file would fail on every
+  router improvement without saying anything about the exit. `route.all` runs under a work budget (D72) so that the
+  two builds, and any machine, give the same bytes.
+- **The oracle test is stricter than the cross-check's allowlist:** it drops the allowances for dangling tracks and
+  vias, which exist for boards with deliberate stubs. If KiCad finds one on an autorouted board, that is a result.
+- **The schematic's golden SVG leaves out the title block,** whose stroke text carries the crate version; the test
+  checks separately that the command's file is the full scene.
+- **"Done" needs a run.** A test that exists but could not run here (oracles, corpus) is named with where it runs,
+  and the exit is not marked done on its account.
+*Why:* a ticked list says what was built, an exit says what works end to end, and the second is only worth writing
+down with the evidence next to it. Where the evidence is partly out of a program's reach (a fab's upload page), the
+line says so and says who has to do what, instead of rounding up.
+
 ## Open questions
 
 
