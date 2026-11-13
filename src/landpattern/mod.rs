@@ -994,7 +994,7 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
         }
         PackageSpec::Bga { rows, cols, pitch, ball, body_x, body_y, height, missing, missing_center } => {
             check_dims(&[("ball", ball), ("body_x", body_x), ("body_y", body_y)])?;
-            let land = ipc::bga_land(ball.nominal(), opts.rounding);
+            let land = ipc::bga_land(ball.nominal());
             if land + opts.min_pad_gap > *pitch {
                 return Err(invalid(format!("{land} lands do not fit a {pitch} pitch; check `ball`")));
             }

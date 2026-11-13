@@ -1933,6 +1933,40 @@ are as authoritative as its tables and are the only place the assembly layouts a
 publishes nothing, "still unverified" with the pages that were read is the honest state, and the stricter stored
 value keeps `fab.check` on the safe side.
 
+### D78. Footprint tables compared with what can be read of IPC-7351B; BGA lands from the land table (2026-11-13)
+IPC-7351B is paywalled, so the flat-lead, flat-lug, molded-body and MELF fillet rows and the BGA land table were
+compared with published reproductions, read on this date. No GPL project or KiCad library was consulted. Sources
+(named per row in `src/landpattern/ipc.rs`, summarized in PARTS.md):
+IPC's own table of contents of IPC-7351B (table numbers and titles only); page images of Tables 3-2, 3-3, 3-5, 3-6
+(IPC-7351B) and of the inward flat ribbon L table (earlier IPC-7351), posted on the PCB Libraries forum; PCB
+Libraries' "Library Expert Surface Mount Families" of 2016-02 (archive.org), the tables of the tool that was IPC's
+calculator; T. Hausherr's blog series "PCB Design Perfection Starts in the CAD Library" (Mentor Graphics,
+2010–2011, archive.org); TI SPRACA4; the KEMET T491 datasheet; Diodes Inc. AP02001 Rev. 81.
+**Result.** No fillet value changed.
+- *Molded body* (0.8/0.5/0.2 outer, 0.25/0.15/0.07 inner, side 0.01/−0.05/−0.10): checked. The page image has
+  these numbers, and KEMET's level A/B/C lands for the T491 follow from them to 0.02 mm, the negative side goals
+  included (the differences between KEMET's land widths are 0.12 and 0.10 mm, twice the goal steps).
+- *MELF*, *flat lead* and *flat lug* (the gull-wing numbers): equal to the 2016 document, one source. That
+  document prints 0.00 where IPC has a negative goal (visible on the chip, fine-pitch gull-wing and molded rows
+  that the page images also give) and 0.12 where IPC has a 0.1 mm courtyard, so it does not confirm the flat-lead
+  Least side goal (−0.05) or Least courtyard (0.10): those two cells stay unchecked, with the values they had.
+- *BGA lands, collapsing balls*: **changed.** The generator reduced the ball by 25/20/15 % and rounded to 0.01 mm
+  (0.4 mm ball → 0.32); IPC-7351B Table 14-5 lists nominal lands rounded to 0.05 mm (0.4 → 0.30, 0.35 → 0.30,
+  0.75 → 0.55). TI and Hausherr print the same eleven rows from 0.75 to 0.20 mm; those are now the lands, and ball
+  sizes between the rows take their group's reduction rounded the same way. The 0.17 and 0.15 mm rows have one
+  source. The land no longer follows the `rounding` option. The two sources disagree on which column to use
+  (TI: the nominal land; Hausherr: IPC's calculator takes the upper end of the "land variation"); the nominal is used.
+- *BGA courtyard* (2.0/1.0/0.5 mm): unchecked and unchanged. Only Hausherr gives the values, and there the level
+  follows the ball size, not a density choice. Non-collapsing lands (Table 14-6) are not generated: one source.
+*Why not more:* a row counts as checked only with two independent sources; one vendor's transcription is recorded
+as such rather than promoted. Changing the BGA courtyard to follow the ball size, or the flat-lead cells to the
+2016 document's values, would replace one unconfirmed number with another.
+**Consequences.** Footprints with 0.4 mm balls get 0.30 mm lands; `bga_fanout_is_drc_clean` routes them at the
+default effort (`low` left 1 of 64 connections open). The Diodes layouts used in the new tests are not the Nominal
+calculation (between Nominal and Most for MELF and SOD-123F; DPAK pads up to 1 mm shorter), so they bound the
+generated patterns without confirming a table. Seen on the way, not changed: IPC-7351B names BGA land patterns
+without the M/N/L suffix, and the built-in DPAK lead pitch is 2.29 mm (JEDEC 2.286).
+
 ### D79. IPC rule values confirmed on secondary sources and kept in a data file; the IPC-2152 fit is the universal chart (2026-11-13)
 The IPC numbers behind `board.rules --preset ipc2|ipc3` (D26) were marked unverified. They were checked on
 2026-11-13 against sources that can be read freely; the standards themselves stay unread (paywalled). A value
@@ -2011,6 +2045,7 @@ Choices made on the way:
 *Why:* a ticked list says what was built, an exit says what works end to end, and the second is only worth writing
 down with the evidence next to it. Where the evidence is partly out of a program's reach (a fab's upload page), the
 line says so and says who has to do what, instead of rounding up.
+
 
 ## Open questions
 

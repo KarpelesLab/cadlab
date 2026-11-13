@@ -41,8 +41,10 @@ Details in [PARTS.md](PARTS.md).
 - [x] Shared user libraries: user library + configured directories, `lib.list/show/publish/import/remove` (D19)
 - [x] Own base library: footprint generator (IPC-7351B: chip, SOIC/SOP/TSSOP/MSOP/SOT-23, QFP, DFN, QFN, pin
       headers) and symbol generator from pin tables (no KiCad library content, see D7)
-- [x] More footprint families: SOT-223/DPAK/D2PAK, SOD/MELF, SMA/SMB/SMC, BGA, DIP (fillet rows for flat
-      lead, molded body, MELF and the BGA land table still to be checked against IPC-7351B)
+- [x] More footprint families: SOT-223/DPAK/D2PAK, SOD/MELF, SMA/SMB/SMC, BGA, DIP. Tables against IPC-7351B
+      (D78, PARTS.md "Sources of the fillet tables"): molded body and the BGA land table checked with two
+      independent sources (BGA lands now from the table); MELF, flat lead and flat lug equal to one source.
+      Not checked: flat lead Least side goal and Least courtyard, BGA courtyard, BGA lands for 0.17/0.15 mm balls
 - [x] BOM commands: list (grouped), replace, DNP, approved alternates, notes; components via `circuit.add/remove`
 - [x] Supplier research provider trait, offline catalog provider, response cache with TTL and offline mode
 - [x] DigiKey provider (API v4)

@@ -103,13 +103,40 @@ dimensions, cadlab produces a correct land pattern (`src/landpattern/`).
   `SOT-23-5`, `SOIC-8`, `TSSOP-20`, `LQFP-48`, `QFN-32 5x5mm P0.5mm EP3.1mm`, `PinHeader 2x05`) map to typical
   JEDEC/EIA dimensions (`landpattern::packages`); for anything else, pass the datasheet dimensions as a
   `PackageSpec` (`"0.15..0.35mm"`, `"1.0±0.05mm"`).
-- **To verify:** the fillet goal table (`src/landpattern/ipc.rs`) follows IPC-7351B as best known; review it
-  against the standard. A SOIC-8 computed with it matches widely used IPC-derived footprints to 0.01 mm. Newer
-  rows to review: flat lead, molded body (outer/inner goals mapped from IPC's heel/toe at the bend), MELF, the
-  BGA land reduction (25/20/15 % by ball size, same land at all densities) and BGA courtyard; also the typical
-  dimensions for SOD-123F, SOD-523, DPAK/D2PAK tab solderable length and DIP body sizes in `packages.rs`.
 - Parametric BGA names: `BGA-64 8x8 P0.8mm 6x6mm` (pins, columns x rows, pitch, body), optional `B0.45mm` ball,
   `H1.2mm` height, `VOID2x2` empty center block; the pin count must match the populated balls.
+- BGA lands (collapsing balls) come from the IPC-7351B land approximation table by nominal ball diameter
+  (0.5 mm ball → 0.4 mm land, 0.4 → 0.3, 0.3 → 0.25): the same land at every density level and rounding
+  setting. Non-collapsing balls (lands larger than the ball) are not generated; use `footprint.create`.
+
+### Sources of the fillet tables
+
+IPC-7351B is not freely readable, so the tables in `src/landpattern/ipc.rs` were compared with what is
+(DECISIONS D78, 2026-11-13); each row there names its source. "Checked" means two independent sources agree.
+
+| Table (IPC-7351B) | Used for | Status | Compared with |
+|---|---|---|---|
+| 3-2, 3-3 gull-wing; 3-5, 3-6 chip | SOIC/SOP/QFP/SOT, SOD-123/323; chips | equal | page images of the four tables (June 2010 edition) posted on the PCB Libraries forum by the author of IPC's calculator |
+| 3-13 inward flat ribbon L | SMA/SMB/SMC, molded tantalum | **checked** | page image of the same table in the earlier IPC-7351 (forum); KEMET T491 datasheet Table 2, whose level A/B/C lands these goals reproduce to 0.02 mm (with F = P = 0.1 mm) |
+| 3-7 cylindrical end cap | MELF, MiniMELF | one source | PCB Libraries "Library Expert Surface Mount Families" (2016-02, archived) |
+| 3-22 flat lead | SOD-123F, SOD-523 | one source; Least side goal (−0.05) and Least courtyard (0.10) **unchecked** | same document, which prints 0.00 for every negative IPC goal and 0.12 for every 0.1 mm courtyard |
+| 3-14 flat lug | DPAK/D2PAK tab (the gull-wing row is used) | one source | same document: one table "Gull-Wing and Flat Lug Leads" with the gull-wing numbers |
+| 14-5 BGA land, collapsing balls | BGA | **checked** for 0.75 to 0.20 mm balls; 0.17 and 0.15 mm one source | TI SPRACA4 Table 1; T. Hausherr, "PCB Design Perfection Starts in the CAD Library" part 9 (Mentor Graphics blog, 2011, archived) |
+| 14-6 BGA land, non-collapsing balls | not generated | n/a | Hausherr part 9 only (15/10/5 % larger than the ball) |
+| BGA courtyard excess | BGA | **unchecked** | Hausherr parts 6 and 9 only: 2.0/1.0/0.5 mm, chosen there by ball size (above 0.50, 0.50 to 0.25, below 0.25 mm); cadlab chooses by the density option |
+
+Courtyard excess 0.5/0.25/0.1 mm (Most/Nominal/Least) of the lead families is from Hausherr part 6; the 2016
+document and KEMET have 0.12 mm at Least. Round-off in that document is 0.01 mm, cadlab's default. The no-lead
+row (QFN/DFN) was not part of this check.
+
+Generated footprints are also compared with manufacturers' land patterns in `src/landpattern/tests.rs`, each test
+stating its source and tolerance: KEMET T491 cases C and D at all three levels (0.02 mm), and Diodes Inc. AP02001
+Rev. 81 ("based on IPC-7351A") for SMA/SMB/SMC, MELF/MiniMELF, SOD-123F and DPAK/D2PAK. The Diodes layouts are
+not the Nominal calculation: their MELF and SOD-123F lands lie between cadlab's Nominal and Most patterns, and
+their DPAK pads are up to 1 mm shorter than the IPC toe and heel goals give (widths agree to 0.15 mm).
+
+Still to review: the typical dimensions for SOD-123F, SOD-523, DPAK/D2PAK tab solderable length (the D2PAK tab
+comes out 1.6 mm longer than Diodes' pad) and DIP body sizes in `packages.rs`.
 
 ## Symbol generation
 

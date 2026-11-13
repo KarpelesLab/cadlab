@@ -549,7 +549,9 @@ fn bga_fanout_is_drc_clean() {
     assert_eq!(errors, Vec::<String>::new());
     // Routing on top of the fanout completes the board.
     // A budget slow CI runners (debug build, Windows) cannot exhaust: the result is deterministic.
-    let o = exec(&r, &mut s, "route.all", json!({"effort": "low", "budget": "600s"}));
+    // Default effort: with the 0.30 mm lands of the IPC-7351B table (D78; 0.32 mm before) the
+    // few iterations of `low` leave one connection of 64 unrouted.
+    let o = exec(&r, &mut s, "route.all", json!({"budget": "600s"}));
     report("bga64", &o, 0);
     render(&r, &mut s, "bga64");
     assert_eq!(completion(&o), 100.0);

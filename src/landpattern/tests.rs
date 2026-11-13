@@ -357,11 +357,21 @@ fn bga_rows_and_lands() {
 
     let fp = gen_named("BGA-64 8x8 P0.8mm 6x6mm", ChipKind::Resistor);
     assert_eq!(fp.pads.len(), 64);
-    // A1 top-left, H8 bottom-right; ball 0.40 mm → land 0.32 mm (20 % reduction).
+    // A1 top-left, H8 bottom-right; ball 0.40 mm → land 0.30 mm (IPC-7351B Table 14-5).
     assert_eq!(pad(&fp, "A1").at, Point::new(-um(2800), um(2800)));
     assert_eq!(pad(&fp, "A8").at, Point::new(um(2800), um(2800)));
     assert_eq!(pad(&fp, "H8").at, Point::new(um(2800), -um(2800)));
-    assert_eq!(pad(&fp, "A1").shape, PadShape::Circle { d: um(320) });
+    assert_eq!(pad(&fp, "A1").shape, PadShape::Circle { d: um(300) });
+    // The land does not follow the footprint's density level or rounding grid, only the ball.
+    let spec = parse("BGA-64 8x8 P0.8mm 6x6mm", ChipKind::Resistor).unwrap();
+    for density in [Density::Most, Density::Least] {
+        let opts = GenOptions { density, rounding: um(1), ..GenOptions::default() };
+        assert_eq!(pad(&generate(&spec, &opts).unwrap(), "A1").shape, PadShape::Circle { d: um(300) });
+    }
+    // TI SPRACA4 (AM572x, 0.8 mm pitch, 0.5 mm balls): 0.4 mm lands.
+    let fp = gen_named("BGA-64 8x8 P0.8mm 7x7mm B0.5mm", ChipKind::Resistor);
+    assert_eq!(pad(&fp, "A1").shape, PadShape::Circle { d: um(400) });
+    let fp = gen_named("BGA-64 8x8 P0.8mm 6x6mm", ChipKind::Resistor);
     // Courtyard: 1.0 mm (nominal) around the 6 mm body.
     let cy = BBox::of_points(fp.courtyard.iter().copied()).unwrap();
     assert_eq!(cy.max, Point::new(um(4000), um(4000)));
@@ -457,4 +467,203 @@ fn new_spec_serde_roundtrip() {
     assert!(matches!(spec, PackageSpec::Melf { kind: ChipKind::Diode, .. }));
     let j = r#"{"family":"melf","length":"3.5mm","diameter":"1.5mm","terminal":"0.3mm","colour":"red"}"#;
     assert!(serde_json::from_str::<PackageSpec>(j).is_err());
+}
+
+/// Z (outer edge to outer edge), G (inner edge to inner edge) and X (pad width) of a
+/// two-terminal footprint.
+fn zgx(fp: &Footprint) -> (Nm, Nm, Nm) {
+    let (p1, p2) = (pad(fp, "1"), pad(fp, "2"));
+    let (len, width) = p1.shape.size();
+    assert_eq!(p2.shape.size(), (len, width));
+    let span = p2.at.x - p1.at.x;
+    (span + len, span - len, width)
+}
+
+/// Courtyard size along X and Y.
+fn courtyard_size(fp: &Footprint) -> (Nm, Nm) {
+    let cy = BBox::of_points(fp.courtyard.iter().copied()).unwrap();
+    (cy.max.x - cy.min.x, cy.max.y - cy.min.y)
+}
+
+#[track_caller]
+fn assert_close(what: &str, got: Nm, want_um: i64, tol_um: i64) {
+    let d = (got - um(want_um)).abs();
+    assert!(d <= um(tol_um), "{what}: {got}, expected {} within {}", um(want_um), um(tol_um));
+}
+
+/// Molded tantalum (inward flat ribbon L leads, IPC-7351B Table 3-13) against KEMET's lands.
+///
+/// Source: KEMET T491 datasheet T2005_T491 (2026-07-08), "Dimensions" (L, W, H, F = termination
+/// width ±0.1, S = termination length ±0.3) and Table 2 "Land Dimensions/Courtyard", whose
+/// density levels A/B/C refer to IPC-7351: W = land width, L = land length, S = gap between the
+/// lands, V1 × V2 = courtyard. KEMET's numbers follow from F = P = 0.1 mm, set here.
+/// Tolerance: 0.02 mm on Z = 2L + S, G = S and X = W (0.01 mm rounding on each side).
+#[test]
+fn molded_tantalum_matches_kemet_t491() {
+    // (case, [L, ±, W, ±, H, F, S], then per level A, B, C: [W, L, S, V1, V2]), µm.
+    let cases = [
+        (
+            "C 6032-28",
+            [6000, 300, 3200, 300, 2500, 2200, 1300],
+            [[2350, 2770, 2370, 8920, 4500], [2230, 2370, 2570, 7820, 4000], [2130, 1990, 2730, 6960, 3740]],
+        ),
+        (
+            "D 7343-31",
+            [7300, 300, 4300, 300, 2800, 2400, 1300],
+            [[2550, 2770, 3670, 10220, 5600], [2430, 2370, 3870, 9120, 5100], [2330, 1990, 4030, 8260, 4840]],
+        ),
+    ];
+    for (case, [l, lt, w, wt, h, f, s], lands) in cases {
+        let spec = PackageSpec::Molded {
+            kind: ChipKind::Capacitor,
+            length: Dim::plus_minus(um(l), um(lt)),
+            body_length: Dim::plus_minus(um(l), um(lt)),
+            width: Dim::plus_minus(um(w), um(wt)),
+            terminal: Dim::plus_minus(um(s), um(300)),
+            lead_width: Dim::plus_minus(um(f), um(100)),
+            height: um(h + 300),
+        };
+        for (density, [kw, kl, ks, v1, v2]) in [Density::Most, Density::Nominal, Density::Least].into_iter().zip(lands)
+        {
+            let opts =
+                GenOptions { density, fab_tolerance: um(100), placement_tolerance: um(100), ..GenOptions::default() };
+            let fp = generate(&spec, &opts).unwrap();
+            let (z, g, x) = zgx(&fp);
+            let what = format!("{case} {density:?}");
+            assert_close(&format!("{what} Z"), z, 2 * kl + ks, 20);
+            assert_close(&format!("{what} G"), g, ks, 20);
+            assert_close(&format!("{what} X"), x, kw, 20);
+            // Courtyard: KEMET's is the lands and the largest body plus 0.5 / 0.25 / 0.12 mm;
+            // ours is around the nominal body, and 0.1 mm at Least (IPC-7351B). Tolerance
+            // 0.05 mm along the lands; across them the body tolerance comes off KEMET's V2.
+            let (cx, cy) = courtyard_size(&fp);
+            assert_close(&format!("{what} courtyard V1"), cx, v1, 50);
+            assert_close(&format!("{what} courtyard V2"), cy, v2 - wt, 50);
+        }
+    }
+}
+
+/// DO-214 molded diodes against Diodes Incorporated's suggested pad layouts.
+///
+/// Source: Diodes Inc. AP02001 "Package Outline Dimensions / Suggested Pad Layout (Based on
+/// IPC-7351A)", Rev. 81 (2014-11): SMA, SMB, SMC outlines (E = overall length, C = lead width,
+/// H = terminal length 0.76..1.52, B = body length, A = body width, J = height) and pads
+/// (X1 = Z, G, Y = X). Those layouts are rounded to 0.1 mm and are not the Nominal calculation:
+/// tolerance 0.3 mm on Z, 0.5 mm on G (the wide terminal tolerance moves G most), 0.25 mm on X.
+#[test]
+fn molded_diodes_near_diodes_ap02001() {
+    // (name, E, B, A, C, J max, pads [Z, G, X]), µm.
+    let cases = [
+        ("SMA", (4800, 5590), (4000, 4600), (2290, 2920), (1270, 1630), 2300, [6500, 1500, 1700]),
+        ("SMB", (5000, 5590), (4060, 4570), (3300, 3940), (1960, 2210), 2500, [6800, 1800, 2300]),
+        ("SMC", (7750, 8130), (6600, 7110), (5590, 6220), (2750, 3180), 2500, [9400, 4400, 3300]),
+    ];
+    let r = |v: (i64, i64)| Dim { min: um(v.0), max: um(v.1) };
+    for (name, e, b, a, c, j, [pz, pg, px]) in cases {
+        let spec = PackageSpec::Molded {
+            kind: ChipKind::Diode,
+            length: r(e),
+            body_length: r(b),
+            width: r(a),
+            terminal: r((760, 1520)),
+            lead_width: r(c),
+            height: um(j),
+        };
+        let (z, g, x) = zgx(&generate(&spec, &GenOptions::default()).unwrap());
+        assert_close(&format!("{name} Z"), z, pz, 300);
+        assert_close(&format!("{name} G"), g, pg, 500);
+        assert_close(&format!("{name} X"), x, px, 250);
+    }
+}
+
+/// MELF and MiniMELF (IPC-7351B Table 3-7) against Diodes Incorporated's suggested pad layouts.
+///
+/// Source: Diodes Inc. AP02001 Rev. 81 (2014-11, "Based on IPC-7351A"): MiniMELF A 3.30..3.70,
+/// B 1.30..1.60, C 0.28..0.50, pads X1 4.70, G 2.10, Y 1.70; MELF A 4.80..5.20, B 2.40..2.60,
+/// C 0.55 typ, pads X1 6.30, G 3.30, Y 2.70. Their pad width is our Nominal one (0.02 mm
+/// tolerance: side goal 0.05); their Z and G lie between our Nominal and Most patterns, which
+/// is asserted as such (0.01 mm slack), so this does not confirm the toe and heel rows.
+#[test]
+fn melf_brackets_diodes_ap02001() {
+    let cases = [
+        ("MiniMELF", (3300, 3700), (1300, 1600), (280, 500), [4700, 2100, 1700]),
+        ("MELF", (4800, 5200), (2400, 2600), (550, 550), [6300, 3300, 2700]),
+    ];
+    let r = |v: (i64, i64)| Dim { min: um(v.0), max: um(v.1) };
+    for (name, a, b, c, [pz, pg, px]) in cases {
+        let spec = PackageSpec::Melf { kind: ChipKind::Diode, length: r(a), diameter: r(b), terminal: r(c) };
+        let at = |density| zgx(&generate(&spec, &GenOptions { density, ..GenOptions::default() }).unwrap());
+        let (zn, gn, xn) = at(Density::Nominal);
+        let (zm, gm, _) = at(Density::Most);
+        assert_close(&format!("{name} X"), xn, px, 20);
+        assert!(zn <= um(pz + 10) && um(pz - 10) <= zm, "{name} Z: {zn} (nominal) .. {zm} (most) around {}", um(pz));
+        assert!(gm <= um(pg + 10) && um(pg - 10) <= gn, "{name} G: {gm} (most) .. {gn} (nominal) around {}", um(pg));
+    }
+}
+
+/// Flat-lead SOD (IPC-7351B Table 3-22) against Diodes Incorporated's suggested pad layout.
+///
+/// Source: Diodes Inc. AP02001 Rev. 81 (2014-11, "Based on IPC-7351A"), SOD123F: He 3.30..3.70,
+/// b 0.80..1.35, L2 0.35..0.85, D 1.70..1.90, E 2.60..2.80, A max 1.15; pads X1 (Z) 4.20,
+/// G 1.52, Y (width) 1.80. Their Z lies between our Nominal (toe 0.2) and Most (toe 0.3)
+/// patterns, asserted as such. The wide tolerances of this outline (b ±0.275, L2 ±0.25) leave G
+/// and the width loose: tolerance 0.4 mm on G and 0.45 mm on the width at Nominal.
+#[test]
+fn flat_lead_sod_near_diodes_ap02001() {
+    let r = |min, max| Dim { min: um(min), max: um(max) };
+    let spec = PackageSpec::Sod {
+        lead: SodLead::Flat,
+        span: r(3300, 3700),
+        body_length: r(2600, 2800),
+        body_width: r(1700, 1900),
+        terminal: r(350, 850),
+        lead_width: r(800, 1350),
+        height: um(1150),
+    };
+    let at = |density| zgx(&generate(&spec, &GenOptions { density, ..GenOptions::default() }).unwrap());
+    let (zn, gn, xn) = at(Density::Nominal);
+    let (zm, _, _) = at(Density::Most);
+    assert!(zn <= um(4200) && um(4200) <= zm, "Z: {zn} (nominal) .. {zm} (most) around 4.2mm");
+    assert_close("G", gn, 1520, 400);
+    assert_close("X", xn, 1800, 450);
+    // The built-in SOD-123F (typical dimensions) gives the same Z within 0.15 mm.
+    let (z, _, _) = zgx(&gen_named("SOD-123F", ChipKind::Diode));
+    assert_close("SOD-123F Z", z, 4200, 150);
+}
+
+/// DPAK and D2PAK (leads and flat lug tab on the gull-wing goals, IPC-7351B Table 3-14) against
+/// Diodes Incorporated's suggested pad layouts.
+///
+/// Source: Diodes Inc. AP02001 Rev. 81 (2014-11, "Based on IPC-7351A"). TO252 (DPAK): lead pads
+/// X 1.06 wide, Y 2.60 long, C 4.572 apart; tab pad X1 5.632 wide, Y1 5.70 long; Y2 10.70 overall.
+/// TO263AB (D2PAK): X 1.10, Y 3.50, C 5.08, X1 10.41, Y1 7.01, Y2 15.99.
+/// Widths and lead positions agree: tolerance on widths 0.15 mm (DPAK) and 0.35 mm (D2PAK, whose
+/// built-in tab width range 9.65..10.67 is wider than this layout assumes), on the lead spacing
+/// 0.01 mm. Lengths do not: the IPC toe and heel goals (0.35 mm each at Nominal, plus
+/// tolerances) give longer pads than these layouts; asserted only as "not shorter, and at most
+/// this much longer": for the DPAK 0.8 mm on a lead, 1.0 mm on the tab and 0.7 mm overall, for
+/// the D2PAK 0.9, 1.6 and 0.9 mm (its built-in tab length 7.0..7.5 is longer than the D1
+/// 6.55..6.95 of this outline).
+#[test]
+fn dpak_near_diodes_ap02001() {
+    // (name, lead width, lead length, lead spacing, tab width, tab length, overall, width tolerance,
+    // how much longer the lead, the tab and the whole pattern may be), µm.
+    let cases = [
+        ("DPAK", 1060, 2600, 4572, 5632, 5700, 10700, 150, [800, 1000, 700]),
+        ("D2PAK", 1100, 3500, 5080, 10410, 7010, 15990, 350, [900, 1600, 900]),
+    ];
+    for (name, lw, ll, c, tw, tl, overall, wtol, longer) in cases {
+        let fp = gen_named(name, ChipKind::Resistor);
+        let (l1, l3, tab) = (pad(&fp, "1"), pad(&fp, "3"), pad(&fp, "2"));
+        let (len, width) = l1.shape.size();
+        let (tab_len, tab_width) = tab.shape.size();
+        assert_close(&format!("{name} lead width"), width, lw, wtol);
+        assert_close(&format!("{name} tab width"), tab_width, tw, wtol);
+        assert_close(&format!("{name} lead spacing"), l1.at.y - l3.at.y, c, 10);
+        let extent = (tab.at.x + Nm(tab_len.0 / 2)) - (l1.at.x - Nm(len.0 / 2));
+        let lengths = [("lead length", len, ll), ("tab length", tab_len, tl), ("overall length", extent, overall)];
+        for ((what, got, want), longer) in lengths.into_iter().zip(longer) {
+            assert!(got >= um(want) && got <= um(want + longer), "{name} {what}: {got}, layout {}", um(want));
+        }
+    }
 }
