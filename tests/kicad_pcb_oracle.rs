@@ -263,7 +263,13 @@ fn export_is_deterministic_and_well_formed() {
     assert!(a.pcb.contains("(filled_polygon (layer \"B.Cu\") (pts (xy "), "zone fill");
     // the reference sits where cadlab's legend prints it: upright, 0.3 mm above the courtyard
     // (U1: courtyard 1.71 mm above the origin, text 1 mm tall);
-    assert!(a.pcb.contains("(property \"Reference\" \"U1\" (at 0 -2.51 0) (layer \"F.SilkS\")"), "U1 reference");
+    // KiCad centers a box around the text there, a little lower than the capitals' middle (D83);
+    let at = a.pcb.split("(property \"Reference\" \"U1\" (at 0 ").nth(1).expect("U1 reference");
+    let (y, rest) = at.split_once(' ').unwrap();
+    assert!(rest.starts_with("0) (layer \"F.SilkS\")"), "U1 reference: {}", &rest[..40]);
+    // 0.03738 heights + 0.052 strokes under the text's center at 2.51 mm (1 mm high, 0.15 mm
+    // stroke).
+    assert_eq!(y, "-2.464819", "U1 reference");
     // no derived minimum via diameter (cadlab checks drill and annular ring only).
     let pro: Value = serde_json::from_str(&a.project).unwrap();
     assert_eq!(pro["board"]["design_settings"]["rules"]["min_via_diameter"], 0.0);
@@ -597,6 +603,7 @@ fn feature_board() -> (tempfile::TempDir, Registry, Session) {
             at: pt(10.0, 13.0),
             size: n(1.0),
             rotation: Default::default(),
+            style: Default::default(),
         },
     });
     (d, r, s)

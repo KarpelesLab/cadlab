@@ -101,6 +101,14 @@ struct Known {
     /// `original` or `reexport` (absent: both comparisons).
     #[serde(default)]
     stage: Option<String>,
+    /// For silkscreen findings that come from the two tools' stroke fonts: only findings naming
+    /// a text, and for KiCad's, only where cadlab measures the two items (or the item and the
+    /// edge) no farther apart than this (mm).
+    #[serde(default)]
+    text_within: Option<f64>,
+    /// Only findings naming one of these objects (cadlab labels: `TP3`, `graphic#12`).
+    #[serde(default)]
+    items: Vec<String>,
 }
 
 fn manifest() -> Manifest {
@@ -158,7 +166,16 @@ fn corpus_allow() -> Vec<Allow<'static>> {
         .iter()
         .chain(ORIGINAL_ONLY_RULES)
         .chain(REEXPORT_ONLY_RULES)
-        .map(|&(side, rule, reason)| Allow { case: None, side, rule, when: None, max: None, involving: &[], reason })
+        .map(|&(side, rule, reason)| Allow {
+            case: None,
+            side,
+            rule,
+            when: None,
+            max: None,
+            involving: &[],
+            text_within: None,
+            reason,
+        })
         .collect();
     v.push(Allow {
         case: None,
@@ -167,6 +184,7 @@ fn corpus_allow() -> Vec<Allow<'static>> {
         when: Some(names_board_text),
         max: None,
         involving: &[],
+        text_within: None,
         reason: "cadlab's silk_over_pad checks silkscreen drawings, not texts (board texts have no outline in \
                  cadlab's DRC; their font is the writer's)",
     });
@@ -458,12 +476,19 @@ fn run_project(
     let ours = drc_compare::findings_of(&cad_diags);
     eprintln!("cadlab DRC: {} findings in {:.1} s", ours.len(), t0.elapsed().as_secs_f64());
 
-    let Some(t) = tools else {
+    // Without KiCad, its DRC reports of an earlier run (CI's `corpus-report` artifact) can be
+    // replayed: `CADLAB_CORPUS_REPLAY=<dir>` with `<project>/drc-original.json` and
+    // `<project>/reexport/drc.json`.
+    let replay = std::env::var_os("CADLAB_CORPUS_REPLAY").map(|d| PathBuf::from(d).join(&e.name));
+    let replayed = |file: &str| -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(replay.as_ref()?.join(file)).ok()?).ok()
+    };
+    if tools.is_none() && replayed("drc-original.json").is_none() {
         row.drc_original = Some(json!({"cadlab": ours.len()}));
         row.status = if row.problems.is_empty() { "ok (no oracles)".into() } else { "differences".into() };
         row.seconds = started.elapsed().as_secs_f64();
         return row;
-    };
+    }
 
     // Allowances: global, rules the project ignores, footprints given a courtyard by the import,
     // and the manifest's known differences. Some apply to one comparison only (`stage`:
@@ -483,6 +508,7 @@ fn run_project(
                 when: None,
                 max: None,
                 involving: &[],
+                text_within: None,
                 reason: ignore_reason,
             });
             stage.push(Some(true));
@@ -502,6 +528,7 @@ fn run_project(
         when: None,
         max: None,
         involving: &generated,
+        text_within: None,
         reason: "one of the footprints has no courtyard in KiCad (nothing to check there); the import gave it one \
                  0.25 mm around its pads (import.courtyard_generated)",
     });
@@ -514,7 +541,8 @@ fn run_project(
             rule: &kd.rule,
             when: None,
             max: Some(kd.max),
-            involving: &[],
+            involving: &kd.items,
+            text_within: kd.text_within,
             reason: &kd.reason,
         });
         stage.push(match kd.stage.as_deref() {
@@ -537,9 +565,14 @@ fn run_project(
     // 3. DRC of the original board (with schematic parity when there is a schematic: KiCad then
     // reports the components missing on the board, as cadlab's drc.unplaced does).
     let parity: &[&str] = if e.sch.is_some() { &["--schematic-parity"] } else { &[] };
-    let report_orig = drc_compare::kicad_drc(&t.cli, &pcb, &out.join("drc-original.json"), parity);
+    let report_orig = match tools {
+        Some(t) => drc_compare::kicad_drc(&t.cli, &pcb, &out.join("drc-original.json"), parity),
+        None => replayed("drc-original.json").unwrap(),
+    };
     let frame = Frame { origin: report.origin };
-    let b = drc_compare::Board { name: &e.name, what: "original board", expect: &[], verbose: false };
+    // `CADLAB_CORPUS_VERBOSE=1` logs every matched pair and every allowed finding.
+    let verbose = std::env::var("CADLAB_CORPUS_VERBOSE").is_ok_and(|v| v == "1");
+    let b = drc_compare::Board { name: &e.name, what: "original board", expect: &[], verbose };
     let mut probs = Vec::new();
     let o =
         drc_compare::compare(&b, &p, &ours, &report_orig, &report.uuids, &frame, &allow, &mut local_used, &mut probs);
@@ -553,8 +586,13 @@ fn run_project(
     std::fs::write(&rpcb, &export.pcb).unwrap();
     std::fs::write(rx.join("board.kicad_pro"), &export.project).unwrap();
     std::fs::write(rx.join("board.kicad_dru"), &export.rules).unwrap();
-    let report_rx = drc_compare::kicad_drc(&t.cli, &rpcb, &rx.join("drc.json"), &[]);
-    let b = drc_compare::Board { name: &e.name, what: "re-export", expect: &[], verbose: false };
+    let report_rx = match tools {
+        Some(t) => drc_compare::kicad_drc(&t.cli, &rpcb, &rx.join("drc.json"), &[]),
+        // A replayed report is of the re-export of the run it comes from: items the export has
+        // changed since are not paired.
+        None => replayed("reexport/drc.json").unwrap_or_else(|| json!({"violations": [], "unconnected_items": []})),
+    };
+    let b = drc_compare::Board { name: &e.name, what: "re-export", expect: &[], verbose };
     let mut probs = Vec::new();
     let mut rx_used = vec![0usize; allow.len()];
     let o = drc_compare::compare(
@@ -589,6 +627,12 @@ fn run_project(
             ));
         }
     }
+
+    let Some(t) = tools else {
+        row.status = if row.problems.is_empty() { "ok (replayed)".into() } else { "differences".into() };
+        row.seconds = started.elapsed().as_secs_f64();
+        return row;
+    };
 
     // 5. Gerbers and drill files. Copper is compared twice: without pours (KiCad's zone fills
     // removed from a copy of the board, cadlab's zones removed), which must agree, and with pours
@@ -857,6 +901,11 @@ fn manifest_is_valid() {
         for k in &e.known {
             assert!(k.side == "kicad" || k.side == "cadlab", "{}: known side {}", e.name, k.side);
             assert!(k.max > 0 && !k.rule.is_empty() && k.reason.len() > 20, "{}: known {}", e.name, k.rule);
+            assert!(
+                k.text_within.is_none_or(|w| w > 0.0 && w <= 0.2 && k.rule.contains("silk")),
+                "{}: text_within is for silkscreen rules, up to 0.2 mm",
+                e.name
+            );
             assert!(
                 k.stage.as_deref().is_none_or(|s| s == "original" || s == "reexport"),
                 "{}: known stage {:?}",

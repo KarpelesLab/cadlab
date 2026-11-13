@@ -18,6 +18,11 @@
 #                             that rule are accepted, reason, and optionally stage = "original" |
 #                             "reexport" (default: both comparisons). Counts are exact as of the pin
 #                             and KiCad 10.0: a new difference, or more of a known one, fails.
+#                             text_within = <mm> limits an entry to silkscreen findings that come from
+#                             the two tools' stroke fonts (D83): only findings naming a text, and of
+#                             KiCad's only those whose two items (or item and board edge) cadlab
+#                             measures no farther apart than that. items = ["TP3"] limits an entry to
+#                             findings naming one of these objects.
 #   [[project.gerber_known]]  a Gerber layer (or `drill`) whose differences are reported, not failed,
 #                             with the reason.
 # Global, principled allowances live in tests/common/drc_compare.rs and tests/corpus.rs; the entries
@@ -44,6 +49,28 @@ rule = "copper_edge_clearance"
 max = 2
 stage = "reexport"
 reason = "KiCad also keeps copper away from the drawing the project puts on the Margin layer (past the USB-C shield pads J1.S1); cadlab's board edge is Edge.Cuts only"
+
+[[project.known]]
+side = "kicad"
+rule = "silk_edge_clearance"
+max = 14
+stage = "original"
+reason = "KiCad also takes the drawing the project puts on the Margin layer as a board edge: 14 pin labels of the module footprint U4 cross it; cadlab's board edge is Edge.Cuts only (as for copper_edge_clearance above)"
+
+[[project.known]]
+side = "kicad"
+rule = "silk_edge_clearance"
+max = 27
+stage = "reexport"
+reason = "the same Margin drawing and the same pin labels of U4, which cadlab imports as drawings of the footprint and exports as lines: KiCad reports them line by line"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_overlap"
+max = 4
+stage = "reexport"
+text_within = 0.05
+reason = "the two stroke fonts (D83): the designators of D2 (over Q1's outline and over a pin label of U4), R2 (over D1's outline) and D3 (over Q2's outline), 0.7 mm high, overlap them in cadlab's font, whose letters end one font unit (0.033 mm at this height) farther out on each side than KiCad's; KiCad, drawing the same texts in its own font, reports none of the four (it reports six other pairs of this board, as cadlab does); the original project ignores the rule"
 
 [[project.gerber_known]]
 layer = "B.Mask"
@@ -134,6 +161,13 @@ max = 1
 stage = "original"
 reason = "LOGO1 is a schematic symbol whose board footprint has no pads: the import makes its drawings board graphics (import.footprint_as_graphics), so the component stays unplaced"
 
+[[project.known]]
+side = "kicad"
+rule = "silk_overlap"
+max = 1
+text_within = 0.05
+reason = "the two stroke fonts (D83): the label BPIO6 next to J301's outline: on it in KiCad's font, 0.02 mm clear of it in cadlab's (three more labels of the row are reported by both)"
+
 [[project.gerber_known]]
 layer = "Edge.Cuts"
 reason = "KiCad plots the open Edge.Cuts arcs too; cadlab's profile is the closed outline (import.outline_open)"
@@ -198,9 +232,9 @@ notes = "Ferris Sweep split keyboard (reversible): 2-layer THT/SMD, no schematic
 [[project.known]]
 side = "kicad"
 rule = "silk_over_copper"
-max = 4
+max = 2
 stage = "original"
-reason = "silkscreen arcs of REF** footprints over the switches' holes: those footprints are made of holes and become board holes (import.footprint_as_holes), whose drawings are not kept"
+reason = "arcs on the back silkscreen of the REF** hole footprints (placed on the front) over the switches' holes: those footprints become board holes (import.footprint_as_holes) and keep their silkscreen drawings as board graphics, but cadlab footprints have no silkscreen on their other side; the two front arcs are reported by both"
 
 [[project.known]]
 side = "cadlab"
@@ -253,6 +287,27 @@ max = 6
 stage = "original"
 reason = "the fiducials FID1-FID8 are on the board but not in the schematic (import.component_not_in_circuit): not placed, so cadlab has no courtyard for them"
 
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_overlap"
+max = 11
+text_within = 0.05
+reason = "the two stroke fonts (D83): seven of the two-line port labels on the bottom (B over 0 to 6) overlap the brackets drawn around them in nine places in cadlab's font; KiCad reports the other bracket lines of the same rows, as cadlab does (30 pairs matched on this board), and not these nine; VREG_3V3 reaches the line under it (cadlab's underscore is drawn lower than KiCad's) and PU/PD A the outline of U19 (cadlab's slash is longer)"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_edge"
+max = 1
+text_within = 0.05
+reason = "the two stroke fonts (D83): VIO SET/SENSE, written along the board edge, crosses it in cadlab's font, whose slash is longer than KiCad's"
+
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_overlap"
+max = 1
+items = ["TP3"]
+reason = "KiCad's silkscreen checks take a circle at its radius, without its stroke (D83, measured): the 0.12 mm circle of test point TP3 overlaps a board line by 0.035 mm as printed, and is 0.025 mm clear of it for KiCad"
+
 [[project.gerber_known]]
 layer = "F.Cu"
 reason = "the fiducials are not placed (import.component_not_in_circuit)"
@@ -288,6 +343,13 @@ max = 1
 stage = "original"
 reason = "G1 is a schematic symbol whose board footprint has no pads (a logo, import.footprint_as_graphics), so the component stays unplaced"
 
+[[project.known]]
+side = "cadlab"
+rule = "drc.silk_overlap"
+max = 1
+items = ["TP21"]
+reason = "KiCad's silkscreen checks take a circle at its radius, without its stroke (D83, measured): the circle of test point TP21 overlaps the outline of U37 as printed and is clear of it for KiCad"
+
 [[project]]
 name = "cynthion"
 repo = "https://github.com/greatscottgadgets/cynthion-hardware"
@@ -316,40 +378,17 @@ reason = "the Kelvin current-sense resistors R1, R2, R42, R59 are net ties whose
 
 [[project.known]]
 side = "cadlab"
-rule = "drc.copper_to_edge"
-max = 6
-reason = "the layer-number texts 1-6 next to the edge: in cadlab's stroke font their glyphs come 0.275 mm from the edge, KiCad's stay clear"
-
-[[project.known]]
-side = "cadlab"
 rule = "drc.silk_over_pad"
 max = 2
-stage = "original"
 reason = "J5's silkscreen passes 0.04 mm from its own copper-less NPTH holes, inside their openings grown by the board's 0.05 mm mask expansion; KiCad's silkscreen check does not apply the board-level expansion (see corne-cherry)"
 
 [[project.gerber_known]]
 layer = "F.Cu"
-reason = "the layer-number texts 1-6 are drawn in cadlab's stroke font, whose glyphs differ from KiCad's"
-
-[[project.gerber_known]]
-layer = "In1.Cu"
-reason = "the layer-number texts 1-6 are drawn in cadlab's stroke font, whose glyphs differ from KiCad's"
-
-[[project.gerber_known]]
-layer = "In2.Cu"
-reason = "the layer-number texts 1-6 are drawn in cadlab's stroke font, whose glyphs differ from KiCad's"
+reason = "the layer-number text 1 is drawn in cadlab's stroke font, whose glyph for this digit differs from KiCad's (the other four layers' digits now match, D83)"
 
 [[project.gerber_known]]
 layer = "In3.Cu"
-reason = "the layer-number texts 1-6 are drawn in cadlab's stroke font, whose glyphs differ from KiCad's"
-
-[[project.gerber_known]]
-layer = "In4.Cu"
-reason = "the layer-number texts 1-6 are drawn in cadlab's stroke font, whose glyphs differ from KiCad's"
-
-[[project.gerber_known]]
-layer = "B.Cu"
-reason = "the layer-number texts 1-6 are drawn in cadlab's stroke font, whose glyphs differ from KiCad's"
+reason = "the layer-number text 4 is drawn in cadlab's stroke font, whose glyph for this digit differs from KiCad's (the other four layers' digits now match, D83)"
 
 [[project]]
 name = "tinytapeout-demo"

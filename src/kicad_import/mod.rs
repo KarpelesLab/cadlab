@@ -57,8 +57,8 @@ use crate::diag::{Diagnostic, Severity};
 use crate::geom::{BBox, Point};
 use crate::model::Project;
 use crate::model::board::{
-    Board, BoardGraphic, Contour, GraphicKind, Hole, Keepout, Outline, PadConnection, Segment, Stackup, Track, Via,
-    Zone,
+    Board, BoardGraphic, Contour, GraphicKind, Hole, Keepout, Outline, PadConnection, Segment, Stackup, TextAlign,
+    TextStyle, TextVAlign, Track, Via, Zone,
 };
 use crate::model::circuit::valid_refdes;
 use crate::model::footprint::{GraphicGeometry, GraphicLayer, PadKind, PadShape};
@@ -694,13 +694,16 @@ pub fn import(
                 "holes",
                 Diagnostic::info(
                     "import.footprint_as_holes",
-                    "board-only footprints made of round holes (stitching vias, mouse bites) become board holes, one per pad",
+                    "board-only footprints made of round holes (stitching vias, mouse bites) become board holes, one per pad; \
+                     their silkscreen drawings become board graphics",
                 )
                 .with_subject(ObjectRef::Name(c.refdes.clone())),
             );
             for (h, net) in hs {
                 holes.push((h, net, c));
             }
+            // What they print stays on the board (a mouse bite's outline at the board edge).
+            board_drawings(c, true, &mut graphics);
             continue;
         }
         let subject = ObjectRef::Name(c.refdes.clone());
@@ -807,6 +810,9 @@ pub fn import(
 
     // Holes.
     let mut hole_names: BTreeSet<String> = BTreeSet::new();
+    // How many holes each footprint has given so far (a footprint of several holes gives one
+    // per pad, in pad order).
+    let mut given: BTreeMap<*const Converted, usize> = BTreeMap::new();
     for (mut h, net, c) in holes {
         let mut name = c.refdes.trim().to_string();
         if name.is_empty()
@@ -829,9 +835,21 @@ pub fn import(
         h.name = name.clone();
         h.id = p.alloc_id();
         h.net = if h.pad.is_some() { map_net(&net) } else { None };
+        // The footprint and its drawings are named by its first hole, each pad by its own.
+        let nth = given.entry(c as *const Converted).or_default();
+        let mut pad = 0;
         for (u, what) in &c.uuids {
-            report.uuids.insert(u.clone(), uuid_label(&name, what));
+            let own = if what.starts_with("pad:") {
+                pad += 1;
+                pad - 1 == *nth
+            } else {
+                *nth == 0
+            };
+            if own {
+                report.uuids.insert(u.clone(), uuid_label(&name, what));
+            }
         }
+        *nth += 1;
         let skipped = c.fp.graphics.len();
         if skipped > 0 {
             notes.agg(
@@ -839,7 +857,8 @@ pub fn import(
                 "hole",
                 Diagnostic::info(
                     "import.hole_drawings",
-                    "mounting hole footprints become board holes; their drawings are not kept",
+                    "hole footprints become board holes; their drawings are not kept (board-only hole footprints keep \
+                     their silkscreen drawings as board graphics)",
                 )
                 .with_subject(ObjectRef::Name(name.clone())),
             );
@@ -916,6 +935,7 @@ pub fn import(
         }
     }
     normalize_zones(p);
+    normalize_texts(p);
 
     // The project's DRC exclusions, as waivers of the findings they match.
     if let Some(k) = opts.rules.as_ref().filter(|k| !k.exclusions.is_empty()) {
@@ -957,7 +977,8 @@ fn default_reference_text(p: &mut Project, refdes: &str) {
     {
         t.offset = None;
     }
-    let plain = t.offset.is_none() && !t.hidden && t.size.is_none() && t.rotation == Angle::ZERO;
+    let plain =
+        t.offset.is_none() && !t.hidden && t.size.is_none() && t.thickness.is_none() && t.rotation == Angle::ZERO;
     p.board_mut().footprints.get_mut(refdes).expect("placed").ref_text = (!plain).then_some(t);
 }
 
@@ -1377,21 +1398,159 @@ fn read_text(
         );
         return;
     }
-    let size = e
-        .get("effects")
-        .and_then(|ef| ef.get("font"))
-        .and_then(|f| f.get("size"))
-        .and_then(|s| s.value())
-        .and_then(mm)
-        .unwrap_or(Nm::from_mm(1));
+    let look = text_look(e, &layer);
+    if look.hidden {
+        return;
+    }
+    let rotation = rotation.normalized();
+    // KiCad's anchor is the corner (or middle) of a box around the text.
+    let at = ctx.frame(at) + look.shift(rotation, &layer);
+    if look.face {
+        notes.agg(
+            "import.text_font",
+            "face",
+            Diagnostic::warning(
+                "import.text_font",
+                "texts in an outline (TrueType) font are drawn in cadlab's stroke font, at the same height, anchor \
+                 and angle: their extent differs",
+            )
+            .with_hint("use KiCad's own font for texts that must fit, or check the legend in the Gerber files"),
+        );
+    }
     graphics.push((
         BoardGraphic {
             id: crate::id::ObjectId(0),
             layer,
-            kind: GraphicKind::Text { text, at: ctx.frame(at), size, rotation: rotation.normalized() },
+            kind: GraphicKind::Text { text, at, size: look.size, rotation, style: look.style },
         },
         uuid.into_iter().collect(),
     ));
+}
+
+/// Text strokes as thick as cadlab draws them anyway are left unset (so cadlab's own exports,
+/// which always write the stroke, import back unchanged).
+fn normalize_texts(p: &mut Project) {
+    use crate::board::silk::{REF_SIZE, ref_stroke_width};
+    let refs: Vec<String> = p.board().footprints.keys().cloned().collect();
+    for r in refs {
+        let Some(t) = p.board().footprints[&r].ref_text.clone() else { continue };
+        if t.thickness == Some(ref_stroke_width(p, t.size.unwrap_or(REF_SIZE))) {
+            p.board_mut().footprints.get_mut(&r).expect("placed").ref_text =
+                Some(crate::model::board::RefText { thickness: None, ..t });
+            default_reference_text(p, &r);
+        }
+    }
+    let defaults: Vec<Option<Nm>> = p
+        .board()
+        .graphics
+        .iter()
+        .map(|g| match &g.kind {
+            GraphicKind::Text { size, .. } => Some(crate::board::text_stroke_width(p, *size)),
+            _ => None,
+        })
+        .collect();
+    for (g, d) in p.board_mut().graphics.iter_mut().zip(defaults) {
+        if let GraphicKind::Text { style, .. } = &mut g.kind
+            && style.thickness == d
+        {
+            style.thickness = None;
+        }
+    }
+}
+
+/// How a KiCad text (`gr_text`, `fp_text`, a footprint field) is drawn.
+pub(super) struct TextLook {
+    /// Character height.
+    pub(super) size: Nm,
+    /// Width, stroke, justification, slant, mirroring and knockout where they differ from
+    /// cadlab's defaults.
+    pub(super) style: TextStyle,
+    /// Not shown.
+    pub(super) hidden: bool,
+    /// Drawn in an outline font by KiCad.
+    pub(super) face: bool,
+    /// The stroke KiCad draws it with.
+    pub(super) stroke: Nm,
+    /// A footprint text KiCad draws at the angle written even when it then reads upside down.
+    pub(super) unlocked: bool,
+}
+
+impl TextLook {
+    /// Whether the text reads from right to left on `layer`.
+    pub(super) fn mirrored(&self, layer: &str) -> bool {
+        self.style.mirror.unwrap_or(layer.starts_with("B."))
+    }
+
+    /// From KiCad's position of the text to cadlab's anchor (`kicad_pcb::kicad_text_shift`),
+    /// for a text drawn at `rotation` on `layer`.
+    pub(super) fn shift(&self, rotation: Angle, layer: &str) -> Point {
+        crate::kicad_pcb::kicad_text_shift(
+            self.size,
+            self.stroke,
+            (self.style.align, self.style.valign),
+            self.style.italic,
+            rotation,
+            self.mirrored(layer),
+        )
+    }
+
+    /// The angle KiCad draws a footprint text written with `angle` at: turned half a turn when
+    /// it would read upside down, unless unlocked.
+    pub(super) fn drawn_angle(&self, angle: Angle) -> Angle {
+        let a = angle.normalized();
+        if self.unlocked || crate::kicad_pcb::kicad_upright(a) { a } else { (a + Angle::DEG_180).normalized() }
+    }
+}
+
+/// Reads the `(effects (font (size H W) (thickness T) bold italic) (justify ...) hide)` of a
+/// text on `layer` (the published file format: no justification is centered both ways, `mirror`
+/// is among the justifications, `knockout` follows the layer name).
+pub(super) fn text_look(e: &Sexpr, layer: &str) -> TextLook {
+    let effects = e.get("effects");
+    let font = effects.and_then(|ef| ef.get("font"));
+    let sizes = font.and_then(|f| f.get("size"));
+    let size = sizes.and_then(|s| s.value()).and_then(mm).filter(|s| s.0 > 0).unwrap_or(Nm::from_mm(1));
+    let width = sizes.and_then(|s| s.items().get(2)).and_then(Sexpr::atom).and_then(mm).filter(|w| w.0 > 0);
+    // No thickness: an eighth of the height; never more than KiCad draws.
+    let stroke = font.and_then(|f| f.child_value("thickness")).and_then(mm).filter(|t| t.0 > 0);
+    let stroke = crate::kicad_pcb::kicad_stroke(stroke.unwrap_or(Nm(size.0 / 8)), size, width.unwrap_or(size));
+    let thickness = Some(stroke);
+    let justify: Vec<&str> = effects
+        .and_then(|ef| ef.get("justify"))
+        .map(|j| j.items().iter().skip(1).filter_map(Sexpr::atom).collect())
+        .unwrap_or_default();
+    let has = |w: &str| justify.contains(&w);
+    let mirrored = has("mirror");
+    let style = TextStyle {
+        width: width.filter(|w| *w != size),
+        thickness,
+        align: if has("left") {
+            TextAlign::Left
+        } else if has("right") {
+            TextAlign::Right
+        } else {
+            TextAlign::Center
+        },
+        valign: if has("top") {
+            TextVAlign::Top
+        } else if has("bottom") {
+            TextVAlign::Bottom
+        } else {
+            TextVAlign::Middle
+        },
+        italic: font.is_some_and(|f| yes(f, "italic")),
+        mirror: (mirrored != layer.starts_with("B.")).then_some(mirrored),
+        knockout: e.get("layer").is_some_and(|l| l.items().iter().skip(2).any(|c| c.atom() == Some("knockout"))),
+    };
+    TextLook {
+        size,
+        style,
+        hidden: yes(e, "hide") || effects.is_some_and(|ef| yes(ef, "hide")),
+        face: font.is_some_and(|f| f.get("face").is_some()),
+        stroke,
+        // KiCad 8+: `(unlocked yes)`; before: `unlocked` after the angle.
+        unlocked: yes(e, "unlocked") || e.get("at").is_some_and(|a| yes(a, "unlocked")),
+    }
 }
 
 fn read_via(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Via> {
@@ -1845,30 +2004,7 @@ fn board_only_holes(c: &Converted) -> Option<Vec<(Hole, Option<String>)>> {
 /// A footprint without pads (logo, marking): its drawings become board graphics.
 fn footprint_drawings(p: &Project, c: &Converted, graphics: &mut Vec<(BoardGraphic, Vec<String>)>, notes: &mut Notes) {
     let _ = p;
-    let side = c.placement.side;
-    let mut n = 0;
-    for (i, g) in c.fp.graphics.iter().enumerate() {
-        let layer = side_layer(crate::board::pad_side(side, g.back), g.layer.front_name());
-        let mut points = footprint::to_board(&c.placement, &g.geometry);
-        if points.len() < 2 {
-            continue;
-        }
-        // The KiCad drawings this graphic was made of name it in the UUID table.
-        let uuids = c.graphic_uuids.get(i).cloned().unwrap_or_default();
-        // Areas (copper, mask, paste polygons) stay filled, and so do filled drawings on other
-        // layers (silkscreen logos and labels): a polygon without a stroke width is an area too.
-        let filled = (!uuids.is_empty() && uuids.iter().all(|u| c.filled_uuids.contains(u))) || g.width == Nm::ZERO;
-        let area = matches!(g.geometry, GraphicGeometry::Polygon { .. })
-            && (filled || matches!(g.layer, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste));
-        let kind = if area {
-            points.pop();
-            GraphicKind::Polygon { points, width: g.width }
-        } else {
-            GraphicKind::Line { points, width: g.width }
-        };
-        graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, uuids));
-        n += 1;
-    }
+    let n = board_drawings(c, false, graphics);
     let what = if c.refdes.is_empty() { c.lib_id.clone() } else { c.refdes.clone() };
     if n > 0 {
         notes.agg(
@@ -1891,6 +2027,40 @@ fn footprint_drawings(p: &Project, c: &Converted, graphics: &mut Vec<(BoardGraph
             .with_hint("it may hold only texts or drawings on other layers; redraw what matters as board graphics"),
         );
     }
+}
+
+/// The drawings of a converted footprint as board graphics (`silk_only`: those on the
+/// silkscreen alone), named in the UUID table by the KiCad drawings they were made of. Returns
+/// how many were added.
+fn board_drawings(c: &Converted, silk_only: bool, graphics: &mut Vec<(BoardGraphic, Vec<String>)>) -> usize {
+    let side = c.placement.side;
+    let mut n = 0;
+    for (i, g) in c.fp.graphics.iter().enumerate() {
+        if silk_only && g.layer != GraphicLayer::Silk {
+            continue;
+        }
+        let layer = side_layer(crate::board::pad_side(side, g.back), g.layer.front_name());
+        let mut points = footprint::to_board(&c.placement, &g.geometry);
+        if points.len() < 2 {
+            continue;
+        }
+        // The KiCad drawings this graphic was made of name it in the UUID table.
+        let uuids = c.graphic_uuids.get(i).cloned().unwrap_or_default();
+        // Areas (copper, mask, paste polygons) stay filled, and so do filled drawings on other
+        // layers (silkscreen logos and labels): a polygon without a stroke width is an area too.
+        let filled = (!uuids.is_empty() && uuids.iter().all(|u| c.filled_uuids.contains(u))) || g.width == Nm::ZERO;
+        let area = matches!(g.geometry, GraphicGeometry::Polygon { .. })
+            && (filled || matches!(g.layer, GraphicLayer::Copper | GraphicLayer::Mask | GraphicLayer::Paste));
+        let kind = if area {
+            points.pop();
+            GraphicKind::Polygon { points, width: g.width }
+        } else {
+            GraphicKind::Line { points, width: g.width }
+        };
+        graphics.push((BoardGraphic { id: crate::id::ObjectId(0), layer, kind }, uuids));
+        n += 1;
+    }
+    n
 }
 
 /// The project footprint for a converted one: the part's preferred footprint or a library

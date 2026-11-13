@@ -36,7 +36,7 @@ use std::fmt::Write as _;
 use crate::board::{self as geo, side_layer};
 use crate::geom::{BBox, Point};
 use crate::model::Project;
-use crate::model::board::{BoardSide, GraphicKind, PadConnection, PlacedFootprint, Segment};
+use crate::model::board::{BoardSide, GraphicKind, PadConnection, PlacedFootprint, Segment, TextAlign, TextVAlign};
 use crate::model::footprint::{
     Corner, Footprint, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Pad, PadKind, PadShape, Paste, StackLayer,
 };
@@ -105,6 +105,72 @@ impl Frame {
     pub fn from_kicad(&self, x: Nm, y: Nm) -> Point {
         Point::new(x - self.origin.0, self.origin.1 - y)
     }
+}
+
+/// How far the box KiCad justifies reaches under the baseline of a text's last line, as (part
+/// of the character height, part of the stroke thickness). Measured on KiCad's plots, like the
+/// three constants after it, from the coordinates of its Gerber files, which fit these values
+/// to the nanometer (`kicad-cli` 10.0.8, `tests/kicad_silk_oracle.rs`; DECISIONS D83).
+const KICAD_BOX_BELOW: (f64, f64) = (0.17 - 1.0 / 21.0, 0.052);
+/// How far the box reaches over the capitals of the first line: a font unit (a 21st of the
+/// height) less some of the stroke, 1.17 character heights in all for one line.
+const KICAD_BOX_ABOVE: (f64, f64) = (1.0 / 21.0, -0.052);
+/// How far the box reaches beyond each end of a line.
+const KICAD_BOX_SIDE: (f64, f64) = (0.0, 0.657894);
+/// KiCad's italic text stands this part of the character height before where a slant from the
+/// baseline would put it (it leans from a font unit above the baseline).
+const KICAD_ITALIC_BACK: f64 = 0.125 / 21.0;
+
+/// From KiCad's anchor of a text to cadlab's, in board axes. cadlab justifies the strokes
+/// themselves (the first character starts at the anchor, the last line's baseline is on it,
+/// the capitals of the first end at it, or the text is centered between those). KiCad
+/// justifies a box around them, as measured on its plots (`kicad-cli` 10.0.8,
+/// `tests/kicad_silk_oracle.rs`; DECISIONS D83): for a character height *h* and a stroke *t*
+/// it reaches 0.1224 *h* + 0.052 *t* under the baseline of the last line, *h*/21 − 0.052 *t*
+/// over the capitals of the first and 0.658 *t* beyond each end of a line; italic text stands
+/// 0.006 *h* further back. `size` is the character height, `thickness` the stroke
+/// as KiCad draws it, `italic` whether it is slanted, `mirror` whether the text reads from
+/// right to left (bottom side). The import adds this to a text's position, the export
+/// subtracts it.
+pub fn kicad_text_shift(
+    size: Nm,
+    thickness: Nm,
+    (align, valign): (TextAlign, TextVAlign),
+    italic: bool,
+    rotation: Angle,
+    mirror: bool,
+) -> Point {
+    let part = |(of_size, of_stroke): (f64, f64)| of_size * size.0 as f64 + of_stroke * thickness.0 as f64;
+    let (below, above, side) = (part(KICAD_BOX_BELOW), part(KICAD_BOX_ABOVE), part(KICAD_BOX_SIDE));
+    let dx = match align {
+        TextAlign::Left => side,
+        TextAlign::Center => 0.0,
+        TextAlign::Right => -side,
+    };
+    let dx = if italic { dx - KICAD_ITALIC_BACK * size.0 as f64 } else { dx };
+    let dy = match valign {
+        TextVAlign::Bottom => below,
+        TextVAlign::Middle => (below - above) / 2.0,
+        TextVAlign::Top => -above,
+    };
+    let dx = if mirror { -dx } else { dx };
+    let (s, c) = rotation.to_rad_f64().sin_cos();
+    Point::new(Nm((dx * c - dy * s).round() as i64), Nm((dx * s + dy * c).round() as i64))
+}
+
+/// The stroke KiCad draws a text of this size with when the file asks for `thickness`: no
+/// thicker than a quarter of the smaller character dimension (measured, D83).
+pub(crate) fn kicad_stroke(thickness: Nm, height: Nm, width: Nm) -> Nm {
+    thickness.min(Nm(height.min(width).0 / 4))
+}
+
+/// Whether KiCad draws a footprint text of this angle as written: it turns texts that would
+/// read upside down by half a turn unless they are `unlocked` (measured, D83), so only
+/// angles in (-90°, 90°] are drawn as they are.
+pub(crate) fn kicad_upright(a: Angle) -> bool {
+    let d = a.normalized().to_deg_f64();
+    let d = if d > 180.0 { d - 360.0 } else { d };
+    d > -90.0 && d <= 90.0
 }
 
 /// Quoted, escaped string.
@@ -438,14 +504,23 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
     let text_angle = deg(pf.rotation);
     let size = Nm::from_um(1000);
     let origin = f.local(Point::new(Nm::ZERO, Nm::ZERO));
-    let field =
-        |k: &'static str, v: String, hide: bool| (k, v, origin.clone(), text_angle.clone(), "F.Fab", hide, size);
+    let field = |k: &'static str, v: String, hide: bool| {
+        (k, v, origin.clone(), text_angle.clone(), "F.Fab", hide, size, pf.rotation)
+    };
     let reference = match geo::silk::ref_text_any(p, refdes) {
         Some(t) => {
             let hidden = pf.ref_text.as_ref().is_some_and(|x| x.hidden);
-            ("Reference", refdes.to_string(), f.local_abs(t.at), deg(t.rotation), "F.SilkS", hidden, t.size)
+            // KiCad centers a box around the text on its position, not the capitals.
+            let centered = (TextAlign::Center, TextVAlign::Middle);
+            // (KiCad draws no stroke wider than a quarter of the height.)
+            let drawn = kicad_stroke(t.width, t.size, t.size);
+            let shift = kicad_text_shift(t.size, drawn, centered, false, t.rotation, bottom);
+            let at = f.local_abs(t.at - shift);
+            ("Reference", refdes.to_string(), at, deg(t.rotation), "F.SilkS", hidden, t.size, t.rotation)
         }
-        None => ("Reference", refdes.to_string(), origin.clone(), text_angle.clone(), "F.SilkS", false, size),
+        None => {
+            ("Reference", refdes.to_string(), origin.clone(), text_angle.clone(), "F.SilkS", false, size, pf.rotation)
+        }
     };
     let mut props =
         vec![reference, field("Value", value, false), field("Footprint", format!("{LIB}:{}", fp.name), true)];
@@ -463,20 +538,25 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
             props.push(field("MPN", m.clone(), true));
         }
     }
-    for (k, v, pos, angle, layer, hide, size) in props {
+    for (k, v, pos, angle, layer, hide, size, turned) in props {
         w.line(
             2,
             &format!(
-                "(property {} {} (at {pos} {angle}) (layer {}){} (uuid {})",
+                "(property {} {} (at {pos} {angle}){} (layer {}){} (uuid {})",
                 q(k),
                 q(&v),
+                // KiCad turns a footprint text that would read upside down unless told not to.
+                if kicad_upright(turned) { "" } else { " (unlocked yes)" },
                 q(&f.layer(layer)),
                 if hide { " (hide yes)" } else { "" },
                 w.id(&format!("{key}/prop/{k}"), format!("text:{refdes}/{k}"))
             ),
         );
         // The reference is drawn with the stroke cadlab's legend uses.
-        let thick = if k == "Reference" { geo::silk::ref_stroke_width(p, size) } else { Nm(size.0 * 15 / 100) };
+        let thick = match geo::silk::ref_text_any(p, refdes) {
+            Some(t) if k == "Reference" => t.width,
+            _ => Nm(size.0 * 15 / 100),
+        };
         w.line(3, &format!("{})", text_effects_stroke(size, thick, bottom)));
     }
 
@@ -986,16 +1066,50 @@ fn write_graphics(w: &mut Writer<'_>) {
                 );
                 w.line(1, &t);
             }
-            GraphicKind::Text { text, at, size, rotation } => {
+            GraphicKind::Text { text, at, size, rotation, style } => {
+                // As cadlab draws it: stroke, character width, anchor (KiCad's is the corner of
+                // a box around the text), slant, mirroring.
+                let thick = style.thickness.unwrap_or_else(|| geo::text_stroke_width(p, *size));
+                let mirror = style.mirror.unwrap_or(g.layer.starts_with("B."));
+                // (KiCad draws no stroke wider than a quarter of the character size.)
+                let drawn = kicad_stroke(thick, *size, style.width.unwrap_or(*size));
+                let shift =
+                    kicad_text_shift(*size, drawn, (style.align, style.valign), style.italic, *rotation, mirror);
                 let t = format!(
-                    "(gr_text {} (at {} {}) (layer {layer}) (uuid {})",
+                    "(gr_text {} (at {} {}) (layer {layer}{}) (uuid {})",
                     q(text),
-                    w.xy(*at),
+                    w.xy(*at - shift),
                     deg(*rotation),
+                    if style.knockout { " knockout" } else { "" },
                     w.id(&key, format!("graphic#{}", g.id.0))
                 );
                 w.line(1, &t);
-                w.line(2, &format!("{})", text_effects(*size, g.layer.starts_with("B."))));
+                let mut justify: Vec<&str> = Vec::new();
+                match style.align {
+                    TextAlign::Left => justify.push("left"),
+                    TextAlign::Right => justify.push("right"),
+                    TextAlign::Center => {}
+                }
+                match style.valign {
+                    TextVAlign::Top => justify.push("top"),
+                    TextVAlign::Bottom => justify.push("bottom"),
+                    TextVAlign::Middle => {}
+                }
+                if mirror {
+                    justify.push("mirror");
+                }
+                let justify =
+                    if justify.is_empty() { String::new() } else { format!(" (justify {})", justify.join(" ")) };
+                w.line(
+                    2,
+                    &format!(
+                        "(effects (font (size {} {}) (thickness {}){}){justify}))",
+                        mm(*size),
+                        mm(style.width.unwrap_or(*size)),
+                        mm(thick),
+                        if style.italic { " (italic yes)" } else { "" },
+                    ),
+                );
             }
         }
     }

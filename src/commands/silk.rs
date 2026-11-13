@@ -40,6 +40,8 @@ pub struct TextInfo {
     pub rotation: Angle,
     /// Cap height.
     pub size: Nm,
+    /// Stroke width.
+    pub stroke: Nm,
     /// Side it is printed on (`F.SilkS` or `B.SilkS`).
     pub layer: String,
     /// Not printed.
@@ -57,6 +59,7 @@ fn text_info(p: &Project, refdes: &str) -> Option<TextInfo> {
         at: t.at,
         rotation: t.rotation,
         size: t.size,
+        stroke: t.width,
         layer: geo::side_layer(pf.side, "F.SilkS"),
         hidden: stored.is_some_and(|s| s.hidden),
         origin: match stored {
@@ -214,6 +217,9 @@ pub struct Set {
     /// Cap height (default 1mm).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<Nm>,
+    /// Stroke width (default: 15 % of the height, at least the rules' `min_silk_width`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<Nm>,
     /// Leave the text out of the legend (`false` prints it again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
@@ -248,6 +254,10 @@ impl Command for Set {
             return Err(CommandError::invalid_args("silk.invalid_size", format!("a text cannot be {s} high"))
                 .with_hint("give a cap height such as `--size 1mm` (fabs print 0.8 to 1 mm reliably)"));
         }
+        if let Some(w) = self.stroke.filter(|w| w.0 <= 0) {
+            return Err(CommandError::invalid_args("silk.invalid_size", format!("a stroke cannot be {w} wide"))
+                .with_hint("give a stroke width such as `--stroke 0.15mm` (about 15 % of the height reads well)"));
+        }
         let p = ctx.project()?;
         // What is not given stays: a text above its courtyard keeps following the courtyard.
         let pf = &p.board().footprints[&r];
@@ -260,6 +270,9 @@ impl Command for Set {
         }
         if let Some(s) = self.size {
             t.size = Some(s);
+        }
+        if let Some(w) = self.stroke {
+            t.thickness = Some(w);
         }
         if let Some(h) = self.hidden {
             t.hidden = h;

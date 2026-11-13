@@ -544,8 +544,6 @@ fn emit_clipped(g: &mut Gerber, strokes: &[Stroke], openings: &[(Polygon, (Xy, X
 
 /// Board graphics on `layer` (lines and texts), clipped against `openings`.
 fn graphics(ctx: &Ctx<'_>, g: &mut Gerber, layer: &str, function: &str, openings: &[(Polygon, (Xy, Xy))]) {
-    let mirror = layer.starts_with("B.");
-    let min_w = ctx.p.board().rules.min_silk_width.0;
     let mut strokes = Vec::new();
     let mut areas: PolygonSet = Vec::new();
     for gr in ctx.p.board().graphics.iter().filter(|gr| gr.layer == layer) {
@@ -554,8 +552,17 @@ fn graphics(ctx: &Ctx<'_>, g: &mut Gerber, layer: &str, function: &str, openings
                 strokes.push(Stroke::Line { pts: points.iter().map(|&p| xy(p)).collect(), width: width.0 })
             }
             GraphicKind::Polygon { points, width } => areas.extend(board::polygon_area(points, *width)),
-            GraphicKind::Text { text, at, size, rotation } => {
-                strokes.extend(text_strokes(text, *at, *size, *rotation, mirror, (size.0 / 8).max(min_w)))
+            GraphicKind::Text { .. } => {
+                let Some(ink) = board::text_ink(ctx.p, layer, &gr.kind) else { continue };
+                if ink.knockout {
+                    areas.extend(ink.region());
+                } else {
+                    strokes.extend(
+                        ink.paths
+                            .iter()
+                            .map(|l| Stroke::Line { pts: l.iter().map(|&p| xy(p)).collect(), width: ink.width.0 }),
+                    );
+                }
             }
         }
     }

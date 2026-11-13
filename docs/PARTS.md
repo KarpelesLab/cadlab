@@ -225,8 +225,10 @@ cadlab lib import-kicad MyLib.kicad_sym --footprints MyLib.pretty [--library tea
   windows or paste drawings), local settings (mask and paste margins, clearances, zone connections, net ties,
   pads on the back, per-side mask openings, paste-in-hole; D40), copper, mask and paste drawings of either
   side, silkscreen, fab and courtyard drawings of the footprint's side (arcs as polylines; a courtyard made of lines, a
-  rectangle or a circle becomes the courtyard polygon; without one, a box 0.25 mm around the pads). Not kept,
-  each reported: texts (`import.footprint_text`), drawings on other layers, inner-layer copper and board edges
+  rectangle or a circle becomes the courtyard polygon; without one, a box 0.25 mm around the pads), and texts
+  printed on the silkscreen of the footprint's side other than the reference, as drawings (their strokes in
+  cadlab's font, `import.footprint_text_drawn`, D83; not texts with variables such as `${REFERENCE}`). Not kept,
+  each reported: other texts (`import.footprint_text`), drawings on other layers, inner-layer copper and board edges
   (`import.footprint_layer`), 3D model paths (`import.footprint_model`: attach a model with
   `footprint.model_set`). An `at` in a
   library file is ignored, as KiCad does.

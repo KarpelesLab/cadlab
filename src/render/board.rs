@@ -16,7 +16,7 @@ use crate::model::board::{BoardSide, GraphicKind, PlacedFootprint};
 use crate::model::footprint::{Footprint, GraphicGeometry, GraphicLayer, Paste};
 use crate::units::{LengthUnit, Nm};
 
-use super::font::{self, HAlign, VAlign};
+use super::font::{HAlign, VAlign};
 use super::{Color, Prim, Scene};
 
 /// A DRC-style marker: a point with a label.
@@ -272,18 +272,6 @@ pub fn mirror_area(a: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
     (-a.2, a.1, -a.0, a.3)
 }
 
-/// Stroke text with quarter-turn rotation, optionally mirrored (x → −x around the anchor) for
-/// bottom-side layers.
-#[allow(clippy::too_many_arguments)]
-fn text(s: &mut Scene, t: &str, at: (f64, f64), size: f64, quarter_turns: u8, mirror: bool, width: f64, color: Color) {
-    for stroke in font::layout(t, (0.0, 0.0), size, HAlign::Center, VAlign::Middle, quarter_turns) {
-        if stroke.len() >= 2 {
-            let pts = stroke.into_iter().map(|(x, y)| (at.0 + if mirror { -x } else { x }, at.1 + y)).collect();
-            s.line(pts, width, color);
-        }
-    }
-}
-
 /// Footprint graphics on one board layer (`F.SilkS`, `B.Fab`, ...).
 fn footprint_graphics(s: &mut Scene, pl: &Placed<'_>, layer: &str, color: Color) {
     let tf = geo::transform(pl.pf);
@@ -333,10 +321,15 @@ fn board_graphics(s: &mut Scene, p: &Project, layer: &str, color: Color) {
                 s.line(points.iter().map(|&q| mp(q)).collect(), mm(*width).max(0.05), color)
             }
             GraphicKind::Polygon { points, .. } => s.fill(points.iter().map(|&q| mp(q)).collect(), color, None),
-            GraphicKind::Text { text: t, at, size, rotation } => {
-                let qt = ((rotation.to_deg_f64() / 90.0).round().rem_euclid(4.0)) as u8;
-                let size = mm(*size);
-                text(s, t, mp(*at), size, qt, layer.starts_with("B."), size * 0.15, color);
+            GraphicKind::Text { .. } => {
+                let Some(ink) = crate::board::text_ink(p, layer, &g.kind) else { continue };
+                if ink.knockout {
+                    fill_set(s, &ink.region(), color);
+                } else {
+                    for l in &ink.paths {
+                        s.line(l.iter().map(|&q| mp(q)).collect(), mm(ink.width).max(0.05), color);
+                    }
+                }
             }
         }
     }

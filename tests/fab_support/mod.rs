@@ -84,6 +84,7 @@ pub fn tiny_board() -> (tempfile::TempDir, Registry, Session) {
             at: Point::new(Nm(20_000_000), Nm(3_000_000)),
             size: Nm(1_500_000),
             rotation: Angle::ZERO,
+            style: Default::default(),
         },
     });
     // A silkscreen line across U1's pins 1 and 5: clipped at the mask openings.

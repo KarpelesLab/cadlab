@@ -37,8 +37,8 @@ Board
 │                 nothing: a named rule area for custom rules; `allow_nets`: nets excepted from it
 │                 (see "Keep-outs and net exceptions")
 ├── holes         mounting holes: name (H1), center, drill, plated pad diameter and net (none = NPTH)
-├── graphics      silkscreen/fab/user drawings, filled polygons and texts; on copper layers they
-│                 are netless copper
+├── graphics      silkscreen/fab/user drawings, filled polygons and texts (with their `style`:
+│                 see "Board texts"); on copper layers they are netless copper
 ├── custom_rules  clearance / track width for a scope: item kinds, layer, footprint, courtyard,
 │                 rule area (see "Local settings, net ties and custom rules")
 └── drc_waivers   DRC findings accepted on purpose: code, subjects (all must be named by the finding;
@@ -220,7 +220,7 @@ the copper (KiCad's silkscreen check, too, reports overlaps of openings only; D5
 pad copper alone (cadlab's behavior before D46, and what the minimum web merging of mask openings does not
 change).
 
-## Silkscreen and reference designators (D82, `src/board/silk.rs`)
+## Silkscreen and reference designators (D82, D83, `src/board/silk.rs`)
 
 A reference designator is not a drawing of the footprint: it is generated, one per placed footprint, on the
 silkscreen of the footprint's side (mirrored on the bottom), in the stroke font every output shares. Where
@@ -232,22 +232,54 @@ Gerber legend, IPC-2581, the 2D renders and the board faces of the 3D render, an
 |---|---|---|
 | `offset` | text center relative to the footprint origin, in board axes: the text follows the part when it moves and does not turn with it | centered above the courtyard's bounding box, 0.3 mm from it |
 | `rotation` | counter-clockwise, as seen from the top (0 reads left to right, 90 bottom to top) | 0 |
-| `size` | cap height; the stroke is 15 % of it, at least `min_silk_width` | 1 mm |
+| `size` | cap height | 1 mm |
+| `thickness` | stroke width (`silk.set --stroke`) | 15 % of the cap height, at least `min_silk_width` |
 | `hidden` | not printed | printed |
 | `manual` | set by hand (`silk.set`) or imported: `silk.arrange` and `place.auto` never move or hide it | arranged |
 
 **Two rules** in `board.rules`, both 0.15 mm by default and both warnings (the board works; the legend is
-cut or unreadable): `silk_to_edge`, from any silkscreen to the outline and to cutouts (`drc.silk_edge`: the
-fab cuts off what crosses an edge), and `silk_clearance`, from a silkscreen text (a reference designator or
-a board text) to the silkscreen of another owner: the drawings and designator of other footprints, board
-drawings and texts (`drc.silk_overlap`). A footprint's designator against its own drawings is not reported,
-and drawings are not checked against each other. Zero is a value, as for `silk_to_pad`: silkscreen may then
-reach the edge or touch, and only crossing and overlapping are reported (what KiCad reports with a zero
-silkscreen clearance). Texts are measured as printed, stroke by stroke. Fab profiles carry neither value
-(none was found on a fab's own page), so `board.rules --fab` leaves them alone and `fab.check` does not
-check them; a designator given a height below the fab's `min_silk_height` is a `fab.silk_height` warning.
-The 2D layer views used to draw each designator on the footprint origin, sized to the part; they now show
-it where it is printed.
+cut or unreadable). Zero is a value, as for `silk_to_pad`: silkscreen may then reach the edge or touch, and
+only crossing and overlapping are reported (what KiCad reports with a zero silkscreen clearance). Texts are
+measured as printed, stroke by stroke (a knocked-out text as its filled box). The pairs are the ones KiCad
+checks, each probed with `kicad-cli` (D83, `tests/kicad_silk_oracle.rs`):
+
+- `silk_to_edge`, from any silkscreen to the outline and to cutouts (`drc.silk_edge`): a footprint's
+  drawings (one finding per footprint), a board drawing, a designator, a board text. The fab cuts off what
+  crosses an edge, so what is reported is silkscreen across an edge or closer to it than the rule, from
+  either side. What lies wholly beyond an edge and clear of it (the outline of a connector overhanging the
+  board, notes drawn next to it) is not printed and not cut: not reported, except a designator, which the
+  legend then lacks (`... is off the board`).
+- `silk_clearance`, between silkscreen items of one side (`drc.silk_overlap`: where two print over each
+  other the legend is a blot). Every text (designator, board text) against every other item, its own
+  footprint's drawings included; and drawings of different owners against each other: two footprints, or
+  a footprint and a board drawing. A footprint's drawings are one item (among themselves they are the
+  footprint's business), and board drawings are not checked against each other (the lines of a frame meet
+  at its corners).
+
+Fab profiles carry neither value (none was found on a fab's own page), so `board.rules --fab` leaves them
+alone and `fab.check` does not check them; a designator given a height below the fab's `min_silk_height`
+is a `fab.silk_height` warning. The 2D layer views used to draw each designator on the footprint origin,
+sized to the part; they now show it where it is printed.
+
+**Board texts** (`graphics` of kind `text`: text, anchor `at`, height `size`, `rotation`, and a `style` for
+what is not the default). One function, `board::text_ink`, turns a text into its strokes for the DRC, the
+Gerber layers, IPC-2581, the renders and copper (a text on a copper layer is netless copper), so they all
+print the same thing:
+
+| `style` field | Meaning | Default |
+|---|---|---|
+| `align` | `left`: the first character starts at the anchor; `right`: the last ends there; line by line | `center` |
+| `valign` | `bottom`: the last line's baseline is on the anchor; `top`: the capitals of the first line end at it | `middle`: halfway between the two |
+| `width` | nominal character width the glyphs are scaled to | the height (the font's own proportions) |
+| `thickness` | stroke width | an eighth of the height, at least `min_silk_width` |
+| `italic` | slanted by 1 in 8 | upright |
+| `mirror` | reads from right to left or not, whatever the layer | mirrored on bottom layers |
+| `knockout` | a filled box a ninth of the height beyond the strokes, the letters left open | plain strokes |
+
+A text may have several lines (`\n`), 1.61 heights apart. The font is cadlab's (Hershey simplex, public
+domain). Line pitch, slant and knockout margin are the values KiCad draws with, measured on its plots, so an
+imported text keeps its place; the glyphs themselves are each tool's own (most of KiCad's capitals end 1/21
+of the character width inside cadlab's on each side: D83).
 
 **Arranging** (`silk.arrange`, and `place.auto` after placing). Every designator not set by hand is given a
 position around its footprint, tried in a fixed order: at 0.3 mm from the courtyard, then 0.25 mm farther
@@ -276,7 +308,7 @@ courtyard; `drc.run` says when that is clipped or overlapping, and names `silk.a
 |---|---|
 | `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `hole_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`, `silk_to_edge`, `silk_clearance`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
 | `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`, `along_edges`; reports `ratsnest_length` and `board_use`; arranges the reference designators as `silk.arrange` does), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
-| `silk` | `arrange` (move the reference designators not set by hand to free positions, all or the given `refdes`; reports what moved and what had to be hidden), `set` (one designator by hand: `at` on the board, `rotation`, `size`, `hidden`; never moved afterwards), `reset` (hand designators back: above the courtyard, arranged again by the next `arrange`), `list` (every designator as printed: position, rotation, size, layer, hidden, `default` / `arranged` / `manual`); see "Silkscreen and reference designators" |
+| `silk` | `arrange` (move the reference designators not set by hand to free positions, all or the given `refdes`; reports what moved and what had to be hidden), `set` (one designator by hand: `at` on the board, `rotation`, `size`, `stroke`, `hidden`; never moved afterwards), `reset` (hand designators back: above the courtyard, arranged again by the next `arrange`), `list` (every designator as printed: position, rotation, size, stroke, layer, hidden, `default` / `arranged` / `manual`); see "Silkscreen and reference designators" |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
@@ -402,10 +434,11 @@ the library stay).
 | mask-only apertures | mask drawings of the footprint |
 | copper, mask and paste drawings of either side (`fp_line`, `fp_poly`, ...) | footprint graphics on those layers (`back` for the other side); filled polygons and rectangles are areas, outlines closed polylines; inner-layer copper is not imported (`import.footprint_layer`) |
 | silkscreen and fab drawings of the footprint's side | footprint graphics (arcs as polylines) |
-| the `Reference` field (`property "Reference"`, KiCad 6/7 `fp_text reference`): position, angle, font height, `hide`, layer | the placement's `ref_text`, set by hand (`silk.arrange` leaves it): offset from the origin, rotation, height when not 1 mm; hidden when the field is hidden or not on the silkscreen of the footprint's side. A field where cadlab prints the designator by default (as in cadlab's own exports of boards never arranged) leaves `ref_text` unset. Other footprint texts (`Value`, user texts) are not imported (`import.footprint_text`) |
+| the `Reference` field (`property "Reference"`, KiCad 6/7 `fp_text reference`): position, angle, font height and thickness, `hide`, `unlocked`, layer | the placement's `ref_text`, set by hand (`silk.arrange` leaves it): offset from the origin, rotation, height when not 1 mm, stroke when not cadlab's; hidden when the field is hidden or not on the silkscreen of the footprint's side. As KiCad draws it (see "KiCad texts" below): turned upright unless `unlocked`, the middle of its box on the position. A field where cadlab prints the designator by default (as in cadlab's own exports of boards never arranged) leaves `ref_text` unset |
+| other footprint texts (`Value` and other fields, `fp_text user`) that print: on the silkscreen of the footprint's side, not hidden | drawings of the footprint: the text's strokes in cadlab's font, where KiCad prints it (`${REFERENCE}` and `${VALUE}` replaced; `import.footprint_text_drawn`). So the DRC, the Gerber legend, the renders and the KiCad export (as `fp_line`s) all have them. Texts on other layers or hidden are not imported (`import.footprint_text`) |
 | courtyard drawings (either side) | per side, the closed shapes (polygons, circles as polygons around them, lines forming loops) united; on the footprint's side the largest piece becomes the courtyard, further pieces (a carrier board's two separate outlines) and the other side's (a key switch's body above a socket footprint on the bottom) stay closed courtyard drawings (`back` for the other side), which the courtyard DRC and `intersectsCourtyard` rules (own side) use too; drawings that close no loop: their bounding box; none on either side: 0.25 mm around the pads (`import.courtyard_generated`, listing every footprint) |
 | `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
-| board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one tented plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad, plated ones keeping their net and mask opening (`import.footprint_as_via`, `import.footprint_as_holes`) |
+| board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one tented plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad, plated ones keeping their net and mask opening, and the footprint's silkscreen drawings as board graphics (a mouse bite's outline at the board edge) (`import.footprint_as_via`, `import.footprint_as_holes`) |
 | `solder_mask_margin`, `solder_paste_margin`, `solder_paste_margin_ratio` / `solder_paste_ratio`, `clearance`, `zone_connect` (pad, footprint) | the pad's or footprint's settings (zero margins and clearances are KiCad's "not set" and stay unset; `zone_connect` 0 none, 1 thermal, 2 solid, 3 `tht_thermal`) |
 | `thermal_gap`, `thermal_width` / `thermal_bridge_width` (pad, footprint), `thermal_bridge_angle` (pad) | the pad's or footprint's thermal gap, spoke width and spoke angle (zero sizes stay unset; an angle equal to KiCad's default for the pad shape, 45° round, 90° others, which is cadlab's, stays unset). The export writes `thermal_width` and `thermal_gap` and hands a footprint's angle to its pads; a zone's `thermal_angle` and `thermal_spokes` have no KiCad counterpart (KiCad pads always have up to 4 spokes) and are not written |
 | setup `pad_to_mask_clearance`, `solder_mask_min_width`, `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | `board.rules` `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio` |
@@ -416,7 +449,26 @@ the library stay).
 | copper `zone` | zone: outline, net, layers, priority, clearance, minimum width, pad connection (`thru_hole_only`: `tht_thermal`), thermal gap and spoke; fills recomputed; values equal to cadlab's defaults left unset |
 | rule area (`keepout`) | keep-out: tracks, vias, copper pour, footprints (all copper layers = no layer list), never with net exceptions (KiCad rule areas have none; the export writes cadlab's without them, `export.keepout_net_exception`); one that forbids nothing is kept as a rule area when a custom rule names it (`enclosedByArea`), else reported (`import.rule_area`) |
 | zone or rule area with several `polygon` outlines | their area under the even-odd rule (a polygon inside another is a hole): one zone or keep-out per separate part, holes joined to the outline by zero-width cuts (`import.zone_outlines`) |
-| `gr_line`/`gr_arc`/`gr_circle`/`gr_rect`/`gr_poly`, `gr_text` | board graphics (lines, arcs and circles as polylines; filled polygons, rectangles and circles as areas; texts with size and angle); on copper layers they are netless copper (a net they carry is reported, `import.copper_drawing_net`) |
+| `gr_line`/`gr_arc`/`gr_circle`/`gr_rect`/`gr_poly` | board graphics (lines, arcs and circles as polylines; filled polygons, rectangles and circles as areas); on copper layers they are netless copper (a net they carry is reported, `import.copper_drawing_net`) |
+| `gr_text`: position, angle, `(font (size H W) (thickness T) italic)`, `(justify left/right top/bottom mirror)`, `knockout`, lines, `hide` | a board text with its `style` ("Board texts"), drawn where KiCad draws it (see "KiCad texts" below); a hidden text is left out; a text in an outline (TrueType) font is drawn in cadlab's stroke font at the same anchor (`import.text_font`) |
+
+**KiCad texts.** Where KiCad draws a text was measured on its plots (`kicad-cli` 10.0.8, 294 probe texts,
+`tests/kicad_silk_oracle.rs`; D83), and the import and export convert between its conventions and cadlab's:
+
+- KiCad justifies a box around the text, not the strokes: for a text of height *h* drawn with stroke *t*,
+  the box reaches 0.1224 *h* + 0.052 *t* under the last baseline, *h*/21 − 0.052 *t* over the first
+  line's capitals (1.17 *h* in all for one line) and 0.658 *t* beyond each end of a line (values that fit
+  the coordinates of KiCad's Gerber files to the nanometer). A centered text therefore sits 0.037 *h* +
+  0.052 *t* higher than its position. cadlab's anchor is on the strokes
+  themselves (table above); the import moves the anchor by the difference and the export moves it back,
+  exactly (`kicad_pcb::kicad_text_shift`).
+- A stroke is never thicker than a quarter of the smaller character dimension, and an eighth of the height
+  when the file gives none.
+- Footprint texts (fields and `fp_text`) are written with their angle on the board, and KiCad turns one
+  that would read upside down by half a turn unless it is `unlocked` (angles outside −90°..90°), without
+  moving its anchor: the import takes the angle KiCad draws, and the export writes `(unlocked yes)` for a
+  designator cadlab prints at such an angle. Board texts are drawn at the angle written.
+- Italic text stands 0.006 *h* before a slant from the baseline.
 
 Nets: with a circuit in the project, footprints are matched by designator, pads to pins through the part's
 pin map, and each board net takes the circuit name most of its pads carry (`import.net_conflict`,
@@ -467,7 +519,7 @@ not matched. The DRC runs only when the project has exclusions.
 
 Never silent: every item not imported is a warning (code, subject, hint) counted in `not_imported`; repeated
 notes are aggregated with a count. Not supported: dimensions, images, text boxes, tables, targets, groups
-(members are imported), footprint texts, 3D models, copper drawings on inner layers of footprints, zones
+(members are imported), footprint texts off the silkscreen, 3D models, copper drawings on inner layers of footprints, zones
 inside footprints, per-layer pad stacks on non-plated holes (the front layer's shape is kept, `import.pad_approximated`), copper of a non-plated pad on some copper layers only (put on every layer, `import.pad_approximated`; a pad larger than its hole becomes a `copper` ring), hatched fills (solid), teardrop zone attributes (teardrops are ordinary zones). The open-source corpus (docs/TESTING.md) measures what these gaps cost on real boards. The library returns KiCad UUID → imported object labels (`BoardImportReport::uuids`) so KiCad reports
 can be read against the imported project.
 
@@ -673,8 +725,8 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout; the message says how far the courtyard reaches past the outer edge (a connector flush with the edge is a waiver, not a move) |
 | `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's exposed copper on that side, or (`silk_check: mask`) overlapping its solder mask opening (grown by its mask margin; non-plated holes included) |
 | `drc.silk_over_mask_opening` | warning | silkscreen overlapping a mask opening drawn by a footprint or on the board (`silk_check: mask`) |
-| `drc.silk_edge` | warning | silkscreen crossing a board edge (the outline or a cutout), off the board, or closer to an edge than `silk_to_edge` (0: crossing only): a footprint's drawings (one finding per footprint), a board drawing, a reference designator (`text:U1/Reference`) or a board text |
-| `drc.silk_overlap` | warning | a silkscreen text (reference designator, board text) overlapping the silkscreen of another owner or closer to it than `silk_clearance` (0: overlapping only): the drawings or the designator of another footprint, a board drawing or text; never a designator against its own footprint's drawings |
+| `drc.silk_edge` | warning | silkscreen crossing a board edge (the outline or a cutout) or closer to an edge than `silk_to_edge` (0: crossing only): a footprint's drawings (one finding per footprint), a board drawing, a reference designator (`text:U1/Reference`) or a board text; a reference designator wholly off the board too (other silkscreen beyond an edge and clear of it is not printed and not reported) |
+| `drc.silk_overlap` | warning | silkscreen overlapping other silkscreen of its side or closer to it than `silk_clearance` (0: overlapping only): a text (reference designator, board text) against any other item, its own footprint's drawings included; the drawings of two footprints; a footprint's drawings and a board drawing. Never a footprint's drawings among themselves, nor two board drawings |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers); tracks and vias of the keep-out's excepted nets (`allow_nets`) are not reported |
 | `drc.keepout_net` | warning | a keep-out excepts a net that does not exist (the exception does nothing) |
 | `drc.disallowed` | error (rule's severity) | a copper item of a kind a custom rule's `disallow` forbids in its scope |

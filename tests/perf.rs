@@ -205,6 +205,7 @@ fn add_culling_cases(p: &mut cadlab::model::Project) {
             at: at(30, 50),
             size: Nm::from_mm(2),
             rotation: Default::default(),
+            style: Default::default(),
         },
     });
 }

@@ -142,8 +142,8 @@ fn silkscreen_at_the_board_edge() {
     assert!(drawing.hint.as_deref().unwrap().contains("drc.waive drc.silk_edge"), "{drawing:?}");
 }
 
-/// `drc.silk_overlap`: a designator on another footprint's drawing, two designators on each
-/// other, a designator on a board drawing; never a designator on its own footprint's drawing.
+/// `drc.silk_overlap`: a designator on another footprint's drawing and on its own, two
+/// designators on each other, a designator on a board drawing.
 #[test]
 fn silkscreen_texts_over_other_silkscreen() {
     let (_d, r, mut s) = setup();
@@ -164,10 +164,13 @@ fn silkscreen_texts_over_other_silkscreen() {
         "{}",
         hit.message
     );
-    // U1's own designator there is its own business.
+    // U1's own designator there is as unreadable (D83; KiCad reports it too).
     exec(&r, &mut s, "silk.reset", json!({"refdes": ["C1"]}));
     exec(&r, &mut s, "silk.set", json!({"refdes": "U1", "at": top}));
-    assert!(findings(&s).is_empty(), "{}", text(&findings(&s)));
+    let d = findings(&s);
+    let own = find(&d, "drc.silk_overlap", &["text:U1/Reference", "U1"]);
+    assert!(own.message.contains("reference text of U1 overlaps the silkscreen of U1"), "{}", own.message);
+    assert_eq!(d.len(), 1, "{}", text(&d));
     exec(&r, &mut s, "silk.reset", json!({"refdes": ["U1"]}));
 
     // Two designators 0.1 mm apart: cap height 1 mm, strokes 0.15 mm, centers 1.25 mm apart.
@@ -201,7 +204,13 @@ fn silkscreen_texts_over_other_silkscreen() {
     p.board_mut().graphics.push(BoardGraphic {
         id,
         layer: "F.SilkS".into(),
-        kind: GraphicKind::Text { text: "V1".into(), at, size: Nm::from_um(1000), rotation: Default::default() },
+        kind: GraphicKind::Text {
+            text: "V1".into(),
+            at,
+            size: Nm::from_um(1000),
+            rotation: Default::default(),
+            style: Default::default(),
+        },
     });
     let label = format!("graphic#{}", id.0);
     let d = findings(&s);
@@ -210,6 +219,195 @@ fn silkscreen_texts_over_other_silkscreen() {
     // On the other side of the board nothing overlaps.
     exec(&r, &mut s, "place.flip", json!({"refdes": ["C1", "C2"]}));
     assert!(findings(&s).is_empty(), "{}", text(&findings(&s)));
+}
+
+/// `drc.silk_overlap` between drawings (D83): a footprint's drawings against a board drawing
+/// and against another footprint's, never two board drawings; and what lies wholly beyond the
+/// board edge is reported for a designator only.
+#[test]
+fn silkscreen_drawings_of_different_owners() {
+    let (_d, r, mut s) = setup();
+    exec(&r, &mut s, "circuit.add", json!({"part": "AP2112K-3.3TRG1"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "U2", "at": ["4mm", "11mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "U1", "at": ["10mm", "7mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "C1", "at": ["4mm", "4mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "C2", "at": ["16mm", "4mm"]}));
+    assert!(findings(&s).is_empty(), "{}", text(&findings(&s)));
+    // Silkscreen against silkscreen and against the edge (not against pads).
+    let findings = |s: &Session| -> Vec<Diagnostic> {
+        findings(s).into_iter().filter(|d| d.code != "drc.silk_over_pad").collect()
+    };
+    let shape = |s: &Session, label: &str| {
+        cadlab::board::silk::silk_shapes(project(s)).iter().find(|x| x.label == label).unwrap().bbox.unwrap()
+    };
+    let u1 = shape(&s, "U1");
+    let line = |s: &mut Session, a: Point, b: Point| {
+        let p = s.project.as_mut().unwrap();
+        let id = p.alloc_id();
+        p.board_mut().graphics.push(BoardGraphic {
+            id,
+            layer: "F.SilkS".into(),
+            kind: GraphicKind::Line { points: vec![a, b], width: Nm::from_um(150) },
+        });
+        format!("graphic#{}", id.0)
+    };
+    let n = |v: i64| Nm(v);
+
+    // A board line through U1's outline, and a second board line across the first.
+    let y = n((u1.min.y + u1.max.y) / 2);
+    let across = line(&mut s, Point::new(n(u1.min.x - 1_000_000), y), Point::new(n(u1.max.x + 1_000_000), y));
+    line(
+        &mut s,
+        Point::new(n(u1.max.x + 500_000), y - Nm(500_000)),
+        Point::new(n(u1.max.x + 500_000), y + Nm(500_000)),
+    );
+    let d = findings(&s);
+    let hit = find(&d, "drc.silk_overlap", &["U1", &across]);
+    assert_eq!(hit.severity, Severity::Warning);
+    assert_eq!(hit.message, format!("silkscreen of U1 overlaps the silkscreen of {across}, minimum is 0.15mm"));
+    assert!(hit.hint.as_deref().unwrap().contains("drc.waive"), "{hit:?}");
+    assert_eq!(d.len(), 1, "board drawings are not checked against each other: {}", text(&d));
+    s.project.as_mut().unwrap().board_mut().graphics.clear();
+
+    // A board line 0.1 mm above U1's drawing: too close at 0.15 mm, accepted when touching is.
+    let y = n(u1.max.y + 100_000 + 75_000);
+    let near = line(&mut s, Point::new(n(u1.min.x), y), Point::new(n(u1.max.x), y));
+    let d = findings(&s);
+    let hit = find(&d, "drc.silk_overlap", &["U1", &near]);
+    assert!(hit.message.starts_with("silkscreen of U1 is 0.1mm from the silkscreen of"), "{}", hit.message);
+    exec(&r, &mut s, "board.rules", json!({"silk_clearance": "0mm"}));
+    assert!(findings(&s).is_empty(), "{}", text(&findings(&s)));
+    exec(&r, &mut s, "board.rules", json!({"silk_clearance": "0.15mm"}));
+    s.project.as_mut().unwrap().board_mut().graphics.clear();
+
+    // Two footprints: U2's drawing on U1's outline is one finding naming both; on the other
+    // side of the board nothing prints over anything.
+    let u2 = shape(&s, "U2");
+    let by = Point::new(n(u1.min.x - u2.min.x + 300_000), n(u1.max.y - (u2.min.y + u2.max.y) / 2));
+    exec(&r, &mut s, "place.move", json!({"refdes": ["U2"], "by": by}));
+    exec(&r, &mut s, "silk.set", json!({"refdes": "U2", "hidden": true}));
+    exec(&r, &mut s, "silk.set", json!({"refdes": "U1", "hidden": true}));
+    let d = findings(&s);
+    let hit = find(&d, "drc.silk_overlap", &["U1", "U2"]);
+    assert_eq!(hit.message, "silkscreen of U1 overlaps the silkscreen of U2, minimum is 0.15mm");
+    assert!(hit.hint.as_deref().unwrap().contains("place.move"), "{hit:?}");
+    assert_eq!(d.len(), 1, "{}", text(&d));
+    exec(&r, &mut s, "place.flip", json!({"refdes": ["U2"]}));
+    assert!(findings(&s).is_empty(), "{}", text(&findings(&s)));
+
+    // Beyond the board edge and clear of it: a drawing and a board text are not printed and
+    // not cut, so they are not reported; a designator there is missing from the legend.
+    let out = Point::new(Nm::from_mm(-5), Nm::from_mm(5));
+    line(&mut s, out, out + mm(2.0, 0.0));
+    let p = s.project.as_mut().unwrap();
+    let id = p.alloc_id();
+    p.board_mut().graphics.push(BoardGraphic {
+        id,
+        layer: "F.SilkS".into(),
+        kind: GraphicKind::Text {
+            text: "note".into(),
+            at: out + mm(0.0, 3.0),
+            size: Nm::from_um(1000),
+            rotation: Default::default(),
+            style: Default::default(),
+        },
+    });
+    assert!(findings(&s).is_empty(), "{}", text(&findings(&s)));
+    exec(&r, &mut s, "silk.set", json!({"refdes": "C2", "at": out + mm(0.0, -3.0)}));
+    let d = findings(&s);
+    assert_eq!(find(&d, "drc.silk_edge", &["text:C2/Reference"]).message, "reference text of C2 is off the board");
+    assert_eq!(d.len(), 1, "{}", text(&d));
+}
+
+/// Board texts are drawn as their style says (D83): anchor, lines, character width, stroke,
+/// slant, mirroring, knockout; the DRC measures those strokes and the KiCad export writes them.
+#[test]
+fn board_texts_follow_their_style() {
+    use cadlab::model::board::{TextAlign, TextStyle, TextVAlign};
+    let (_d, _r, mut s) = setup();
+    let p = s.project.as_mut().unwrap();
+    let at = mm(10.0, 7.0);
+    let mut add = |text: &str, layer: &str, style: TextStyle| {
+        let id = p.alloc_id();
+        p.board_mut().graphics.push(BoardGraphic {
+            id,
+            layer: layer.into(),
+            kind: GraphicKind::Text {
+                text: text.into(),
+                at,
+                size: Nm::from_mm(1),
+                rotation: Default::default(),
+                style,
+            },
+        });
+        let g = p.board().graphics.last().unwrap();
+        (cadlab::board::text_ink(p, &g.layer, &g.kind).unwrap(), g.kind.clone())
+    };
+    let um = |v: i64| v as f64 / 1000.0;
+    let plain = add("HELLO", "F.SilkS", TextStyle::default()).0.bbox().unwrap();
+    // Centered both ways, capitals 1 mm high, the stroke an eighth of that but at least the
+    // rules' minimum silkscreen width (0.15 mm).
+    assert_eq!(um(plain.min.y - at.y.0), -575.0);
+    assert_eq!(um(plain.max.y - at.y.0), 575.0);
+    assert!((plain.min.x + plain.max.x - 2 * at.x.0).abs() < 300_000, "{plain:?}");
+    // Left and bottom: the text starts at the anchor and stands on it.
+    let left = TextStyle { align: TextAlign::Left, valign: TextVAlign::Bottom, ..Default::default() };
+    let b = add("HELLO", "F.SilkS", left).0.bbox().unwrap();
+    assert!(b.min.x >= at.x.0 - 75_000 && b.min.x < at.x.0 + 300_000, "{b:?}");
+    assert_eq!(um(b.min.y - at.y.0), -75.0);
+    assert!(((b.max.x - b.min.x) - (plain.max.x - plain.min.x)).abs() <= 2, "{b:?}");
+    // Right and top: it ends at the anchor and hangs from it.
+    let right = TextStyle { align: TextAlign::Right, valign: TextVAlign::Top, ..Default::default() };
+    let b = add("HELLO", "F.SilkS", right).0.bbox().unwrap();
+    assert!(b.max.x <= at.x.0 + 75_000 && b.max.x > at.x.0 - 300_000, "{b:?}");
+    assert_eq!(um(b.max.y - at.y.0), 75.0);
+    // On the bottom the same text runs the other way; unless it is not mirrored.
+    let b = add("HELLO", "B.SilkS", left).0.bbox().unwrap();
+    assert!(b.max.x <= at.x.0 + 75_000, "{b:?}");
+    let unmirrored = TextStyle { mirror: Some(false), ..left };
+    let b = add("HELLO", "B.SilkS", unmirrored).0.bbox().unwrap();
+    assert!(b.min.x >= at.x.0 - 75_000, "{b:?}");
+    // Two lines are one line pitch higher; twice the character width is twice as wide between
+    // the stroke centers; a stroke of its own.
+    let two = add("HELLO\nHELLO", "F.SilkS", TextStyle::default()).0.bbox().unwrap();
+    assert!(two.max.y - two.min.y > plain.max.y - plain.min.y + 1_400_000, "{two:?}");
+    assert!(((two.max.x - two.min.x) - (plain.max.x - plain.min.x)).abs() <= 2, "{two:?}");
+    let wide = TextStyle { width: Some(Nm::from_mm(2)), thickness: Some(Nm::from_um(200)), ..Default::default() };
+    let (ink, _) = add("HELLO", "F.SilkS", wide);
+    assert_eq!(ink.width, Nm::from_um(200));
+    let b = ink.bbox().unwrap();
+    assert!(((b.max.x - b.min.x - 200_000) - 2 * (plain.max.x - plain.min.x - 150_000)).abs() <= 2, "{b:?}");
+    // Italic leans to the right; a knockout prints the box and leaves the letters open.
+    let b = add("HELLO", "F.SilkS", TextStyle { italic: true, ..left }).0.bbox().unwrap();
+    assert!(b.max.x > plain.max.x - plain.min.x + at.x.0, "{b:?}");
+    let (ink, _) = add("HELLO", "F.SilkS", TextStyle { knockout: true, ..Default::default() });
+    let k = ink.bbox().unwrap();
+    assert!(k.min.x < plain.min.x && k.max.x > plain.max.x && k.min.y < plain.min.y && k.max.y > plain.max.y);
+    let area = |set: &cadlab::geom::poly::PolygonSet| -> f64 { cadlab::geom::poly::area2(set) as f64 };
+    let (boxed, letters) = (area(&ink.knockout_box()), area(&ink.strokes()));
+    assert!((area(&ink.region()) - (boxed - letters)).abs() < 1e-6 * boxed, "the box without the letters");
+
+    // The KiCad export says how each is drawn, and the import reads it back the same.
+    let p = s.project.as_ref().unwrap();
+    let export = cadlab::kicad_pcb::export(p, "board");
+    for want in [
+        "(effects (font (size 1 1) (thickness 0.15)))",
+        "(effects (font (size 1 1) (thickness 0.15)) (justify left bottom))",
+        "(effects (font (size 1 1) (thickness 0.15)) (justify right top))",
+        "(effects (font (size 1 1) (thickness 0.15)) (justify left bottom mirror))",
+        "(effects (font (size 1 2) (thickness 0.2)))",
+        "(effects (font (size 1 1) (thickness 0.15) (italic yes)) (justify left bottom))",
+        "(layer \"F.SilkS\" knockout)",
+        "\"HELLO\\nHELLO\"",
+    ] {
+        assert!(export.pcb.contains(want), "the export has {want}");
+    }
+    let mut q = cadlab::model::Project::new("back");
+    cadlab::kicad_import::import(&mut q, &export.pcb, &Default::default()).unwrap();
+    let kinds = |p: &cadlab::model::Project| -> Vec<GraphicKind> {
+        p.board().graphics.iter().map(|g| g.kind.clone()).collect()
+    };
+    assert_eq!(kinds(&q), kinds(p));
 }
 
 /// `silk.arrange` moves designators off the edge and off other silkscreen, in a way that
@@ -379,15 +577,29 @@ fn every_output_draws_the_same_text() {
     assert!(moved[0].contains(&start), "no stroke starting at {start} in the top legend");
     assert!(!base[0].contains(&start));
     // The KiCad export: position in the footprint's frame (C1 is turned by 90°), angle on the
-    // board, height and stroke.
+    // board, height and stroke. KiCad centers a box around the text on the position, which
+    // reaches farther below the baseline than above the capitals (D83): for this text turned a
+    // quarter (its top to the left of the board, which is +Y of the footprint's KiCad frame),
+    // the position is that much towards its baseline of the text's center at (4, 0).
+    use cadlab::model::board::{TextAlign, TextVAlign};
     let pcb = &moved[3];
     let at = pcb.lines().position(|l| l.contains("(property \"Reference\" \"C1\"")).unwrap();
     let field: Vec<&str> = pcb.lines().skip(at).take(2).collect();
-    assert!(field[0].contains("(at 4 0 90) (layer \"F.SilkS\")"), "{field:?}");
+    let quarter = cadlab::units::Angle::DEG_90;
+    let (h, w) = (Nm::from_um(1200), Nm::from_um(180));
+    let centered = (TextAlign::Center, TextVAlign::Middle);
+    let shift = cadlab::kicad_pcb::kicad_text_shift(h, w, centered, false, quarter, false);
+    assert!(shift.x < Nm::ZERO && shift.x > Nm::from_um(-150) && shift.y == Nm::ZERO, "{shift:?}");
+    let y = format!("{}", -shift.x.0 as f64 / 1e6);
+    assert!(field[0].contains(&format!("(at 4 {y} 90) (layer \"F.SilkS\")")), "{field:?} for {y}");
     assert!(field[1].contains("(font (size 1.2 1.2) (thickness 0.18))"), "{field:?}");
+    // C2 reads from top to bottom: KiCad would turn it upright unless told not to.
     let at = pcb.lines().position(|l| l.contains("(property \"Reference\" \"C2\"")).unwrap();
     let field: Vec<&str> = pcb.lines().skip(at).take(2).collect();
-    assert!(field[0].contains("270) (layer \"B.SilkS\")") && field[1].contains("(justify mirror)"), "{field:?}");
+    assert!(
+        field[0].contains("270) (unlocked yes) (layer \"B.SilkS\")") && field[1].contains("(justify mirror)"),
+        "{field:?}"
+    );
 
     // Imported back, the texts are where they were, set by hand; hidden ones stay hidden.
     exec(&r, &mut s, "silk.set", json!({"refdes": "U1", "hidden": true}));

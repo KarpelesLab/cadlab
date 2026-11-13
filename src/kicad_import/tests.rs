@@ -882,3 +882,127 @@ fn copper_rings_around_non_plated_holes() {
     import(&mut q, &out, &opts()).unwrap();
     assert_eq!(crate::board::footprint_for(&q, "SW1").unwrap().pads, sw.pads);
 }
+
+/// Texts (D83): a board text keeps how KiCad draws it (justification, character width, stroke,
+/// slant, mirroring, knockout, lines), a hidden one is left out; a footprint's texts on the
+/// silkscreen of its side become drawings of the footprint, where KiCad prints them; the
+/// silkscreen drawings of a footprint that becomes board holes become board graphics.
+#[test]
+fn texts_as_drawn() {
+    use crate::model::board::{TextAlign, TextStyle, TextVAlign};
+    let board = r#"(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (36 "B.SilkS" user) (37 "F.SilkS" user) (44 "Edge.Cuts" user)
+    (49 "F.Fab" user))
+  (net 0 "")
+  (footprint "Lib:R" (layer "F.Cu") (uuid "f1") (at 110 60 90)
+    (property "Reference" "R1" (at 0 -2 90) (layer "F.SilkS") (uuid "r1") (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "10k" (at 0 2 90) (layer "F.Fab") (uuid "v1") (effects (font (size 1 1) (thickness 0.15))))
+    (property "Datasheet" "" (at 0 0 90) (layer "F.Fab") (hide yes) (uuid "d1") (effects (font (size 1 1))))
+    (fp_text user "+" (at 3 0 90) (layer "F.SilkS") (uuid "t1") (effects (font (size 1 1) (thickness 0.2))))
+    (fp_text user "${REFERENCE}" (at 0 0 90) (layer "F.Fab") (uuid "t2") (effects (font (size 1 1))))
+    (fp_text user "hidden" (at 5 0 90) (layer "F.SilkS") (hide yes) (uuid "t3") (effects (font (size 1 1))))
+    (pad "1" smd rect (at -0.5 0 90) (size 0.5 0.5) (layers "F.Cu" "F.Mask"))
+    (pad "2" smd rect (at 0.5 0 90) (size 0.5 0.5) (layers "F.Cu" "F.Mask")))
+  (footprint "Lib:bite" (layer "F.Cu") (uuid "f2") (at 120 50)
+    (property "Reference" "bite" (at 0 0) (layer "F.SilkS") (hide yes) (uuid "r2") (effects (font (size 1 1))))
+    (attr board_only exclude_from_pos_files exclude_from_bom)
+    (fp_line (start -1 1) (end 1 1) (stroke (width 0.12) (type solid)) (layer "F.SilkS") (uuid "l2"))
+    (pad "" np_thru_hole circle (at 0 0) (size 0.5 0.5) (drill 0.5) (layers "*.Cu" "*.Mask")))
+  (gr_rect (start 100 50) (end 130 70) (stroke (width 0.1)) (fill none) (layer "Edge.Cuts"))
+  (gr_text "A\nB" (at 105 55 90) (layer "F.SilkS") (uuid "g1")
+    (effects (font (size 1.5 1) (thickness 0.2) (italic yes)) (justify left bottom)))
+  (gr_text "back" (at 105 65) (layer "B.SilkS" knockout) (uuid "g2")
+    (effects (font (size 1 1) (thickness 0.15) (bold yes)) (justify right top mirror)))
+  (gr_text "front" (at 115 65) (layer "B.SilkS") (uuid "g3") (effects (font (size 2 2) (thickness 0.25))))
+  (gr_text "gone" (at 125 65) (layer "F.SilkS") (uuid "g4") (effects (font (size 1 1)) hide))
+)"#;
+    let mut p = Project::new("t");
+    let (r, d) = import(&mut p, board, &opts()).unwrap();
+    let b = p.board();
+    let text = |t: &str| {
+        b.graphics
+            .iter()
+            .find_map(|g| match &g.kind {
+                GraphicKind::Text { text, at, size, rotation, style } if text == t => {
+                    Some((*at, *size, *rotation, *style))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no text {t:?}"))
+    };
+    let (at, size, rotation, style) = text("A\nB");
+    // KiCad's position is the corner of a box around the text; cadlab's anchor is on the strokes.
+    let shift = crate::kicad_pcb::kicad_text_shift(
+        Nm::from_um(1500),
+        Nm::from_um(200),
+        (TextAlign::Left, TextVAlign::Bottom),
+        true,
+        Angle::DEG_90,
+        false,
+    );
+    assert!(shift.x < Nm::ZERO && shift.y > Nm::ZERO, "up from the box corner, along the turned text: {shift:?}");
+    assert_eq!((at, size, rotation), (pt(5.0, 15.0) + shift, Nm::from_um(1500), Angle::DEG_90));
+    assert_eq!(
+        style,
+        TextStyle {
+            width: Some(Nm::from_mm(1)),
+            thickness: Some(Nm::from_um(200)),
+            align: TextAlign::Left,
+            valign: TextVAlign::Bottom,
+            italic: true,
+            ..Default::default()
+        }
+    );
+    let (_, _, _, style) = text("back");
+    assert_eq!(
+        style,
+        TextStyle { align: TextAlign::Right, valign: TextVAlign::Top, knockout: true, ..Default::default() },
+        "mirrored like its layer, the stroke cadlab's own"
+    );
+    // Not mirrored on a bottom layer: said so; a stroke that is the default is not stored.
+    let (_, _, _, style) = text("front");
+    assert_eq!(style, TextStyle { mirror: Some(false), ..Default::default() });
+    assert!(!b.graphics.iter().any(|g| matches!(&g.kind, GraphicKind::Text { text, .. } if text == "gone")));
+
+    // R1's "+" is a drawing of the footprint: 0.2 mm strokes, 3 mm from the origin along the
+    // footprint's X axis (turned a quarter: above the part), upright on the board at 90°.
+    let fp = crate::board::footprint_for(&p, "R1").expect("R1's footprint");
+    let plus: Vec<&crate::model::footprint::Graphic> =
+        fp.graphics.iter().filter(|g| g.layer == GraphicLayer::Silk && g.width == Nm::from_um(200)).collect();
+    assert_eq!(plus.len(), 2, "the two strokes of a plus: {:?}", fp.graphics);
+    let tf = crate::board::transform(&b.footprints["R1"]);
+    let pts: Vec<Point> = plus
+        .iter()
+        .flat_map(|g| match &g.geometry {
+            GraphicGeometry::Path { points } => points.iter().map(|q| tf(*q)).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let (lo, hi) = pts.iter().fold((pts[0], pts[0]), |(lo, hi), q| {
+        (Point::new(lo.x.min(q.x), lo.y.min(q.y)), Point::new(hi.x.max(q.x), hi.y.max(q.y)))
+    });
+    let center = Point::new(Nm((lo.x.0 + hi.x.0) / 2), Nm((lo.y.0 + hi.y.0) / 2));
+    // KiCad: the footprint at (110, 60) turned 90°, the text at (3, 0) in its frame: 3 mm up.
+    let want = pt(10.0, 13.0);
+    assert!((center.x.0 - want.x.0).abs() < 100_000 && (center.y.0 - want.y.0).abs() < 200_000, "{center:?}");
+    assert!(codes(&d).contains(&"import.footprint_text_drawn"), "{:?}", codes(&d));
+    assert!(codes(&d).contains(&"import.footprint_text"), "the fab texts are reported: {:?}", codes(&d));
+    assert_eq!(r.uuids.get("t1").map(String::as_str), Some("R1"));
+
+    // The mouse bite: a board hole, its silkscreen line a board graphic named by the drawing.
+    assert_eq!(b.holes.len(), 1);
+    let line = b
+        .graphics
+        .iter()
+        .find(|g| matches!(g.kind, GraphicKind::Line { .. }) && g.layer == "F.SilkS")
+        .expect("the mouse bite's line");
+    assert_eq!(r.uuids.get("l2"), Some(&format!("graphic#{}", line.id.0)));
+
+    // The export writes the drawing back as lines of the footprint, and the texts as drawn.
+    let export = crate::kicad_pcb::export(&p, "t");
+    assert!(export.pcb.contains("(justify left bottom)"), "{}", export.pcb);
+    assert!(export.pcb.contains("(font (size 1.5 1) (thickness 0.2) (italic yes))"), "{}", export.pcb);
+    assert!(export.pcb.contains("(layer \"B.SilkS\" knockout)"), "{}", export.pcb);
+    assert!(export.pcb.contains("(justify right top mirror)"), "{}", export.pcb);
+}

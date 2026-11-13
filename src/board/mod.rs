@@ -11,7 +11,7 @@ pub mod prepared;
 pub mod silk;
 pub mod zones;
 
-use polyclip::{ArcTol, Circle, Curve, EndCap, Join, Path, Polygon, PolygonSet, Shape, Side};
+use polyclip::{ArcTol, Circle, Curve, EndCap, Geometry, Join, Path, Polygon, PolygonSet, Rect, Shape, Side};
 
 use crate::geom::Point;
 use crate::id::ObjectId;
@@ -748,21 +748,168 @@ pub fn text_stroke_width(p: &Project, size: Nm) -> Nm {
 /// Text strokes as polylines: centered on `at`, cap height `size`, rotated, mirrored (bottom
 /// side) — the Hershey font every output uses.
 pub fn text_paths(text: &str, at: Point, size: Nm, rotation: Angle, mirror: bool) -> Vec<Vec<Point>> {
+    use crate::model::board::TextStyle;
+    styled_text_paths(text, at, size, rotation, mirror, &TextStyle::default()).0
+}
+
+/// The strokes of a text drawn with `style`, and the corners of the box around them (the
+/// strokes' center lines, in the text's own frame): `mirror` flips the reading direction,
+/// as on the bottom side.
+pub(crate) fn styled_text_paths(
+    text: &str,
+    at: Point,
+    size: Nm,
+    rotation: Angle,
+    mirror: bool,
+    style: &crate::model::board::TextStyle,
+) -> (Vec<Vec<Point>>, [Point; 4]) {
+    use crate::model::board::{TextAlign, TextVAlign};
     use crate::render::font::{self, HAlign, VAlign};
+    let h = match style.align {
+        TextAlign::Left => HAlign::Left,
+        TextAlign::Center => HAlign::Center,
+        TextAlign::Right => HAlign::Right,
+    };
+    let v = match style.valign {
+        TextVAlign::Top => VAlign::Top,
+        TextVAlign::Middle => VAlign::Middle,
+        TextVAlign::Bottom => VAlign::Bottom,
+    };
+    let width = style.width.unwrap_or(size).0 as f64;
+    let local = font::layout_block(text, size.0 as f64, width, h, v, style.italic);
     let (s, c) = rotation.to_rad_f64().sin_cos();
-    font::layout(text, (0.0, 0.0), size.0 as f64, HAlign::Center, VAlign::Middle, 0)
-        .into_iter()
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            l.into_iter()
-                .map(|(x, y)| {
-                    let x = if mirror { -x } else { x };
-                    let (rx, ry) = (x * c - y * s, x * s + y * c);
-                    Point::new(Nm(rx.round() as i64) + at.x, Nm(ry.round() as i64) + at.y)
-                })
-                .collect()
-        })
-        .collect()
+    let place = |(x, y): (f64, f64)| {
+        let x = if mirror { -x } else { x };
+        let (rx, ry) = (x * c - y * s, x * s + y * c);
+        Point::new(Nm(rx.round() as i64) + at.x, Nm(ry.round() as i64) + at.y)
+    };
+    let mut lo = (f64::MAX, f64::MAX);
+    let mut hi = (f64::MIN, f64::MIN);
+    for &(x, y) in local.iter().flatten() {
+        lo = (lo.0.min(x), lo.1.min(y));
+        hi = (hi.0.max(x), hi.1.max(y));
+    }
+    if lo.0 > hi.0 {
+        (lo, hi) = ((0.0, 0.0), (0.0, 0.0));
+    }
+    let frame = [place(lo), place((hi.0, lo.1)), place(hi), place((lo.0, hi.1))];
+    let paths = local.into_iter().filter(|l| !l.is_empty()).map(|l| l.into_iter().map(place).collect()).collect();
+    (paths, frame)
+}
+
+/// Margin of a knocked-out text's box beyond its strokes, in character heights: a ninth (what
+/// KiCad leaves around a knocked-out text, measured on its plots: D83).
+pub const KNOCKOUT_MARGIN: f64 = 1.0 / 9.0;
+
+/// A board text as every output draws it ([`text_ink`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextInk {
+    /// The strokes' center lines.
+    pub paths: Vec<Vec<Point>>,
+    /// Stroke width.
+    pub width: Nm,
+    /// Corners of the box around the strokes' center lines, in the text's own frame (it turns
+    /// with the text).
+    pub frame: [Point; 4],
+    /// Knocked out: the ink is [`TextInk::knockout_box`] with the strokes left open.
+    pub knockout: bool,
+    /// Character height.
+    pub height: Nm,
+}
+
+impl TextInk {
+    /// The frame grown by `grow` on every side.
+    fn grown_frame(&self, grow: i64) -> PolygonSet {
+        let [a, b, _, d] = self.frame;
+        let unit = |from: Point, to: Point| {
+            let (dx, dy) = ((to.x.0 - from.x.0) as f64, (to.y.0 - from.y.0) as f64);
+            let l = dx.hypot(dy);
+            if l == 0.0 { (0.0, 0.0) } else { (dx / l, dy / l) }
+        };
+        // Along the text and across it; a text without extent keeps its rotation's axes.
+        let (mut u, mut v) = (unit(a, b), unit(a, d));
+        if u == (0.0, 0.0) && v == (0.0, 0.0) {
+            (u, v) = ((1.0, 0.0), (0.0, 1.0));
+        } else if u == (0.0, 0.0) {
+            u = (v.1, -v.0);
+        } else if v == (0.0, 0.0) {
+            v = (-u.1, u.0);
+        }
+        let g = grow as f64;
+        let ring: Vec<polyclip::Point> = self
+            .frame
+            .iter()
+            .zip([(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)])
+            .map(|(q, (su, sv))| {
+                polyclip::Point::new(
+                    q.x.0 + (g * (su * u.0 + sv * v.0)).round() as i64,
+                    q.y.0 + (g * (su * u.1 + sv * v.1)).round() as i64,
+                )
+            })
+            .collect();
+        polyclip::union_all(&ring, polyclip::FillRule::NonZero).unwrap_or_default()
+    }
+
+    /// The box a knocked-out text fills: [`KNOCKOUT_MARGIN`] character heights beyond the
+    /// strokes on every side.
+    pub fn knockout_box(&self) -> PolygonSet {
+        self.grown_frame(self.width.0 / 2 + (self.height.0 as f64 * KNOCKOUT_MARGIN).round() as i64)
+    }
+
+    /// The box around what is printed: the strokes' frame grown by half the stroke width, or
+    /// the knockout box.
+    pub fn outline_box(&self) -> PolygonSet {
+        if self.knockout { self.knockout_box() } else { self.grown_frame((self.width.0 / 2).max(1)) }
+    }
+
+    /// The strokes at their width, as one region set.
+    pub fn strokes(&self) -> PolygonSet {
+        let set = stroke_set(self.paths.clone(), self.width);
+        polyclip::union_all(&set, polyclip::FillRule::NonZero).unwrap_or(set)
+    }
+
+    /// What is printed: the strokes, or for a knocked-out text the box without them.
+    pub fn region(&self) -> PolygonSet {
+        let strokes = self.strokes();
+        if !self.knockout {
+            return strokes;
+        }
+        let area = self.knockout_box();
+        polyclip::boolean(polyclip::Op::Difference, &area, &strokes, polyclip::FillRule::NonZero).unwrap_or(area)
+    }
+
+    /// Bounding box of what is printed.
+    pub fn bbox(&self) -> Option<Rect> {
+        if self.knockout {
+            return self.knockout_box().bbox();
+        }
+        let h = (self.width.0 / 2).max(1);
+        let mut pts = self.paths.iter().flatten();
+        let first = pts.next()?;
+        let (mut lo, mut hi) = (*first, *first);
+        for q in pts {
+            lo = Point::new(lo.x.min(q.x), lo.y.min(q.y));
+            hi = Point::new(hi.x.max(q.x), hi.y.max(q.y));
+        }
+        Some(Rect::new(polyclip::Point::new(lo.x.0 - h, lo.y.0 - h), polyclip::Point::new(hi.x.0 + h, hi.y.0 + h)))
+    }
+}
+
+/// How the board text `kind` on `layer` is drawn: its strokes (lines, anchor, width and slant
+/// from its style; mirrored on bottom layers unless the style says otherwise) and their width
+/// (the style's, else [`text_stroke_width`]). `None` for other graphics. The DRC, the Gerber
+/// layers, IPC-2581 and the renders all draw this.
+pub fn text_ink(p: &Project, layer: &str, kind: &GraphicKind) -> Option<TextInk> {
+    let GraphicKind::Text { text, at, size, rotation, style } = kind else { return None };
+    let mirror = style.mirror.unwrap_or(layer.starts_with("B."));
+    let (paths, frame) = styled_text_paths(text, *at, *size, *rotation, mirror, style);
+    Some(TextInk {
+        paths,
+        width: style.thickness.unwrap_or_else(|| text_stroke_width(p, *size)),
+        frame,
+        knockout: style.knockout,
+        height: *size,
+    })
 }
 
 /// A filled polygon with its outline stroked by `width` (0: the area alone), as one region set.
@@ -879,13 +1026,10 @@ fn graphic_items(p: &Project, items: &[CopperItem]) -> Vec<CopperItem> {
         let (shape, anchor) = match &g.kind {
             GraphicKind::Line { points, width } => (stroke_set(vec![points.clone()], *width), points.first().copied()),
             GraphicKind::Polygon { points, width } => (polygon_area(points, *width), points.first().copied()),
-            GraphicKind::Text { text, at, size, rotation } => {
-                let mirror = g.layer == "B.Cu";
-                let paths = text_paths(text, *at, *size, *rotation, mirror);
-                let set = stroke_set(paths, text_stroke_width(p, *size));
-                let set = polyclip::union_all(&set, polyclip::FillRule::NonZero).unwrap_or(set);
-                (set, Some(*at))
-            }
+            GraphicKind::Text { at, .. } => match text_ink(p, &g.layer, &g.kind) {
+                Some(ink) => (ink.region(), Some(*at)),
+                None => continue,
+            },
         };
         if shape.is_empty() {
             continue;

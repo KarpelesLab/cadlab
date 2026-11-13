@@ -13,7 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use polyclip::{Circle, EndCap, Geometry, Join, Path, Polygon, PolygonSet, Rect, Ring};
 
-use super::{COPPER_TOL, PlacedPad, contour_ring, footprint_for, fp_graphic_shape, pad_side, placed_courtyards};
+use super::{
+    COPPER_TOL, PlacedPad, TextInk, contour_ring, footprint_for, fp_graphic_shape, pad_side, placed_courtyards,
+};
 use crate::geom::{Point, RTree};
 use crate::model::Project;
 use crate::model::board::{BoardSide, GraphicKind, RefText, SilkCheck};
@@ -81,15 +83,14 @@ impl PlacedText {
 
     /// Bounding box of the inked region of `text` (`None` for a text without strokes).
     pub fn bbox(&self, text: &str) -> Option<Rect> {
-        let h = (self.width.0 / 2).max(1);
-        let mut pts = self.paths(text).into_iter().flatten();
-        let first = pts.next()?;
-        let (mut lo, mut hi) = (first, first);
-        for q in pts {
-            lo = Point::new(lo.x.min(q.x), lo.y.min(q.y));
-            hi = Point::new(hi.x.max(q.x), hi.y.max(q.y));
-        }
-        Some(Rect::new(polyclip::Point::new(lo.x.0 - h, lo.y.0 - h), polyclip::Point::new(hi.x.0 + h, hi.y.0 + h)))
+        self.ink(text).bbox()
+    }
+
+    /// `text` as drawn: strokes, stroke width and frame ([`TextInk`]).
+    pub fn ink(&self, text: &str) -> TextInk {
+        let (paths, frame) =
+            super::styled_text_paths(text, self.at, self.size, self.rotation, self.mirror(), &Default::default());
+        TextInk { paths, width: self.width, frame, knockout: false, height: self.size }
     }
 }
 
@@ -157,7 +158,7 @@ pub fn ref_text_any(p: &Project, refdes: &str) -> Option<PlacedText> {
     Some(PlacedText {
         at,
         size,
-        width: ref_stroke_width(p, size),
+        width: t.and_then(|t| t.thickness).unwrap_or_else(|| ref_stroke_width(p, size)),
         rotation: t.map_or(Angle::ZERO, |t| t.rotation),
         side: pf.side,
     })
@@ -188,8 +189,8 @@ pub struct SilkShape {
     pub footprint: Option<String>,
     /// Side.
     pub side: BoardSide,
-    /// The text, for texts.
-    pub text: Option<(String, PlacedText)>,
+    /// The text as drawn, for texts.
+    pub text: Option<TextInk>,
     /// Bounding box of the inked region.
     pub bbox: Option<Rect>,
     /// The inked region (for a text: empty until [`SilkShape::region`] builds it).
@@ -200,7 +201,7 @@ impl SilkShape {
     /// The inked region (a text's strokes are built here, on demand).
     pub fn region(&self) -> std::borrow::Cow<'_, PolygonSet> {
         match &self.text {
-            Some((s, t)) => std::borrow::Cow::Owned(t.shape(s)),
+            Some(ink) => std::borrow::Cow::Owned(ink.region()),
             None => std::borrow::Cow::Borrowed(&self.shape),
         }
     }
@@ -301,21 +302,19 @@ pub fn silk_texts(p: &Project) -> Vec<SilkShape> {
             footprint: Some(r.clone()),
             side: pf.side,
             bbox: t.bbox(r),
-            text: Some((r.clone(), t)),
+            text: Some(t.ink(r)),
             shape: PolygonSet::new(),
         });
     }
     for g in &board.graphics {
         let Some(side) = silk_side(&g.layer) else { continue };
-        let GraphicKind::Text { text, at, size, rotation } = &g.kind else { continue };
-        let t =
-            PlacedText { at: *at, size: *size, width: super::text_stroke_width(p, *size), rotation: *rotation, side };
+        let Some(ink) = super::text_ink(p, &g.layer, &g.kind) else { continue };
         out.push(SilkShape {
             label: format!("graphic#{}", g.id.0),
             footprint: None,
             side,
-            bbox: t.bbox(text),
-            text: Some((text.clone(), t)),
+            bbox: ink.bbox(),
+            text: Some(ink),
             shape: PolygonSet::new(),
         });
     }
@@ -635,14 +634,19 @@ pub fn arrange(p: &Project, only: Option<&BTreeSet<String>>) -> Arrangement {
         }
     }
     for s in silk_texts(p) {
-        let Some((text, t)) = &s.text else { continue };
+        let Some(ink) = &s.text else { continue };
         if s.footprint.as_deref().is_some_and(is_moving) {
             continue;
         }
-        let area = text_box(text, t.at, t.size, t.width, t.rotation);
+        // A designator counts as the box reserved for it, a board text as the box around its
+        // strokes (a knocked-out one as its filled box).
+        let area = match s.footprint.as_deref().and_then(|r| Some((r, ref_text(p, r)?))) {
+            Some((r, t)) => vec![text_box(r, t.at, t.size, t.width, t.rotation)],
+            None => ink.outline_box(),
+        };
         if let Some(bbox) = area.bbox() {
             // No owner: the text of another part is in the way of this part's text like any other.
-            fixed.push(Obstacle { side: s.side, owner: None, kind: ObstacleKind::Silk, bbox, shape: vec![area] });
+            fixed.push(Obstacle { side: s.side, owner: None, kind: ObstacleKind::Silk, bbox, shape: area });
         }
     }
     let pads = super::placed_pads(p);
@@ -802,19 +806,20 @@ pub fn arrange(p: &Project, only: Option<&BTreeSet<String>>) -> Arrangement {
         let pf = &board.footprints[*r];
         let old = pf.ref_text.as_ref();
         let size = old.and_then(|t| t.size);
+        let thickness = old.and_then(|t| t.thickness);
         let new = match chosen.get(r) {
             Some(c) => {
                 let default = default_ref_at(p, r, size.unwrap_or(REF_SIZE));
-                if default == Some(c.at) && c.rotation == Angle::ZERO && size.is_none() {
+                if default == Some(c.at) && c.rotation == Angle::ZERO && size.is_none() && thickness.is_none() {
                     None
                 } else {
                     let offset = (default != Some(c.at)).then(|| c.at - pf.at);
-                    Some(RefText { offset, rotation: c.rotation, size, hidden: false, manual: false })
+                    Some(RefText { offset, rotation: c.rotation, size, thickness, hidden: false, manual: false })
                 }
             }
             None => {
                 out.hidden.push((*r).clone());
-                Some(RefText { offset: None, rotation: Angle::ZERO, size, hidden: true, manual: false })
+                Some(RefText { offset: None, rotation: Angle::ZERO, size, thickness, hidden: true, manual: false })
             }
         };
         if new.as_ref() != old {

@@ -134,6 +134,12 @@ no `-o`.)
       pads and other silkscreen; hidden with a warning as a last resort), set by hand with `silk.set`, kept in
       the board and printed at the same place by the Gerber legend, IPC-2581, the renders and the KiCad export
       (`src/board/silk.rs`, `tests/silk.rs`)
+- [x] Silkscreen DRC over every pair that prints (D83): `drc.silk_overlap` also between drawings of different
+      owners (two footprints, a footprint and a board drawing) and between a designator and its own footprint's
+      drawings; `drc.silk_edge` only for what is printed or cut; board texts with a style (justification, lines,
+      character width, stroke, italic, mirroring, knockout) drawn by one function for the DRC and every output;
+      a designator's stroke (`silk.set --stroke`). The pairs and distances are KiCad's, probed with `kicad-cli`
+      (`tests/kicad_silk_oracle.rs`)
 - [x] Board rendering (per layer, composite, realistic top/bottom; highlight, ratsnest, markers, crop)
 - [x] Outputs: Gerber X2 (+ X3 component data), Excellon/XNC drill (+ optional Gerber X2 drill), generic
       pick-and-place CSV, IPC-D-356A (`export.*`, `src/fabout/`)
@@ -151,14 +157,16 @@ shown, two are waiting** (audit of 2026-11-13, D81). The board is `examples/demo
   fab outside `targets`, exports a complete JLCPCB bundle and a complete PCBWay bundle with byte-identical
   fabrication data, the same archives from the documented command lines (`tests/demo_board.rs`,
   `demo_board_passes_drc_and_exports_for_both_fabs`, `documented_commands_write_the_same_bundles`).
-- Run once, failed, fixed, waiting for the next run: the KiCad DRC oracle on this board (`tests/demo_board.rs`,
-  `kicad_drc_clean_demo_board`; it needs `kicad-cli`, so it runs in CI's `oracles` job only). Its first CI run, on
-  2026-11-13 with KiCad 10, failed on two findings: the reference designators of J1 and J3, the connectors at the
-  top edge, were printed across the board edge (`silk_edge_clearance`); it also listed about a dozen designators
-  over other silkscreen (`silk_overlap`), then allowed as a rule cadlab did not have. Both are fixed by D82:
-  cadlab's DRC has the two rules, `place.auto` moves the designators to free positions, and the test no longer
-  allows `silk_overlap` on KiCad's side alone. Without KiCad, `reference_designators_are_legible` shows that no
-  designator of the board comes within 0.15 mm of an edge or of other silkscreen. The next CI run decides this part.
+- Shown 2026-11-13, in CI: the KiCad DRC oracle on this board (`tests/demo_board.rs`,
+  `kicad_drc_clean_demo_board`; it needs `kicad-cli`, so it runs in CI's `oracles` job only). Its first CI run, with
+  KiCad 10, failed on two findings: the reference designators of J1 and J3, the connectors at the top edge, were
+  printed across the board edge (`silk_edge_clearance`); it also listed about a dozen designators over other
+  silkscreen (`silk_overlap`), then allowed as a rule cadlab did not have. Both were fixed by D82: cadlab's DRC
+  has the two rules, `place.auto` moves the designators to free positions, and the test no longer allows
+  `silk_overlap` on KiCad's side alone. It has passed since (KiCad 10.0.8; master's run of D82, then the runs of
+  D83, whose rules also check drawings against drawings and a designator against its own footprint: the board
+  stays clean under them in both tools). Without KiCad, `reference_designators_are_legible` shows that no
+  designator of the board comes within 0.15 mm of an edge or of other silkscreen.
 - Pending, manual: the two fabs' online checks. They need a person with accounts; the bundles, what to upload
   where and what to look at are in [MANUFACTURING.md](MANUFACTURING.md), "Demo board", with a table for the result.
 
@@ -277,6 +285,11 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
   fills, router, Gerber `WasherPad`, drill, IPC-D-356A, DSN, KiCad export, `footprint.create`), thermal spokes
   joining a row of same-net pads, open connections paired by island in the corpus comparison; DRC
   clearance tolerance kept at 2 µm (measured)
+- [x] Silkscreen on imported boards (D83): board texts as KiCad draws them (its placement conventions measured
+  on its plots and converted at import and export; cadlab's own stroke font), footprint texts on the silkscreen
+  as drawings of the footprint, a designator's stroke, the silkscreen of mouse-bite footprints; on the corpus
+  the two DRCs agree on `silk_edge_clearance` / `silk_overlap` but for the stroke fonts, KiCad's circles without
+  their stroke and its Margin layer, each counted per board in the manifest
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
 - [x] Fab profiles re-checked against the fabs' pages 2026-11-13: unverified values closed where published,

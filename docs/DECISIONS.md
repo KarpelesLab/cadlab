@@ -2166,6 +2166,125 @@ though nothing electrical depends on it, and the tool that placed the parts is t
 room is. Storing the result keeps every output and both DRCs talking about the same text, and leaves the last
 word to whoever sets one by hand.
 
+### D83. Silkscreen DRC against KiCad on the corpus: drawings against drawings, texts drawn as KiCad places them, the font as the measured residual (2026-11-13)
+D82's two rules ran against KiCad for the first time in CI and the corpus job failed (run 43408253002): 518
+differences, both ways. KiCad alone reported silkscreen drawings over each other and at the edge; cadlab alone
+reported hundreds of board texts over other silkscreen. Each cause was found from the data (KiCad's reports
+replayed against cadlab's findings, then probes run by `kicad-cli` in the oracle job, `tests/kicad_silk_oracle.rs`),
+none from KiCad's sources.
+- **cadlab's texts were not where KiCad's are.** A board text was a string, a center, a height and an angle;
+  KiCad's has a justification, a character width, a stroke, lines, a slant, mirroring and a knockout, and the
+  import dropped them all, so a left-justified pin label was drawn centered on its anchor, across the connector
+  it stands next to. Board texts now carry a `style` (BOARD.md, "Board texts") and one function
+  (`board::text_ink`) draws them for the DRC, Gerber, IPC-2581, the renders and copper. Hidden texts are no
+  longer imported as visible.
+- **KiCad justifies a box, not the strokes.** With the style modeled, texts were still 0.05 to 0.15 mm off.
+  Probe texts plotted by KiCad (294 of them in the end) gave its conventions: the box around a text reaches
+  0.1224 *h* + 0.052 *t* under the baseline, *h*/21 − 0.052 *t* over the capitals and 0.658 *t* beyond each
+  end (height *h*, stroke *t*); lines are 1.61 *h* apart; a stroke is at most a quarter of the character size; a
+  footprint text that would read upside down is turned unless `unlocked`; a knockout box is *h*/9 beyond the
+  strokes. The values were fitted to the coordinates in KiCad's Gerber files, which they reproduce to the
+  nanometer.
+  cadlab keeps its own anchor (on the strokes: a text that starts at its anchor starts there) and converts at
+  the KiCad boundary, both ways and exactly, instead of taking KiCad's box into its model; line pitch, slant and
+  knockout margin, which are free choices, take KiCad's values so that imported texts keep their place. After
+  that every probe agrees within nanometers vertically and one font unit horizontally.
+- **The fonts are two, and that is the residual.** The probes also measured the glyphs: KiCad's stroke font
+  has the Hershey simplex advance widths cadlab's has (the alphabet is 24.44 mm wide in KiCad's, 24.39 mm in
+  cadlab's, at 1 mm), but most of its letters end one unit (1/21 of the character width, 0.048 mm at 1 mm) inside
+  cadlab's on each side, and a few glyphs differ more (`1`, `l`, `i`, `I`, punctuation). cadlab does not copy
+  KiCad's glyphs (D56), so a text that KiCad draws 0.01 mm clear of a line may touch it in cadlab's font and the
+  reverse. These are recorded per board (below), not allowed by rule.
+- **`drc.silk_overlap` checks what KiCad checks,** established by 112 rule probes at 0 and 0.15 mm: a text
+  against every other silkscreen item, its own footprint's drawings included (D82 left a designator on its own
+  footprint's drawing alone; KiCad reports it and it reads as badly), and drawings of different owners against
+  each other (two footprints; a footprint and a board drawing). Not a footprint's drawings among themselves, not
+  two board drawings, nothing across sides, nothing hidden: as KiCad.
+- **`drc.silk_edge` no longer reports what is wholly off the board,** except a designator. KiCad measures
+  silkscreen to the edge from either side and says nothing about silkscreen beyond it and clear of it (the
+  outline of an overhanging connector, notes next to the board): nothing there is cut, so nothing is wrong.
+  A designator that is not printed at all stays a finding (cadlab places designators; KiCad has no such rule).
+- **Footprint texts on the silkscreen become drawings of the footprint** (their strokes, in cadlab's font, where
+  KiCad prints them) instead of being dropped: the legend, the DRC, the renders and the KiCad export then have
+  them without a text object in the footprint model, whose library footprints are shared by placements while a
+  KiCad footprint text has its angle on the board. A footprint that differs only by such a text gets its own
+  library footprint, as it did for any other drawing. The price: KiCad checks a footprint text against its own
+  footprint's drawings (any pair with a text), cadlab takes a footprint's drawings as one item.
+- **The designator keeps its stroke** (`ref_text.thickness`, `silk.set --stroke`): KiCad draws each designator
+  with the stroke its field gives (0.1 mm on corne-cherry's 0.5 mm texts), and cadlab printed them all 15 % of
+  their height or `min_silk_width` thick, half as thick again there.
+- **Silkscreen drawings of footprints that become board holes** (mouse bites) are kept as board graphics.
+- **Real differences, left as they are and recorded:**
+  - KiCad takes a circle at its radius, without its stroke: a 0.12 mm circle is 0.06 mm smaller for its
+    silkscreen checks than it prints (probes: a circle overlapping a line by 0.05 mm is not reported, one
+    0.1 mm away passes a 0.15 mm rule). cadlab measures the ink.
+  - KiCad takes drawings on the Margin layer as board edges; cadlab's edge is the outline the fab cuts.
+  - Tolerance: cadlab's 2 µm (D56) against KiCad's, under 2 µm here (an overlap of 2 µm and a gap 2 µm short
+    of the rule are KiCad's alone), on overlaps and distances alike.
+  - KiCad names one silkscreen segment per finding and, for silkscreen on a mask opening, often no pad;
+    cadlab one footprint and one pad. The comparison folds both ways (`PER_SEGMENT`, `PER_PAD`).
+- **The comparison measures what it allows.** A manifest entry for a font difference carries `text_within`:
+  it covers only findings that name a text, and a KiCad finding only when cadlab measures the two items no
+  farther apart than that many millimeters. An unmatched silkscreen finding is logged with cadlab's distance.
+  `CADLAB_CORPUS_REPLAY=<dir>` replays KiCad's DRC reports of an earlier run (CI's `corpus-report` artifact)
+  against the current code without KiCad, which is how the causes above were separated between CI runs.
+
+**Measured** (CI, KiCad 10.0.8, 2026-11-13; the corpus job's reports are its `corpus-report` artifact):
+- The corpus comparison has no unexplained difference again, with both silkscreen rules compared on every board
+  and both comparisons (original, re-export). Both tools report, and the comparison pairs, for example 77 edge
+  findings and 2 overlaps on glasgow-revD1, 30 overlaps on glasgow-revC3, 86 overlaps and 83 silkscreen-on-pad
+  findings on tinytapeout-demo's re-export.
+- What is left, per board, in the manifest (30 DRC entries for 261 findings at most, 14 Gerber layers; before
+  D82: 23 for 209, and 18):
+  - fonts (`text_within = 0.05`): nrfmicro's re-export, 4 designator overlaps cadlab alone reports;
+    buspirate5-rev10, 1 label KiCad alone reports (0.02 mm clear in cadlab's font); glasgow-revC3, 11 overlaps
+    and 1 edge crossing cadlab alone reports (two-line labels in brackets, an underscore, two slashes);
+  - circles without their stroke: glasgow-revC3 TP3, glasgow-revD1 TP21 (cadlab alone);
+  - Margin layer: nrfmicro, 14 KiCad findings on the original and 27 on the re-export;
+  - sweep-v2.2: 2 KiCad findings on back-silkscreen arcs of front hole footprints (4 before: the front arcs are
+    now board graphics and reported by both).
+  Gone from the manifest: cynthion's copper-to-edge entry (6 findings) and four of its six copper layers' Gerber
+  differences (the layer numbers are where KiCad draws them: 0.05 to 0.12 mm² per layer became under 0.006 mm²
+  on four layers, and 0.02 mm² on the two whose digits, `1` and `4`, are drawn differently).
+- The re-exports read in KiCad as the originals do. Its own silkscreen findings on cadlab's re-export, before
+  and after: glasgow-revD1 199 `silk_overlap` (its report's cap), 199 `silk_over_copper` and 98 edge findings,
+  now 2, 5 and 77, the original's; cynthion 199, 199 and 9, now none, as on the original; buspirate5-rev10 199,
+  199 and 28, now 7, 69 and 20.
+- Probes: the 93 convention probes agree with KiCad's plots within 3 nm (1 µm is asserted), knockout boxes within
+  4 µm (KiCad builds them around a polygon of the strokes); 87 of the 112 rule cells get the same answer from both
+  DRCs at both clearances, 25 differ for the reasons above, each asserted.
+- Cost: cadlab's DRC takes as long as before on every corpus board, within a few percent (glasgow-revD1, the
+  longest: 41.7 s before and 43.1 s after on CI's runners, 37.5 s and 36.1 s on one machine; the silkscreen
+  rules use the grid index over bounding boxes they had), and the benchmark job's baselines hold.
+- Wrong guesses the manifest caught: four designator pairs on corne-cherry, a label at tinytapeout-demo's edge
+  and a designator on nrfmicro were first recorded as font differences. They were gone one run later, which
+  had given designators their own stroke, replaced the first estimate of KiCad's box by the fitted one and
+  stopped counting a text that touches the edge within the tolerance as crossing it (which change removed
+  which was not separated); the entries, then unused, failed that run and were removed.
+
+**Not done, not verified:**
+- 23 of cadlab's 109 `drc.silk_overlap` findings on tinytapeout-demo's re-export cannot be checked: KiCad's
+  report stops at 199 findings of the type (113 of them further segments of pairs cadlab reports), and the
+  original project ignores the rule. They are counted apart (`beyond_kicad_report_cap`), as before.
+- A footprint's text against its own footprint's drawings, and two texts of one footprint, are checked by KiCad
+  and not by cadlab (the texts are drawings of the footprint): two probe cells, no corpus finding.
+- Texts in outline (TrueType) fonts are drawn in the stroke font at the same anchor (`import.text_font`;
+  lumenpnp-mobo and tinytapeout-demo have some): their extent differs and nothing measures by how much.
+- A knocked-out footprint text is drawn as plain strokes. `bold` is not modeled: in KiCad's stroke font it
+  changes nothing when the file gives a thickness (probed: the same strokes at the same width).
+- cadlab draws a board text at least `min_silk_width` thick, KiCad at most a quarter of its height: a text
+  under 0.6 mm high with the default rules is exported with a stroke KiCad then thins.
+- Board texts are set through the import and the library API only: board graphics have no command yet, so
+  neither has a text's style.
+- Carried over from D82: designators are not checked against pads; a `silk_to_edge` different from
+  `silk_clearance` is not exported to KiCad.
+
+*Why:* a legend is checked for what is printed, so the DRC has to draw texts where every output draws them and
+compare every pair of things that can print over each other; and an import has to put a text where its designer
+saw it. KiCad's placement conventions are facts about its file format, measurable from outside, and matching
+them costs nothing; its glyphs are its own work, so the two fonts stay two and the difference they make is
+counted, per board, with a bound.
+
 ### D84. Router: the residuals D80 left, diagnosed; grid lines along the finest rows, exits off the grid lines, finer grids after a run that leaves a few connections (2026-11-13)
 D80 left three groups of failures the router could be blamed for. Each was reproduced at the 200 M work budget (seeds
 1–3, D80's numbers to the connection), looked at in place (`route_bench`'s new `CADLAB_BENCH_DUMP` and
@@ -2241,6 +2360,7 @@ coarse for a hand-fitted corner, not a missing crossover; the QFN's was the grid
 the pours' is the granularity of the re-plan. A fix was kept only where the corpus and the generated benchmark
 both showed it, and the mechanism built for the first diagnosis was removed when the measurement said the
 simpler one did the work.
+
 
 
 ## Open questions

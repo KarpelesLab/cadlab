@@ -402,6 +402,13 @@ pub fn cases() -> Vec<Case> {
                 route_all(r, s);
                 // C2.1's top edge is at 10.285; the 0.15 mm line's lower edge at 10.365.
                 silk_line(s, (14.3, 10.44), (14.8, 10.44));
+                // C2's designator, above its courtyard, would sit exactly 0.15 mm (the silkscreen
+                // clearance, to the nanometer) over this line, where the last digit of either
+                // tool's rounding decides a `silk_overlap`: 0.2 mm higher, the case is about
+                // the pad alone.
+                let at = cadlab::board::silk::ref_text(s.project.as_ref().unwrap(), "C2").unwrap().at;
+                let up = cadlab::geom::Point::new(cadlab::units::Nm::ZERO, cadlab::units::Nm::from_um(200));
+                exec(r, s, "silk.set", json!({"refdes": "C2", "at": at + up}));
             },
         },
         Case {

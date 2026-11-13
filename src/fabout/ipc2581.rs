@@ -668,10 +668,32 @@ fn legend_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
                     &[Stroke::Line { pts, width: width.0.max(min_w) }],
                 );
             }
-            GraphicKind::Text { text, at, size, rotation } => {
-                let w = (size.0 / 8).max(min_w);
-                let strokes = text_strokes(text, *at, *size, *rotation, side == BoardSide::Bottom, w);
-                stroke_set(&mut body, d, &[a("geometryUsage", "TEXT")], &strokes);
+            GraphicKind::Text { .. } => {
+                let Some(ink) = crate::board::text_ink(c.p, &layer, &gr.kind) else { continue };
+                if ink.knockout {
+                    // The outlines of the box and of the letters left open in it (IPC-2581
+                    // legend features are strokes).
+                    let strokes: Vec<Stroke> = ink
+                        .region()
+                        .iter()
+                        .flat_map(|poly| std::iter::once(&poly.outer).chain(&poly.holes))
+                        .map(|r| {
+                            let mut pts: Vec<(i64, i64)> = r.0.iter().map(|q| (q.x, q.y)).collect();
+                            if let Some(&f) = pts.first() {
+                                pts.push(f);
+                            }
+                            Stroke::Line { pts, width: min_w }
+                        })
+                        .collect();
+                    stroke_set(&mut body, d, &[a("geometryUsage", "TEXT")], &strokes);
+                } else {
+                    let strokes: Vec<Stroke> = ink
+                        .paths
+                        .iter()
+                        .map(|l| Stroke::Line { pts: l.iter().map(|&q| (q.x.0, q.y.0)).collect(), width: ink.width.0 })
+                        .collect();
+                    stroke_set(&mut body, d, &[a("geometryUsage", "TEXT")], &strokes);
+                }
             }
         }
     }

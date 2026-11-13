@@ -35,6 +35,7 @@ const CASE_ALLOW: &[Allow<'static>] = &[
         when: None,
         max: None,
         involving: &[],
+        text_within: None,
         reason: "copper without a net touching a net is a short for cadlab (the design must say what each track \
                  carries); KiCad gives such a track the net it touches when it loads the board",
     },
@@ -45,6 +46,7 @@ const CASE_ALLOW: &[Allow<'static>] = &[
         when: None,
         max: None,
         involving: &[],
+        text_within: None,
         reason: "KiCad assigned the netless 0.25 mm track to GND (see the drc.short entry), whose power class asks \
                  for 0.4 mm; cadlab checks the class width of a track's own net, and it has none",
     },
@@ -55,6 +57,7 @@ const CASE_ALLOW: &[Allow<'static>] = &[
         when: None,
         max: Some(1),
         involving: &[],
+        text_within: None,
         reason: "cadlab keeps silkscreen `silk_to_pad` (0.15 mm, exported as min_silk_clearance) from pad copper, \
                  a fab limit; KiCad's silk_over_copper only reports silkscreen overlapping a mask opening (its \
                  silk clearance applies between silkscreen items), so a line 0.08 mm from C2.1 passes there",
@@ -75,6 +78,7 @@ const KICAD_10_0_7_ALLOW: &[Allow<'static>] = &[Allow {
     when: Some(names_u1_pad5),
     max: Some(1),
     involving: &[],
+    text_within: None,
     reason: "KiCad 10.0.7 no longer reports the GND track's clearance violation to pad U1.5 (3V3, 0.156 mm against \
              0.2 mm) once the same track is reported crossing a 3V3 track; KiCad 10.0.6 reported it (actual \
              0.1562 mm) on the identical board, and the gap is a real violation, so cadlab keeps it",

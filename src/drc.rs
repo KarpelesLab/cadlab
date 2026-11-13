@@ -1320,10 +1320,13 @@ fn silk_ref(s: &SilkShape) -> ObjectRef {
     ObjectRef::parse(&s.label).unwrap_or_else(|_| ObjectRef::Name(s.label.clone()))
 }
 
-/// Silkscreen crossing a board edge (the outline or a cutout) or off the board, or closer to an
-/// edge than `silk_to_edge`: the fab cuts off what crosses, and prints nothing up to the edge. Every
+/// Silkscreen crossing a board edge (the outline or a cutout), or closer to an edge than
+/// `silk_to_edge`: the fab cuts off what crosses, and prints nothing up to the edge. Every
 /// silkscreen item is checked: footprint drawings (one finding per footprint), board drawings,
-/// reference designators and board texts. A zero `silk_to_edge` only forbids crossing.
+/// reference designators and board texts. A zero `silk_to_edge` only forbids crossing. What
+/// lies wholly beyond an edge and clear of it is not printed and not cut (the outline of a
+/// connector overhanging the board, notes drawn next to it), so it is not reported, except a
+/// reference designator: the legend then lacks it.
 fn silk_edges(ctx: &Ctx, silk: &[SilkShape], texts: &[SilkShape], o: &BoardShape, out: &mut Vec<Diagnostic>) {
     let min = ctx.rules.silk_to_edge;
     let limit = (min.0 - TOLERANCE.0).max(0);
@@ -1344,14 +1347,16 @@ fn silk_edges(ctx: &Ctx, silk: &[SilkShape], texts: &[SilkShape], o: &BoardShape
         }
         let what = s.describe();
         let nearest = o.edges.iter().filter_map(|e| gap(&*shape, e)).min_by(|a, b| a.0.total_cmp(&b.0));
-        let message = if o.outside(&*shape) {
-            // Nothing of it on the board: beyond the outline, or all of it in a cutout.
-            let region = |r: &Ring| Polygon::new(r.clone(), vec![]);
-            let off = !polyclip::intersects(&region(&o.outer), &*shape)
-                || o.cutouts.iter().any(|c| polyclip::contains(&region(c), &*shape));
-            if off { format!("{what} is off the board") } else { format!("{what} crosses the board edge") }
+        let designator = s.text.is_some() && s.footprint.is_some();
+        // Part of it beyond an edge (by more than the tolerance: touching the edge is not).
+        let beyond = o.outside(&*shape);
+        let message = if beyond && nearest.is_some_and(|g| g.0 == 0.0) {
+            format!("{what} crosses the board edge")
         } else if limit > 0 && o.near_edge(&*shape, limit) {
             format!("{what} is {} from the board edge, minimum is {min}", nm_f(nearest.map_or(0.0, |g| g.0)))
+        } else if designator && beyond {
+            // Nothing of it on the board: beyond the outline, or all of it in a cutout.
+            format!("{what} is off the board")
         } else {
             continue;
         };
@@ -1372,15 +1377,14 @@ fn silk_edges(ctx: &Ctx, silk: &[SilkShape], texts: &[SilkShape], o: &BoardShape
     }
 }
 
-/// A silkscreen text overlapping other silkscreen, or closer to it than `silk_clearance`:
-/// reference designators and board texts against the texts and drawings of other owners (other
-/// footprints, the board). A footprint's reference designator against its own drawings is not
-/// reported, and drawings are not checked against each other. A zero `silk_clearance` only
-/// forbids overlaps.
+/// Silkscreen overlapping other silkscreen, or closer to it than `silk_clearance`: the two
+/// print as one blot. Checked are every text (reference designators, board texts) against every
+/// other silkscreen item, its own footprint's drawings included, and drawings of different
+/// owners against each other: two footprints, or a footprint and a board drawing. A footprint's
+/// drawings among themselves are the footprint's business and one item here, and board drawings
+/// are not checked against each other (a frame's lines meet at its corners). A zero
+/// `silk_clearance` only forbids overlaps.
 fn silk_overlaps(ctx: &Ctx, silk: &[SilkShape], texts: &[SilkShape], out: &mut Vec<Diagnostic>) {
-    if texts.is_empty() {
-        return;
-    }
     let min = ctx.rules.silk_clearance;
     let limit = (min.0 - TOLERANCE.0).max(1);
     let near = |a: &PolygonSet, b: &PolygonSet| {
@@ -1392,30 +1396,38 @@ fn silk_overlaps(ctx: &Ctx, silk: &[SilkShape], texts: &[SilkShape], out: &mut V
     let nt = texts.len();
     let mut regions: BTreeMap<usize, PolygonSet> = BTreeMap::new();
     for (i, j) in near_pairs(&boxes, limit) {
-        // `i < j`: a text and a later text or a drawing.
-        if i >= nt {
-            continue;
-        }
+        // `i < j`: a text and a later text or a drawing, or two drawings.
         let (a, b) = (all[i], all[j]);
-        if a.side != b.side || (a.footprint.is_some() && a.footprint == b.footprint) {
+        if a.side != b.side || (i >= nt && a.footprint == b.footprint) {
             continue;
         }
         for k in [i, j] {
-            regions.entry(k).or_insert_with(|| all[k].region().into_owned());
+            if k < nt {
+                regions.entry(k).or_insert_with(|| all[k].region().into_owned());
+            }
         }
-        let (sa, sb) = (&regions[&i], &regions[&j]);
+        let region = |k: usize| if k < nt { &regions[&k] } else { &all[k].shape };
+        let (sa, sb) = (region(i), region(j));
         if sa.is_empty() || sb.is_empty() || !near(sa, sb) {
             continue;
         }
         let anchor = a.bbox.map(|b| from_f(b.min.x as f64, b.min.y as f64)).unwrap_or_default();
         let (dist, at) = gap(sa, sb).unwrap_or((0.0, anchor));
         let how = if dist == 0.0 { "overlaps".to_string() } else { format!("is {} from", nm_f(dist)) };
-        let hint = match &a.footprint {
-            Some(r) => format!(
+        let hint = match (&a.text, &a.footprint, &b.footprint) {
+            (Some(_), Some(r), _) => format!(
                 "let cadlab find it a free position (`silk.arrange`), or set one (`silk.set {r} --at ...`, `--hidden` \
                  to leave it out)"
             ),
-            None => "move the text off the other silkscreen".to_string(),
+            (Some(_), None, _) => "move the text off the other silkscreen".to_string(),
+            (None, Some(r), Some(o)) => format!(
+                "move {r} or {o} apart (`place.move`); where the two drawings print over each other the legend is a \
+                 blot. If it is meant (parts sharing an outline), waive it: `drc.waive drc.silk_overlap --subjects \
+                 {r},{o} --reason <why>`"
+            ),
+            (None, ..) => "move the part or the board drawing: where the two print over each other the legend is a \
+                           blot; a drawing that frames the part on purpose can be waived (`drc.waive`)"
+                .to_string(),
         };
         out.push(
             Diagnostic::warning(

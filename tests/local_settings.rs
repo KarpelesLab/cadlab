@@ -495,6 +495,7 @@ fn copper_drawings_on_the_board() {
             at: mm(10.0, 2.0),
             size: Nm(1_000_000),
             rotation: Default::default(),
+            style: Default::default(),
         },
     });
     let id2 = p.alloc_id();

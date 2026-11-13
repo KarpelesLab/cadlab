@@ -183,20 +183,22 @@ impl Local {
 /// cadlab is concerned: `silk.arrange` leaves it. `None` without a position.
 fn reference_text(c: &Sexpr, side: BoardSide, orient: Angle) -> Option<RefText> {
     let ((x, y), angle) = at_of(c)?;
-    let effects = c.get("effects");
-    let hidden = yes(c, "hide")
-        || effects.is_some_and(|ef| yes(ef, "hide"))
-        || !matches!(fp_layer(layer_of(c).unwrap_or(""), side), Some((GraphicLayer::Silk, false)));
-    let size = effects
-        .and_then(|ef| ef.get("font"))
-        .and_then(|f| f.get("size"))
-        .and_then(|s| s.value())
-        .and_then(mm)
-        .filter(|s| s.0 > 0 && *s != crate::board::silk::REF_SIZE);
+    let layer = layer_of(c).unwrap_or("");
+    let look = super::text_look(c, layer);
+    let hidden = look.hidden || !matches!(fp_layer(layer, side), Some((GraphicLayer::Silk, false)));
+    // As KiCad draws it: turned upright unless unlocked, a box around the text centered on the
+    // position (cadlab centers the capitals; the designator is always centered).
+    let rotation = look.drawn_angle(angle);
+    let centered = super::TextLook {
+        style: crate::model::board::TextStyle { mirror: look.style.mirror, ..Default::default() },
+        ..look
+    };
     Some(RefText {
-        offset: Some(Point::new(x, -y).rotated(orient)),
-        rotation: angle.normalized(),
-        size,
+        offset: Some(Point::new(x, -y).rotated(orient) + centered.shift(rotation, layer)),
+        rotation,
+        size: Some(centered.size).filter(|s| *s != crate::board::silk::REF_SIZE),
+        // Left out again when it is the stroke cadlab draws anyway (`default_reference_text`).
+        thickness: Some(centered.stroke),
         hidden,
         manual: true,
     })
@@ -267,6 +269,8 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
     let mut value = String::new();
     let mut props = BTreeMap::new();
     let mut ref_text = None;
+    // Texts other than the reference: (the text, its element).
+    let mut texts: Vec<(String, &Sexpr)> = Vec::new();
     for c in e.items() {
         match c.head() {
             Some("property") => {
@@ -275,6 +279,9 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                 let v = v.unwrap_or("").to_string();
                 if let Some(u) = c.child_value("uuid") {
                     uuids.push((u.to_string(), format!("prop:{k}")));
+                }
+                if k != "Reference" {
+                    texts.push((v.clone(), c));
                 }
                 match k {
                     "Reference" => {
@@ -300,16 +307,11 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                             uuids.push((u.to_string(), "prop:Reference".to_string()));
                         }
                     }
-                    "value" => value = text,
-                    _ => notes.agg(
-                        "import.footprint_text",
-                        "fp_text",
-                        Diagnostic::info(
-                            "import.footprint_text",
-                            "footprint user texts are not imported (cadlab footprints have no texts of their own; the reference designator keeps its place)",
-                        )
-                        .with_hint("add board texts on the silkscreen if they matter for manufacturing"),
-                    ),
+                    "value" => {
+                        value = text.clone();
+                        texts.push((text, c));
+                    }
+                    _ => texts.push((text, c)),
                 }
             }
             _ => {}
@@ -476,7 +478,72 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         .filter(|(g, _)| g.layer != GraphicLayer::Courtyard)
         .map(|(_, u)| u)
         .collect();
+    let mut graphic_uuids = graphic_uuids;
     let courtyard = take_courtyard(&mut graphics);
+
+    // Texts other than the reference that print on the silkscreen of the footprint's side
+    // become drawings: their strokes, in cadlab's font, where KiCad puts the text (position in
+    // the footprint's frame, angle on the board, as the Reference field). The others (fab,
+    // user layers, hidden fields) are documentation cadlab footprints do not keep.
+    for (text, c) in texts {
+        let layer = layer_of(c).unwrap_or("");
+        let look = super::text_look(c, layer);
+        let silk = matches!(fp_layer(layer, side), Some((GraphicLayer::Silk, false)));
+        let Some(((x, y), angle)) = at_of(c) else { continue };
+        if look.hidden || text.trim().is_empty() {
+            continue;
+        }
+        if !silk || (library.is_some() && text.contains("${")) {
+            notes.agg(
+                "import.footprint_text",
+                "fp_text",
+                Diagnostic::info(
+                    "import.footprint_text",
+                    "footprint texts off the silkscreen of the footprint's side are not imported (cadlab footprints \
+                     keep no texts; those on the silkscreen become drawings, and the reference designator keeps its place)",
+                )
+                .with_hint("add board texts on the silkscreen if they matter for manufacturing"),
+            );
+            continue;
+        }
+        let text = text.replace("${REFERENCE}", refdes.trim()).replace("${VALUE}", &value);
+        let angle = look.drawn_angle(angle);
+        let anchor = at + Point::new(x, -y).rotated(orient) + look.shift(angle, layer);
+        let (paths, _) =
+            crate::board::styled_text_paths(&text, anchor, look.size, angle, look.mirrored(layer), &look.style);
+        let width = look.stroke;
+        let uuid: Vec<String> =
+            c.child_value("uuid").or(c.child_value("tstamp")).map(String::from).into_iter().collect();
+        // KiCad's findings on the text name the footprint, whose drawing it now is.
+        if let Some(u) = uuid.first() {
+            match uuids.iter_mut().find(|(k, _)| k == u) {
+                Some((_, what)) => *what = "fp".to_string(),
+                None => uuids.push((u.clone(), "fp".to_string())),
+            }
+        }
+        // Back into the footprint's frame (the inverse of the placement).
+        let local = |q: Point| {
+            let d = (q - at).rotated(Angle::ZERO - rotation);
+            if side == BoardSide::Bottom { Point::new(-d.x, d.y) } else { d }
+        };
+        for path in paths.into_iter().filter(|l| l.len() >= 2) {
+            graphics.push(Graphic::new(
+                GraphicLayer::Silk,
+                width,
+                GraphicGeometry::Path { points: path.into_iter().map(local).collect() },
+            ));
+            graphic_uuids.push(uuid.clone());
+        }
+        notes.agg(
+            "import.footprint_text_drawn",
+            "fp_text",
+            Diagnostic::info(
+                "import.footprint_text_drawn",
+                "footprint texts on the silkscreen (other than the reference designator) are imported as drawings \
+                 of the footprint, in cadlab's stroke font",
+            ),
+        );
+    }
 
     // Pads.
     let mut pads: Vec<Pad> = Vec::new();

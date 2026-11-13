@@ -240,14 +240,20 @@ Allowances, each with its reason, on top of the cross-check's (`drc_compare::ALL
 - re-export only: `drc.unplaced` (no schematic to check parity against);
 - report granularity: KiCad reports silkscreen over copper, at an edge or over other silkscreen per silkscreen
   segment, where cadlab's silkscreen checks take a footprint's drawings as one item, so extra KiCad findings
-  on a pair cadlab reports are the same defect; an open connection names one item of each island, either
+  on a pair cadlab reports are the same defect; for silkscreen on a mask opening KiCad often names the
+  segment alone, cadlab one finding per pad, so a further pad of a footprint silkscreen KiCad reports is
+  the same defect too (`PER_PAD`, D83); an open connection names one item of each island, either
   tool's choice, so once exact matches are taken a KiCad `unconnected_items` and a cadlab `drc.unrouted`
   sharing an item are the same defect, and so are two that join the same two islands of cadlab's
   connectivity through other items (a zone and a pad in KiCad, two pads in cadlab: D60); KiCad's report stops at 199 findings of most types, so cadlab
   findings of a type KiCad reported exactly 199 times are unverifiable and counted apart;
 - board-specific `known` entries in the manifest: side, rule, an exact maximum count, the comparison it
   applies to, and the reason; `gerber_known` entries for layers whose differences are explained. A known
-  difference that no longer shows up fails the test too, so the manifest follows fixes.
+  difference that no longer shows up fails the test too, so the manifest follows fixes. An entry may be
+  narrowed: `items` to findings naming given objects, and `text_within` (mm) to silkscreen findings that
+  come from the two stroke fonts: only findings that name a text, and of KiCad's only those whose two items
+  (or item and board edge) cadlab measures no farther apart than that (D83). Every unmatched silkscreen
+  finding is logged with the texts it names and cadlab's distance between its items.
 
 The summary table (stderr and `$CARGO_TARGET_TMPDIR/corpus/summary.txt`) gives per project the copper layers,
 footprints, tracks, netlist components, import diagnostics, items not imported, KiCad/cadlab/matched DRC
@@ -266,6 +272,14 @@ CADLAB_CORPUS_DIR=$PWD/target/corpus CADLAB_ORACLES=1 \
   CADLAB_ORACLE_KICAD_CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli \
   cargo test --release --test corpus -- --nocapture   # CADLAB_CORPUS_ONLY=name,name for a subset
 ```
+
+Without KiCad, its DRC reports of an earlier run can be replayed against the current code:
+`CADLAB_CORPUS_REPLAY=<dir>` with CI's `corpus-report` artifact unpacked in `<dir>` (`<project>/drc-original.json`,
+`<project>/reexport/drc.json`; `gh run download <run> -n corpus-report -D <dir>`). The comparison of the original
+boards is then exact for everything a board alone decides (without the schematic's netlist the circuit is built
+from the board, so parity findings and the designators of renamed parts differ); the re-export's report is that of
+the export of the run it comes from, so it is indicative only once the export or the import's numbering has
+changed. Netlist, Gerbers and re-routing are skipped. This is how D83 separated its causes between CI runs.
 
 Results with KiCad 10.0.7 at the pins (re-measured 2026-10-15, D56; 10.0.6 gave the same corpus results
 before D44): every board imports; the board-level comparison has no unexplained difference; two boards
@@ -307,7 +321,15 @@ boards (four GND pads on `buspirate5-rev10`, one on `sweep-v2.2`). Both were the
 same-net resistor-array and 0402 pads, which cadlab dropped for not reaching the pour), `sweep-v2.2`'s none
 (both tools leave the two keyboard halves' GND apart, as only the cable joins them, and name other ends of
 the two islands); with copper rings around non-plated holes modeled (the power switches' pegs), the manifest
-has 23 entries (209 findings at most) and 18 Gerber layers, and no pour-connectivity entry.
+has 23 entries (209 findings at most) and 18 Gerber layers, and no pour-connectivity entry. With the two
+silkscreen rules compared on every board instead of allowed (D82, D83; KiCad 10.0.8, 2026-11-13) it has 30
+entries (261 findings at most) and 14 Gerber layers: ten entries are silkscreen (nrfmicro's Margin layer, 41
+KiCad findings; the two stroke fonts, 17 findings on three boards; circles without their stroke, 2), the
+texts on `cynthion`'s copper layers are where KiCad draws them (its copper-to-edge entry and four of its six
+layer differences are gone), and KiCad's own silkscreen findings on cadlab's re-exports fell to the originals'
+(`glasgow-revD1`: 199, 199 and 98 of `silk_overlap`, `silk_over_copper` and `silk_edge_clearance` before, 2, 5
+and 77 now; `cynthion`: 199, 199 and 9 before, none now). On `tinytapeout-demo`'s re-export KiCad's report
+stops at 199 `silk_overlap` findings, so 23 of cadlab's 109 cannot be checked there.
 
 **Known issues** (recorded per board in the manifest; candidates for later work):
 
@@ -316,14 +338,27 @@ has 23 entries (209 findings at most) and 18 Gerber layers, and no pour-connecti
   `POWER SW`, are renamed when the circuit comes from the board, D56);
 - per-layer thermal and zone settings of pad stacks take the pad's (D48);
 - footprint drawings that are neither copper, mask, paste nor courtyard on the other side of the footprint
-  (silkscreen, fab), and the drawings of footprints that become board holes, are not kept;
+  (silkscreen, fab) are not kept, nor the drawings of footprints that become board holes, except the
+  silkscreen of board-only hole footprints on their own side, kept as board graphics (D83; `sweep-v2.2`'s
+  hole footprints also draw on the back silkscreen: two KiCad findings);
 - custom DRC rules cadlab has no counterpart for (`hasComponentClass`, terms relating both items such as
   `A.Net == B.Net`, disallowed `text`/`hole`/`footprint`, track widths conditioned on `B`) and DRC
   exclusions stored in the project (layer-marker texts outside the outline, overlapping PMOD headers);
   `disallow`, conditions on `B` (a second scope, clearances) and rule severities are modeled since D46;
-- texts on copper layers are drawn in cadlab's stroke font (Hershey simplex, public domain), whose glyphs
-  differ from KiCad's own font (Gerber copper layers, copper-to-edge near the edge); KiCad's glyph data
-  exists only in its sources, so it is not matched (D56);
+- texts are drawn in cadlab's stroke font (Hershey simplex, public domain), where KiCad draws them: its
+  placement conventions are measured and converted (D83), its glyph data exists only in its sources and is
+  not matched (D56). Measured (`tests/kicad_silk_oracle.rs`): letters and digits advance by the same widths,
+  most of KiCad's capitals end 1/21 of the character width inside cadlab's on each side, and `1`, `l`, `i`,
+  `I` and most punctuation differ more. What it costs: `cynthion`'s layer numbers `1` and `4` on two copper
+  layers (the other four now match), and on the silkscreen a text that one font draws just clear of a line
+  and the other on it: 1 pair on `buspirate5-rev10` (KiCad only), 4 on `nrfmicro`'s re-export and 12 on
+  `glasgow-revC3` (cadlab only; the manifest's entries with `text_within`, at most 0.05 mm);
+- silkscreen circles: KiCad's silkscreen checks take a circle at its radius, without its stroke, so a
+  0.12 mm test point circle is 0.06 mm smaller for it than it prints (probed, D83); cadlab measures the ink
+  (`glasgow-revC3` TP3, `glasgow-revD1` TP21);
+- the Margin layer: KiCad takes drawings on it as board edges, for silkscreen as for copper; cadlab's board
+  edge is Edge.Cuts (`nrfmicro`: the pin labels of the module across the Margin line, 14 findings on the
+  original and 27 on the re-export, where they are drawings);
 - silkscreen over solder mask openings (D46, D51): KiCad's check grows pads by pad and footprint mask
   margins but not by the board-level expansion (`pad_to_mask_clearance`), which the fab applies and cadlab
   checks (`corne-cherry` 0.2 mm: 118 findings on the re-export; `cynthion` 0.05 mm); KiCad also does not
@@ -433,16 +468,22 @@ wrong pin or two nets drawn touching fails it. The M4 board is `examples/demo-bo
 keeps the export and KiCad's report in `$CARGO_TARGET_TMPDIR/demo_board/`, and compares with the cross-check's
 matching and allowances (above, "Cross-checks") except those for dangling tracks and vias.
 
-## Silkscreen (D82)
+## Silkscreen (D82, D83)
 
 `tests/silk.rs` covers the two rules and the designators: a designator across the edge, 0.125 mm from it, over a
 cutout, a footprint's drawing at the edge, zero rules (crossing and overlapping only), waivers; a designator on
-another footprint's drawing, on another designator, on board drawings and texts, never on its own footprint's
-drawing; `silk.arrange` (what moves, the same result from scratch and again, texts set by hand untouched,
-`place.move` taking the text along, `place.rotate` dropping an arranged position); a board without room (hidden,
-`silk.hidden`, no strokes in the legend, `(hide yes)` in the KiCad export); and the outputs: the Gerber legends,
-IPC-2581, both realistic renders and the KiCad export follow a designator moved, turned and resized by hand, the
-top legend starts a stroke where `board::silk::ref_text` says, and the export imports back to the same texts.
+another footprint's drawing and on its own, on another designator, on board drawings and texts; drawings of
+different owners (a board line through a footprint's outline and 0.1 mm from it, two footprints' drawings on each
+other, never two board lines, nothing across sides); what lies wholly beyond the board edge (a drawing and a board
+text unreported, a designator `off the board`); board texts drawn as their style says (anchor, lines, character
+width, stroke, slant, mirroring, knockout) and written so to KiCad and read back; `silk.arrange` (what moves, the
+same result from scratch and again, texts set by hand untouched, `place.move` taking the text along,
+`place.rotate` dropping an arranged position); a board without room (hidden, `silk.hidden`, no strokes in the
+legend, `(hide yes)` in the KiCad export); and the outputs: the Gerber legends, IPC-2581, both realistic renders
+and the KiCad export follow a designator moved, turned and resized by hand, the top legend starts a stroke where
+`board::silk::ref_text` says, and the export imports back to the same texts. The importer's unit tests
+(`kicad_import::tests::texts_as_drawn`) cover a board text's style, a footprint text becoming a drawing where
+KiCad prints it, and a mouse bite's silkscreen line kept as a board graphic.
 
 `tests/common/mod.rs` `silk::assert_legible` is the check KiCad's `silk_edge_clearance` and `silk_overlap` make,
 without KiCad: every printed designator, as the box reserved for it (wider than cadlab's own strokes), stays
@@ -453,24 +494,38 @@ opening; and cadlab's DRC reports no `drc.silk_edge` or `drc.silk_overlap`. It r
 and writes `$CARGO_TARGET_TMPDIR/demo_board/top.png` to look at) and on the boards of agent sessions 1, 3, 5 and
 6 after their `place auto`, where no designator is hidden either.
 
-What this rests on, and what it does not show. CI's first KiCad DRC of the demo board (2026-11-13, KiCad 10,
-before D82) reported the designators of J1 and J3 across the edge and designators over other silkscreen: C3/C2
-0.10 mm apart, C6/C4, R3/R5, U2 on Y1's drawing, D1, R1 and R2 on J1's, C1 on U1's. cadlab's new rules, run on
-that same placement with the designators back above their courtyards, report the same ones (C2/C3 at 0.1 mm,
-R3/R5 at 0.1 mm, the others overlapping) and two that the summary of that run at hand does not name (D2 on R6,
-C5 0.14 mm from U1's drawing): consistent with KiCad measuring strokes of the same height and thickness, no
-more than that. KiCad's glyph widths are not known here (its font data
-is only in its sources, D56), which is why the box reserved for a text is at least one cap height per character
-wide and the first two rounds add 0.1 mm. **Not run:** `kicad-cli` is not installed where D82 was written, so
-`kicad_drc_clean_demo_board`, `tests/drc_crosscheck.rs` and the corpus were not run with the new rules. Known
-to need a look on their next CI run: the cross-check no longer allows KiCad's `silk_overlap` one-sidedly, so any
-designator pair the two tools judge differently by font width fails it (on its boards cadlab reports one
-`drc.silk_overlap`, the designators of C2 and C3 printed on each other on `courtyard_overlap` and
-`courtyard_touch`, and nothing at an edge); on the corpus, the import now takes
-each `Reference` field's position, so KiCad's findings on designators should pair with cadlab's, while KiCad's
-findings on texts cadlab does not import (`Value` fields and user texts on silkscreen layers) and on drawings
-of one footprint over another's have no counterpart and no allowance yet, and the manifest's `known` counts
-were not re-measured.
+**Against KiCad** (`tests/kicad_silk_oracle.rs`, in CI's `oracles` job; D83). What KiCad does with silkscreen was
+measured with `kicad-cli`, on two probe boards written for the purpose, and both tests fail when a measurement
+changes:
+
+- `kicad_text_geometry`: 294 probe texts on a grid (board texts and footprint texts; every justification, lines,
+  heights 1 to 3 mm, widths, strokes, bold, italic, angles, both sides, mirrored or not, knockouts, footprints
+  turned and flipped, `unlocked`; then each printable ASCII character alone and between two bars) are plotted by
+  `kicad-cli pcb export gerbers`; the strokes of each grid cell are read back from the Gerber file (positions
+  calibrated on a line of known ends) and their extent around the text's anchor is compared with the extent of
+  what cadlab draws after importing the same file. The 93 convention probes must agree within 1 µm vertically
+  (they do within 3 nm; knockout boxes within 6 µm, KiCad building them around a polygon of the strokes) and
+  one font unit (0.05 of the character size) more in all, and in stroke width exactly: where the anchor
+  is for each justification, the cap height, the line pitch, the slant, the widest stroke, mirroring, the
+  knockout box, where a footprint's text goes when the footprint is turned or on the bottom. The table of both
+  tools' extents is kept in `$CARGO_TARGET_TMPDIR/kicad_text/table.txt` (CI's `oracle-outputs` artifact); the
+  glyph probes are in it for the record (advance widths equal for letters and digits; KiCad's `1`, `l`, `i`,
+  `I` and most punctuation differ), and whole strings must come out within a tenth of each other's width.
+- `kicad_silk_rules`: 112 probe cells, each run through both DRCs at silkscreen clearances of 0 and 0.15 mm: a
+  board line against a footprint's line, circle (outline and filled) and polygon at gaps from −50 µm to
+  +200 µm; which pairs are checked at all (two board lines, two lines of one footprint, of two footprints,
+  across sides, a designator on its own footprint's line, on a board line, on another footprint's line, hidden,
+  footprint texts, board texts); a Margin line; the board edge from inside, from outside, across, far beyond.
+  The two tools must give the same answer in every cell but 25, each for one of five known reasons the test
+  names and requires to still hold: KiCad takes a circle at its radius without its stroke (18 cells, and
+  KiCad's answers must be exactly those of a drawing half the stroke farther away); cadlab's 2 µm tolerance
+  (3); a footprint's texts being drawings of the footprint in cadlab (2); KiCad taking Margin drawings as
+  edges (1); cadlab reporting a designator wholly off the board (1). `rule_probe_board_imports` and
+  `probe_board_imports` run cadlab's side of both without KiCad.
+
+The demo board's KiCad DRC (`kicad_drc_clean_demo_board`) and the cross-check boards (`tests/drc_crosscheck.rs`)
+pass with both rules compared and nothing allowed for them. On the corpus the two DRCs agree on silkscreen except
+for the font, the circle strokes and the Margin layer, each counted per board (above, "Open-source corpus").
 
 ## Agent sessions
 

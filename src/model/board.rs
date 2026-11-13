@@ -563,6 +563,9 @@ pub struct RefText {
     /// Cap height (unset: 1 mm).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<Nm>,
+    /// Stroke width (unset: 15 % of the cap height, at least the minimum silkscreen width).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<Nm>,
     /// Not printed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
@@ -838,7 +841,83 @@ pub enum GraphicKind {
         /// Rotation.
         #[serde(default)]
         rotation: Angle,
+        /// How it is drawn when not the default: centered on `at`, characters as wide as the
+        /// font draws them at that height, stroke an eighth of the height.
+        #[serde(default, skip_serializing_if = "TextStyle::is_default")]
+        style: TextStyle,
     },
+}
+
+/// Horizontal position of a text relative to its anchor, in reading direction, line by line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAlign {
+    /// The first character starts at the anchor.
+    Left,
+    /// Centered on the anchor.
+    #[default]
+    Center,
+    /// The last character ends at the anchor.
+    Right,
+}
+
+/// Vertical position of a text relative to its anchor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TextVAlign {
+    /// The capitals of the first line end at the anchor.
+    Top,
+    /// The anchor is halfway between the top of the first line's capitals and the last
+    /// line's baseline.
+    #[default]
+    Middle,
+    /// The baseline of the last line is on the anchor.
+    Bottom,
+}
+
+/// How a board text is drawn, where it differs from the default. A text may have several
+/// lines (`\n`). Every output draws it through `board::text_ink`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TextStyle {
+    /// Width the characters are scaled to, as a nominal character width (unset: the height, the
+    /// font's own proportions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<Nm>,
+    /// Stroke width (unset: an eighth of the height, at least the minimum silkscreen width).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<Nm>,
+    /// Horizontal position relative to the anchor.
+    #[serde(default, skip_serializing_if = "is_default_align")]
+    pub align: TextAlign,
+    /// Vertical position relative to the anchor.
+    #[serde(default, skip_serializing_if = "is_default_valign")]
+    pub valign: TextVAlign,
+    /// Slanted.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub italic: bool,
+    /// Mirrored or not, when not what the layer's side says (bottom layers are mirrored, so
+    /// the text reads from the bottom).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<bool>,
+    /// Knocked out: a filled box around the text with the text left open.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub knockout: bool,
+}
+
+impl TextStyle {
+    /// Whether nothing is set.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn is_default_align(a: &TextAlign) -> bool {
+    *a == TextAlign::Center
+}
+
+fn is_default_valign(a: &TextVAlign) -> bool {
+    *a == TextVAlign::Middle
 }
 
 /// The board (`board.json`).

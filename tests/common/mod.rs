@@ -217,9 +217,9 @@ pub mod silk {
         // Each text as the box reserved for it.
         let boxes: Vec<PolygonSet> = texts
             .iter()
-            .map(|s| {
-                let (text, t) = s.text.as_ref().expect("a text");
-                vec![text_box(text, t.at, t.size, t.width, t.rotation)]
+            .map(|s| match s.footprint.as_deref().and_then(|r| Some((r, ref_text(p, r)?))) {
+                Some((r, t)) => vec![text_box(r, t.at, t.size, t.width, t.rotation)],
+                None => s.text.as_ref().expect("a text").outline_box(),
             })
             .collect();
         let pads = cadlab::board::placed_pads(p);
