@@ -233,13 +233,7 @@ struct Pose {
 
 impl Pose {
     fn placed(&self) -> PlacedFootprint {
-        PlacedFootprint {
-            at: self.at,
-            rotation: Angle(self.rot as i32 * 90_000),
-            side: self.side,
-            locked: false,
-            footprint: None,
-        }
+        PlacedFootprint::new(self.at, Angle(self.rot as i32 * 90_000), self.side)
     }
 }
 

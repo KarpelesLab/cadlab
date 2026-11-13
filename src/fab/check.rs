@@ -444,6 +444,28 @@ impl Ctx<'_> {
                 out.push(d);
             }
         }
+        // Reference designators given a height of their own (`silk.set --size`, an import):
+        // one finding per height, naming the components.
+        if let Some(m) = q.min_silk_height {
+            let mut by_size: std::collections::BTreeMap<Nm, Vec<String>> = Default::default();
+            for (r, pf) in &board.footprints {
+                if let Some(t) = pf.ref_text.as_ref().filter(|t| !t.hidden)
+                    && let Some(size) = t.size.filter(|s| *s < m)
+                {
+                    by_size.entry(size).or_default().push(r.clone());
+                }
+            }
+            for (size, mut refs) in by_size {
+                refs.sort_by(|a, b| natural_cmp(a, b));
+                let mut d = Diagnostic::warning(
+                    "fab.silk_height",
+                    format!("the reference designator of {} is {size} high, {who}'s minimum is {m}", refs.join(", ")),
+                )
+                .with_hint("print it larger (`silk.set <refdes> --size ...`) or leave it out (`--hidden`)");
+                d.subjects = refs.into_iter().map(ObjectRef::Name).collect();
+                out.push(d);
+            }
+        }
         for g in board.graphics.iter().filter(|g| g.layer.ends_with(".SilkS")) {
             let subject = ObjectRef::Item { kind: "graphic".into(), index: g.id.0 };
             match &g.kind {

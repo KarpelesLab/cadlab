@@ -395,6 +395,14 @@ pub struct SetRules {
     /// Minimum silk width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_silk_width: Option<Nm>,
+    /// Minimum silkscreen-to-board-edge distance, outline and cutouts (default 0.15mm; 0:
+    /// silkscreen may reach the edge, not cross it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silk_to_edge: Option<Nm>,
+    /// Minimum distance between a silkscreen text and the silkscreen of another footprint or of
+    /// the board (default 0.15mm; 0: they may touch, not overlap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silk_clearance: Option<Nm>,
     /// Minimum zone width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone_min_width: Option<Nm>,
@@ -551,6 +559,8 @@ impl Command for SetRules {
             ("min_clearance", self.min_clearance),
             ("mask_min_web", self.mask_min_web),
             ("hole_clearance", self.hole_clearance),
+            ("silk_to_edge", self.silk_to_edge),
+            ("silk_clearance", self.silk_clearance),
         ] {
             if v.is_some_and(|v| v < Nm::ZERO) {
                 return Err(CommandError::invalid_args("board.invalid_rule", format!("`{field}` cannot be negative")));
@@ -565,6 +575,8 @@ impl Command for SetRules {
         }
         r.min_clearance = self.min_clearance.unwrap_or(r.min_clearance);
         r.hole_clearance = self.hole_clearance.unwrap_or(r.hole_clearance);
+        r.silk_to_edge = self.silk_to_edge.unwrap_or(r.silk_to_edge);
+        r.silk_clearance = self.silk_clearance.unwrap_or(r.silk_clearance);
         r.mask_expansion = self.mask_expansion.unwrap_or(r.mask_expansion);
         r.mask_min_web = self.mask_min_web.unwrap_or(r.mask_min_web);
         r.paste_margin = self.paste_margin.unwrap_or(r.paste_margin);
@@ -584,6 +596,8 @@ impl Command for SetRules {
         for (field, a, b) in [
             ("min_clearance", before.min_clearance, r.min_clearance),
             ("hole_clearance", before.hole_clearance, r.hole_clearance),
+            ("silk_to_edge", before.silk_to_edge, r.silk_to_edge),
+            ("silk_clearance", before.silk_clearance, r.silk_clearance),
             ("mask_expansion", before.mask_expansion, r.mask_expansion),
             ("mask_min_web", before.mask_min_web, r.mask_min_web),
             ("paste_margin", before.paste_margin, r.paste_margin),
@@ -1141,19 +1155,17 @@ impl Command for PlaceSet {
         if existing.as_ref().is_some_and(|f| f.locked) {
             return Err(CommandError::conflict("place.locked", format!("{r} is locked")));
         }
-        let mut fp = existing.clone().unwrap_or(PlacedFootprint {
-            at: self.at,
-            rotation: Angle::ZERO,
-            side: BoardSide::Top,
-            locked: false,
-            footprint: None,
-        });
+        let mut fp = existing.clone().unwrap_or(PlacedFootprint::new(self.at, Angle::ZERO, BoardSide::Top));
         fp.at = self.at;
         if let Some(a) = self.rotation {
             fp.rotation = a.normalized();
         }
         if let Some(s) = self.side {
             fp.side = s;
+        }
+        if existing.as_ref().is_some_and(|e| e.rotation != fp.rotation || e.side != fp.side) {
+            // An arranged designator was chosen for the other orientation.
+            fp.reset_arranged_text();
         }
         let moved = existing.as_ref().is_some_and(|e| e.at != fp.at || e.rotation != fp.rotation || e.side != fp.side);
         p.board_mut().footprints.insert(r.clone(), fp.clone());
@@ -1243,7 +1255,11 @@ impl Command for PlaceRotate {
         let mut out = BTreeMap::new();
         for r in keys.iter().cloned() {
             let fp = unlocked(ctx.project_mut()?, &r)?;
-            fp.rotation = (fp.rotation + self.by).normalized();
+            let turned = (fp.rotation + self.by).normalized();
+            if turned != fp.rotation {
+                fp.reset_arranged_text();
+            }
+            fp.rotation = turned;
             out.insert(r, fp.clone());
         }
         routing_left_behind(ctx, &keys, before, self.rip)?;
@@ -1283,6 +1299,7 @@ impl Command for PlaceFlip {
         for r in keys.iter().cloned() {
             let fp = unlocked(ctx.project_mut()?, &r)?;
             fp.side = if fp.side == BoardSide::Top { BoardSide::Bottom } else { BoardSide::Top };
+            fp.reset_arranged_text();
             out.insert(r, fp.clone());
         }
         routing_left_behind(ctx, &keys, before, self.rip)?;
@@ -1753,8 +1770,19 @@ impl Command for PlaceAuto {
         for (r, fp) in out.iter_mut() {
             if let Some(o) = old.get(r) {
                 fp.footprint = o.footprint.clone();
+                // A designator set by hand keeps its offset from the part.
+                fp.ref_text = o.ref_text.clone().filter(|t| t.manual);
             }
             pm.board_mut().footprints.insert(r.clone(), fp.clone());
+        }
+        // Reference designators: every text not set by hand gets a free position around its
+        // part, now that the parts are where they are (`silk.arrange`).
+        super::silk::arrange_texts(ctx, None)?;
+        let board = ctx.project()?.board();
+        for (r, fp) in out.iter_mut() {
+            if let Some(now) = board.footprints.get(r) {
+                fp.ref_text = now.ref_text.clone();
+            }
         }
         if !outside.is_empty() {
             ctx.report(
@@ -1824,7 +1852,7 @@ fn rows(p: &Project, moving: &[String], gap: i64) -> (BTreeMap<String, PlacedFoo
         }
         // Origin so that the courtyard's top-left lands at (x, y).
         let at = Point::new(Nm(snap(x - b.min.x.0)), Nm(snap(y - b.max.y.0)));
-        let fp = PlacedFootprint { at, rotation: Angle::ZERO, side: BoardSide::Top, locked: false, footprint: None };
+        let fp = PlacedFootprint::new(at, Angle::ZERO, BoardSide::Top);
         out.insert(r, fp);
         x += w + gap;
         row_h = row_h.max(h);

@@ -17,7 +17,7 @@ use super::{Ctx, K, Notes, at_of, child_xy, layer_of, mm, pts_of, width_of, yes}
 use crate::board::arc_points;
 use crate::diag::Diagnostic;
 use crate::geom::{BBox, Point};
-use crate::model::board::{BoardSide, PadConnection, PlacedFootprint};
+use crate::model::board::{BoardSide, PadConnection, PlacedFootprint, RefText};
 use crate::model::footprint::{
     Corner, Footprint, Graphic, GraphicGeometry, GraphicLayer, MaskOpening, Mount, Overrides, Pad, PadKind, PadShape,
     PadStack, Paste,
@@ -176,6 +176,32 @@ impl Local {
     }
 }
 
+/// The Reference field (`(property "Reference" ...)` or `(fp_text reference ...)`) as the
+/// placement's reference designator text: where the board's designer put it (KiCad writes the
+/// position in the footprint's frame and the angle on the board), its height, and hidden when
+/// the field is hidden or not on the silkscreen of the footprint's side. Set by hand as far as
+/// cadlab is concerned: `silk.arrange` leaves it. `None` without a position.
+fn reference_text(c: &Sexpr, side: BoardSide, orient: Angle) -> Option<RefText> {
+    let ((x, y), angle) = at_of(c)?;
+    let effects = c.get("effects");
+    let hidden = yes(c, "hide")
+        || effects.is_some_and(|ef| yes(ef, "hide"))
+        || !matches!(fp_layer(layer_of(c).unwrap_or(""), side), Some((GraphicLayer::Silk, false)));
+    let size = effects
+        .and_then(|ef| ef.get("font"))
+        .and_then(|f| f.get("size"))
+        .and_then(|s| s.value())
+        .and_then(mm)
+        .filter(|s| s.0 > 0 && *s != crate::board::silk::REF_SIZE);
+    Some(RefText {
+        offset: Some(Point::new(x, -y).rotated(orient)),
+        rotation: angle.normalized(),
+        size,
+        hidden,
+        manual: true,
+    })
+}
+
 /// Converts a `(footprint ...)` element of a board. Returns `None` (with a diagnostic) when it
 /// has no position.
 pub(super) fn convert(e: &Sexpr, ctx: &Ctx, notes: &mut Notes) -> Option<Converted> {
@@ -240,6 +266,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
     let mut refdes = String::new();
     let mut value = String::new();
     let mut props = BTreeMap::new();
+    let mut ref_text = None;
     for c in e.items() {
         match c.head() {
             Some("property") => {
@@ -250,7 +277,10 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                     uuids.push((u.to_string(), format!("prop:{k}")));
                 }
                 match k {
-                    "Reference" => refdes = v,
+                    "Reference" => {
+                        refdes = v;
+                        ref_text = reference_text(c, side, orient);
+                    }
                     "Value" => value = v,
                     "Footprint" => {}
                     _ => {
@@ -263,14 +293,20 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
                 let kind = it.get(1).and_then(Sexpr::atom).unwrap_or("");
                 let text = it.get(2).and_then(Sexpr::atom).unwrap_or("").to_string();
                 match kind {
-                    "reference" => refdes = text,
+                    "reference" => {
+                        refdes = text;
+                        ref_text = reference_text(c, side, orient);
+                        if let Some(u) = c.child_value("uuid").or(c.child_value("tstamp")) {
+                            uuids.push((u.to_string(), "prop:Reference".to_string()));
+                        }
+                    }
                     "value" => value = text,
                     _ => notes.agg(
                         "import.footprint_text",
                         "fp_text",
                         Diagnostic::info(
                             "import.footprint_text",
-                            "footprint user texts are not imported (cadlab footprints have no texts; designators are placed by the legend writer)",
+                            "footprint user texts are not imported (cadlab footprints have no texts of their own; the reference designator keeps its place)",
                         )
                         .with_hint("add board texts on the silkscreen if they matter for manufacturing"),
                     ),
@@ -564,7 +600,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         refdes,
         value,
         lib_id,
-        placement: PlacedFootprint { at, rotation, side, locked, footprint: None },
+        placement: PlacedFootprint { at, rotation, side, locked, footprint: None, ref_text },
         fp,
         props,
         attrs,

@@ -199,6 +199,7 @@ impl Lit<'_> {
 
 /// A placed footprint with its geometry, in board coordinates.
 struct Placed<'a> {
+    p: &'a Project,
     refdes: &'a str,
     pf: &'a PlacedFootprint,
     fp: &'a Footprint,
@@ -208,7 +209,7 @@ fn placed(p: &Project) -> Vec<Placed<'_>> {
     p.board()
         .footprints
         .iter()
-        .filter_map(|(r, pf)| Some(Placed { refdes: r, pf, fp: geo::footprint_for(p, r)? }))
+        .filter_map(|(r, pf)| Some(Placed { p, refdes: r, pf, fp: geo::footprint_for(p, r)? }))
         .collect()
 }
 
@@ -313,21 +314,15 @@ fn footprint_graphics(s: &mut Scene, pl: &Placed<'_>, layer: &str, color: Color)
     }
 }
 
-/// The designator at the footprint origin, sized to fit the courtyard, mirrored on the bottom.
+/// The designator as the legend prints it ([`geo::silk::ref_text`]: the same position, rotation
+/// and size as the Gerber silkscreen and the KiCad export); nothing when it is hidden.
 fn refdes_text(s: &mut Scene, pl: &Placed<'_>, color: Color) {
-    let tf = geo::transform(pl.pf);
-    let pts: Vec<(f64, f64)> = if pl.fp.courtyard.is_empty() {
-        pl.fp.pads.iter().map(|pd| mp(tf(pd.at))).collect()
-    } else {
-        pl.fp.courtyard.iter().map(|&q| mp(tf(q))).collect()
-    };
-    let (w, h) = bbox(pts.into_iter()).map_or((2.0, 1.0), |b| (b.2 - b.0, b.3 - b.1));
-    let vertical = h > w * 1.15;
-    let (along, across) = if vertical { (h, w) } else { (w, h) };
-    let per_unit = font::width(pl.refdes, 1.0).max(0.5);
-    let size = (along * 0.6 / per_unit).min(across * 0.33).clamp(0.3, 1.5);
-    let mirror = pl.pf.side == BoardSide::Bottom;
-    text(s, pl.refdes, mp(pl.pf.at), size, u8::from(vertical), mirror, size * 0.15, color);
+    let Some(t) = geo::silk::ref_text(pl.p, pl.refdes) else { return };
+    for stroke in t.paths(pl.refdes) {
+        if stroke.len() >= 2 {
+            s.line(stroke.into_iter().map(mp).collect(), mm(t.width), color);
+        }
+    }
 }
 
 /// Board graphics (lines, texts) on a layer.

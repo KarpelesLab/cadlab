@@ -110,7 +110,6 @@ fn manifest() -> Manifest {
 /// Rules only one tool has (cadlab checks a subset of KiCad's rules and has a few of its own,
 /// docs/BOARD.md): reported by that tool only, on any board.
 const ONE_SIDED_RULES: &[(Side, &str, &str)] = &[
-    (Side::Kicad, "silk_edge_clearance", "cadlab has no silkscreen-to-board-edge rule"),
     (
         Side::Kicad,
         "text_height",

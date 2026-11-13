@@ -24,9 +24,12 @@ Board
 │                 board spec preferences (finish, mask/silk colors) — requirements, not a fab choice (D12)
 ├── outline       closed contours of line/arc segments: the first is the outer edge, others are cutouts
 ├── rules         design rules (engineering intent): clearance, track width, via drill/diameter, min annular
-│                 ring, min drill, hole-to-hole, copper-to-edge, silk-to-pad, zone min width; net classes override
-│                 per net (from the circuit)
-├── footprints    by refdes: position, rotation, side, locked; footprint name defaults to the part's
+│                 ring, min drill, hole-to-hole, copper-to-edge, silk-to-pad, silk-to-edge, silk clearance,
+│                 zone min width; net classes override per net (from the circuit)
+├── footprints    by refdes: position, rotation, side, locked; footprint name defaults to the part's;
+│                 `ref_text`: where the reference designator is printed when not above the courtyard
+│                 (offset from the origin, rotation, height, hidden, set by hand or arranged; see
+│                 "Silkscreen and reference designators")
 ├── tracks        segments (and arcs): layer, width, net, start, end, optional arc midpoint
 ├── vias          position, drill, diameter, net, layer span (through by default)
 ├── zones         polygon, layer(s), net, priority, clearance, min width, thermal relief settings
@@ -217,12 +220,63 @@ the copper (KiCad's silkscreen check, too, reports overlaps of openings only; D5
 pad copper alone (cadlab's behavior before D46, and what the minimum web merging of mask openings does not
 change).
 
+## Silkscreen and reference designators (D82, `src/board/silk.rs`)
+
+A reference designator is not a drawing of the footprint: it is generated, one per placed footprint, on the
+silkscreen of the footprint's side (mirrored on the bottom), in the stroke font every output shares. Where
+it is printed is the placement's `ref_text`, read by every output through `board::silk::ref_text`: the
+Gerber legend, IPC-2581, the 2D renders and the board faces of the 3D render, and the KiCad export (its
+`Reference` field: position, angle, height, stroke, hidden). So they all show the same legend.
+
+| `ref_text` field | Meaning | Default |
+|---|---|---|
+| `offset` | text center relative to the footprint origin, in board axes: the text follows the part when it moves and does not turn with it | centered above the courtyard's bounding box, 0.3 mm from it |
+| `rotation` | counter-clockwise, as seen from the top (0 reads left to right, 90 bottom to top) | 0 |
+| `size` | cap height; the stroke is 15 % of it, at least `min_silk_width` | 1 mm |
+| `hidden` | not printed | printed |
+| `manual` | set by hand (`silk.set`) or imported: `silk.arrange` and `place.auto` never move or hide it | arranged |
+
+**Two rules** in `board.rules`, both 0.15 mm by default and both warnings (the board works; the legend is
+cut or unreadable): `silk_to_edge`, from any silkscreen to the outline and to cutouts (`drc.silk_edge`: the
+fab cuts off what crosses an edge), and `silk_clearance`, from a silkscreen text (a reference designator or
+a board text) to the silkscreen of another owner: the drawings and designator of other footprints, board
+drawings and texts (`drc.silk_overlap`). A footprint's designator against its own drawings is not reported,
+and drawings are not checked against each other. Zero is a value, as for `silk_to_pad`: silkscreen may then
+reach the edge or touch, and only crossing and overlapping are reported (what KiCad reports with a zero
+silkscreen clearance). Texts are measured as printed, stroke by stroke. Fab profiles carry neither value
+(none was found on a fab's own page), so `board.rules --fab` leaves them alone and `fab.check` does not
+check them; a designator given a height below the fab's `min_silk_height` is a `fab.silk_height` warning.
+The 2D layer views used to draw each designator on the footprint origin, sized to the part; they now show
+it where it is printed.
+
+**Arranging** (`silk.arrange`, and `place.auto` after placing). Every designator not set by hand is given a
+position around its footprint, tried in a fixed order: at 0.3 mm from the courtyard, then 0.25 mm farther
+four times, each time above, below, left and right upright, then left and right turned a quarter (reading
+from the right of the board), each centered on its side and then slid along it in 0.25 mm steps either way
+while the text still reaches over the side; then inside the courtyard (the middle, then towards each side),
+for parts large enough. A position is free when the text's box (as high as the capitals, as wide as the
+text in cadlab's font or one cap height per character, whichever is wider, plus the stroke: other tools
+draw the same text in their own stroke font) is on the board at least `silk_to_edge` from every edge,
+`silk_to_pad` from every solder mask opening of its side, `silk_clearance` from every other silkscreen
+drawing and text (its own footprint's drawings included), on no other part's courtyard, and no nearer to
+another part's courtyard than to its own (a designator next to another part reads as that part's). Both
+clearances count as at least 0.15 mm, plus a 0.1 mm margin. Texts with the fewest free positions choose
+first (ties in natural designator order); a text whose free positions are all taken may send the single
+text in its way to another of that text's positions. Texts left without a position get a second round
+without the margin, then a third in which they may also stand beside or beyond another part, up to 3.3 mm
+from their own courtyard. A text still without a position is hidden, with one `silk.hidden` warning naming
+them all: nothing is ever printed clipped. The result depends on nothing but the board (arranging twice
+changes nothing), and it is stored: `place.set` and `place.move` take the text along, `place.rotate`,
+`place.flip` and a `place.set` that turns the part drop an arranged position (the text returns above the
+courtyard; `drc.run` says when that is clipped or overlapping, and names `silk.arrange`).
+
 ## Commands
 
 | Group | Commands |
 |---|---|
-| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `hole_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
-| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`, `along_edges`; reports `ratsnest_length` and `board_use`), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
+| `board` | `import_kicad` (a `.kicad_pcb` with its `.kicad_pro`/`.kicad_dru` rules, see "KiCad import"), `import_kicad_rules` (rules and net classes alone), `export_kicad`, `setup` (layers, thickness, preferences), `outline` (rect, polygon, circle, rounded rect), `rules` (show; `preset` ipc2/ipc3, `fab` + `process` + `margin` to derive from a fab profile, then field by field, also `min_clearance`, `hole_clearance`, `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio`, `silk_check`, `silk_to_edge`, `silk_clearance`; see "Design rules"), `custom_rule` / `custom_rule_remove` / `custom_rules` (scoped clearance, track width, pair scopes, disallowed kinds and severity, see "Local settings, net ties and custom rules"), `info`, `ratsnest`, `hole` (mounting hole: drill, optional plated `pad` and `net`, name H1...), `hole_remove`, `cutout` (rect, circle or polygon inside the outline), `cutout_remove` (by number), `sync` (add footprints for new components, drop removed ones) |
+| `place` | `set` (at, rotation, side), `move` (relative), `rotate`, `flip`, `lock`, `remove`, `list`, `hint` (per-designator `edge`: `any`, `left`, `right`, `top`, `bottom`; `clear`; persisted in `board.json` `placement_hints`), `auto` (strategy `groups` (default) or `rows`; `spacing`, `replace`, `compact`, `density`, `along_edges`; reports `ratsnest_length` and `board_use`; arranges the reference designators as `silk.arrange` does), `near` (next to a pin `U1.VDD` or a part; `side`, `distance`), `align` (X or Y of origins to first/center/min/max/value), `distribute` (equal or given gaps between courtyards) |
+| `silk` | `arrange` (move the reference designators not set by hand to free positions, all or the given `refdes`; reports what moved and what had to be hidden), `set` (one designator by hand: `at` on the board, `rotation`, `size`, `hidden`; never moved afterwards), `reset` (hand designators back: above the courtyard, arranged again by the next `arrange`), `list` (every designator as printed: position, rotation, size, layer, hidden, `default` / `arranged` / `manual`); see "Silkscreen and reference designators" |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
@@ -269,6 +323,7 @@ nets, warns about tracks and vias smaller than their class asks (`drc.track_widt
 | minimum drill | 0.30 mm | 0.30 mm |
 | hole to hole, copper to edge | 0.50, 0.30 mm | 0.50, 0.30 mm |
 | silk to pad, silk width, zone minimum width | 0.15, 0.15, 0.20 mm | 0.15, 0.15, 0.20 mm |
+| silk to edge, silk clearance (cadlab's own choice: KiCad's default silkscreen clearance) | 0.15, 0.15 mm | 0.15, 0.15 mm |
 | `ipc_class` | 2 | 3 |
 
 Sources and status. The preset values and the IPC numbers behind them live in `rule-presets/ipc.toml`
@@ -313,7 +368,8 @@ these presets.
 | `via_drill` | `min_drill` | = `min_drill` | max(`min_drill`, 0.30 mm) |
 | `via_diameter` | `min_via_ring` | drill + 2 × ring | max(drill + 2 × ring, 0.60 mm) |
 
-Fields the profile leaves out keep their value; `ipc_class` is kept. The pad annular ring (`min_pth_ring`) and
+Fields the profile leaves out keep their value; `ipc_class` is kept, and so are `silk_to_edge` and
+`silk_clearance`, which no profile carries (D82). The pad annular ring (`min_pth_ring`) and
 the pad hole-to-hole distance stay `fab.check` checks: cadlab's rules have one annular ring for vias and pads.
 For JLCPCB's two-layer process, `tightest` gives 0.10 mm track/space and 0.15 / 0.25 mm vias, `comfortable`
 0.13 mm track/space minimums with 0.25 mm tracks and 0.3 / 0.6 mm vias.
@@ -346,6 +402,7 @@ the library stay).
 | mask-only apertures | mask drawings of the footprint |
 | copper, mask and paste drawings of either side (`fp_line`, `fp_poly`, ...) | footprint graphics on those layers (`back` for the other side); filled polygons and rectangles are areas, outlines closed polylines; inner-layer copper is not imported (`import.footprint_layer`) |
 | silkscreen and fab drawings of the footprint's side | footprint graphics (arcs as polylines) |
+| the `Reference` field (`property "Reference"`, KiCad 6/7 `fp_text reference`): position, angle, font height, `hide`, layer | the placement's `ref_text`, set by hand (`silk.arrange` leaves it): offset from the origin, rotation, height when not 1 mm; hidden when the field is hidden or not on the silkscreen of the footprint's side. A field where cadlab prints the designator by default (as in cadlab's own exports of boards never arranged) leaves `ref_text` unset. Other footprint texts (`Value`, user texts) are not imported (`import.footprint_text`) |
 | courtyard drawings (either side) | per side, the closed shapes (polygons, circles as polygons around them, lines forming loops) united; on the footprint's side the largest piece becomes the courtyard, further pieces (a carrier board's two separate outlines) and the other side's (a key switch's body above a socket footprint on the bottom) stay closed courtyard drawings (`back` for the other side), which the courtyard DRC and `intersectsCourtyard` rules (own side) use too; drawings that close no loop: their bounding box; none on either side: 0.25 mm around the pads (`import.courtyard_generated`, listing every footprint) |
 | `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
 | board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one tented plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad, plated ones keeping their net and mask opening (`import.footprint_as_via`, `import.footprint_as_holes`) |
@@ -390,8 +447,10 @@ relating both items (`A.Net == B.Net`), other functions (`hasComponentClass`, ..
 with geometric ones or with a severity, other constraints in scoped rules (`courtyard_clearance`,
 `silk_clearance`, ...), track widths with conditions on `B`, and disallowed types without counterpart
 (`text`, `hole`, `footprint`, `micro_via`, ...). Zero minimums keep cadlab's value (`import.rule_zero`), except `min_silk_clearance`, which
-becomes `silk_to_pad` even at zero (silkscreen may then touch pads but not cover them, as KiCad checks
-it). Rule areas sharing a name (KiCad's `enclosedByArea('X')` then means any of them) get unique names (`X`,
+becomes `silk_to_pad`, `silk_to_edge` and `silk_clearance` even at zero (silkscreen may then touch pads,
+edges and other silkscreen but not cover or cross them, as KiCad checks it; the export writes
+`silk_clearance` back as `min_silk_clearance`, which KiCad applies between silkscreen items and to the
+board edge). Rule areas sharing a name (KiCad's `enclosedByArea('X')` then means any of them) get unique names (`X`,
 `X_2`) and a rule naming one becomes a rule per area, in place. Without a circuit, a designator cadlab
 cannot use but that is annotated (`POWER SW`, not `REF**`) is replaced by its letters and the next free number
 (`POWERSW1`, `import.refdes_renamed`), so its copper and nets stay.
@@ -475,7 +534,8 @@ to a routed board, such as an imported one, land clear of its copper).
    target pin (weighted 4 for decoupling, 2 otherwise) plus the distance of their other pads to the nearest
    placed pin of the same net (ground weighted 0.3). Candidates are tried best first; the first valid one wins.
    When spreading, every part's box covers its courtyard and its silkscreen (pin-1 dots outside the
-   courtyard included), so no silkscreen lands on a neighbour's pads, and passives keep out of each
+   courtyard included; reference designators are arranged after the placement, see "Silkscreen and
+   reference designators"), so no silkscreen lands on a neighbour's pads, and passives keep out of each
    differential pair's breakout: for every part with a pad of each net within 2 mm (an end), the box of the
    two pads grown by 0.5 mm and stretched 2.5 mm away from the part's center (a D+ pull-up at its pin
    blocked the pair's way out). Also when spreading (D53), a rail's first capacitor goes to a regulator's
@@ -613,6 +673,8 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout; the message says how far the courtyard reaches past the outer edge (a connector flush with the edge is a waiver, not a move) |
 | `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's exposed copper on that side, or (`silk_check: mask`) overlapping its solder mask opening (grown by its mask margin; non-plated holes included) |
 | `drc.silk_over_mask_opening` | warning | silkscreen overlapping a mask opening drawn by a footprint or on the board (`silk_check: mask`) |
+| `drc.silk_edge` | warning | silkscreen crossing a board edge (the outline or a cutout), off the board, or closer to an edge than `silk_to_edge` (0: crossing only): a footprint's drawings (one finding per footprint), a board drawing, a reference designator (`text:U1/Reference`) or a board text |
+| `drc.silk_overlap` | warning | a silkscreen text (reference designator, board text) overlapping the silkscreen of another owner or closer to it than `silk_clearance` (0: overlapping only): the drawings or the designator of another footprint, a board drawing or text; never a designator against its own footprint's drawings |
 | `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers); tracks and vias of the keep-out's excepted nets (`allow_nets`) are not reported |
 | `drc.keepout_net` | warning | a keep-out excepts a net that does not exist (the exception does nothing) |
 | `drc.disallowed` | error (rule's severity) | a copper item of a kind a custom rule's `disallow` forbids in its scope |

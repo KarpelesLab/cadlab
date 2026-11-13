@@ -14,13 +14,14 @@ use std::collections::BTreeMap;
 use polyclip::{Circle, EndCap, FillRule, Geometry, Join, Op, Path, Polygon, PolygonSet, Rect, Ring};
 
 use crate::board::prepared::{self, Prepared};
+use crate::board::silk::{Opening, SilkShape, mask_openings, silk_shapes, silk_texts};
 use crate::board::{self as geo, COPPER_TOL, CopperItem};
 use crate::diag::{Diagnostic, Severity};
 use crate::geom::{Point, RTree};
 use crate::model::Project;
-use crate::model::board::{BoardSide, CustomRule, GraphicKind, RuleSeverity, Rules, SilkCheck};
+use crate::model::board::{BoardSide, CustomRule, RuleSeverity, Rules, SilkCheck};
 use crate::model::circuit::NetClass;
-use crate::model::footprint::{GraphicGeometry, GraphicLayer, PadKind};
+use crate::model::footprint::PadKind;
 use crate::model::sections::natural_cmp;
 use crate::refs::ObjectRef;
 use crate::units::Nm;
@@ -62,7 +63,13 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     let courtyards = courtyards(p);
     courtyard_rules(&courtyards, outline.as_ref(), &mut out);
     board_holes(p, &courtyards, outline.as_ref(), &mut out);
-    silk_to_pads(&ctx, &pads, &mut out);
+    let silk = silk_shapes(p);
+    silk_to_pads(&ctx, &silk, &pads, &mut out);
+    let texts = silk_texts(p);
+    if let Some(o) = &outline {
+        silk_edges(&ctx, &silk, &texts, o, &mut out);
+    }
+    silk_overlaps(&ctx, &silk, &texts, &mut out);
     keepouts(&ctx, &courtyards, &mut out);
     disallowed(&ctx, &items, &mut out);
     unrouted(&items, &mut out);
@@ -123,7 +130,7 @@ pub fn check_limits(p: &Project, rules: &Rules) -> Vec<Diagnostic> {
         board_edges(&ctx, &items, &o, &mut out);
     }
     if rules.silk_to_pad > Nm::ZERO {
-        silk_to_pads(&ctx, &pads, &mut out);
+        silk_to_pads(&ctx, &silk_shapes(p), &pads, &mut out);
     }
     out.sort_by(|a, b| {
         let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
@@ -1216,141 +1223,15 @@ fn courtyard_rules(cy: &Courtyards, outline: Option<&BoardShape>, out: &mut Vec<
     }
 }
 
-fn stroke(points: Vec<polyclip::Point>, width: Nm) -> PolygonSet {
-    polyclip::offset_paths(&vec![Path(points)], (width.0 / 2).max(1), Join::Round, EndCap::Round, COPPER_TOL)
-        .unwrap_or_default()
-}
-
-/// Silkscreen strokes by owner (designator or `graphic#id`) and side.
-fn silk_shapes(p: &Project) -> Vec<(String, BoardSide, PolygonSet)> {
-    let mut out = Vec::new();
-    let board = p.board();
-    for (r, pf) in &board.footprints {
-        let Some(fp) = geo::footprint_for(p, r) else { continue };
-        let tf = geo::transform(pf);
-        let mut set = PolygonSet::new();
-        for g in fp.graphics.iter().filter(|g| g.layer == GraphicLayer::Silk) {
-            match &g.geometry {
-                GraphicGeometry::Path { points } => {
-                    set.extend(stroke(points.iter().map(|q| pt(tf(*q))).collect(), g.width));
-                }
-                GraphicGeometry::Polygon { points } => {
-                    let mut v: Vec<polyclip::Point> = points.iter().map(|q| pt(tf(*q))).collect();
-                    if let Some(&f) = v.first() {
-                        v.push(f);
-                    }
-                    set.extend(stroke(v, g.width));
-                }
-                GraphicGeometry::Circle { center, radius, filled } => {
-                    let c = pt(tf(*center));
-                    if *filled {
-                        let ring = Circle { center: c, radius: radius.0 + g.width.0 / 2 }.to_ring(COPPER_TOL);
-                        set.extend(ring.ok().map(|r| Polygon::new(r, vec![])));
-                    } else if let Ok(r) = (Circle { center: c, radius: radius.0 }).to_ring(COPPER_TOL) {
-                        set.extend(stroke(Path::from(r).0, g.width));
-                    }
-                }
-            }
-        }
-        if !set.is_empty() {
-            out.push((r.clone(), pf.side, set));
-        }
-    }
-    for g in &board.graphics {
-        let side = match g.layer.as_str() {
-            "F.SilkS" => BoardSide::Top,
-            "B.SilkS" => BoardSide::Bottom,
-            _ => continue,
-        };
-        let set = match &g.kind {
-            GraphicKind::Line { points, width } => stroke(points.iter().map(|q| pt(*q)).collect(), *width),
-            GraphicKind::Polygon { points, width } => geo::polygon_area(points, *width),
-            GraphicKind::Text { .. } => continue,
-        };
-        if !set.is_empty() {
-            out.push((format!("graphic#{}", g.id.0), side, set));
-        }
-    }
-    out
-}
-
-/// A solder mask opening the silkscreen is checked against.
-enum Opening<'a> {
-    /// A pad's opening (or its copper, with `silk_check: copper`).
-    Pad(&'a geo::PlacedPad),
-    /// A mask drawing: owner (designator or `graphic#id`).
-    Drawn(String),
-}
-
-/// Solder mask openings on each side, by owner, with their regions: pads with an opening on
-/// that side (grown by their mask margin with `silk_check: mask`, their copper with `copper`),
-/// then, with `mask`, footprint and board mask drawings.
-fn mask_openings<'a>(ctx: &Ctx, pads: &'a [geo::PlacedPad]) -> Vec<(Opening<'a>, BoardSide, PolygonSet)> {
-    let board = ctx.p.board();
-    let mask = board.rules.silk_check == SilkCheck::Mask;
-    let mut out = Vec::new();
-    for side in [BoardSide::Top, BoardSide::Bottom] {
-        let layer = if side == BoardSide::Top { "F.Cu" } else { "B.Cu" };
-        for pp in pads.iter().filter(|pp| pp.mask_on(side)) {
-            if !mask {
-                if pp.layers.iter().any(|l| l == layer) {
-                    out.push((Opening::Pad(pp), side, vec![pp.shape_on(layer).clone()]));
-                }
-                continue;
-            }
-            let m = pp.overrides.mask_margin.unwrap_or(board.rules.mask_expansion).0;
-            let shape = if m == 0 {
-                vec![pp.shape_on(layer).clone()]
-            } else {
-                let tol =
-                    polyclip::ArcTol::new(1_000, if m > 0 { polyclip::Side::Outside } else { polyclip::Side::Inside });
-                polyclip::offset(pp.shape_on(layer), m, Join::Round, tol).unwrap_or_default()
-            };
-            if !shape.is_empty() {
-                out.push((Opening::Pad(pp), side, shape));
-            }
-        }
-    }
-    if !mask {
-        return out;
-    }
-    for (r, pf) in &board.footprints {
-        let Some(fp) = geo::footprint_for(ctx.p, r) else { continue };
-        for g in fp.graphics.iter().filter(|g| g.layer == GraphicLayer::Mask) {
-            let shape = geo::fp_graphic_shape(pf, g);
-            if !shape.is_empty() {
-                out.push((Opening::Drawn(r.clone()), geo::pad_side(pf.side, g.back), shape));
-            }
-        }
-    }
-    for g in &board.graphics {
-        let side = match g.layer.as_str() {
-            "F.Mask" => BoardSide::Top,
-            "B.Mask" => BoardSide::Bottom,
-            _ => continue,
-        };
-        let set = match &g.kind {
-            GraphicKind::Line { points, width } => stroke(points.iter().map(|q| pt(*q)).collect(), *width),
-            GraphicKind::Polygon { points, width } => geo::polygon_area(points, *width),
-            GraphicKind::Text { .. } => continue,
-        };
-        if !set.is_empty() {
-            out.push((Opening::Drawn(format!("graphic#{}", g.id.0)), side, set));
-        }
-    }
-    out
-}
-
 /// Silkscreen too close to exposed pad copper (`silk_to_pad`) or, with `silk_check: mask`, over
 /// a solder mask opening (pads grown by their mask margin, non-plated holes, mask drawings).
 /// Openings only forbid overlaps: the mask margin is already a clearance around the copper, so
 /// `silk_to_pad` is measured to the copper rather than added on top of the margin.
-fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
-    let silk = silk_shapes(ctx.p);
+fn silk_to_pads(ctx: &Ctx, silk: &[SilkShape], pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     if silk.is_empty() {
         return;
     }
-    let openings = mask_openings(ctx, pads);
+    let openings = mask_openings(ctx.p, pads);
     let min = ctx.rules.silk_to_pad;
     let limit = (min.0 - TOLERANCE.0).max(1);
     let mask = ctx.p.board().rules.silk_check == SilkCheck::Mask;
@@ -1365,14 +1246,14 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
         }
     };
     // One index over silk owners then openings.
-    let mut boxes: Vec<Option<Rect>> = silk.iter().map(|(_, _, s)| s.bbox()).collect();
+    let mut boxes: Vec<Option<Rect>> = silk.iter().map(|s| s.bbox).collect();
     boxes.extend(openings.iter().map(|(_, _, s)| s.bbox()));
     let ns = silk.len();
     for (i, j) in near_pairs(&boxes, limit) {
         if i >= ns || j < ns {
             continue;
         }
-        let ((owner, side, shape), (what_is, oside, opening)) = (&silk[i], &openings[j - ns]);
+        let (SilkShape { label: owner, side, shape, .. }, (what_is, oside, opening)) = (&silk[i], &openings[j - ns]);
         if side != oside {
             continue;
         }
@@ -1431,6 +1312,121 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
         };
         d = d.at(at);
         out.push(d);
+    }
+}
+
+/// The subject a finding names a silkscreen item by.
+fn silk_ref(s: &SilkShape) -> ObjectRef {
+    ObjectRef::parse(&s.label).unwrap_or_else(|_| ObjectRef::Name(s.label.clone()))
+}
+
+/// Silkscreen crossing a board edge (the outline or a cutout) or off the board, or closer to an
+/// edge than `silk_to_edge`: the fab cuts off what crosses, and prints nothing up to the edge. Every
+/// silkscreen item is checked: footprint drawings (one finding per footprint), board drawings,
+/// reference designators and board texts. A zero `silk_to_edge` only forbids crossing.
+fn silk_edges(ctx: &Ctx, silk: &[SilkShape], texts: &[SilkShape], o: &BoardShape, out: &mut Vec<Diagnostic>) {
+    let min = ctx.rules.silk_to_edge;
+    let limit = (min.0 - TOLERANCE.0).max(0);
+    for s in silk.iter().chain(texts) {
+        let Some(bbox) = s.bbox else { continue };
+        // Far from every edge and inside: nothing to measure (and no text strokes to build).
+        if !o.edge_index.any(&bbox.expand(limit))
+            && o.outer.bbox().is_some_and(|b| b.contains_rect(&bbox))
+            && o.outer_in_range
+            && even_odd_inside(&o.outer, bbox.min)
+            && !o.cutouts.iter().any(|c| even_odd_inside(c, bbox.min))
+        {
+            continue;
+        }
+        let shape = s.region();
+        if shape.is_empty() {
+            continue;
+        }
+        let what = s.describe();
+        let nearest = o.edges.iter().filter_map(|e| gap(&*shape, e)).min_by(|a, b| a.0.total_cmp(&b.0));
+        let message = if o.outside(&*shape) {
+            // Nothing of it on the board: beyond the outline, or all of it in a cutout.
+            let region = |r: &Ring| Polygon::new(r.clone(), vec![]);
+            let off = !polyclip::intersects(&region(&o.outer), &*shape)
+                || o.cutouts.iter().any(|c| polyclip::contains(&region(c), &*shape));
+            if off { format!("{what} is off the board") } else { format!("{what} crosses the board edge") }
+        } else if limit > 0 && o.near_edge(&*shape, limit) {
+            format!("{what} is {} from the board edge, minimum is {min}", nm_f(nearest.map_or(0.0, |g| g.0)))
+        } else {
+            continue;
+        };
+        let at = nearest.map_or(from_f(bbox.min.x as f64, bbox.min.y as f64), |g| g.1);
+        let hint = match (&s.text, &s.footprint) {
+            (Some(_), Some(r)) => format!(
+                "let cadlab find it a free position (`silk.arrange`), or set one (`silk.set {r} --at ...`, `--hidden` \
+                 to leave it out); the fab cuts silkscreen off at the board edge"
+            ),
+            (Some(_), None) => "move the text away from the board edge; the fab cuts silkscreen off there".to_string(),
+            (None, Some(r)) => format!(
+                "move {r} away from the board edge; if its drawing reaches the edge by design (an edge connector), \
+                 waive the finding: `drc.waive drc.silk_edge --subjects {r} --reason <why>`"
+            ),
+            (None, None) => "move the drawing away from the board edge; the fab cuts silkscreen off there".to_string(),
+        };
+        out.push(Diagnostic::warning("drc.silk_edge", message).with_subject(silk_ref(s)).at(at).with_hint(hint));
+    }
+}
+
+/// A silkscreen text overlapping other silkscreen, or closer to it than `silk_clearance`:
+/// reference designators and board texts against the texts and drawings of other owners (other
+/// footprints, the board). A footprint's reference designator against its own drawings is not
+/// reported, and drawings are not checked against each other. A zero `silk_clearance` only
+/// forbids overlaps.
+fn silk_overlaps(ctx: &Ctx, silk: &[SilkShape], texts: &[SilkShape], out: &mut Vec<Diagnostic>) {
+    if texts.is_empty() {
+        return;
+    }
+    let min = ctx.rules.silk_clearance;
+    let limit = (min.0 - TOLERANCE.0).max(1);
+    let near = |a: &PolygonSet, b: &PolygonSet| {
+        if min > TOLERANCE { polyclip::distance_less_than(a, b, limit) } else { overlap(a, b).is_some() }
+    };
+    // One index over the texts, then the drawings.
+    let all: Vec<&SilkShape> = texts.iter().chain(silk).collect();
+    let boxes: Vec<Option<Rect>> = all.iter().map(|s| s.bbox).collect();
+    let nt = texts.len();
+    let mut regions: BTreeMap<usize, PolygonSet> = BTreeMap::new();
+    for (i, j) in near_pairs(&boxes, limit) {
+        // `i < j`: a text and a later text or a drawing.
+        if i >= nt {
+            continue;
+        }
+        let (a, b) = (all[i], all[j]);
+        if a.side != b.side || (a.footprint.is_some() && a.footprint == b.footprint) {
+            continue;
+        }
+        for k in [i, j] {
+            regions.entry(k).or_insert_with(|| all[k].region().into_owned());
+        }
+        let (sa, sb) = (&regions[&i], &regions[&j]);
+        if sa.is_empty() || sb.is_empty() || !near(sa, sb) {
+            continue;
+        }
+        let anchor = a.bbox.map(|b| from_f(b.min.x as f64, b.min.y as f64)).unwrap_or_default();
+        let (dist, at) = gap(sa, sb).unwrap_or((0.0, anchor));
+        let how = if dist == 0.0 { "overlaps".to_string() } else { format!("is {} from", nm_f(dist)) };
+        let hint = match &a.footprint {
+            Some(r) => format!(
+                "let cadlab find it a free position (`silk.arrange`), or set one (`silk.set {r} --at ...`, `--hidden` \
+                 to leave it out)"
+            ),
+            None => "move the text off the other silkscreen".to_string(),
+        };
+        out.push(
+            Diagnostic::warning(
+                "drc.silk_overlap",
+                format!("{} {how} the {}, minimum is {min}", a.describe(), b.describe()),
+            )
+            .with_subject(silk_ref(a))
+            .with_subject(silk_ref(b))
+            .at(at)
+            .with_hint(hint),
+        );
     }
 }
 

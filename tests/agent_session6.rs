@@ -34,6 +34,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::{Value, json};
 
+mod common;
+
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent_session6")
 }
@@ -620,6 +622,11 @@ fn wireless_node_through_mcp() {
     circuit(&mut c);
     stackup_and_width(&mut c);
     layout(&mut c);
+    // The legend reads (D82): `place auto` moved the reference designators off the board edge,
+    // the pads and each other; none had to be left out.
+    let board = cadlab::model::Project::load(&project).unwrap();
+    common::silk::assert_legible(&board);
+    assert_eq!(common::silk::hidden(&board), Vec::<String>::new());
     analysis(&mut c, &project);
     outputs(&mut c, &project);
 }

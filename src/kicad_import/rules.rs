@@ -18,7 +18,7 @@
 //! | `min_hole_clearance` | `hole_clearance` |
 //! | `min_copper_edge_clearance` | `copper_to_edge` |
 //! | `defaults.silk_line_width` | `min_silk_width` |
-//! | `min_silk_clearance` | `silk_to_pad` (zero included: overlaps only) |
+//! | `min_silk_clearance` | `silk_to_pad`, `silk_to_edge`, `silk_clearance` (zero included: overlaps only) |
 //! | other classes | net classes (values equal to the board defaults are inherited) |
 //! | `netclass_patterns`, `netclass_assignments` | `net.class` of matching circuit nets |
 //! | `.kicad_dru` rules without condition (`clearance`, `track_width`, `hole_size`, `annular_width`, `hole_to_hole`, `edge_clearance`) | the board rule, when stricter |
@@ -150,8 +150,12 @@ fn parse_pro(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
     set("min_silk_width", json_mm(ds["defaults"].get("silk_line_width")), "defaults.silk_line_width", diags);
     // Zero is a real value here: silkscreen may come up to pads but not over them (cadlab's
     // silk-to-pad check then reports overlaps only), as KiCad's silk_over_copper does.
+    // KiCad's one silkscreen clearance is cadlab's three: to pads, to board edges and between
+    // silkscreen items (zero: crossing the edge and overlapping are still reported, as in KiCad).
     if let Some(v) = json_mm(r.get("min_silk_clearance")).filter(|v| v.0 >= 0) {
-        k.rules.insert("silk_to_pad".into(), v);
+        for f in ["silk_to_pad", "silk_to_edge", "silk_clearance"] {
+            k.rules.insert(f.into(), v);
+        }
     }
     let min_clearance = json_mm(r.get("min_clearance"));
 

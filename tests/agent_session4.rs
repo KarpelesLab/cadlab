@@ -153,7 +153,8 @@ fn check_mcp_surface(c: &mut Client) {
     let tools = list["result"]["tools"].as_array().unwrap();
     // One tool per group plus describe, call and batch, small enough to keep in context.
     assert!(tools.len() < 40, "{} tools", tools.len());
-    assert!(size < 42 * 1024, "tools/list is {size} bytes");
+    // 42 KB until the `silk` group (D82: four commands) brought it to 43.3 KB.
+    assert!(size < 44 * 1024, "tools/list is {size} bytes");
     for t in tools {
         assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()), "{t}");
         for (k, p) in t["inputSchema"]["properties"].as_object().unwrap() {

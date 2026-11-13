@@ -55,7 +55,7 @@ GLOBAL OPTS
 
 Groups follow the registry namespaces (`cadlab --help` lists them with a one-line summary each): `project`,
 `part`, `footprint`, `circuit` (components, ERC, lint, netlist), `net`, `netclass`, `diffpair`, `lengthgroup`,
-`block`, `bom`, `board`, `place`, `track`, `via`, `impedance`, `current`, `lib`, `catalog`, `drc`, `zone`,
+`block`, `bom`, `board`, `place`, `track`, `via`, `impedance`, `current`, `silk`, `lib`, `catalog`, `drc`, `zone`,
 `keepout`, `route`, `render`, `schematic`, `export`, `fab`, `history`. Actions with underscores also accept dashes
 on the CLI (`net no-connect`). Shortcuts: `cadlab erc` and `cadlab lint` (aliases of `circuit erc` / `circuit
 lint`), `cadlab drc` alone runs `drc run`, `cadlab undo` / `redo`.

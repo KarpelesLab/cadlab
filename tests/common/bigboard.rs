@@ -225,9 +225,7 @@ pub fn build(spec: Spec) -> (tempfile::TempDir, Registry, Session) {
     }
     // Placement.
     let place = |p: &mut Project, r: &str, at: Point, rot: Angle, side: BoardSide| {
-        p.board_mut()
-            .footprints
-            .insert(r.to_string(), PlacedFootprint { at, rotation: rot, side, locked: false, footprint: None });
+        p.board_mut().footprints.insert(r.to_string(), PlacedFootprint::new(at, rot, side));
     };
     for (c, r) in ic_of_cell.iter().enumerate() {
         let (cx, cy) = cell_center(c, spec.cols);

@@ -27,6 +27,7 @@ use cadlab::command::{Registry, RunOptions, Session, Step};
 use cadlab::kicad_pcb::Frame;
 use cadlab::supplier::Suppliers;
 use common::oracle::{self, Oracle};
+use common::silk;
 use drc_compare::{ALLOW, Allow};
 use serde_json::{Value, json};
 
@@ -344,4 +345,41 @@ fn kicad_drc_clean_demo_board() {
     };
     drc_compare::compare(&board, p, &ours, &report, &export.uuids, &Frame::of(p), &allow, &mut used, &mut problems);
     assert!(problems.is_empty(), "KiCad DRC on the demo board:\n{}", problems.join("\n"));
+}
+
+/// The legend of the demo board reads (DECISIONS D82): `place.auto` moved every reference
+/// designator to a free position, so none is cut by the board edge (J1 and J3 sit at the top
+/// edge, where their designators used to be printed across it), on a pad, or within KiCad's
+/// default 0.15 mm silkscreen clearance of another footprint's silkscreen or designator, and
+/// none had to be left out. This is what KiCad's `silk_edge_clearance` and `silk_overlap`
+/// check, measured here on the box reserved for each text; [`kicad_drc_clean_demo_board`] asks
+/// KiCad itself. The top side is rendered to `$CARGO_TARGET_TMPDIR/demo_board/top.png`, to look
+/// at.
+#[test]
+fn reference_designators_are_legible() {
+    let (_dir, r, mut s) = build();
+    let p = s.project.as_ref().unwrap();
+    let rules = &p.board().rules;
+    assert_eq!((rules.silk_to_edge, rules.silk_clearance), (silk::KICAD_SILK_CLEARANCE, silk::KICAD_SILK_CLEARANCE));
+    silk::assert_legible(p);
+    assert_eq!(silk::hidden(p), Vec::<String>::new());
+    // The connectors at the top edge: their designators are on the board, beside them.
+    for refdes in ["J1", "J3"] {
+        let t = cadlab::board::silk::ref_text(p, refdes).unwrap();
+        assert!(t.at.y.0 < 39_000_000, "{refdes} at {:?}", t.at);
+    }
+    // Every designator stays with its part: within 3.5 mm of its courtyard.
+    for refdes in p.board().footprints.keys() {
+        let t = cadlab::board::silk::ref_text(p, refdes).unwrap();
+        let b = cadlab::board::place::courtyard_box(p, refdes).unwrap();
+        let (dx, dy) = ((b.x0 - t.at.x.0).max(t.at.x.0 - b.x1).max(0), (b.y0 - t.at.y.0).max(t.at.y.0 - b.y1).max(0));
+        assert!(dx.max(dy) < 3_500_000, "{refdes}: designator {} mm from its part", dx.max(dy) as f64 / 1e6);
+    }
+    let keep = Path::new(env!("CARGO_TARGET_TMPDIR")).join("demo_board");
+    std::fs::create_dir_all(&keep).unwrap();
+    exec(&r, &mut s, "render.board", json!({"path": keep.join("top.png"), "realistic": "top", "px_per_mm": 30}));
+    // Arranging again changes nothing.
+    let again = exec(&r, &mut s, "silk.arrange", json!({}));
+    assert_eq!(again["output"]["moved"], json!({}), "{again}");
+    assert!(codes(&again).is_empty(), "{again}");
 }

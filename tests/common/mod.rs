@@ -184,6 +184,106 @@ pub mod golden {
 
 pub mod stm32;
 
+pub mod silk {
+    //! The legend reads: no printed reference designator is cut by the board edge, on a
+    //! solder mask opening or over other silkscreen (DECISIONS D82). Measured on the box
+    //! `silk.arrange` reserves for a text (`board::silk::text_box`: wider than cadlab's own
+    //! strokes, for tools that draw the text in another stroke font), without the DRC.
+
+    use cadlab::board::silk::{mask_openings, ref_text, silk_shapes, silk_texts, text_box};
+    use cadlab::geom::poly::{Path, Polygon, PolygonSet, Ring};
+    use cadlab::model::Project;
+    use cadlab::units::Nm;
+
+    /// KiCad's default silkscreen clearance, also cadlab's default `silk_to_edge` and
+    /// `silk_clearance`.
+    pub const KICAD_SILK_CLEARANCE: Nm = Nm(150_000);
+
+    /// Every way a printed reference designator of `p` comes within `clearance` of a board
+    /// edge (outline or cutout) or of the silkscreen of another owner (the drawings of other
+    /// footprints, board drawings, every other text), or lies on a solder mask opening.
+    /// Distances may fall 2 µm short (`drc::TOLERANCE`).
+    pub fn problems(p: &Project, clearance: Nm) -> Vec<String> {
+        let d = clearance.0 - cadlab::drc::TOLERANCE.0;
+        let board = p.board();
+        let rings: Vec<Ring> = board
+            .outline
+            .contours
+            .iter()
+            .map(|c| Ring::from(cadlab::board::contour_ring(c, cadlab::board::COPPER_TOL)))
+            .collect();
+        let drawings = silk_shapes(p);
+        let texts = silk_texts(p);
+        // Each text as the box reserved for it.
+        let boxes: Vec<PolygonSet> = texts
+            .iter()
+            .map(|s| {
+                let (text, t) = s.text.as_ref().expect("a text");
+                vec![text_box(text, t.at, t.size, t.width, t.rotation)]
+            })
+            .collect();
+        let pads = cadlab::board::placed_pads(p);
+        let openings = mask_openings(p, &pads);
+        let mut out = Vec::new();
+        for (r, pf) in &board.footprints {
+            let Some(t) = ref_text(p, r) else { continue };
+            let area: PolygonSet = vec![text_box(r, t.at, t.size, t.width, t.rotation)];
+            if let Some(outer) = rings.first() {
+                let inside = cadlab::geom::poly::contains(&Polygon::new(outer.clone(), vec![]), &area);
+                let near =
+                    rings.iter().any(|e| cadlab::geom::poly::distance_less_than(&area, &Path::from(e.clone()), d));
+                if !inside || near {
+                    out.push(format!("{r}: within {clearance} of the board edge, or over it"));
+                }
+            }
+            for s in drawings.iter().filter(|s| s.side == pf.side && s.footprint.as_deref() != Some(r.as_str())) {
+                if cadlab::geom::poly::distance_less_than(&area, &s.shape, d) {
+                    out.push(format!("{r}: within {clearance} of the silkscreen of {}", s.label));
+                }
+            }
+            for (s, other) in texts.iter().zip(&boxes) {
+                if s.side == pf.side
+                    && s.footprint.as_deref() != Some(r.as_str())
+                    && cadlab::geom::poly::distance_less_than(&area, other, d)
+                {
+                    out.push(format!("{r}: within {clearance} of {}", s.label));
+                }
+            }
+            for (_, side, opening) in &openings {
+                if *side == pf.side && cadlab::geom::poly::intersects(&area, opening) {
+                    out.push(format!("{r}: on a solder mask opening"));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Panics when a reference designator of `p` is not legible ([`problems`] at KiCad's
+    /// default clearance), or when cadlab's own DRC reports silkscreen at an edge or
+    /// overlapping (`drc.silk_edge`, `drc.silk_overlap`).
+    pub fn assert_legible(p: &Project) {
+        let found = problems(p, KICAD_SILK_CLEARANCE);
+        assert!(found.is_empty(), "reference designators:\n{}", found.join("\n"));
+        let drc: Vec<String> = cadlab::drc::check(p)
+            .into_iter()
+            .filter(|d| matches!(d.code.as_ref(), "drc.silk_edge" | "drc.silk_overlap"))
+            .map(|d| d.to_string())
+            .collect();
+        assert!(drc.is_empty(), "silkscreen findings:\n{}", drc.join("\n"));
+    }
+
+    /// The designators whose text is hidden.
+    pub fn hidden(p: &Project) -> Vec<String> {
+        p.board()
+            .footprints
+            .iter()
+            .filter(|(_, pf)| pf.ref_text.as_ref().is_some_and(|t| t.hidden))
+            .map(|(r, _)| r.clone())
+            .collect()
+    }
+}
+
 pub mod boards {
     //! Example boards built through the command registry.
 

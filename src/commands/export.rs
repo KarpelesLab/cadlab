@@ -854,6 +854,9 @@ impl Command for PlaceImportIdx {
         for pl in moves {
             let (at, rotation, side) = pl.board_placement();
             if let Some(f) = p.board_mut().footprints.get_mut(&pl.refdes) {
+                if f.rotation != rotation || f.side != side {
+                    f.reset_arranged_text();
+                }
                 f.at = at;
                 f.rotation = rotation;
                 f.side = side;

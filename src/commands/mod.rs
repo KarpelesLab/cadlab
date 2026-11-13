@@ -21,6 +21,7 @@ pub mod placement;
 pub mod project;
 pub mod render;
 pub mod route;
+pub mod silk;
 pub mod sim;
 pub mod touchstone;
 mod util;
@@ -41,6 +42,7 @@ pub fn register_all(r: &mut Registry) {
     board::register(r);
     electrical::register(r);
     placement::register(r);
+    silk::register(r);
     lib::register(r);
     catalog::register(r);
     drc::register(r);
@@ -75,6 +77,7 @@ pub const GROUP_SUMMARIES: &[(&str, &str)] = &[
     ("via", "Manual vias"),
     ("impedance", "Track impedance from the stackup"),
     ("current", "Track width for a current (IPC-2152)"),
+    ("silk", "Reference designators on the silkscreen"),
     ("lib", "Shared user libraries (parts, footprints, blocks outside projects)"),
     ("catalog", "Offline part catalogs and configured providers"),
     ("drc", "Design rule check (`cadlab drc run`, or `cadlab drc`)"),

@@ -2095,6 +2095,78 @@ down with the evidence next to it. Where the evidence is partly out of a program
 line says so and says who has to do what, instead of rounding up.
 
 
+### D82. Silkscreen: edge and overlap rules, reference designators arranged and kept in the board (2026-11-13)
+The first KiCad DRC of the M4 demo board in CI (KiCad 10) failed: the reference designators of J1 and J3, the
+connectors at the top edge, were printed across the board edge, and about a dozen more sat on other silkscreen
+(allowed until then as "a rule cadlab does not have"). cadlab printed every designator centered above its
+courtyard, whatever was there, and its DRC said nothing: a real defect in what a fab prints.
+- **Two DRC rules, values in `board.rules`:** `drc.silk_edge` (`silk_to_edge`: any silkscreen to the outline and
+  cutouts) and `drc.silk_overlap` (`silk_clearance`: a text to the silkscreen of another owner). Both 0.15 mm by
+  default, KiCad's default silkscreen clearance, and left out of saved rules at that value, so existing projects
+  load unchanged and get the checks. Scope of the second: texts only (designators and board texts) against other
+  footprints' drawings and designators and board drawings and texts; a designator on its own footprint's drawing is
+  the footprint's business, and drawings against drawings are what courtyards already keep apart.
+- **Warnings, not errors,** like `drc.silk_over_pad` and like KiCad's: the board works either way, the fab cuts or
+  overprints the ink. Waivable (an edge connector drawn to the edge).
+- **Zero means "may touch", not "unchecked".** The plan was for zero to switch a check off, as a zero limit does
+  in fab checks (`drc::check_limits`). In `drc.run`, though, a zero `silk_to_pad` still reports overlaps (D46),
+  and a zero KiCad silkscreen clearance still reports crossing and overlapping, which is what many imported
+  boards carry. Unchecked at zero would leave every such KiCad finding without a counterpart. So zero only drops
+  the distance; to drop a check, waive its code.
+- **No fab profile field.** Profiles carry values with a source on the fab's own page. The fabs' pages were not
+  searched for a silkscreen-to-edge or silkscreen-to-silkscreen distance in this change, and a number without a
+  source is what profiles must not hold; a field can be added when a page is found. `board.rules --fab` leaves the two rules alone and `fab.check` does not check them. A
+  designator given a height under the fab's `min_silk_height` is reported (`fab.silk_height`).
+- **The designator's place is in the board** (`PlacedFootprint.ref_text`: offset from the origin in board axes,
+  rotation, height, hidden, set by hand or not), unset for the default above the courtyard, so no migration and
+  untouched boards save as before. One function (`board::silk::ref_text`) answers every output: the Gerber
+  legend, IPC-2581, the renders (which used to draw the designator on the footprint origin, sized to the part,
+  unlike the legend), the 3D board faces and the KiCad export, whose `Reference` field now carries rotation,
+  stroke and `hide`. An offset in board axes follows `place.move`; turning or flipping a part drops an arranged
+  position, never one set by hand.
+- **Arranging is a pass over stored data, not something each output recomputes:** `silk.arrange`, run by
+  `place.auto` after placing, not by `place.set`/`move` (the DRC then says what is clipped and names the command).
+  Positions are tried in a fixed order around the part, then inside it, the text counted as a box; the texts with
+  the fewest free positions choose first, and one text may make room for another. Details in BOARD.md. Three
+  rounds: clearances plus 0.1 mm and "no nearer to another part than to its own"; without the margin; then also
+  beside or beyond a neighbour, up to 3.3 mm away. Then hidden, with a warning: never printed clipped.
+- **Size stays 1 mm.** A smaller text would fit more often, but the smallest height a fab prints is the fab's
+  (JLCPCB 1.0 mm), and the board must not depend on one (D12). `silk.set --size` is the designer's call.
+- **A far designator rather than none.** The first version stopped at 1.3 mm and hid what did not fit: one
+  designator on the demo board (R6, between an LED and the MCU's pins), up to six on the session boards, among
+  them an IC. With the third round reaching 3.3 mm, none is hidden on those five boards; such a text stands
+  next to its neighbour's (the demo's "D2" over "R6", left of the pair), as a person would write them.
+- **The KiCad import keeps each `Reference` field** (position, angle, height, hidden; set by hand as far as cadlab
+  is concerned). Before, imported boards printed designators above courtyards, not where their designer put
+  them, and KiCad's silkscreen findings on them could not be paired. A field at cadlab's default place leaves
+  `ref_text` unset, so cadlab's own exports of unarranged boards round-trip exactly; an arranged text comes back as
+  one set by hand (a KiCad board does not say who placed a text). KiCad's single `min_silk_clearance` becomes all
+  three silkscreen rules; the export writes `silk_clearance` back (KiCad applies it between silkscreen items and
+  to the edge, never to copper), no longer `silk_to_pad`.
+- **The comparison pairs the findings:** `silk_edge_clearance` → `drc.silk_edge` and `silk_overlap` →
+  `drc.silk_overlap` in `TYPE_MAP`, per-segment KiCad findings folded as for `silk_over_copper`, measured values not
+  compared (each tool's own font); the one-sided allowances for both types are removed, from the cross-check, the
+  demo board's oracle test and the corpus.
+- **`tools/list` budget 42 → 44 KB:** the `silk` group (four commands) brought it to 43.3 KB.
+
+What supports the fix without KiCad: run on the demo board's placement with the designators back above their
+courtyards, the new rules report the two designators across the edge and the overlaps CI's KiCad run listed, with
+the same 0.10 mm where KiCad gave a distance; after `place.auto` they report nothing, and no designator's box is
+within 0.15 mm of an edge or of other silkscreen (`reference_designators_are_legible`, and the same check on the
+boards of agent sessions 1, 3, 5 and 6).
+**Not verified:** `kicad-cli` was not available, so neither the demo board's oracle test nor the cross-check nor
+the corpus ran with this change; KiCad's glyph widths are unknown here, so a designator pair it measures closer
+than cadlab's box allows for remains possible. The corpus manifest was not re-measured: KiCad's findings on
+`Value` fields and user texts (not imported) and on one footprint's drawing over another's have no counterpart.
+Not done: reference designators are still not checked against pads by `drc.silk_over_pad` (the legend writer
+clips them there, and KiCad's finding on them stays an allowance); a `silk_to_edge` different from
+`silk_clearance` is not exported to KiCad; other footprint texts are not modeled.
+*Why:* a legend is read by the person holding the board, so a clipped or overprinted designator is a defect even
+though nothing electrical depends on it, and the tool that placed the parts is the one that knows where the free
+room is. Storing the result keeps every output and both DRCs talking about the same text, and leaves the last
+word to whoever sets one by hand.
+
+
 ## Open questions
 
 

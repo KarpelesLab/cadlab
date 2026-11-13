@@ -206,6 +206,15 @@ pub struct Rules {
     pub zone_min_width: Nm,
     /// IPC-6012 class (2 or 3).
     pub ipc_class: u8,
+    /// Minimum silkscreen-to-board-edge distance (outline and cutouts): the fab cuts off what
+    /// crosses the edge. 0: silkscreen may reach the edge, not cross it.
+    #[serde(skip_serializing_if = "is_default_silk_clearance")]
+    pub silk_to_edge: Nm,
+    /// Minimum distance between a silkscreen text and the silkscreen of another owner (the
+    /// texts and drawings of other footprints, board texts and drawings). 0: they may touch,
+    /// not overlap.
+    #[serde(skip_serializing_if = "is_default_silk_clearance")]
+    pub silk_clearance: Nm,
     /// Absolute minimum copper clearance: local pad and footprint clearances and custom rules
     /// may go below `clearance` and net class values, never below this (0: no floor).
     #[serde(skip_serializing_if = "is_zero_nm")]
@@ -265,6 +274,19 @@ fn is_zero_nm(n: &Nm) -> bool {
     n.0 == 0
 }
 
+/// Default `silk_to_edge` and `silk_clearance` (left out of saved rules at this value).
+fn default_silk_clearance() -> Nm {
+    Nm::from_um(150)
+}
+
+fn is_default_silk_clearance(n: &Nm) -> bool {
+    *n == default_silk_clearance()
+}
+
+fn is_zero_angle(a: &Angle) -> bool {
+    a.0 == 0
+}
+
 fn is_zero_scale(s: &Scale) -> bool {
     s.0 == 0
 }
@@ -285,6 +307,8 @@ impl Default for Rules {
             min_silk_width: Nm::from_um(150),
             zone_min_width: Nm::from_um(200),
             ipc_class: 2,
+            silk_to_edge: default_silk_clearance(),
+            silk_clearance: default_silk_clearance(),
             min_clearance: Nm::ZERO,
             hole_clearance: Nm::ZERO,
             mask_expansion: Nm::ZERO,
@@ -348,6 +372,8 @@ impl Rules {
             "min_silk_width" => &mut self.min_silk_width,
             "zone_min_width" => &mut self.zone_min_width,
             "hole_clearance" => &mut self.hole_clearance,
+            "silk_to_edge" => &mut self.silk_to_edge,
+            "silk_clearance" => &mut self.silk_clearance,
             _ => return None,
         })
     }
@@ -499,6 +525,50 @@ pub struct PlacedFootprint {
     /// Footprint name, when not the part's preferred one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footprint: Option<String>,
+    /// How the reference designator is printed on the silkscreen, when not centered above the
+    /// courtyard (`silk.arrange`, `silk.set`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_text: Option<RefText>,
+}
+
+impl PlacedFootprint {
+    /// A placement with every optional setting at its default: unlocked, the part's preferred
+    /// footprint, the reference designator above the courtyard.
+    pub fn new(at: Point, rotation: Angle, side: BoardSide) -> PlacedFootprint {
+        PlacedFootprint { at, rotation, side, locked: false, footprint: None, ref_text: None }
+    }
+
+    /// Drops an arranged reference text position (`silk.arrange` chose it for another
+    /// orientation of the part); a text set by hand (`silk.set`) is kept.
+    pub fn reset_arranged_text(&mut self) {
+        if self.ref_text.as_ref().is_some_and(|t| !t.manual) {
+            self.ref_text = None;
+        }
+    }
+}
+
+/// How a footprint's reference designator is printed on the silkscreen of its side. Every
+/// output that draws the designator (Gerber legend, IPC-2581, renders, KiCad export) reads this
+/// through `board::silk::ref_text`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RefText {
+    /// Text center relative to the footprint origin, in board axes (the text follows the part
+    /// when it moves and does not turn with it). Unset: centered above the courtyard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<Point>,
+    /// Counter-clockwise rotation of the text: 0 reads left to right, 90 bottom to top.
+    #[serde(default, skip_serializing_if = "is_zero_angle")]
+    pub rotation: Angle,
+    /// Cap height (unset: 1 mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<Nm>,
+    /// Not printed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+    /// Set by hand (`silk.set`): `silk.arrange` and `place.auto` never move or hide it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub manual: bool,
 }
 
 /// Which board edge a part goes to in automatic placement (`place.hint`). Sides are as seen

@@ -611,9 +611,9 @@ fn legend(ctx: &Ctx<'_>, side: BoardSide) -> OutFile {
                 }
             }
         }
-        // Reference designator above the courtyard.
+        // Reference designator, where `board::silk::ref_text` puts it.
         if let Some(t) = super::refdes_text(ctx.p, refdes) {
-            strokes.extend(text_strokes(refdes, t.at, t.size, Angle::ZERO, side == BoardSide::Bottom, t.width.0));
+            strokes.extend(text_strokes(refdes, t.at, t.size, t.rotation, t.mirror(), t.width.0));
         }
         g.attrs(&[(".C", field(refdes))]);
         emit_clipped(&mut g, &strokes, &openings, "Material");

@@ -783,6 +783,7 @@ pub fn import(
         let mut pf = c.placement.clone();
         pf.footprint = (preferred.as_deref() != Some(fp_name.as_str())).then(|| fp_name.clone());
         p.board_mut().footprints.insert(refdes.clone(), pf);
+        default_reference_text(p, &refdes);
         if c.attrs.contains("dnp") {
             p.bom_mut().dnp.insert(refdes.clone());
         }
@@ -940,6 +941,24 @@ pub fn import(
         Severity::Info => 2,
     });
     Ok((report, diags))
+}
+
+/// Simplifies the imported reference designator text of `refdes`: a position that is cadlab's
+/// default one (within the rounding of a rotated footprint's frame) is left out, and so is
+/// the whole text when it is then printed upright at the default size, as in every export of
+/// a board whose texts were never moved.
+fn default_reference_text(p: &mut Project, refdes: &str) {
+    use crate::board::silk::{REF_SIZE, default_ref_at};
+    let Some(pf) = p.board().footprints.get(refdes) else { return };
+    let Some(mut t) = pf.ref_text.clone() else { return };
+    let near = |a: Point, b: Point| (a.x.0 - b.x.0).abs() <= 2 && (a.y.0 - b.y.0).abs() <= 2;
+    if let (Some(o), Some(d)) = (t.offset, default_ref_at(p, refdes, t.size.unwrap_or(REF_SIZE)))
+        && near(pf.at + o, d)
+    {
+        t.offset = None;
+    }
+    let plain = t.offset.is_none() && !t.hidden && t.size.is_none() && t.rotation == Angle::ZERO;
+    p.board_mut().footprints.get_mut(refdes).expect("placed").ref_text = (!plain).then_some(t);
 }
 
 fn uuid_label(refdes: &str, what: &str) -> String {

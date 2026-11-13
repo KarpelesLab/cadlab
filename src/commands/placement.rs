@@ -450,7 +450,11 @@ impl Command for PlaceNear {
             }
             ctx.report(d);
         }
-        ctx.project_mut()?.board_mut().footprints.insert(r.clone(), pf.clone());
+        // A designator set by hand keeps its offset from the part; an arranged one starts over.
+        let mut pf = pf.clone();
+        let board = ctx.project_mut()?.board_mut();
+        pf.ref_text = board.footprints.get(&r).and_then(|old| old.ref_text.clone()).filter(|t| t.manual);
+        board.footprints.insert(r.clone(), pf.clone());
         Ok(Placed { placements: [(r, pf)].into(), unplaced: vec![], ratsnest_length: None, board_use: None })
     }
 

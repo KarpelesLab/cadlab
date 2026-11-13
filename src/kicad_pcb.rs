@@ -403,7 +403,11 @@ fn pad_pins(p: &Project, refdes: &str) -> BTreeMap<String, (String, PinKind)> {
 }
 
 fn text_effects(size: Nm, mirror: bool) -> String {
-    let thick = Nm(size.0 * 15 / 100);
+    text_effects_stroke(size, Nm(size.0 * 15 / 100), mirror)
+}
+
+/// Text effects with a given stroke thickness.
+fn text_effects_stroke(size: Nm, thick: Nm, mirror: bool) -> String {
     let justify = if mirror { " (justify mirror)" } else { "" };
     format!("(effects (font (size {s} {s}) (thickness {})){justify})", mm(thick), s = mm(size))
 }
@@ -428,15 +432,19 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
         w.line(2, &format!("(descr {})", q(&fp.description)));
     }
 
-    // Texts: the reference where cadlab's legend prints it (upright, above the courtyard), the
-    // value and other fields at the origin on the fab layer.
+    // Texts: the reference where cadlab's legend prints it (`board::silk::ref_text`: position,
+    // rotation, size, hidden when cadlab leaves it out), the value and other fields at the
+    // origin on the fab layer.
     let text_angle = deg(pf.rotation);
     let size = Nm::from_um(1000);
     let origin = f.local(Point::new(Nm::ZERO, Nm::ZERO));
     let field =
         |k: &'static str, v: String, hide: bool| (k, v, origin.clone(), text_angle.clone(), "F.Fab", hide, size);
-    let reference = match crate::fabout::refdes_text(p, refdes) {
-        Some(t) => ("Reference", refdes.to_string(), f.local_abs(t.at), "0".to_string(), "F.SilkS", false, t.size),
+    let reference = match geo::silk::ref_text_any(p, refdes) {
+        Some(t) => {
+            let hidden = pf.ref_text.as_ref().is_some_and(|x| x.hidden);
+            ("Reference", refdes.to_string(), f.local_abs(t.at), deg(t.rotation), "F.SilkS", hidden, t.size)
+        }
         None => ("Reference", refdes.to_string(), origin.clone(), text_angle.clone(), "F.SilkS", false, size),
     };
     let mut props =
@@ -467,7 +475,9 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
                 w.id(&format!("{key}/prop/{k}"), format!("text:{refdes}/{k}"))
             ),
         );
-        w.line(3, &format!("{})", text_effects(size, bottom)));
+        // The reference is drawn with the stroke cadlab's legend uses.
+        let thick = if k == "Reference" { geo::silk::ref_stroke_width(p, size) } else { Nm(size.0 * 15 / 100) };
+        w.line(3, &format!("{})", text_effects_stroke(size, thick, bottom)));
     }
 
     let mut attr = vec![match fp.mount {
@@ -574,7 +584,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
 /// A board hole as a one-pad mounting hole footprint (no courtyard, excluded from BOM and
 /// position files, its name hidden like in cadlab's legend).
 fn write_hole(w: &mut Writer<'_>, h: &crate::model::board::Hole) {
-    let pf = PlacedFootprint { at: h.at, rotation: Angle::ZERO, side: BoardSide::Top, locked: false, footprint: None };
+    let pf = PlacedFootprint::new(h.at, Angle::ZERO, BoardSide::Top);
     let f = FpFrame::new(&pf);
     let key = format!("hole/{}", h.id.0);
     let at = w.xy(h.at);
@@ -1209,7 +1219,9 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
                     "min_microvia_diameter": 0.2,
                     "min_microvia_drill": 0.1,
                     "min_resolved_spokes": 2,
-                    "min_silk_clearance": mmf(r.silk_to_pad),
+                    // KiCad's silkscreen clearance applies between silkscreen items and to the
+                    // board edge (its silk_over_copper only reports overlaps of mask openings).
+                    "min_silk_clearance": mmf(r.silk_clearance),
                     "min_text_height": 0.8,
                     "min_text_thickness": 0.08,
                     "min_through_hole_diameter": mmf(r.min_drill),

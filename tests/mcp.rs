@@ -102,6 +102,7 @@ fn mcp_session() {
             "via",
             "impedance",
             "current",
+            "silk",
             "lib",
             "catalog",
             "drc",

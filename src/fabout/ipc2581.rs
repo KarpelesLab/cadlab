@@ -642,7 +642,7 @@ fn legend_feature(c: &Ctx<'_>, x: &mut Xml, d: &mut Dict, side: BoardSide) {
         let attrs = [a("geometryUsage", "GRAPHIC"), a("componentRef", refdes.clone())];
         stroke_set(&mut body, d, &attrs, &strokes);
         if let Some(t) = super::refdes_text(c.p, refdes) {
-            let text = text_strokes(refdes, t.at, t.size, Angle::ZERO, side == BoardSide::Bottom, t.width.0);
+            let text = text_strokes(refdes, t.at, t.size, t.rotation, t.mirror(), t.width.0);
             let attrs = [a("geometryUsage", "TEXT"), a("componentRef", refdes.clone())];
             stroke_set(&mut body, d, &attrs, &text);
         }

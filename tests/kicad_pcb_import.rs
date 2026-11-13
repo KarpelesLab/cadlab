@@ -28,7 +28,8 @@ use cadlab::{Diagnostic, ObjectId, Severity};
 use common::oracle::{self, Oracle};
 use serde_json::{Value, json};
 
-/// The board with every object ID zeroed (IDs are allocated anew on import).
+/// The board with every object ID zeroed (IDs are allocated anew on import) and every moved
+/// reference designator marked as set by hand.
 fn without_ids(b: &Board) -> Board {
     let mut b = b.clone();
     let z = ObjectId(0);
@@ -38,6 +39,9 @@ fn without_ids(b: &Board) -> Board {
     b.keepouts.iter_mut().for_each(|t| t.id = z);
     b.holes.iter_mut().for_each(|t| t.id = z);
     b.graphics.iter_mut().for_each(|t| t.id = z);
+    // A reference designator moved by `silk.arrange` comes back as one set by hand: a KiCad
+    // board says where a text is, not who put it there.
+    b.footprints.values_mut().filter_map(|f| f.ref_text.as_mut()).for_each(|t| t.manual = true);
     b
 }
 

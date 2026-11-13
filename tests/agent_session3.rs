@@ -19,6 +19,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+mod common;
+
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent_session3")
 }
@@ -336,6 +338,11 @@ fn stm32_usb_device_four_layers_from_a_prompt() {
     let drc = step_json(p, &["drc"]);
     assert_eq!(drc["output"]["errors"], 0, "{:?}", codes(&drc));
     assert_eq!(drc["output"]["warnings"], 0, "{:?}", codes(&drc));
+    // The legend reads (D82): `place auto` moved the reference designators off the board edge,
+    // the pads and each other; none had to be left out.
+    let board = cadlab::model::Project::load(p).unwrap();
+    common::silk::assert_legible(&board);
+    assert_eq!(common::silk::hidden(&board), Vec::<String>::new());
 
     step(p, &["render", "schematic", "out/schematic.svg"]);
     step(p, &["render", "board", "out/board.png"]);

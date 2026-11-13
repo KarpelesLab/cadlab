@@ -615,6 +615,11 @@ fn mixed_signal_logger_with_blocks() {
     circuit(&mut c);
     board_and_placement(&mut c, &project);
     route_and_check(&mut c);
+    // The legend reads (D82): `place auto` moved the reference designators off the board edge,
+    // the pads and each other; none had to be left out.
+    let board = cadlab::model::Project::load(&project).unwrap();
+    common::silk::assert_legible(&board);
+    assert_eq!(common::silk::hidden(&board), Vec::<String>::new());
     spice(&mut c, &project);
     outputs(&mut c, &project);
     move_routed(&mut c);

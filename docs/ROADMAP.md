@@ -129,6 +129,11 @@ no `-o`.)
 - [x] Copper zones with fill (thermal reliefs, clearances, islands removal, priorities, keep-outs)
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
+- [x] Legible silkscreen (D82): `drc.silk_edge` and `drc.silk_overlap` (rules `silk_to_edge`, `silk_clearance`),
+      reference designators moved to free positions by `silk.arrange` and `place.auto` (off the board edge,
+      pads and other silkscreen; hidden with a warning as a last resort), set by hand with `silk.set`, kept in
+      the board and printed at the same place by the Gerber legend, IPC-2581, the renders and the KiCad export
+      (`src/board/silk.rs`, `tests/silk.rs`)
 - [x] Board rendering (per layer, composite, realistic top/bottom; highlight, ratsnest, markers, crop)
 - [x] Outputs: Gerber X2 (+ X3 component data), Excellon/XNC drill (+ optional Gerber X2 drill), generic
       pick-and-place CSV, IPC-D-356A (`export.*`, `src/fabout/`)
@@ -146,8 +151,14 @@ shown, two are waiting** (audit of 2026-11-13, D81). The board is `examples/demo
   fab outside `targets`, exports a complete JLCPCB bundle and a complete PCBWay bundle with byte-identical
   fabrication data, the same archives from the documented command lines (`tests/demo_board.rs`,
   `demo_board_passes_drc_and_exports_for_both_fabs`, `documented_commands_write_the_same_bundles`).
-- Written, never run: the KiCad DRC oracle on this board (`tests/demo_board.rs`, `kicad_drc_clean_demo_board`). It
-  needs `kicad-cli`, so it runs in CI's `oracles` job only; its first CI result decides this part.
+- Run once, failed, fixed, waiting for the next run: the KiCad DRC oracle on this board (`tests/demo_board.rs`,
+  `kicad_drc_clean_demo_board`; it needs `kicad-cli`, so it runs in CI's `oracles` job only). Its first CI run, on
+  2026-11-13 with KiCad 10, failed on two findings: the reference designators of J1 and J3, the connectors at the
+  top edge, were printed across the board edge (`silk_edge_clearance`); it also listed about a dozen designators
+  over other silkscreen (`silk_overlap`), then allowed as a rule cadlab did not have. Both are fixed by D82:
+  cadlab's DRC has the two rules, `place.auto` moves the designators to free positions, and the test no longer
+  allows `silk_overlap` on KiCad's side alone. Without KiCad, `reference_designators_are_legible` shows that no
+  designator of the board comes within 0.15 mm of an edge or of other silkscreen. The next CI run decides this part.
 - Pending, manual: the two fabs' online checks. They need a person with accounts; the bundles, what to upload
   where and what to look at are in [MANUFACTURING.md](MANUFACTURING.md), "Demo board", with a table for the result.
 
