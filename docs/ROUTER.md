@@ -49,16 +49,17 @@ That keeps it independent and makes Specctra DSN/SES a natural second front end 
 connection, without touching the project; the `route.*` commands apply it. Modules: `model` (the router's view of
 the board), `grid` (grid and static maps), `fanout` (BGA dog bones, fine-pitch escapes, neck-downs), `engine`
 (grid A* and negotiation), `rooms` (free-space decomposition) and `expansion` (the gridless search over it), `post`
-(optimization), `gridless` (visibility-graph refinement), `arcs` (arc corners), `shove` (push-and-shove), `index`
-(spatial index and exact clearance checks), `geo` (float geometry kernel). Algorithm modules only; nothing uses
-the command layer.
+(optimization), `pours` (zone fills as places to connect to), `gridless` (visibility-graph refinement), `arcs`
+(arc corners), `shove` (push-and-shove), `index` (spatial index and exact clearance checks), `geo` (float
+geometry kernel). Algorithm modules only; nothing uses the command layer.
 
 **Preprocess.** Copper items and islands come from `crate::board` (zone fills included, so pads joined by a pour
 count as connected). Every net's islands that hold a pad or via are joined by a minimum spanning tree (Prim, closest
 anchor pair, as the ratsnest); already-connected copper is never re-routed and existing tracks stay. Obstacles:
 other-net pads, tracks and vias with the larger of both nets' clearances, board edge and cutouts
 (`copper_to_edge`), keep-outs (`no_tracks` per layer, `no_vias`; not for the nets a keep-out excepts, see
-"Keep-out net exceptions"), NPTH holes; drilled holes for via `hole_to_hole`. Zone fills are not obstacles: they are refilled around the new copper. Net classes give each net
+"Keep-out net exceptions"), NPTH holes; drilled holes for via `hole_to_hole`. Zone fills are not obstacles: they are
+refilled around the new copper (and checked again for what that cuts off, see Pours). Net classes give each net
 a *profile* (track width, clearance, via drill and diameter).
 
 **Scoped rules** (`scoped`, D61). The router keeps the clearance the DRC computes for each pair of items
@@ -189,6 +190,44 @@ ripped and routed again without sharing, with vias four times as dear (40); the 
 fewer vias, no more failed connections, and is at most 10 % plus 8 grid steps per saved via longer. Other nets
 stay where they are, so the result is legal by construction. This saves 4–33 % of the vias for a few percent
 more track.
+
+**Pours** (`pours`, D80). A zone fill is derived data: it joins the pads it covers when the run is planned, and it
+is filled again around every new track and via afterwards. The plan used to take the first for granted: pads a
+pour joined on the board as given needed no connection, tracks of other nets then cut the pour between them, and
+the board came out with open connections the run never counted (on the corpus re-route, where the board starts
+empty and every surface pour is whole, most of what was left open: buspirate5-rev10 1 failed and 66 open). Three
+things handle it:
+
+- *Fills are places to connect to.* Each fill island of a net on a routing layer is rasterized into the grid
+  cells where a track of the net ending at the cell center lies on its copper (the center at least the half
+  width plus 20 µm inside). A connection whose far side holds fills (they are part of that side's copper island)
+  may end on any such cell within 4 mm of its near end (at least 16 cells), besides the side's pads and tracks:
+  the usual via into a plane or short track into a pour. When only the tree's side holds fills the search runs
+  from the other side and the path is turned around.
+- *Pour rounds.* Once negotiation and legalization leave a legal routing, the fills are computed for it
+  (`board::copper_items` on the board with the wires as they stand). A net with fills is planned again, from
+  what the fills alone still join, when they no longer join an island of its plan, or when one of its
+  connections is routed and yet open (a track ending on a piece of pour that was cut off since). Its routing is
+  dropped and negotiation starts again with those nets to route (present factor as it was, history kept), so
+  the nets around a cut-off pad make room for its via or track; then legalization, and the fills again: up to 3
+  rounds before the retries and via minimization, up to 2 after them (they move nets too). A round that ends
+  with more connections open on the filled board than before it is undone (everything back to the routing
+  before the round, no more rounds), so a round cut short by the budget costs nothing. A first negotiation
+  still going at 55 % of the budget (it ends at 75 %) fills the pours for the routing as it stands, shared points
+  and all: with one pad cut off per 100 connections or more it ends there, and the rounds get the rest of its
+  share; with fewer it goes on (glasgow-revC3: 4 pads cut off in 739 connections, where ending early cost seven
+  connections). Tried and dropped: planning the cut-off nets again inside the running negotiation, with nothing
+  to go back to (glasgow-revD1 ended with 416 connections open instead of 120–137), and negotiating again for
+  everything legalization left failing after ending early (worse on four of six boards).
+- *Honest counts.* The final status of every connection was already read from the copper islands of the
+  verified board; a net with more ratsnest lines open there than it has failed connections now reports the
+  difference as failed connections ("cut off from the pour of net GND", with the via or track to add as hints),
+  so `stats.failed` no longer undercounts what `route.status` and the DRC then show.
+
+Limits: a net is planned again whole (its wires that were fine are routed again); fills are those of the legal
+routing before optimization, so a pull-tight or a via removed afterwards can still cut a neck (reported, not
+fixed); a pour of a net with a rule profile no routed net uses is not planned again (reported). Boards without
+zones route exactly as before.
 
 **Searches that cannot succeed.** A search that fails visits everything it can reach from its sources first,
 often most of the board. Two exact tests skip them without changing any result (D57). *Static reachability*: per
@@ -590,8 +629,8 @@ its gap and skew. Results are identical for 1 and 4 threads.
 - Push-and-shove moves straight unlocked tracks and vias; arc tracks, lines of mixed widths and closed loops stay
   fixed, vias are pushed as through vias, lines are not split or merged, and a free end (a track ending on
   nothing) cannot move. A shoved line keeps its layer.
-- A track crossing a pour can split it; the refill keeps DRC clean but the zone's net may show new ratsnest lines
-  (route again).
+- A track crossing a pour can split it. The run fills the pours for its routing and plans the nets it cut off
+  again (Pours, above), within the budget and a few rounds; what is still cut off is reported as failed.
 - Hole-to-hole between vias of the same net in *one* wire of a search is left to the final DRC.
 - Differential pairs: one layer per coupled connection, no vias in a pair (no layer change, no polarity swap),
   0°/45° centerlines only (no arcs while routing; meanders may use arcs), straight breakout stubs. Pads tapped
@@ -750,7 +789,8 @@ the JVM start and file exchange) and imported through `route.import_ses`, then m
 `CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results; `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search.
 `route_bench --corpus [names...]` re-routes the open-source corpus instead (below); there `CADLAB_BENCH_TRACE=1`
 prints a timeline of the router's phases and negotiation iterations (time and work), `CADLAB_BENCH_NETS=a,b` routes only
-those nets, `CADLAB_BENCH_WORK=<units>` uses a work budget (repeatable: compare builds this way, not on time; the job
+those nets, `CADLAB_BENCH_ORIGINAL=1` lists the connections each project's own routing leaves open instead of
+routing (the reference for residuals), `CADLAB_BENCH_WORK=<units>` uses a work budget (repeatable: compare builds this way, not on time; the job
 `corpus-route` of CI does it for three seeds) and `CADLAB_BENCH_SEED=<n>` sets the seed.
 
 **Results** (release build, 16-core macOS development machine, freerouting 2.4.1 on Java 25). *M5* is the router
@@ -980,6 +1020,60 @@ groups "1, 2" and "3, 4"). No width gets out, and the original board's own track
 first was exempting them (the oracle job rejected it, 11 `shorting_items` KiCad reports and cadlab then did not), so the
 router reports them with a hint. nrfmicro's D+/D− crossing: congestion around the receptacle takes the room in most seeds. revD1
 and revC3 are budget-bound at this count; corne-cherry's GND and QSPI leftovers near the RP2040s are congestion.
+
+**Corpus re-route, D80** (pours; `CADLAB_BENCH_WORK=200000000 route_bench --corpus`, seeds 1/2/3, 4 threads, the shared
+64-core Linux machine; *before* is the version before D80 and *after* this one, both repeat exactly, and after gives the same
+tracks, vias and work on 1 thread: buspirate5-rev10, corne-cherry and lumenpnp-ringlight checked. *Open* is the number that
+counts: the connections `route.status` and the DRC find missing on the routed board with its pours filled again. *Failed* is
+what the run reports; before, it counted planned connections only. DRC errors other than unrouted: 0 on every board and
+seed, before and after.)
+
+| board | layers | connections (seed 1) | open before | open after | failed before | failed after | vias (seed 1) | length (seed 1) | work (seed 1) |
+|---|---|---|---|---|---|---|---|---|---|
+| nrfmicro | 2 | 85 | 2/2/3 | 2/2/3 | 2/2/3 | 2/2/3 | 37 | 447.8 mm | 7.9 M |
+| buspirate-flash-sop | 2 | 47 | 0/0/0 | 0/0/0 | 0/0/0 | 0/0/0 | 4 | 460.2 mm | 1.6 M |
+| buspirate-rs232 | 2 | 43 | 0/0/0 | 0/0/0 | 0/0/0 | 0/0/0 | 10 | 280.9 mm | 1.9 M |
+| buspirate5-rev10 | 4 | 473 → 540 | 66/63/64 | **4/0/7** | 1/1/0 | 4/0/7 | 237 → 304 | 2891 → 3044 mm | 55.5 → 173.1 M |
+| lumenpnp-ringlight | 2 | 37 → 39 | 2/2/2 | **0/0/0** | 0/0/0 | 0/0/0 | 0 → 2 | 214 → 180 mm | 0.7 → 1.4 M |
+| lumenpnp-mobo | 4 | 461 → 521 | 69/62/61 | **8/14/14** | 3/0/0 | 10/16/17 | 230 → 341 | 5763 → 5518 mm | 200 → 204 M (budget) |
+| sweep-v2.2 | 2 | 47 → 49 | 5/4/6 | 3/3/3 | 3/3/3 | 3/3/3 | 20 → 21 | 2137 → 2161 mm | 124.9 → 128.9 M |
+| corne-cherry | 2 | 431 → 445 | 13/12/17 | **4/5/5** | 5/4/7 | 4/5/5 | 451 → 488 | 8405 → 8393 mm | 205 → 211 M (budget) |
+| glasgow-revC3 | 4 | 739 | 32/33/30 | 35/32/34 | 34/34/31 | 41/37/41 | 400 → 422 | 3755 → 3398 mm | 211 → 210 M (budget) |
+| glasgow-revD1 | 6 | 1583 → 1701 | 199/197/184 | **137/145/170** | 115/112/110 | 139/147/173 | 1000 → 1035 | 8950 → 8663 mm | 221 → 221 M (budget) |
+| cynthion | 4 | 693 → 722 | 55/52/53 | **32/27/33** | 27/27/28 | 33/27/35 | 426 → 467 | 3118 → 3166 mm | 203 → 202 M (budget) |
+| tinytapeout-demo | 4 | 361 → 393 | 37/41/37 | **29/23/28** | 20/19/19 | 29/23/29 | 250 → 265 | 4463 → 4384 mm | 200 → 200 M (budget) |
+| all twelve | | | 480/468/457 | **254/251/297** | 210/202/201 | 265/260/313 | | | |
+
+Connections grow because pads cut off from their pour now get a connection each. Open connections fall by 43 % over the
+three seeds (1405 → 802); `failed` rises to meet them, since it was the undercount (the two differ by a few where one
+ratsnest line stands for a connection with two failed ends). *Not better:* glasgow-revC3, 95 → 101 open over the three seeds:
+its pours are on the inner layers and hardly cut (4 pads at the mid-negotiation check), so it pays for the pour checks and
+gains nothing. Boards that end on the budget spend part of it on the rounds; where the first negotiation is still going at
+55 % of the budget with many pads cut off, it ends earlier than before (mobo, corne-cherry, revD1, cynthion, tinytapeout).
+
+Completion by this measure (open connections against the connections of the run, seed 1): nrfmicro 97.6 %, the three small
+boards 100 %, buspirate5-rev10 99.3 % (100 % in seed 2), lumenpnp-mobo 98.5 %, sweep-v2.2 93.9 %, corne-cherry 99.1 %,
+glasgow-revC3 95.3 %, glasgow-revD1 91.9 %, cynthion 95.6 %, tinytapeout-demo 92.6 %. No board that was under 100 % reaches it
+in all three seeds except lumenpnp-ringlight.
+
+What is left, by cause (seed 1; `CADLAB_BENCH_VERBOSE=1` lists every connection):
+
+- *Open in the original too* (sweep-v2.2, 3): `gnd`, `raw` and `vcc` join the two halves of the split keyboard, 19, 190 and
+  196 mm apart across the mouse-bite row. `CADLAB_BENCH_ORIGINAL=1` shows the same three open on the board as designed, and
+  no other board has any: a residual of the design, not of the router.
+- *Infeasible under the board's rules* (cynthion, 8): the sense pads inside the force pads of the Kelvin shunts (D72: KiCad's
+  DRC reports the original's tracks there as shorts).
+- *The USB-C D+/D− crossing* (nrfmicro, 2–3): `DATA-` J1.A7 to J1.B7 and on to U1.29, in 0.2 mm tracks at 0.2 mm clearance;
+  the report names pad D1.1 and the routing of CC1, VBUS and GND as what is in the way. The original board routes the net
+  (two vias behind the receptacle, 0.2 mm tracks under the same rules), so it is feasible and the router's miss. Unchanged
+  by this pass and not diagnosed further in it (D72 looked at the crossover via's depth).
+- *Pads the routing still cuts off from a pour* (6 over the boards: buspirate5 1, mobo 1, cynthion 3, tinytapeout 1): reported
+  as such; the rounds ran out (budget, or a round that made things worse and was undone).
+- *Fine-pitch pads with no exit left* (tinytapeout-demo's QFN-80 7, mobo's LQFP 1, corne-cherry's receptacle CC1 1): boxed in
+  by neighbors' escapes and routing, as before D80.
+- *Congestion and budget*: the rest (glasgow-revC3 41, glasgow-revD1 139, cynthion about 20, tinytapeout-demo about 20, mobo 8,
+  corne-cherry 3, buspirate5 3). Both glasgow boards and cynthion, tinytapeout-demo, mobo and corne-cherry end on the 200 M
+  budget with negotiation unfinished; whether more budget closes them was not measured in this pass.
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).

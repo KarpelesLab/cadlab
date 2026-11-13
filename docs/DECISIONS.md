@@ -2008,6 +2008,54 @@ default rule set of every new project was left out of a verification pass. Apply
 (copper weight, board thickness, planes) was left out for the same reason: their charts are published only as
 images, and a fit of them could not be checked against numbers.
 
+### D80. Router and pours: fills are places to connect to, the run refills them for its routing and negotiates again for what it cut off, and the count is the board's (2026-11-13)
+**Measured first.** The corpus re-route at a 200 M work budget (seeds 1–3, D72) on the version before: 210/202/201 connections
+failed, and 480/468/457 open on the routed boards with their pours filled again (`route.status`, the DRC). The difference was
+known (D72, "not fixed here") and it was most of what was left: buspirate5-rev10 reported 1 failed with 66 open, lumenpnp-mobo
+3 and 69, glasgow-revD1 115 and 199. Cause: the plan reads connectivity from the board as given, fills included, so pads a
+pour joins need no connection; the re-route starts from an empty board, where every surface pour is whole, then routes
+tracks across it; the pour is filled again around them and the pads inside the cuts are open, uncounted. The reported
+completion (corne-cherry 98.8 %) was of the planned connections only.
+**Decision.** (1) *Fills are places to connect to* (`router::pours`): each fill island of a net is rasterized into the grid
+cells where a track of the net may end on its copper, and a connection whose far side holds fills may end on those within
+4 mm of its near end. (2) *Pour rounds*: on a legal routing (after legalization) the run computes the fills for its own
+wires, plans again every net whose fills no longer join an island of its plan or that has a routed connection left open,
+and negotiates again with those nets to route; up to 3 rounds before the retries and via minimization and 2 after. A round
+that leaves more connections open than before it is undone. A first negotiation still going at 55 % of the budget ends
+there when the routing as it stands cuts off one pad per 100 connections or more. (3) *The count is the board's*: a net with
+more ratsnest lines open on the verified board than failed connections reports the difference as failed, with a reason and
+hints, so `stats.failed` and `completion` no longer undercount.
+**Result** (same budget and seeds, zero DRC errors other than unrouted before and after, identical for 1 and 4 threads):
+open connections 480/468/457 → 254/251/297 (−43 %). Per board, seeds 1/2/3: buspirate5-rev10 66/63/64 → 4/0/7,
+lumenpnp-mobo 69/62/61 → 8/14/14, lumenpnp-ringlight 2/2/2 → 0/0/0, corne-cherry 13/12/17 → 4/5/5, glasgow-revD1
+199/197/184 → 137/145/170, cynthion 55/52/53 → 32/27/33, tinytapeout-demo 37/41/37 → 29/23/28, sweep-v2.2 5/4/6 → 3/3/3;
+glasgow-revC3 32/33/30 → 35/32/34 (worse by 6 over the seeds: its pours are inner planes that tracks hardly cut, so the
+checks cost budget and gain nothing); nrfmicro and the two small buspirate boards unchanged. Reported failures rise
+(210/202/201 → 265/260/313) because they now include what was hidden. Generated benchmark: boards without zones route
+exactly as before; qfp-qfn-4l (inner-layer pours) 125 → 128 vias and 1984.6 → 1934.5 mm against HEAD, 100 % and zero DRC
+errors, inside the golden's tolerance (128 vias, 2000.0 mm). The goldens were not blessed: stm32-4l, fine-4l and bga144-4l
+already differed from them within tolerance before this change (54/53 vias, 103/111, 154/146), and that drift is not this
+change's to record.
+**Exit criteria, as measured.** *M5* (typical 2- and 4-layer hobby boards to 100 % with zero DRC errors): met by the
+generated boards and by three of the five small corpus boards; not by nrfmicro (2–3 of 85 open: the USB-C D+/D− crossing,
+which the original board routes, so the router's miss). sweep-v2.2's three open connections are open in the original board
+as well (`CADLAB_BENCH_ORIGINAL=1`: `gnd`, `raw`, `vcc` between the halves of the split keyboard; no other corpus board has
+any), a residual of the design. *M6* (equal or better completion than freerouting on the benchmark corpus): met on the
+generated benchmark suite by the recorded comparison; on the open-source corpus freerouting has never been run, and cadlab
+leaves connections open on nine of the twelve boards (2 to 170), six of which end on the budget. Neither line is marked done.
+**Tried and dropped.** Routing the cut-off nets again without sharing after legalization (buspirate5 31 failed: their
+neighbors do not move). A follow-up run of the whole router on the routed board (buspirate5 15 open in 63 s: setup per round, and no
+negotiation with the nets in the way). Ending every first negotiation at 55 % of the budget (revC3 42 open instead
+of 35). Planning the cut-off nets again inside the running negotiation (revD1 416 open). Negotiating again for everything
+legalization left failing (worse on four of six boards).
+**Known residuals.** cynthion's 8 Kelvin sense pads (infeasible under its rules, D72); sweep's 3; the nrfmicro crossing;
+6 pads still cut off from a pour in seed 1, reported as such; fine-pitch pads with no exit (tinytapeout-demo 7, mobo 1,
+corne-cherry 1); the rest is congestion at the budget (both glasgow boards, cynthion, tinytapeout-demo). A net is planned
+again whole, and the fills checked are those before optimization.
+*Why:* a completion figure that the board itself contradicts cannot close an exit criterion, and a pour is copper the
+router changes by routing, so it has to look at the result; counting from the refilled board makes every later number
+comparable with what the user sees.
+
 ### D81. Milestone exits: an exit is done when a named test that was run shows it (2026-11-13)
 Every roadmap checkbox was ticked while only M0 and M2 had a dated exit. The audit went through the others (M5 and
 M6, the router's, are handled separately) and wrote on each **Exit:** line the test that shows it, or what is missing.
