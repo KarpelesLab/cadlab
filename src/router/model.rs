@@ -83,6 +83,8 @@ pub(crate) struct Obstacle {
     pub vias: bool,
     /// Net of the copper (`None`: blocks every net).
     pub net: Option<u32>,
+    /// Nets it does not exist for (a keep-out's excepted nets; sorted). Empty for anything else.
+    pub except: Vec<u32>,
     pub clear: Clear,
     pub kind: ObKind,
     /// For reports: `pad U3.4 (net GND)`, `board edge`, ...
@@ -94,6 +96,14 @@ pub(crate) struct Obstacle {
     /// The copper item it is (index into the items the board was built from), whose clearance
     /// the scoped rules resolve exactly (`None`: `clear` decides).
     pub item: Option<u32>,
+}
+
+impl Obstacle {
+    /// Whether tracks and vias of `net` ignore it (a keep-out excepting the net).
+    #[inline]
+    pub fn spares(&self, net: u32) -> bool {
+        !self.except.is_empty() && self.except.binary_search(&net).is_ok()
+    }
 }
 
 /// A drilled hole (vias keep `hole_to_hole` from it).
@@ -285,6 +295,7 @@ impl RouterBoard {
                 tracks: layers,
                 vias: true,
                 net,
+                except: Vec::new(),
                 clear: Clear::Net(net_clear(it.net.as_deref())),
                 kind,
                 label,
@@ -307,6 +318,7 @@ impl RouterBoard {
                         tracks: all,
                         vias: true,
                         net: None,
+                        except: Vec::new(),
                         // The copper-to-hole clearance when the rules set one (the DRC checks it),
                         // else the copper clearance; a net's larger clearance still applies.
                         clear: Clear::Net(if rules.hole_clearance.0 > 0 {
@@ -340,6 +352,7 @@ impl RouterBoard {
                     tracks: all,
                     vias: true,
                     net: id_of(&pp.net),
+                    except: Vec::new(),
                     clear: Clear::Fixed(scoped.hc),
                     kind: ObKind::Copper,
                     label: format!("hole of pad {}.{}", pp.refdes, pp.number),
@@ -358,6 +371,7 @@ impl RouterBoard {
                     tracks: all,
                     vias: true,
                     net: id_of(&v.net),
+                    except: Vec::new(),
                     clear: Clear::Fixed(scoped.hc),
                     kind: ObKind::Copper,
                     label: format!("hole of via#{}", v.id.0),
@@ -385,6 +399,7 @@ impl RouterBoard {
                     tracks: all,
                     vias: true,
                     net: None,
+                    except: Vec::new(),
                     clear: Clear::Fixed(rules.copper_to_edge.0 as f64),
                     kind: ObKind::Edge,
                     label: if k == 0 { "board edge".into() } else { "board cutout".into() },
@@ -408,12 +423,16 @@ impl RouterBoard {
             }
             let shape = Shape::of_ring(k.outline.iter().map(|q| P::of(*q)).collect());
             let layers = if k.layers.is_empty() { all } else { layer_mask(&layer_names, &k.layers) };
+            // Net ids are in name order, as `allow_nets` is: sorted.
+            let mut except: Vec<u32> = k.allow_nets.iter().filter_map(|n| net_ids.get(n)).copied().collect();
+            except.sort_unstable();
             obstacles.push(Obstacle {
                 bbox: shape.bbox(),
                 shape,
                 tracks: if k.no_tracks { layers } else { 0 },
                 vias: k.no_vias,
                 net: None,
+                except,
                 clear: Clear::Fixed(0.0),
                 kind: ObKind::Keepout,
                 label: format!("keep-out `{}`", k.name),

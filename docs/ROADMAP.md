@@ -349,4 +349,6 @@ Research-sized items beyond the milestones above; none blocks a release.
   node: nRF52832, matching network, 50 Ω microstrip, U.FL; D70), replayed by `tests/agent_session6.rs`; fixed: mesh
   slivers, `sim.sparams --plan`, `part_values`, results at a frequency and over a band with impedance, VSWR and
   available loss, passivity and reciprocity checks, notes on ideal parts and ports on parts, `net.loss` with mask,
-  impedance lines in `fab-lock.json`; open: net exceptions in keep-outs.
+  impedance lines in `fab-lock.json`. Its open item fixed (D76): net exceptions in keep-outs (`keepout.add
+  --allow-nets`, `keepout.set`), honored by the DRC, zone fill, the router (grid, gridless, push-and-shove, pairs)
+  and `route.track`, and reported by the exports that cannot express them (DSN, IDF, IDX, KiCad).

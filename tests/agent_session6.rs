@@ -341,15 +341,16 @@ fn layout(c: &mut Client) {
         json!({"layer": "F.Cu", "points": ["J1.2", ["35.025mm", "14.275mm"], ["35.025mm", "15.7mm"]]}),
     );
     c.ok("track", "add", json!({"layer": "F.Cu", "points": ["J1.3", ["35.025mm", "11.325mm"], ["35.025mm", "9.9mm"]]}));
-    // Two keep-outs either side of the feed: a keep-out has no net exception (deferred).
-    for (n, y0, y1) in [("RF_LOW", "10.8mm", "12.2mm"), ("RF_HIGH", "13.4mm", "14.8mm")] {
-        c.ok(
-            "keepout",
-            "add",
-            json!({"name": n, "outline": {"rect": {"from": ["24.9mm", y0], "to": ["32.7mm", y1]}}, "layers": ["F.Cu"],
-                "no_tracks": true, "no_vias": true, "no_pours": true, "no_footprints": true}),
-        );
-    }
+    // One keep-out around the feed, which the feed net itself may cross (D76; the session had to
+    // draw two rectangles, one each side of the track).
+    let k = c.ok(
+        "keepout",
+        "add",
+        json!({"name": "RF", "outline": {"rect": {"from": ["24.9mm", "10.8mm"], "to": ["32.7mm", "14.8mm"]}},
+            "layers": ["F.Cu"], "no_tracks": true, "no_vias": true, "no_pours": true, "no_footprints": true,
+            "allow_nets": ["RF_FEED"]}),
+    );
+    assert_eq!(k["output"]["keepouts"][0]["allow_nets"], json!(["RF_FEED"]), "{k}");
     c.ok("place", "hint", json!({"refdes": ["J2"], "edge": "left"}));
     c.ok("place", "hint", json!({"refdes": ["J3"], "edge": "bottom"}));
     let pl = c.ok("place", "auto", json!({}));

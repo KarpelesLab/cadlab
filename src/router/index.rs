@@ -172,7 +172,10 @@ impl Checker<'_> {
                 Item::Static(o) => {
                     let ob = &rb.obstacles[o as usize];
                     let own = ob.net == Some(net) || (skip.is_some() && ob.net == skip);
-                    if ob.tracks & bit == 0 || (own && matches!(ob.kind, ObKind::Pad | ObKind::Copper)) {
+                    if ob.tracks & bit == 0
+                        || (own && matches!(ob.kind, ObKind::Pad | ObKind::Copper))
+                        || ob.spares(net)
+                    {
                         continue;
                     }
                     if !scoped || ob.item.is_none() {
@@ -275,7 +278,7 @@ impl Checker<'_> {
             match it {
                 Item::Static(o) => {
                     let ob = &rb.obstacles[o as usize];
-                    if !ob.vias {
+                    if !ob.vias || ob.spares(net) {
                         continue;
                     }
                     let own = ob.net == Some(net);

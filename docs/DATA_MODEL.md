@@ -62,7 +62,7 @@ Project
 │   ├── tracks      segments and arcs: layer, width, net
 │   ├── vias        position, drill, pad, layer span (through/blind/buried/micro)
 │   ├── zones       polygon, layer(s), net, priority, fill settings (+ cached fill)
-│   ├── keepouts    rule areas
+│   ├── keepouts    keep-outs (with net exceptions) and rule areas
 │   └── graphics    silkscreen text/lines, fab notes, logos
 └── outputs         output job definitions (which files, which formats); fab choice happens at export
 ```

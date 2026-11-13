@@ -121,6 +121,7 @@ expression: names
   "zone.list",
   "zone.fill",
   "keepout.add",
+  "keepout.set",
   "keepout.remove",
   "keepout.list",
   "route.all",

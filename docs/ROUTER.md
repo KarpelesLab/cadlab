@@ -57,8 +57,8 @@ the command layer.
 count as connected). Every net's islands that hold a pad or via are joined by a minimum spanning tree (Prim, closest
 anchor pair, as the ratsnest); already-connected copper is never re-routed and existing tracks stay. Obstacles:
 other-net pads, tracks and vias with the larger of both nets' clearances, board edge and cutouts
-(`copper_to_edge`), keep-outs (`no_tracks` per layer, `no_vias`), NPTH holes; drilled holes for via
-`hole_to_hole`. Zone fills are not obstacles: they are refilled around the new copper. Net classes give each net
+(`copper_to_edge`), keep-outs (`no_tracks` per layer, `no_vias`; not for the nets a keep-out excepts, see
+"Keep-out net exceptions"), NPTH holes; drilled holes for via `hole_to_hole`. Zone fills are not obstacles: they are refilled around the new copper. Net classes give each net
 a *profile* (track width, clearance, via drill and diameter).
 
 **Scoped rules** (`scoped`, D61). The router keeps the clearance the DRC computes for each pair of items
@@ -406,6 +406,31 @@ failed whose ends are pads gets a first hint naming the command that can move ot
 false`), ahead of the router's own hints (move parts, smaller clearance).
 The result lists the nets moved (`rerouted`) and replaces their old copper.
 
+### Keep-out net exceptions (D76)
+
+A keep-out's `allow_nets` (docs/BOARD.md, "Keep-outs and net exceptions") makes it an obstacle that does not
+exist for those nets: `Obstacle::except` holds their net ids and `Obstacle::spares(net)` answers. Every place that
+asks whether an obstacle is in a net's way asks it too: the exact checks (`Checker::seg`, `Checker::via`, used by
+the fanout, the optimizer, the arcs, length tuning and the failure explanation), the free space of the gridless
+rooms (`rooms::track_space`, `via_space`), the hulls of the gridless refinement, and the push-and-shove world
+(`seg_hits`, `via_hits`), which is how `route.track` refuses another net's track through the keep-out and never
+pushes a neighbour into it.
+
+The grid's static maps are per rule profile, not per net, so a point's state says *which* nets may use it: free,
+one net (`net + 1`: near that net's own copper, or inside a keep-out excepting it alone), a set of nets (`SET + i`,
+an index into `Statics::sets`: inside a keep-out excepting several), or blocked. A point within reach of several
+obstacles gets the nets every one of them lets through (`Sets::combine`: the intersection, a single net falling
+back to its one-net state, none to blocked), so a pad of another net inside the keep-out still blocks, and two
+overlapping keep-outs let through only the nets both except. `Statics::ok(state, net)` is the one test the search
+uses; the reachability components (`components`) add a set's points to each of its nets.
+
+A differential pair is searched as a centerline with a net of its own (`~pair:<name>`): it is added to the
+exceptions of the keep-outs that except *both* nets of the pair, so a pair never enters a keep-out one of its
+nets may not.
+
+A connection that fails at a keep-out names it (`blocked by keep-out `wall` on F.Cu`) and hints at the exception:
+`change keep-out `wall`, or except net GND from it (keepout.set --allow-nets)`.
+
 ### Differential pairs (`pairs`, M8)
 
 A pair is a circuit-level definition (`diffpair.add P N [--name] [--class] [--max-skew] [--max-uncoupled]
@@ -618,7 +643,7 @@ cadlab route import-ses out/route/board.ses     # then: cadlab drc run
 | `structure/layer` | copper layers, all `signal`, top to bottom |
 | `boundary (path pcb 0 …)` | outer contour, arcs as chords within 1 µm |
 | `keepout` on layer `signal` | each cutout (`cutout1`, ...) |
-| `keepout` / `wire_keepout` / `via_keepout` | keep-outs forbidding tracks and vias / tracks / vias, one per layer (`signal` when all); pour- or footprint-only keep-outs are left out with a warning |
+| `keepout` / `wire_keepout` / `via_keepout` | keep-outs forbidding tracks and vias / tracks / vias, one per layer (`signal` when all); pour- or footprint-only keep-outs are left out with a warning; net exceptions are not written (the external router keeps those nets out too, `export.keepout_net_exception`, D76) |
 | `structure/via`, `structure/rule` | via padstacks in use (rules default first); rules track width and clearance |
 | `placement` | each footprint: image = footprint name, position, `front`/`back`, rotation, `lock_type position` when locked, `PN` = part; mounting holes as components `H1`… (locked) |
 | `library/image` | pins in footprint-local coordinates (pin ID = pad number; repeated or empty numbers become `<number>@<index>`), courtyard as outline, non-plated holes as image keep-outs; a non-plated mounting hole is an image with only a keep-out |

@@ -310,7 +310,7 @@ impl Command for NoConnect {
 }
 
 /// Renames net `from` to `to` (merging into `to` when it exists), with every reference to it:
-/// diff pairs, length groups, and the board's tracks, vias and zones.
+/// diff pairs, length groups, and the board's tracks, vias, zones and keep-out exceptions.
 pub(crate) fn move_net(p: &mut Project, from: &str, to: &str) {
     let c = p.circuit_mut();
     let Some(net) = c.nets.remove(from) else { return };
@@ -337,6 +337,11 @@ pub(crate) fn move_net(p: &mut Project, from: &str, to: &str) {
     b.tracks.iter_mut().for_each(|t| rename(&mut t.net));
     b.vias.iter_mut().for_each(|v| rename(&mut v.net));
     b.zones.iter_mut().for_each(|z| rename(&mut z.net));
+    for k in b.keepouts.iter_mut().filter(|k| k.allow_nets.iter().any(|n| n == from)) {
+        k.allow_nets.iter_mut().filter(|n| *n == from).for_each(|n| *n = to.to_string());
+        k.allow_nets.sort();
+        k.allow_nets.dedup();
+    }
 }
 
 /// Rename a net.

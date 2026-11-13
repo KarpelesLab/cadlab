@@ -1605,7 +1605,7 @@ with it; `process.impedance` in `fab-lock.json` lists controlled lines for the o
 without a published stackup); capacitors print in pF below 1 pF (`0.8pF`, not `800fF`, also in part IDs and BOMs);
 the assumed loss tangent prints `0.02`, not `20m`; a coplanar solve says so in its summary; `impedance.solve --netclass`
 says how to assign nets.
-Deferred: keep-outs have no net exception (the feed needs two rectangles, one each side); no lumped elements in the
+Deferred: keep-outs have no net exception (the feed needs two rectangles, one each side; done in D76); no lumped elements in the
 openEMS export; passives have no self-resonance model; `describe` ignores an unknown argument and lists everything
 (`name` for `command`). Thread count needs no new option: `RAYON_NUM_THREADS` caps the solver, and an idle server
 uses no CPU (a server shows one idle thread per core after its first parallel call).
@@ -1826,6 +1826,53 @@ deflate encoder and extras); file contents and names are unchanged. fstool needs
 `fab::export::zip` sizes it from the contents and cuts at the reported archive length.
 *Why:* one less third-party dependency on the export path (and its extraction-side advisories), and archive
 handling stays in a crate the project's maintainer controls.
+
+### D76. Net exceptions in keep-outs (2026-11-13)
+The item session 6 left open (D70): a keep-out under an antenna or around an RF feed must let the feed net through,
+and the agent had to draw two rectangles, one each side of the track. A keep-out now carries `allow_nets`: the nets
+it does not apply to.
+**Meaning.** An exception covers the copper of the net: its tracks, vias and pours, each where the keep-out forbids
+that kind. Footprints stay forbidden (a courtyard has no single net), netless copper is never excepted, and an
+exception on a keep-out that forbids no copper is refused (`keepout.nothing_excepted`) rather than stored as a
+setting that does nothing. It is a list of nets, not of net classes or patterns: the cases seen name one or two
+nets, and a class can be added later without changing what is stored for nets.
+**Model.** `Keepout::allow_nets`: net names, sorted, without duplicates, left out of the file when empty. Boards
+without exceptions are saved byte for byte as before, so the schema version stays 1 and there is no migration (as
+for the optional fields added before, D40). Net renames and merges (`move_net`) rename the entries. A name
+whose net no longer exists excepts nothing and is reported by the DRC (`drc.keepout_net`, a warning), not removed
+behind the user's back.
+**Commands.** `keepout.add --allow-nets`, and `keepout.set` (`allow_nets` adds, `forbid_nets` removes: both are
+lists, so neither needs a way to say "empty" on the command line); `keepout.list` and every summary show
+`except net(s) ...`. Nets must exist (`net.not_found` with suggestions).
+**Consumers.** DRC: `drc.keepout` skips tracks and vias of excepted nets. Zone fill: a `no_pours` keep-out is not
+subtracted from the pour of an excepted net. Router: a keep-out obstacle carries the excepted net ids
+(`Obstacle::except`), and every question "is this in the way of net N" skips it for them: the exact checks, the
+gridless rooms and refinement, push-and-shove (so `route.track` refuses any other net and never shoves a neighbour
+into the keep-out). The grid's static maps are per rule profile, so their per-point state grew from "free / one
+net / blocked" to "free / one net / a set of nets / blocked" (`grid::SET`, `Statics::sets`), combined by
+intersection; this is exact for any number of excepted nets and overlapping keep-outs, where giving excepted nets
+profiles of their own would have collided with neck-down and pair profiles, which are shared by key. A differential
+pair's centerline net is excepted only where both of its nets are. Failures at a keep-out hint at the exception.
+Placement is unchanged (footprints are not excepted).
+**Formats without a per-net exception** (Specctra DSN, IDF 3.0, IDX, KiCad rule areas): the keep-out is written as
+it is, without the exception, and the export warns `export.keepout_net_exception` naming the keep-out and its nets;
+IDX also names the exception in the item's description, and the KiCad export lists it in its `warnings`. Stricter,
+never looser, the rule D47 took for IDF's layers: a reader that honors the file can never put copper where cadlab
+forbids it, at the price of an external router leaving the excepted nets unrouted there (route them in cadlab
+first: existing tracks are written as wiring) and of KiCad's DRC reporting their copper. The other way round,
+dropping the keep-out for the kinds it excepts, would let a freerouting session route any net through an antenna
+keep-out. Imports never create an exception: none of the formats read holds one, so a cadlab → KiCad → cadlab
+round trip loses it. IPC-2581, Gerber and the renders carry no keep-outs, so nothing changes there.
+**Not done.** The KiCad export could express the exception exactly with a custom rule in the `.kicad_dru`
+(`disallow` with an `intersectsArea` and net name condition, as the export already writes for cadlab's custom
+rules) on a rule area that forbids no copper, and the import could read that pair back. It needs KiCad to confirm
+the semantics (rule area layers, pours judged by outline or by fill), and `kicad-cli` only runs in CI, so it is
+left for a change that can add an oracle case. `track.add` and `via.add` place what they are told, as before; the
+DRC reports copper they put in a keep-out.
+*Why:* the exception is the designer's intent ("nothing here but the feed"), and one keep-out states it where two
+rectangles only approximated it: they left the strip under the track open to every net and had to be redrawn
+whenever the track moved. Carrying it through the DRC, the fill and every router stage keeps the rule the project
+has had since M5, that the router returns nothing the DRC would flag.
 
 ### D77. Fab profiles re-checked: unverified values closed only from the fab's own pages and files (2026-11-13)
 Every built-in fab profile was read again against the fab's own pages, and the files those pages publish (PCBWay's

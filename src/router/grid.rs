@@ -19,17 +19,99 @@ pub(crate) const FREE: u32 = 0;
 /// Map state: no net may use this point.
 pub(crate) const BLOCKED: u32 = u32::MAX;
 
-/// Whether a static map state lets `net` through (free, or only near its own copper).
-#[inline]
-pub(crate) fn ok(st: u32, net: u32) -> bool {
-    st == FREE || st == net + 1
+/// Map states from here up to `BLOCKED` (excluded) stand for a set of nets that may use the
+/// point: `SET + i` is `Statics::sets[i]` (points inside a keep-out that excepts several nets).
+/// States between `FREE` and `SET` are `net + 1`: one net only (near its own copper, or inside
+/// a keep-out that excepts it).
+pub(crate) const SET: u32 = 1 << 31;
+
+/// The nets a static obstacle lets through.
+#[derive(Clone, Copy)]
+enum Allow<'a> {
+    None,
+    One(u32),
+    Many(&'a [u32]),
 }
 
-fn combine(st: u32, owned: Option<u32>) -> u32 {
-    match (st, owned) {
-        (FREE, Some(n)) => n + 1,
-        (x, Some(n)) if x == n + 1 => x,
-        _ => BLOCKED,
+impl Allow<'_> {
+    fn of(ob: &super::model::Obstacle) -> Allow<'_> {
+        match ob.kind {
+            ObKind::Pad | ObKind::Copper => ob.net.map_or(Allow::None, Allow::One),
+            _ => match ob.except.as_slice() {
+                [] => Allow::None,
+                [n] => Allow::One(*n),
+                many => Allow::Many(many),
+            },
+        }
+    }
+
+    fn one(self) -> Option<u32> {
+        match self {
+            Allow::One(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+/// The distinct net sets of the maps, while they are built.
+#[derive(Default)]
+struct Sets {
+    list: Vec<Vec<u32>>,
+    ids: BTreeMap<Vec<u32>, u32>,
+}
+
+impl Sets {
+    /// The state for the nets `v` (sorted).
+    fn state(&mut self, v: Vec<u32>) -> u32 {
+        match v.as_slice() {
+            [] => BLOCKED,
+            [n] => n + 1,
+            _ => {
+                if let Some(&i) = self.ids.get(&v) {
+                    return SET + i;
+                }
+                let i = self.list.len() as u32;
+                self.list.push(v.clone());
+                self.ids.insert(v, i);
+                SET + i
+            }
+        }
+    }
+
+    /// The state of a point in state `st` that comes within reach of an obstacle letting
+    /// `allow` through: the nets both let through.
+    fn combine(&mut self, st: u32, allow: Allow<'_>) -> u32 {
+        match (st, allow) {
+            (BLOCKED, _) | (_, Allow::None) => BLOCKED,
+            (FREE, Allow::One(n)) => n + 1,
+            (FREE, Allow::Many(s)) => self.state(s.to_vec()),
+            (x, Allow::One(n)) if x < SET => {
+                if x == n + 1 {
+                    x
+                } else {
+                    BLOCKED
+                }
+            }
+            (x, Allow::Many(s)) if x < SET => {
+                if s.binary_search(&(x - 1)).is_ok() {
+                    x
+                } else {
+                    BLOCKED
+                }
+            }
+            (x, Allow::One(n)) => {
+                if self.list[(x - SET) as usize].binary_search(&n).is_ok() {
+                    n + 1
+                } else {
+                    BLOCKED
+                }
+            }
+            (x, Allow::Many(s)) => {
+                let both: Vec<u32> =
+                    self.list[(x - SET) as usize].iter().copied().filter(|n| s.binary_search(n).is_ok()).collect();
+                self.state(both)
+            }
+        }
     }
 }
 
@@ -136,6 +218,8 @@ pub(crate) struct Statics {
     pub vst: Vec<u16>,
     /// The distinct states.
     pub states: Vec<St>,
+    /// Net sets of the map states from [`SET`] up (sorted nets each).
+    pub sets: Vec<Vec<u32>>,
 }
 
 /// State rasters of the scoped rules (see [`Statics::tst`]).
@@ -216,6 +300,22 @@ fn inside_mask(rb: &RouterBoard, grid: &Grid) -> Vec<bool> {
 }
 
 impl Statics {
+    /// Whether a map state lets `net` through: free, only near its own copper, or inside
+    /// keep-outs that all except it.
+    #[inline]
+    pub fn ok(&self, st: u32, net: u32) -> bool {
+        st == FREE || st == net + 1 || (st >= SET && st != BLOCKED && self.in_set(st, net))
+    }
+
+    fn in_set(&self, st: u32, net: u32) -> bool {
+        self.sets[(st - SET) as usize].binary_search(&net).is_ok()
+    }
+
+    /// The nets of a set state (none for any other state).
+    pub fn only(&self, st: u32) -> &[u32] {
+        if st >= SET && st != BLOCKED { &self.sets[(st - SET) as usize] } else { &[] }
+    }
+
     /// Builds the maps for the `active` profiles on the routing layers `slots` (stackup
     /// indices).
     pub fn build(rb: &RouterBoard, grid: &Grid, slots: &[usize], active: &[bool]) -> Statics {
@@ -223,6 +323,7 @@ impl Statics {
         let s_diag = grid.g * std::f64::consts::SQRT_2 / 2.0;
         let (tst, vst, states) = state_rasters(rb, grid, slots, active);
         let scoped = rb.scoped.on;
+        let mut sets = Sets::default();
         let mut track = Vec::new();
         let mut via = Vec::new();
         for (pi, pr) in rb.profiles.iter().enumerate() {
@@ -241,7 +342,8 @@ impl Statics {
                     if ob.tracks & bit == 0 {
                         continue;
                     }
-                    let owned = if matches!(ob.kind, ObKind::Pad | ObKind::Copper) { ob.net } else { None };
+                    let allow = Allow::of(ob);
+                    let owned = allow.one();
                     // Clearance per point when it depends on the state of the copper there.
                     let varies = scoped && ob.item.is_some() && !tst.is_empty();
                     let r_of = |c: f64| {
@@ -274,7 +376,7 @@ impl Statics {
                                 reach
                             };
                             if ob.shape.dist_point(grid.dpt(i, j)) < reach {
-                                m[k] = combine(st, owned);
+                                m[k] = sets.combine(st, allow);
                             }
                         }
                     }
@@ -288,7 +390,8 @@ impl Statics {
                 .map(|(x, y)| if inside[grid.didx(2 * x, 2 * y)] { FREE } else { BLOCKED })
                 .collect();
             for ob in rb.obstacles.iter().filter(|o| o.vias) {
-                let owned = if matches!(ob.kind, ObKind::Pad | ObKind::Copper) { ob.net } else { None };
+                let allow = Allow::of(ob);
+                let owned = allow.one();
                 let varies = scoped && ob.item.is_some() && !vst.is_empty();
                 let hi = if varies {
                     let nb = ob.bbox.expand(rb.via_out(pr, rb.max_clear()));
@@ -311,7 +414,7 @@ impl Statics {
                         if ob.kind == ObKind::Pad && d < pr.rv - TOL {
                             v[k] = BLOCKED; // no via in pad
                         } else if d < req && !owned.is_some_and(|n| st == n + 1 && ob.kind == ObKind::Copper) {
-                            v[k] = combine(st, owned);
+                            v[k] = sets.combine(st, allow);
                         }
                     }
                 }
@@ -329,6 +432,48 @@ impl Statics {
             }
             via.push(v);
         }
-        Statics { track, via, tst, vst, states }
+        Statics { track, via, tst, vst, states, sets: sets.list }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Points within reach of obstacles: the nets every one of them lets through.
+    #[test]
+    fn states_combine_to_the_nets_every_obstacle_lets_through() {
+        let mut sets = Sets::default();
+        // A pad of net 4, or a keep-out excepting net 4 alone: that net only.
+        assert_eq!(sets.combine(FREE, Allow::One(4)), 5);
+        assert_eq!(sets.combine(5, Allow::One(4)), 5);
+        assert_eq!(sets.combine(5, Allow::One(3)), BLOCKED);
+        assert_eq!(sets.combine(5, Allow::None), BLOCKED);
+        assert_eq!(sets.combine(BLOCKED, Allow::One(4)), BLOCKED);
+        // A keep-out excepting nets 2, 4 and 7.
+        let a = sets.combine(FREE, Allow::Many(&[2, 4, 7]));
+        assert_eq!(a, SET);
+        assert_eq!(sets.combine(FREE, Allow::Many(&[2, 4, 7])), a, "one state per set");
+        assert_eq!(sets.combine(a, Allow::Many(&[2, 4, 7])), a);
+        // Inside it, near a pad of net 4, of net 3; in a second keep-out.
+        assert_eq!(sets.combine(a, Allow::One(4)), 5);
+        assert_eq!(sets.combine(5, Allow::Many(&[2, 4, 7])), 5);
+        assert_eq!(sets.combine(a, Allow::One(3)), BLOCKED);
+        assert_eq!(sets.combine(4, Allow::Many(&[2, 4, 7])), BLOCKED);
+        let b = sets.combine(a, Allow::Many(&[4, 7, 9]));
+        assert_eq!(b, SET + 1);
+        assert_eq!(sets.combine(a, Allow::Many(&[7, 9])), 8, "one net left: its own state");
+        assert_eq!(sets.combine(a, Allow::Many(&[1, 9])), BLOCKED);
+        assert_eq!(sets.combine(a, Allow::None), BLOCKED);
+        let st = Statics { track: vec![], via: vec![], tst: vec![], vst: vec![], states: vec![], sets: sets.list };
+        assert_eq!(st.sets, [vec![2, 4, 7], vec![4, 7]]);
+        for net in 0..10 {
+            assert!(st.ok(FREE, net) && !st.ok(BLOCKED, net));
+            assert_eq!(st.ok(5, net), net == 4);
+            assert_eq!(st.ok(a, net), [2, 4, 7].contains(&net));
+            assert_eq!(st.ok(b, net), [4, 7].contains(&net));
+        }
+        assert_eq!((st.only(a), st.only(b)), (&[2, 4, 7][..], &[4, 7][..]));
+        assert!(st.only(FREE).is_empty() && st.only(5).is_empty() && st.only(BLOCKED).is_empty());
     }
 }

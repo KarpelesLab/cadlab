@@ -764,7 +764,8 @@ Friction log, and what was done:
 
 Seen but left as they are:
 
-- A keep-out has no net exception, so the feed takes two rectangles, one each side of the track (router and DRC work).
+- A keep-out has no net exception, so the feed takes two rectangles, one each side of the track (router and DRC
+  work). Fixed afterwards, see the follow-up below.
 - `export.openems` wrote no lumped elements, so its result for this region was the bare layout (it writes them since D74, which replaced the `openems.parts_not_modeled` warning).
 - `describe {"name": ...}` ignores the unknown argument and lists every command (the argument is `command`).
 - `sim.sparams` takes one thread below 262 144 nodes by the existing rule. `RAYON_NUM_THREADS` caps the solver and the
@@ -773,3 +774,16 @@ Seen but left as they are:
 - 91 s for the same run that took 569 s under a machine load of 100: the plan's minutes are nominal.
 - `sim.sparams` has no way to place a part's parasitics by datasheet other than `esr` and `esl`; no self-resonance or
   frequency-dependent Q.
+
+Follow-up (D76): keep-outs take net exceptions. `keepout.add --allow-nets RF_FEED` (and `keepout.set` on an
+existing one) excepts the copper of those nets, tracks, vias and pours, from the keep-out; footprints stay
+forbidden. The replay now draws the one rectangle the agent wanted around the feed instead of two, with the same
+result (100 % routed, DRC clean). Tests: `tests/route.rs` `keepout_net_exceptions` (a wall across the board that
+one net, then two, may cross, under each search: `auto`, `grid` with and without the gridless refinement,
+`gridless`; `route.track` refused for another net in every mode), `tests/diffpair.rs` (a pair crosses only when
+both of its nets are excepted), `tests/drc.rs` (excepted, other-net and netless copper, footprints, an exception
+for a net that is gone), `tests/zone.rs` (the pour of an excepted net fills the keep-out; the commands, the saved
+form, net renames and merges), `tests/keepout_exceptions.rs` (DSN, IDF, IDX and KiCad write the keep-out without
+the exception and warn `export.keepout_net_exception`; the files equal those written without one), and unit
+tests of the grid's net-set states (`router::grid`, `router::components`). Not checked against an oracle: KiCad
+and freerouting only ever see the keep-out without its exception.

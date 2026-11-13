@@ -20,6 +20,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<ZoneList>()
         .register::<ZoneFill>()
         .register::<KeepoutAdd>()
+        .register::<KeepoutSet>()
         .register::<KeepoutRemove>()
         .register::<KeepoutList>();
 }
@@ -617,16 +618,66 @@ fn keepouts_text(o: &Keepouts) -> String {
             let layers = if k.layers.is_empty() { "all layers".to_string() } else { k.layers.join(" ") };
             if what.is_empty() {
                 format!("keepout:{} on {layers}: rule area (forbids nothing)", k.name)
-            } else {
+            } else if k.allow_nets.is_empty() {
                 format!("keepout:{} on {layers}: no {}", k.name, what.join(", "))
+            } else {
+                let nets = if k.allow_nets.len() == 1 { "net" } else { "nets" };
+                format!(
+                    "keepout:{} on {layers}: no {}, except {nets} {}",
+                    k.name,
+                    what.join(", "),
+                    k.allow_nets.join(" ")
+                )
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+/// The index of keep-out `name` (exact, then case-insensitive; `keepout:` prefix allowed).
+fn keepout_index(p: &Project, name: &str) -> Result<usize, CommandError> {
+    let name = name.strip_prefix("keepout:").unwrap_or(name);
+    let ks = &p.board().keepouts;
+    if let Some(i) =
+        ks.iter().position(|k| k.name == name).or_else(|| ks.iter().position(|k| k.name.eq_ignore_ascii_case(name)))
+    {
+        return Ok(i);
+    }
+    let s = did_you_mean(name, ks.iter().map(|k| k.name.as_str()), 3);
+    Err(CommandError::not_found("keepout.not_found", format!("no keep-out `{name}`"))
+        .with_subject(ObjectRef::Named { kind: "keepout".into(), name: name.into() })
+        .with_suggestions(&s)
+        .with_hint_if_none("list keep-outs with `keepout.list`"))
+}
+
+/// Net names for a keep-out's exceptions: existing nets, sorted, without duplicates.
+fn resolve_nets(p: &Project, nets: &[String]) -> Result<Vec<String>, CommandError> {
+    let mut out = nets.iter().map(|n| super::net::net_name(p, n)).collect::<Result<Vec<_>, _>>()?;
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Refuses net exceptions on a keep-out that forbids no copper (they would do nothing).
+fn check_exceptions(k: &Keepout) -> Result<(), CommandError> {
+    if k.allow_nets.is_empty() || k.no_tracks || k.no_vias || k.no_pours {
+        return Ok(());
+    }
+    Err(CommandError::invalid_args(
+        "keepout.nothing_excepted",
+        format!(
+            "keep-out `{}` forbids no tracks, vias or pours: a net exception would change nothing (footprints are \
+             forbidden whatever their nets)",
+            k.name
+        ),
+    )
+    .with_subject(ObjectRef::Named { kind: "keepout".into(), name: k.name.clone() })
+    .with_hint("drop `allow_nets`, or forbid tracks, vias or pours in the keep-out"))
+}
+
 /// Add a keep-out area. With no `no_*` flag given, everything is forbidden; with `rule_area`,
-/// nothing (a named area for custom rules).
+/// nothing (a named area for custom rules). `allow_nets` excepts nets: an antenna or RF feed
+/// keep-out that the feed net itself may cross.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KeepoutAdd {
@@ -653,11 +704,16 @@ pub struct KeepoutAdd {
     /// (`board.custom_rule`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rule_area: bool,
+    /// Nets excepted from the keep-out: their tracks, vias and pours may enter it (the router,
+    /// zone fill and the DRC honor it). Footprints stay forbidden.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_nets: Vec<String>,
 }
 
 impl Command for KeepoutAdd {
     const NAME: &'static str = "keepout.add";
-    const SUMMARY: &'static str = "Add a keep-out area forbidding tracks, vias, pours and/or footprints";
+    const SUMMARY: &'static str =
+        "Add a keep-out area forbidding tracks, vias, pours and/or footprints, with optional net exceptions";
     const KIND: CommandKind = CommandKind::Mutation;
     const POSITIONAL: &'static [&'static str] = &["name"];
     type Output = Keepouts;
@@ -667,6 +723,7 @@ impl Command for KeepoutAdd {
         check_name(p, &self.name, "keepout", None)?;
         let layers = resolve_layers(p, &self.layers, "keepout.invalid_layer")?;
         let outline = resolve_outline(p, &self.outline, "keepout")?;
+        let allow_nets = resolve_nets(p, &self.allow_nets)?;
         let flags = [self.no_tracks, self.no_vias, self.no_pours, self.no_footprints];
         if self.rule_area && flags.contains(&Some(true)) {
             return Err(CommandError::invalid_args(
@@ -691,13 +748,74 @@ impl Command for KeepoutAdd {
             no_vias: f(self.no_vias),
             no_pours: f(self.no_pours),
             no_footprints: f(self.no_footprints),
+            allow_nets,
         };
+        check_exceptions(&k)?;
         p.board_mut().keepouts.push(k.clone());
         Ok(Keepouts { keepouts: vec![k] })
     }
 
     fn summarize(o: &Keepouts) -> String {
         format!("added {}", keepouts_text(o))
+    }
+}
+
+/// Change the net exceptions of a keep-out: the nets whose tracks, vias and pours may enter it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KeepoutSet {
+    /// Keep-out name.
+    pub name: String,
+    /// Nets to except from the keep-out (added to its exceptions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_nets: Vec<String>,
+    /// Nets no longer excepted (removed from its exceptions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbid_nets: Vec<String>,
+}
+
+impl Command for KeepoutSet {
+    const NAME: &'static str = "keepout.set";
+    const SUMMARY: &'static str = "Change a keep-out's net exceptions (the nets allowed to enter it)";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = Keepouts;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<Keepouts, CommandError> {
+        let p = ctx.project()?;
+        let i = keepout_index(p, &self.name)?;
+        if self.allow_nets.is_empty() && self.forbid_nets.is_empty() {
+            return Err(CommandError::invalid_args("keepout.nothing_to_set", "nothing to change")
+                .with_hint("give `allow_nets` and/or `forbid_nets`"));
+        }
+        let allow = resolve_nets(p, &self.allow_nets)?;
+        let mut k = p.board().keepouts[i].clone();
+        // A net to forbid may be gone from the circuit: match the stored names.
+        let forbid: Vec<&str> = self.forbid_nets.iter().map(|n| n.strip_prefix("net:").unwrap_or(n)).collect();
+        for n in &forbid {
+            if !k.allow_nets.iter().any(|a| a.eq_ignore_ascii_case(n)) {
+                let s = did_you_mean(n, k.allow_nets.iter().map(String::as_str), 3);
+                return Err(CommandError::not_found(
+                    "keepout.net_not_excepted",
+                    format!("keep-out `{}` has no exception for net `{n}`", k.name),
+                )
+                .with_subject(ObjectRef::Named { kind: "keepout".into(), name: k.name.clone() })
+                .with_subject(ObjectRef::Net((*n).into()))
+                .with_suggestions(&s)
+                .with_hint_if_none("see its exceptions with `keepout.list`"));
+            }
+        }
+        k.allow_nets.retain(|a| !forbid.iter().any(|n| a.eq_ignore_ascii_case(n)));
+        k.allow_nets.extend(allow);
+        k.allow_nets.sort();
+        k.allow_nets.dedup();
+        check_exceptions(&k)?;
+        ctx.project_mut()?.board_mut().keepouts[i] = k.clone();
+        Ok(Keepouts { keepouts: vec![k] })
+    }
+
+    fn summarize(o: &Keepouts) -> String {
+        keepouts_text(o)
     }
 }
 
@@ -717,20 +835,7 @@ impl Command for KeepoutRemove {
     type Output = Keepouts;
 
     fn run(self, ctx: &mut Context<'_>) -> Result<Keepouts, CommandError> {
-        let p = ctx.project()?;
-        let name = self.name.strip_prefix("keepout:").unwrap_or(&self.name);
-        let ks = &p.board().keepouts;
-        let Some(i) = ks
-            .iter()
-            .position(|k| k.name == name)
-            .or_else(|| ks.iter().position(|k| k.name.eq_ignore_ascii_case(name)))
-        else {
-            let s = did_you_mean(name, ks.iter().map(|k| k.name.as_str()), 3);
-            return Err(CommandError::not_found("keepout.not_found", format!("no keep-out `{name}`"))
-                .with_subject(ObjectRef::Named { kind: "keepout".into(), name: name.into() })
-                .with_suggestions(&s)
-                .with_hint_if_none("list keep-outs with `keepout.list`"));
-        };
+        let i = keepout_index(ctx.project()?, &self.name)?;
         let k = ctx.project_mut()?.board_mut().keepouts.remove(i);
         Ok(Keepouts { keepouts: vec![k] })
     }

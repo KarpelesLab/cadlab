@@ -571,3 +571,51 @@ fn pair_routes_wherever_the_receptacle_sits() {
     }
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// A keep-out between the ESD array and the MCU (D76): the coupled pair crosses it only when it
+/// excepts both nets of the pair.
+#[test]
+fn pair_crosses_a_keepout_excepting_both_nets() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    usb_board(&r, &mut s);
+    exec(
+        &r,
+        &mut s,
+        "diffpair.add",
+        json!({"p": "USB_DP", "n": "USB_DM", "max_skew": "0.1mm", "max_uncoupled": "12mm"}),
+    );
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "wall", "outline": {"rect": {"from": ["21mm", "-1mm"], "to": ["23mm", "25mm"]}},
+               "no_tracks": true, "no_vias": true, "allow_nets": ["USB_DP"]}),
+    );
+    let inside = |s: &Session| {
+        let x = |p: cadlab::Point| p.x.0 as f64 / 1e6;
+        let b = s.project.as_ref().unwrap().board();
+        b.tracks.iter().filter(|t| x(t.start).min(x(t.end)) < 23.0 && x(t.start).max(x(t.end)) > 21.0).count()
+    };
+    let o = exec(&r, &mut s, "route.diffpair", json!({}));
+    let pr = &o["output"]["pairs"][0];
+    assert_eq!(
+        (pr["status"].as_str(), pr["routed"].as_u64()),
+        (Some("partial"), Some(2)),
+        "USB_DM is not excepted: {pr}"
+    );
+    assert_eq!(inside(&s), 0);
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+
+    exec(&r, &mut s, "route.rip", json!({"all": true}));
+    let o = exec(&r, &mut s, "keepout.set", json!({"name": "wall", "allow_nets": ["USB_DM"]}));
+    assert_eq!(o["output"]["keepouts"][0]["allow_nets"], json!(["USB_DM", "USB_DP"]));
+    let o = exec(&r, &mut s, "route.diffpair", json!({}));
+    let pr = &o["output"]["pairs"][0];
+    assert_eq!(pr["status"], "routed", "{pr}");
+    assert_eq!(pr["connections"], 3);
+    assert!(inside(&s) >= 2, "both nets cross the keep-out");
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    assert_eq!(drc_codes(&s, "drc.diffpair"), Vec::<String>::new());
+}

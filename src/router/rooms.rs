@@ -402,7 +402,7 @@ pub(crate) fn track_space(
             Item::Static(o) => {
                 let ob = &rb.obstacles[o as usize];
                 let own = ob.net == Some(net) && matches!(ob.kind, ObKind::Pad | ObKind::Copper);
-                if ob.tracks & bit == 0 || own {
+                if ob.tracks & bit == 0 || own || ob.spares(net) {
                     continue;
                 }
                 holes.extend_from_slice(grown.track(rb, prof, o as usize));
@@ -490,7 +490,7 @@ pub(crate) fn via_space(
         match it {
             Item::Static(o) => {
                 let ob = &rb.obstacles[o as usize];
-                if !ob.vias {
+                if !ob.vias || ob.spares(net) {
                     continue;
                 }
                 let own = ob.net == Some(net);

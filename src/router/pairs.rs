@@ -183,6 +183,13 @@ pub(crate) fn route_pairs(
         let id = rb.nets.len() as u32;
         rb.nets.push(format!("~pair:{name}"));
         rb.net_profile.push(k);
+        // The centerline may enter the keep-outs that except both nets of the pair (the new id
+        // is the largest: the lists stay sorted).
+        if let (Some(&pn), Some(&nn)) = (rb.net_ids.get(&d.p), rb.net_ids.get(&d.n)) {
+            for ob in rb.obstacles.iter_mut().filter(|o| o.spares(pn) && o.spares(nn)) {
+                ob.except.push(id);
+            }
+        }
         fat.insert(name.clone(), id);
         rules.insert(name.clone(), r);
     }

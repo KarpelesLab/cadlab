@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use super::geo::{BoxF, P, point_seg_d2};
-use super::grid::{Grid, Statics, delta, ok};
+use super::grid::{Grid, Statics, delta};
 use super::index::TOL;
 use super::model::RouterBoard;
 use super::scoped::St;
@@ -1001,7 +1001,7 @@ impl<'a> Engine<'a> {
             let mut stubs: Vec<Access> = Vec::new();
             for y in y0..=y1 {
                 for x in x0..=x1 {
-                    if !ok(map[self.grid.didx(2 * x, 2 * y)], t.net) {
+                    if !self.st.ok(map[self.grid.didx(2 * x, 2 * y)], t.net) {
                         continue;
                     }
                     let c = self.grid.cell(x, y);
@@ -1223,7 +1223,7 @@ impl<'a> Engine<'a> {
                 let km = (k0 + mid_off[nd]) as usize;
                 let kq = (k0 + 2 * mid_off[nd]) as usize;
                 let mut pen = 0.0;
-                if !ok(tmap[km], net) || !ok(tmap[kq], net) {
+                if !self.st.ok(tmap[km], net) || !self.st.ok(tmap[kq], net) {
                     if mode != Mode::Explain {
                         continue;
                     }
@@ -1254,7 +1254,7 @@ impl<'a> Engine<'a> {
             if self.vias_allowed {
                 let cell = self.grid.cidx(x, y);
                 let mut pen = 0.0;
-                let legal = ok(self.st.via[prof][cell], net);
+                let legal = self.st.ok(self.st.via[prof][cell], net);
                 if !legal {
                     if mode != Mode::Explain {
                         continue;
@@ -1284,7 +1284,7 @@ impl<'a> Engine<'a> {
                     if s2 == s {
                         continue;
                     }
-                    if !ok(track[k], net) && mode != Mode::Explain {
+                    if !self.st.ok(track[k], net) && mode != Mode::Explain {
                         continue;
                     }
                     let v = (s2 * cells) as u32 + cell as u32;
@@ -1356,7 +1356,7 @@ impl<'a> Engine<'a> {
             let occ_s = &self.occ_t[ai][s];
             let hist_s = &self.hist_t[s];
             let kq = self.grid.didx(2 * x, 2 * y);
-            if !ok(tmap[kq], net) {
+            if !self.st.ok(tmap[kq], net) {
                 continue;
             }
             // Moves u -> v along the layer: u = v - (dx, dy), midpoint between them.
@@ -1366,7 +1366,7 @@ impl<'a> Engine<'a> {
                     continue;
                 }
                 let km = self.grid.didx(2 * x - dx, 2 * y - dy);
-                if !ok(tmap[km], net) {
+                if !self.st.ok(tmap[km], net) {
                     continue;
                 }
                 let occ = (occ_s[km] + occ_s[kq]) as f32;
@@ -1382,7 +1382,7 @@ impl<'a> Engine<'a> {
             // Vias u (another slot, same cell) -> v.
             if self.vias_allowed {
                 let cell = self.grid.cidx(x, y);
-                if !ok(self.st.via[prof][cell], net) {
+                if !self.st.ok(self.st.via[prof][cell], net) {
                     continue;
                 }
                 let occ = self.occ_v[ai][cell] as f32;
@@ -1422,7 +1422,7 @@ impl<'a> Engine<'a> {
         let ns = self.slots.len();
         // Legal for the net, and also not near other nets' routing. A move along a layer
         // needs its midpoint and end free; a via needs its cell free and its end legal.
-        let legal = |s: usize, i: i32, j: i32| ok(self.st.track[prof][s][self.grid.didx(i, j)], net);
+        let legal = |s: usize, i: i32, j: i32| self.st.ok(self.st.track[prof][s][self.grid.didx(i, j)], net);
         let free = |s: usize, i: i32, j: i32| legal(s, i, j) && self.occ_t[ai][s][self.grid.didx(i, j)] == 0;
         for &(n, _) in sources {
             let (s, x, y) = self.unpack(n);
@@ -1473,7 +1473,7 @@ impl<'a> Engine<'a> {
             }
             if self.vias_allowed {
                 let cell = self.grid.cidx(x, y);
-                if ok(self.st.via[prof][cell], net) && self.occ_v[ai][cell] == 0 {
+                if self.st.ok(self.st.via[prof][cell], net) && self.occ_v[ai][cell] == 0 {
                     for s2 in (0..ns).filter(|&s2| s2 != s) {
                         let u = (s2 as u32) * cells + cell as u32;
                         if reach(u, legal(s2, 2 * x, 2 * y), &mut queue) {

@@ -112,7 +112,10 @@ fn stretch(pts: &[P], layer: usize, net: u32, ck: &Checker<'_>, grid: f64, any_a
         match it {
             Item::Static(o) => {
                 let ob = &rb.obstacles[o as usize];
-                if ob.tracks & bit == 0 || (ob.net == Some(net) && matches!(ob.kind, ObKind::Pad | ObKind::Copper)) {
+                if ob.tracks & bit == 0
+                    || (ob.net == Some(net) && matches!(ob.kind, ObKind::Pad | ObKind::Copper))
+                    || ob.spares(net)
+                {
                     continue;
                 }
                 let st = rb.st_track_box(pr, &[layer], &ob.bbox.expand(pr.hw + rb.max_clear()));

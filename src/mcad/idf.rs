@@ -21,7 +21,8 @@
 //!   `.VIA_KEEPOUT ECAD` for `no_vias`; `.PLACE_KEEPOUT ECAD` for `no_footprints`, on the side
 //!   its copper layers touch (`TOP`, `BOTTOM` or `BOTH`) with height 0 (every component
 //!   excluded). Pour keep-outs and rule areas (keep-outs that forbid nothing) have no IDF 3.0
-//!   counterpart and are left out (IDX carries pour keep-outs).
+//!   counterpart and are left out (IDX carries pour keep-outs). IDF has no nets: a keep-out's
+//!   net exceptions are not written (the sections overstate, [`IdfOut::net_exceptions`]).
 //!
 //! In these sections the loop label is the direction (0: counter-clockwise), each section is
 //! one closed loop.
@@ -69,6 +70,8 @@ pub struct IdfOut {
     pub holes: usize,
     /// Keep-out sections written (`.ROUTE_KEEPOUT`, `.VIA_KEEPOUT`, `.PLACE_KEEPOUT`).
     pub keepouts: usize,
+    /// Routing and via keep-outs written without their net exceptions (name, excepted nets).
+    pub net_exceptions: Vec<(String, Vec<String>)>,
 }
 
 fn q(s: &str) -> String {
@@ -257,7 +260,16 @@ pub fn export(p: &Project, o: &Options) -> Option<IdfOut> {
     for c in seen.values() {
         library_entry(&mut l, c);
     }
-    Some(IdfOut { board: b, library: l, no_body, model_errors, placed: bodies.len(), holes: holes.len(), keepouts })
+    Some(IdfOut {
+        board: b,
+        library: l,
+        no_body,
+        model_errors,
+        placed: bodies.len(),
+        holes: holes.len(),
+        keepouts,
+        net_exceptions: super::keepout_net_exceptions(p, false),
+    })
 }
 
 #[cfg(test)]

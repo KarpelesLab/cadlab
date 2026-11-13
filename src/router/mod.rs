@@ -2354,7 +2354,7 @@ fn fanout_items(
         let map = &st.track[rb.net_profile[net as usize]][s];
         [(2 * x, 2 * y), (2 * x + dx, 2 * y + dy), (2 * x + 2 * dx, 2 * y + 2 * dy)]
             .into_iter()
-            .all(|(i, j)| i >= 0 && j >= 0 && i < grid.dw() && j < grid.dh() && grid::ok(map[grid.didx(i, j)], net))
+            .all(|(i, j)| i >= 0 && j >= 0 && i < grid.dw() && j < grid.dh() && st.ok(map[grid.didx(i, j)], net))
     };
     let mut missed = Vec::new();
     let mut escapes = fanout::escape(&rb, &routes, slots, &grid, &mut index, only, &open, &cross, prio, &mut missed);
@@ -2961,7 +2961,10 @@ fn describe(rb: &RouterBoard, _ck: &Checker<'_>, blockers: &[(Blocker, usize, P)
                     ObKind::Edge => {
                         rep.hints.push("move parts away from the board edge, or lower copper_to_edge".into());
                     }
-                    ObKind::Keepout => rep.hints.push(format!("change {}", ob.label)),
+                    ObKind::Keepout => rep.hints.push(format!(
+                        "change {}, or except net {} from it (keepout.set --allow-nets)",
+                        ob.label, rep.net
+                    )),
                     ObKind::Copper => {
                         if let Some(n) = ob.net {
                             rep.hints.push(format!(

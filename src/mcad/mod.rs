@@ -327,6 +327,17 @@ pub fn inset_outer(p: &Project, outer: &Loop, edge: Nm) -> Vec<Loop> {
         .collect()
 }
 
+/// The keep-outs whose net exceptions an MCAD file cannot carry (name, excepted nets): those
+/// forbidding tracks or vias, or pours when the format writes pour keep-outs (`pours`).
+pub fn keepout_net_exceptions(p: &Project, pours: bool) -> Vec<(String, Vec<String>)> {
+    p.board()
+        .keepouts
+        .iter()
+        .filter(|k| !k.allow_nets.is_empty() && (k.no_tracks || k.no_vias || (pours && k.no_pours)))
+        .map(|k| (k.name.clone(), k.allow_nets.clone()))
+        .collect()
+}
+
 /// The board sides a keep-out's copper layers touch (`layers` empty: all layers; only inner
 /// layers: both sides).
 pub fn keepout_sides(p: &Project, layers: &[String]) -> Vec<BoardSide> {

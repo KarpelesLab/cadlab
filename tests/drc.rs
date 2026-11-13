@@ -343,6 +343,7 @@ fn silk_keepout_and_through_hole_rules() {
         no_vias: true,
         no_pours: true,
         no_footprints: true,
+        allow_nets: vec![],
     });
     let kt = add_track(&mut s, "B.Cu", mm(9.5, 14.2), mm(12.5, 14.2), 0.25, None);
     let kv = add_via(&mut s, mm(9.6, 12.3), 0.3, 0.6, None);
@@ -358,6 +359,7 @@ fn silk_keepout_and_through_hole_rules() {
         no_vias: false,
         no_pours: false,
         no_footprints: false,
+        allow_nets: vec![],
     });
     add_track(&mut s, "F.Cu", mm(18.5, 10.0), mm(19.0, 10.0), 0.25, None);
 
@@ -626,4 +628,50 @@ fn copper_checks_find_every_error_about_tracks_and_vias() {
     let full = about_copper(&cadlab::drc::check(p));
     assert!(full.len() >= 4, "{full:?}");
     assert_eq!(about_copper(&cadlab::drc::check_copper(p)), full);
+}
+
+/// Net exceptions of a keep-out (D76): tracks and vias of an excepted net may be inside, any
+/// other net's and netless copper may not, footprints never; an exception for a net that is
+/// gone is a warning.
+#[test]
+fn keepout_net_exceptions() {
+    let (_d, r, mut s) = routed();
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "feed", "outline": {"rect": {"from": ["9mm", "11.5mm"], "to": ["13mm", "14.5mm"]}},
+               "allow_nets": ["3V3"]}),
+    );
+    let own = add_track(&mut s, "B.Cu", mm(9.5, 12.0), mm(12.5, 12.0), 0.25, Some("3V3"));
+    let own_via = add_via(&mut s, mm(9.6, 13.0), 0.3, 0.6, Some("3V3"));
+    let other = add_track(&mut s, "B.Cu", mm(9.5, 14.0), mm(12.5, 14.0), 0.25, Some("VIN"));
+    let netless = add_via(&mut s, mm(12.0, 13.0), 0.3, 0.6, None);
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 1uF 16V X5R 0402", "refdes": "C7"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "C7", "at": ["11mm", "13mm"], "side": "bottom"}));
+    let d = drc(&s);
+    let k: Vec<&Diagnostic> = d.iter().filter(|x| x.code == "drc.keepout").collect();
+    assert_eq!(k.len(), 3, "{}", text(&d));
+    let t = find(&d, "drc.keepout", &format!("track#{other}"));
+    assert!(t.hint.as_deref().unwrap().contains("keepout.set feed --allow-nets"), "{:?}", t.hint);
+    find(&d, "drc.keepout", &format!("via#{netless}"));
+    find(&d, "drc.keepout", "C7");
+    for sub in [format!("track#{own}"), format!("via#{own_via}")] {
+        let sub = ObjectRef::parse(&sub).unwrap();
+        assert!(k.iter().all(|x| !x.subjects.contains(&sub)), "{}", text(&d));
+    }
+    assert!(!codes(&d).contains("drc.keepout_net"));
+
+    // The same copper without the exception.
+    exec(&r, &mut s, "keepout.set", json!({"name": "feed", "forbid_nets": ["3V3"]}));
+    let d = drc(&s);
+    assert_eq!(d.iter().filter(|x| x.code == "drc.keepout").count(), 5, "{}", text(&d));
+
+    // An exception left behind by a net that no longer exists.
+    project(&mut s).board_mut().keepouts[0].allow_nets = vec!["GHOST".into()];
+    let d = drc(&s);
+    let w = find(&d, "drc.keepout_net", "net:GHOST");
+    assert_eq!(w.severity, Severity::Warning);
+    assert!(w.subjects.contains(&ObjectRef::Named { kind: "keepout".into(), name: "feed".into() }));
+    assert!(w.hint.as_deref().unwrap().contains("--forbid-nets GHOST"));
 }

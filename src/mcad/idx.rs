@@ -21,6 +21,9 @@
 //!   `KEEPOUT_AREA_ROUTING` (`Route`), vias `KEEPOUT_AREA_VIA` (`Via`), pours
 //!   `KEEPOUT_AREA_OTHER` (`Plane`) through the board, footprints `KEEPOUT_AREA_COMPONENT`
 //!   (`ComponentPlacement`) per side, from the board surface outward without an upper limit.
+//!   A keep-out's net exceptions are named in the description of its copper items only
+//!   (`no tracks on F.Cu, except net RF`): EDMD keep-outs have no nets
+//!   ([`IdxOut::net_exceptions`]).
 //! - Components (`COMPONENT`, `AssemblyComponent` of type `Physical`): the package body
 //!   rectangle extruded to the body height, one item per footprint and part number, placed per
 //!   designator with a 3D transformation: rotated about Z on the top face (Z = thickness), or
@@ -71,6 +74,8 @@ pub struct IdxOut {
     pub holes: usize,
     /// Keep-out items written (one per forbidden kind and side).
     pub keepouts: usize,
+    /// Copper keep-outs whose net exceptions are only in the description (name, excepted nets).
+    pub net_exceptions: Vec<(String, Vec<String>)>,
 }
 
 /// Indented XML writer with text content.
@@ -564,7 +569,11 @@ pub fn export(p: &Project, o: &Options) -> Option<IdxOut> {
     for k in &p.board().keepouts {
         let Some(lp) = polygon_loop(&k.outline) else { continue };
         let lp = lp.oriented(true);
-        let layers = if k.layers.is_empty() { "all copper layers".to_string() } else { k.layers.join(", ") };
+        let mut layers = if k.layers.is_empty() { "all copper layers".to_string() } else { k.layers.join(", ") };
+        if !k.allow_nets.is_empty() {
+            let nets = if k.allow_nets.len() == 1 { "net" } else { "nets" };
+            layers = format!("{layers}, except {nets} {}", k.allow_nets.join(", "));
+        }
         let sides = keepout_sides(p, &k.layers);
         let mut kinds: Vec<(&str, &str, &str, Option<BoardSide>)> = Vec::new();
         if k.no_tracks {
@@ -637,7 +646,14 @@ pub fn export(p: &Project, o: &Options) -> Option<IdxOut> {
     x.start("foundation:ProcessInstruction", &[("xsi:type", "computational:EDMDProcessInstructionSendInformation")]);
     x.out.push_str("/>\n");
     x.close("foundation:EDMDDataSet");
-    Some(IdxOut { content: x.out, no_body, components: bodies.len(), holes: holes.len(), keepouts })
+    Some(IdxOut {
+        content: x.out,
+        no_body,
+        components: bodies.len(),
+        holes: holes.len(),
+        keepouts,
+        net_exceptions: super::keepout_net_exceptions(p, true),
+    })
 }
 
 /// The package item of a body: its rectangle extruded to the body height. Returns its id.

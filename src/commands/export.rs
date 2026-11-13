@@ -357,6 +357,31 @@ fn report_no_body(ctx: &mut Context<'_>, refdes: Vec<String>) {
     }
 }
 
+/// Reports the keep-outs (name, excepted nets) a format wrote without their net exceptions:
+/// `what` says what that means for the reader of the file.
+pub(crate) fn report_net_exceptions(ctx: &mut Context<'_>, format: &str, what: &str, list: &[(String, Vec<String>)]) {
+    for (name, nets) in list {
+        let mut d = Diagnostic::warning(
+            "export.keepout_net_exception",
+            format!(
+                "keep-out `{name}` excepts {} {}, which {format} cannot express: {what}",
+                if nets.len() == 1 { "net" } else { "nets" },
+                nets.join(", ")
+            ),
+        )
+        .with_subject(ObjectRef::Named { kind: "keepout".into(), name: name.clone() })
+        .with_hint(format!(
+            "the cadlab project keeps the exception (the router, zone fill and `drc.run` honor it); tell the \
+             reader of the file, or drop the exception (`keepout.set {name} --forbid-nets ...`) if the file must \
+             match"
+        ));
+        for n in nets {
+            d = d.with_subject(ObjectRef::Net(n.clone()));
+        }
+        ctx.report(d);
+    }
+}
+
 fn report_model_errors(ctx: &mut Context<'_>, errors: &[(String, crate::models3d::ModelError3d)]) {
     for (refdes, e) in errors {
         ctx.report(e.warning(refdes));
@@ -524,6 +549,12 @@ impl Command for Idf {
         let written = write(files.into_iter().map(|f| (dir.join(&f.name), f)).collect())?;
         report_no_body(ctx, out.no_body);
         report_model_errors(ctx, &out.model_errors);
+        report_net_exceptions(
+            ctx,
+            "IDF",
+            "its routing and via keep-out sections hold for every net",
+            &out.net_exceptions,
+        );
         Ok(IdfExported { files: written.files, components: out.placed, holes: out.holes, keepouts: out.keepouts })
     }
 
@@ -589,6 +620,12 @@ impl Command for Idx {
         let file = OutFile { name: String::new(), function: "IDX".into(), content: out.content };
         let written = write(vec![(path, file)])?;
         report_no_body(ctx, out.no_body);
+        report_net_exceptions(
+            ctx,
+            "IDX",
+            "its keep-out items hold for every net (the exception is named in their description only)",
+            &out.net_exceptions,
+        );
         Ok(IdxExported {
             path: written.files[0].path.clone(),
             components: out.components,
@@ -932,6 +969,13 @@ impl Command for ExportDsn {
         };
         let file = OutFile { name: String::new(), function: "SpecctraDesign".into(), content: d.write() };
         write(vec![(path, file)])?;
+        report_net_exceptions(
+            ctx,
+            "a Specctra design",
+            "the external router keeps these nets out of it too (route them in cadlab first: existing tracks are \
+             written as wiring)",
+            &out.net_exceptions,
+        );
         for w in out.warnings {
             ctx.report(
                 Diagnostic::warning("export.dsn_incomplete", w)

@@ -685,6 +685,17 @@ pub struct Keepout {
     /// No footprints (courtyards).
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_footprints: bool,
+    /// Nets excepted from the keep-out: their tracks, vias and pours may enter it (sorted, no
+    /// duplicates). Footprints are forbidden regardless.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_nets: Vec<String>,
+}
+
+impl Keepout {
+    /// Whether copper of `net` is excepted from this keep-out (netless copper never is).
+    pub fn allows(&self, net: Option<&str>) -> bool {
+        net.is_some_and(|n| self.allow_nets.iter().any(|a| a == n))
+    }
 }
 
 /// A board-level drilled hole (mounting hole): non-plated, or plated with a round copper pad.

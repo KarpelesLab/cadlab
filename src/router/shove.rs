@@ -497,7 +497,9 @@ impl<'a> World<'a> {
             match it {
                 Item::Static(o) => {
                     let ob = &rb.obstacles[o as usize];
-                    if ob.tracks & bit == 0 || (ob.net == Some(net) && matches!(ob.kind, ObKind::Pad | ObKind::Copper))
+                    if ob.tracks & bit == 0
+                        || (ob.net == Some(net) && matches!(ob.kind, ObKind::Pad | ObKind::Copper))
+                        || ob.spares(net)
                     {
                         continue;
                     }
@@ -582,7 +584,7 @@ impl<'a> World<'a> {
             match it {
                 Item::Static(o) => {
                     let ob = &rb.obstacles[o as usize];
-                    if !ob.vias {
+                    if !ob.vias || ob.spares(net) {
                         continue;
                     }
                     let own = ob.net == Some(net);

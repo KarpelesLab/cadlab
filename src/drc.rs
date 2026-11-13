@@ -1434,10 +1434,27 @@ fn silk_to_pads(ctx: &Ctx, pads: &[geo::PlacedPad], out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Tracks, vias and footprints inside keep-outs that forbid them.
+/// Tracks, vias and footprints inside keep-outs that forbid them. Copper of a keep-out's
+/// excepted nets (`allow_nets`) may be inside; an exception naming no net of the circuit is
+/// reported.
 fn keepouts(ctx: &Ctx, cy: &Courtyards, out: &mut Vec<Diagnostic>) {
     let board = ctx.p.board();
     for k in &board.keepouts {
+        for n in k.allow_nets.iter().filter(|n| !ctx.p.circuit().nets.contains_key(*n)) {
+            out.push(
+                Diagnostic::warning(
+                    "drc.keepout_net",
+                    format!("keep-out `{}` excepts net `{n}`, which does not exist", k.name),
+                )
+                .with_subject(ObjectRef::Named { kind: "keepout".into(), name: k.name.clone() })
+                .with_subject(ObjectRef::Net(n.clone()))
+                .with_hint(format!(
+                    "drop the exception (`keepout.set {} --forbid-nets {n}`) or except the net that replaced it \
+                     (`--allow-nets`)",
+                    k.name
+                )),
+            );
+        }
         let ring: Ring = k.outline.iter().map(|q| pt(*q)).collect();
         if ring.len() < 3 {
             continue;
@@ -1445,7 +1462,10 @@ fn keepouts(ctx: &Ctx, cy: &Courtyards, out: &mut Vec<Diagnostic>) {
         let Some(kb) = ring.bbox() else { continue };
         let kmask = if k.layers.is_empty() { u64::MAX } else { ctx.mask(&k.layers) };
         let kref = ObjectRef::Named { kind: "keepout".into(), name: k.name.clone() };
-        let hint = format!("move it out of keep-out `{}`, or change the keep-out", k.name);
+        let hint = format!(
+            "move it out of keep-out `{0}`, change the keep-out, or except its net (`keepout.set {0} --allow-nets`)",
+            k.name
+        );
         let mut push = |what: String, subject: ObjectRef, at: Point| {
             out.push(
                 Diagnostic::error("drc.keepout", format!("{what} is inside keep-out `{}`", k.name))
@@ -1457,7 +1477,7 @@ fn keepouts(ctx: &Ctx, cy: &Courtyards, out: &mut Vec<Diagnostic>) {
         };
         if k.no_tracks {
             for t in &board.tracks {
-                if ctx.mask(std::slice::from_ref(&t.layer)) & kmask == 0 {
+                if ctx.mask(std::slice::from_ref(&t.layer)) & kmask == 0 || k.allows(t.net.as_deref()) {
                     continue;
                 }
                 let shape = geo::track_shape(t);
@@ -1470,7 +1490,7 @@ fn keepouts(ctx: &Ctx, cy: &Courtyards, out: &mut Vec<Diagnostic>) {
         }
         if k.no_vias {
             for v in &board.vias {
-                if ctx.mask(&geo::via_layers(ctx.p, v)) & kmask == 0 {
+                if ctx.mask(&geo::via_layers(ctx.p, v)) & kmask == 0 || k.allows(v.net.as_deref()) {
                     continue;
                 }
                 let shape = geo::via_shape(v);

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::engine::DIRS;
-use super::grid::{FREE, Grid, Statics, ok};
+use super::grid::{BLOCKED, FREE, Grid, SET, Statics};
 
 /// No label (a node that is not free for every net).
 const NONE: u32 = u32::MAX;
@@ -130,11 +130,11 @@ impl Components {
         };
         // The targets' components are few and sources may be thousands (a large net's tree):
         // the first source in one of them answers.
-        let mut to: Vec<u64> = targets.iter().filter(|&&t| ok(state(t), net)).map(|&t| root(tag(t))).collect();
+        let mut to: Vec<u64> = targets.iter().filter(|&&t| st.ok(state(t), net)).map(|&t| root(tag(t))).collect();
         to.sort_unstable();
         to.dedup();
         for &(n, _) in sources {
-            if ok(state(n), net) {
+            if st.ok(state(n), net) {
                 if to.binary_search(&root(tag(n))).is_ok() {
                     return true;
                 }
@@ -149,16 +149,16 @@ impl Components {
                 if nx < 0 || ny < 0 || nx >= grid.w || ny >= grid.h {
                     continue;
                 }
-                if ok(map[grid.didx(2 * x + dx, 2 * y + dy)], net)
-                    && ok(map[grid.didx(2 * nx, 2 * ny)], net)
+                if st.ok(map[grid.didx(2 * x + dx, 2 * y + dy)], net)
+                    && st.ok(map[grid.didx(2 * nx, 2 * ny)], net)
                     && to.binary_search(&root(tag(s * cells + grid.cidx(nx, ny) as u32))).is_ok()
                 {
                     return true;
                 }
             }
-            if ok(st.via[prof][c as usize], net) {
+            if st.ok(st.via[prof][c as usize], net) {
                 for s2 in (0..ns).filter(|&s2| s2 != s) {
-                    if ok(st.track[prof][s2 as usize][grid.didx(2 * x, 2 * y)], net)
+                    if st.ok(st.track[prof][s2 as usize][grid.didx(2 * x, 2 * y)], net)
                         && to.binary_search(&root(tag(s2 * cells + c))).is_ok()
                     {
                         return true;
@@ -233,18 +233,26 @@ impl ProfileComponents {
                 p[u] = r;
             }
         }
-        // Points only one net may use.
+        // Points only one net may use, or only the nets a keep-out excepts (each of them).
         let mut owned = Owned::new();
         for (s, m) in maps.iter().enumerate() {
             for (k, &v) in m.iter().enumerate() {
-                if v != FREE && v != super::grid::BLOCKED {
+                if v != FREE && v < SET {
                     owned.entry(v - 1).or_default().0.push((s as u32, k as u32));
+                } else if v != BLOCKED {
+                    for &n in st.only(v) {
+                        owned.entry(n).or_default().0.push((s as u32, k as u32));
+                    }
                 }
             }
         }
         for (c, &v) in st.via[prof].iter().enumerate() {
-            if v != FREE && v != super::grid::BLOCKED {
+            if v != FREE && v < SET {
                 owned.entry(v - 1).or_default().1.push(c as u32);
+            } else if v != BLOCKED {
+                for &n in st.only(v) {
+                    owned.entry(n).or_default().1.push(c as u32);
+                }
             }
         }
         ProfileComponents { label: p, owned, nets: Mutex::new(BTreeMap::new()) }
@@ -271,11 +279,11 @@ impl ProfileComponents {
             let l = self.label[n];
             if l == NONE { VIRTUAL | n as u64 } else { l as u64 }
         };
-        let okp = |s: usize, i: i32, j: i32| ok(maps[s][grid.didx(i, j)], net);
+        let okp = |s: usize, i: i32, j: i32| st.ok(maps[s][grid.didx(i, j)], net);
         let inside = |x: i32, y: i32| x >= 0 && y >= 0 && x < grid.w && y < grid.h;
         // Every slot's node at cell (x, y) the net may use, joined through a via there.
         let via_join = |root: &mut BTreeMap<u64, u64>, x: i32, y: i32| {
-            if !ok(st.via[prof][grid.cidx(x, y)], net) {
+            if !st.ok(st.via[prof][grid.cidx(x, y)], net) {
                 return;
             }
             let mut first: Option<u64> = None;
@@ -339,8 +347,6 @@ impl ProfileComponents {
 mod tests {
     use super::*;
     use crate::router::geo::{BoxF, P};
-    use crate::router::grid::BLOCKED;
-
     /// Statics without scoped rules (the maps filled by the test).
     fn plain() -> Statics {
         Statics {
@@ -349,6 +355,7 @@ mod tests {
             tst: vec![],
             vst: vec![],
             states: vec![crate::router::scoped::St::default()],
+            sets: vec![],
         }
     }
 
@@ -379,6 +386,17 @@ mod tests {
         let st = Statics { track: vec![vec![wall(4), wall(BLOCKED)]], via: vec![blocked_vias.clone()], ..plain() };
         let c = Components::new(1);
         assert!(c.may_reach(&grid, &st, 0, 3, &[(a, 0.0)], &[b]));
+        assert!(!c.may_reach(&grid, &st, 0, 5, &[(a, 0.0)], &[b]));
+        // The wall inside a keep-out excepting nets 3 and 6 (a set state): passable for both.
+        let st = Statics {
+            track: vec![vec![wall(SET), wall(BLOCKED)]],
+            via: vec![blocked_vias.clone()],
+            sets: vec![vec![3, 6]],
+            ..plain()
+        };
+        let c = Components::new(1);
+        assert!(c.may_reach(&grid, &st, 0, 3, &[(a, 0.0)], &[b]));
+        assert!(c.may_reach(&grid, &st, 0, 6, &[(a, 0.0)], &[b]));
         assert!(!c.may_reach(&grid, &st, 0, 5, &[(a, 0.0)], &[b]));
         // Layer 1 free and every via cell free: both sides join for every net.
         let st =

@@ -586,6 +586,7 @@ fn feature_board() -> (tempfile::TempDir, Registry, Session) {
         no_vias: true,
         no_pours: true,
         no_footprints: false,
+        allow_nets: vec![],
     });
     let id = p.alloc_id();
     p.board_mut().graphics.push(BoardGraphic {

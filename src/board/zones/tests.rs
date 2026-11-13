@@ -349,6 +349,7 @@ fn project_fill_edges_priorities_keepouts() {
         no_vias: false,
         no_pours: true,
         no_footprints: false,
+        allow_nets: vec![],
     });
     for (i, (net, x, y)) in [("GND", 15, 5), ("VCC", 5, 5)].into_iter().enumerate() {
         b.vias.push(Via {

@@ -4,7 +4,8 @@
 //! - layers: the copper layers, all `signal`;
 //! - boundary: the outer contour (arcs as chords within 1 µm); cutouts become keep-outs on every
 //!   layer; keep-outs forbidding tracks and/or vias become `wire_keepout`/`via_keepout`/`keepout`
-//!   per layer;
+//!   per layer, without their net exceptions (a Specctra keep-out holds for every net: the
+//!   external router keeps the excepted nets out too, see [`DsnExport::net_exceptions`]);
 //! - one image per footprint, pins in footprint-local coordinates (Specctra mirrors and rotates
 //!   them for the placement), one padstack per distinct pad shape: pad rotation is part of the
 //!   padstack (rectangles turned a quarter swap sides; other angles become polygons), round
@@ -53,6 +54,9 @@ pub struct DsnExport {
     pub dsn: Dsn,
     /// Warnings (items left out or approximated).
     pub warnings: Vec<String>,
+    /// Keep-outs written without their net exceptions (name, excepted nets): the external
+    /// router keeps those nets out of them too.
+    pub net_exceptions: Vec<(String, Vec<String>)>,
 }
 
 /// Arc tolerance for outlines and tracks.
@@ -391,7 +395,11 @@ pub fn export(p: &Project, name: &str, opts: &Options) -> DsnExport {
             shape: Shape::Polygon { layer: ALL_SIGNAL.into(), width: Nm::ZERO, points: contour_points(c) },
         })
         .collect();
+    let mut net_exceptions = Vec::new();
     for k in &board.keepouts {
+        if !k.allow_nets.is_empty() && (k.no_tracks || k.no_vias) {
+            net_exceptions.push((k.name.clone(), k.allow_nets.clone()));
+        }
         let kind = match (k.no_tracks, k.no_vias) {
             (true, true) => KeepoutKind::All,
             (true, false) => KeepoutKind::Wire,
@@ -531,7 +539,7 @@ pub fn export(p: &Project, name: &str, opts: &Options) -> DsnExport {
         wires,
         wire_vias,
     };
-    DsnExport { dsn, warnings }
+    DsnExport { dsn, warnings, net_exceptions }
 }
 
 #[cfg(test)]

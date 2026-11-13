@@ -116,6 +116,17 @@ fn gnd_pours_connect_pads() {
     assert_eq!(codes(&o), ["zone.split"]);
     assert_eq!(o["output"]["fills"][0]["islands"], 2);
     assert_eq!(gnd_lines(&r, &mut s), 1, "C2.2's half is cut off from C1.2 and U1.2");
+    // An exception for GND (D76): its pour fills the keep-out; another net's would not.
+    exec(&r, &mut s, "keepout.set", json!({"name": "slot", "allow_nets": ["GND"]}));
+    let o = exec(&r, &mut s, "zone.fill", json!({}));
+    assert_eq!(codes(&o), Vec::<String>::new());
+    assert_eq!(o["output"]["fills"][0]["islands"], 1);
+    let whole = o["output"]["fills"][0]["area_mm2"].as_f64().unwrap();
+    assert!((whole - area).abs() < 1e-6, "the pour is what it was without the keep-out: {whole} vs {area}");
+    assert_eq!(gnd_lines(&r, &mut s), 0);
+    exec(&r, &mut s, "keepout.set", json!({"name": "slot", "allow_nets": ["VIN"], "forbid_nets": ["GND"]}));
+    let o = exec(&r, &mut s, "zone.fill", json!({}));
+    assert_eq!(codes(&o), ["zone.split"], "VIN's exception does not let GND's pour in");
     exec(&r, &mut s, "keepout.remove", json!({"name": "slot"}));
     assert_eq!(gnd_lines(&r, &mut s), 0);
 
@@ -283,4 +294,76 @@ fn drc_accepts_filled_pours() {
     let unrouted: Vec<&Value> =
         o["diagnostics"].as_array().unwrap().iter().filter(|d| d["code"] == "drc.unrouted").collect();
     assert!(unrouted.iter().all(|d| !d["message"].as_str().unwrap().contains("GND")), "{unrouted:?}");
+}
+
+/// Net exceptions of keep-outs (D76): the commands, what they store and show, and what follows
+/// a net rename.
+#[test]
+fn keepout_net_exceptions() {
+    let (_d, r, mut s) = setup();
+    let rect = json!({"rect": {"from": ["11mm", "-1mm"], "to": ["12mm", "16mm"]}});
+    // Unknown nets, and exceptions that would do nothing.
+    let f = fail(&r, &mut s, "keepout.add", json!({"name": "k", "outline": rect, "allow_nets": ["GNX"]}));
+    assert_eq!(f.error.diagnostic.code, "net.not_found");
+    assert!(format!("{:?}", f.error).contains("GND"), "suggests GND");
+    let f = fail(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "k", "outline": rect, "no_footprints": true, "allow_nets": ["GND"]}),
+    );
+    assert_eq!(f.error.diagnostic.code, "keepout.nothing_excepted");
+    let f = fail(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "k", "outline": rect, "rule_area": true, "allow_nets": ["GND"]}),
+    );
+    assert_eq!(f.error.diagnostic.code, "keepout.nothing_excepted");
+    assert!(s.project.as_ref().unwrap().board().keepouts.is_empty());
+
+    // Stored sorted, without duplicates, under the nets' own spelling; absent when empty.
+    let o = exec(&r, &mut s, "keepout.add", json!({"name": "plain", "outline": rect, "layers": ["F.Cu"]}));
+    assert!(o["output"]["keepouts"][0].get("allow_nets").is_none(), "the saved format is unchanged without exceptions");
+    let o = exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "slot", "outline": rect, "layers": ["B.Cu"], "no_pours": true, "allow_nets": ["vin", "net:GND", "VIN"]}),
+    );
+    assert_eq!(o["output"]["keepouts"][0]["allow_nets"], json!(["GND", "VIN"]));
+    assert_eq!(o["summary"], "added keepout:slot on B.Cu: no pours, except nets GND VIN");
+
+    // keepout.set adds and removes.
+    let f = fail(&r, &mut s, "keepout.set", json!({"name": "slot"}));
+    assert_eq!(f.error.diagnostic.code, "keepout.nothing_to_set");
+    let f = fail(&r, &mut s, "keepout.set", json!({"name": "slit", "allow_nets": ["3V3"]}));
+    assert_eq!(f.error.diagnostic.code, "keepout.not_found");
+    let f = fail(&r, &mut s, "keepout.set", json!({"name": "slot", "forbid_nets": ["3V3"]}));
+    assert_eq!(f.error.diagnostic.code, "keepout.net_not_excepted");
+    let f = fail(&r, &mut s, "keepout.set", json!({"name": "slot", "allow_nets": ["NOPE"]}));
+    assert_eq!(f.error.diagnostic.code, "net.not_found");
+    let o =
+        exec(&r, &mut s, "keepout.set", json!({"name": "keepout:slot", "allow_nets": ["3V3"], "forbid_nets": ["VIN"]}));
+    assert_eq!(o["output"]["keepouts"][0]["allow_nets"], json!(["3V3", "GND"]));
+    let o = exec(&r, &mut s, "keepout.list", json!({}));
+    assert_eq!(
+        o["summary"],
+        "keepout:plain on F.Cu: no tracks, vias, pours, footprints\nkeepout:slot on B.Cu: no pours, except nets 3V3 GND"
+    );
+
+    // A renamed net keeps its exception; merged into an excepted net, it is listed once.
+    exec(&r, &mut s, "net.rename", json!({"from": "3V3", "to": "VOUT"}));
+    let allow = |s: &Session| s.project.as_ref().unwrap().board().keepouts[1].allow_nets.clone();
+    assert_eq!(allow(&s), ["GND", "VOUT"]);
+    exec(&r, &mut s, "net.rename", json!({"from": "VOUT", "to": "GND", "merge": true}));
+    assert_eq!(allow(&s), ["GND"]);
+
+    // Saved and loaded back.
+    exec(&r, &mut s, "project.save", json!({}));
+    let root = s.root().unwrap().to_path_buf();
+    let mut s2 = Session::new();
+    exec(&r, &mut s2, "project.open", json!({"path": root}));
+    assert_eq!(s2.project.as_ref().unwrap().board().keepouts, s.project.as_ref().unwrap().board().keepouts);
+    assert_eq!(allow(&s2), ["GND"]);
 }

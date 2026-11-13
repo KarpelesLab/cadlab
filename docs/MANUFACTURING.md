@@ -131,7 +131,10 @@ direction (0: counter-clockwise), and the owner is `ECAD`:
 
 Pour keep-outs (`no_pours`) and rule areas (keep-outs that forbid nothing, named areas for scoped rules) have no
 IDF 3.0 section and are left out (IDX carries pour keep-outs as `Plane` keep-outs); cutout margins are not
-written either (the cutouts are in the board outline).
+written either (the cutouts are in the board outline). Neither format has nets: a keep-out's net exceptions
+(`allow_nets`, D76) are not written, so its routing, via and pour keep-outs read as holding for every net, and
+the export warns (`export.keepout_net_exception`); IDX names the exception in the item's description
+(`no tracks on F.Cu, except net RF`).
 
 **IDX** (`export.idx [path] [--vias] [--components false]`, default `out/mcad/<project>.idx`): the ProSTEP iViP
 PSI 5 "ECAD/MCAD Collaboration" format, written from the free V4.5 recommendation, implementation guidelines

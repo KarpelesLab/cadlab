@@ -159,6 +159,7 @@ fn add_culling_cases(p: &mut cadlab::model::Project) {
         no_vias: false,
         no_pours: true,
         no_footprints: false,
+        allow_nets: vec![],
     });
     for (k, (fx, fy)) in [(3, 3), (97, 3), (50, 55), (75, 30)].into_iter().enumerate() {
         let id = p.alloc_id();

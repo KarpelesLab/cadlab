@@ -1517,6 +1517,7 @@ fn read_zone(e: &Sexpr, ctx: &Ctx, uuid: Option<String>, notes: &mut Notes) -> V
             no_vias: forbidden("vias"),
             no_pours: forbidden("copperpour"),
             no_footprints: forbidden("footprints"),
+            allow_nets: vec![],
         };
         if forbidden("pads") {
             notes.push(

@@ -736,7 +736,9 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
                     }
                 }
                 for k in &board.keepouts {
+                    // A pour of an excepted net fills the keep-out.
                     if k.no_pours
+                        && !k.allows(z.net.as_deref())
                         && (k.layers.is_empty() || k.layers.iter().any(|l| l == layer))
                         && k.outline.len() >= 3
                     {

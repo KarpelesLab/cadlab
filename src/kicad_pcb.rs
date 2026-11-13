@@ -1107,6 +1107,16 @@ fn write_copper(w: &mut Writer<'_>) {
         };
         let layers: Vec<String> = layers.iter().map(|l| q(l)).collect();
         let allow = |forbidden: bool| if forbidden { "not_allowed" } else { "allowed" };
+        // A KiCad rule area has no net exception: written as it is without one (stricter,
+        // never looser), and reported.
+        if !k.allow_nets.is_empty() && (k.no_tracks || k.no_vias || k.no_pours) {
+            w.warnings.push(format!(
+                "keep-out `{}`: a KiCad rule area has no net exception; written without the exception for {} \
+                 (KiCad's DRC reports their copper inside it)",
+                k.name,
+                k.allow_nets.join(", ")
+            ));
+        }
         w.line(
             1,
             &format!(

@@ -1127,3 +1127,82 @@ fn scoped_rules_asking_for_more_are_kept() {
         "a track crosses the area's boundary unsplit"
     );
 }
+
+/// Net exceptions of a keep-out (D76): the wall of `failures_explain_what_blocks` lets the
+/// excepted nets through, in every search (grid, gridless rooms, with and without the gridless
+/// refinement) and in `route.track`, and the DRC agrees; every other net still stops at it.
+#[test]
+fn keepout_net_exceptions() {
+    let r = Registry::with_builtins();
+    let wall = |allow: &[&str]| {
+        json!({"name": "wall", "outline": {"rect": {"from": ["12.5mm", "-1mm"], "to": ["13.5mm", "16mm"]}},
+               "no_tracks": true, "no_vias": true, "allow_nets": allow})
+    };
+    let failed = |o: &Value| -> Vec<(String, String, String)> {
+        o["output"]["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["status"] == "failed")
+            .map(|c| {
+                let hints: Vec<&str> = c["hints"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+                (c["net"].as_str().unwrap().to_string(), c["reason"].as_str().unwrap().to_string(), hints.join("; "))
+            })
+            .collect()
+    };
+    let crossing = |s: &Session, net: &str| {
+        let x = |p: cadlab::Point| p.x.0 as f64 / 1e6;
+        s.project.as_ref().unwrap().board().tracks.iter().any(|t| {
+            t.net.as_deref() == Some(net) && x(t.start).min(x(t.end)) < 13.5 && x(t.start).max(x(t.end)) > 12.5
+        })
+    };
+    for (router, gridless) in [("auto", true), ("grid", false), ("grid", true), ("gridless", true)] {
+        let what = format!("router {router}, gridless {gridless}");
+        let opts = json!({"router": router, "gridless": gridless});
+        let mut s = Session::new();
+        let _d = new_project(&r, &mut s);
+        ldo_board(&r, &mut s);
+        // One excepted net: 3V3 crosses, GND does not.
+        let o = exec(&r, &mut s, "keepout.add", wall(&["3V3"]));
+        assert_eq!(o["output"]["keepouts"][0]["allow_nets"], json!(["3V3"]));
+        let o = exec(&r, &mut s, "route.all", opts.clone());
+        report(&format!("wall except 3V3 ({what})"), &o, 0);
+        let f = failed(&o);
+        assert_eq!(f.len(), 1, "{what}: {f:?}");
+        assert_eq!(f[0].0, "GND", "{what}");
+        assert!(f[0].1.contains("keep-out `wall`"), "{what}: {}", f[0].1);
+        assert!(f[0].2.contains("except net GND") && f[0].2.contains("keepout.set"), "{what}: {}", f[0].2);
+        assert!(crossing(&s, "3V3"), "{what}: 3V3 goes through the wall");
+        assert!(!crossing(&s, "GND"), "{what}: GND stays out of it");
+        let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
+        assert_eq!(errors, Vec::<String>::new(), "{what}");
+        // Two excepted nets (points only a set of nets may use): everything routes.
+        exec(&r, &mut s, "keepout.set", json!({"name": "wall", "allow_nets": ["GND"]}));
+        let o = exec(&r, &mut s, "route.all", opts.clone());
+        report(&format!("wall except 3V3 and GND ({what})"), &o, 0);
+        assert_eq!(failed(&o), vec![], "{what}");
+        assert_eq!(completion(&o), 100.0, "{what}");
+        assert!(crossing(&s, "GND"), "{what}");
+        assert_eq!(drc_errors(&s), Vec::<String>::new(), "{what}");
+        // Without the exceptions the same copper is in the keep-out.
+        exec(&r, &mut s, "keepout.set", json!({"name": "wall", "forbid_nets": ["3V3", "GND"]}));
+        let errors = drc_errors(&s);
+        assert!(!errors.is_empty() && errors.iter().all(|e| e.starts_with("drc.keepout")), "{what}: {errors:?}");
+    }
+
+    // Manual routing: a straight track through the wall, refused for VIN, placed for 3V3.
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    exec(&r, &mut s, "keepout.add", wall(&["3V3"]));
+    let track = |net: &str, mode: &str| json!({"layer": "B.Cu", "net": net, "mode": mode, "points": [["11mm", "2mm"], ["15mm", "2mm"]]});
+    for mode in ["strict", "walkaround", "shove"] {
+        let f = r.execute(&mut s, "route.track", track("VIN", mode), RunOptions::default()).expect_err("blocked");
+        assert_eq!(f.error.diagnostic.code, "route.track_blocked", "{mode}: {}", f.error);
+        assert!(f.error.diagnostic.message.contains("keep-out `wall`"), "{mode}: {}", f.error);
+    }
+    assert!(s.project.as_ref().unwrap().board().tracks.is_empty());
+    let o = exec(&r, &mut s, "route.track", track("3V3", "strict"));
+    assert_eq!((o["output"]["segments"].as_u64(), o["output"]["walked"].as_bool()), (Some(1), Some(false)));
+    assert!(drc_errors(&s).iter().all(|e| !e.starts_with("drc.keepout")));
+}

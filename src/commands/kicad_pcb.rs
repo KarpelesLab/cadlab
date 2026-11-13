@@ -260,15 +260,29 @@ impl Command for ExportKicad {
         write(&path, &out.pcb)?;
         write(&pro, &out.project)?;
         write(&dru, &out.rules)?;
+        let excepted: Vec<(String, Vec<String>)> = p
+            .board()
+            .keepouts
+            .iter()
+            .filter(|k| !k.allow_nets.is_empty() && (k.no_tracks || k.no_vias || k.no_pours))
+            .map(|k| (k.name.clone(), k.allow_nets.clone()))
+            .collect();
         let b = p.board();
+        let (tracks, vias, zones) = (b.tracks.len(), b.vias.len(), b.zones.len());
+        super::export::report_net_exceptions(
+            ctx,
+            "a KiCad rule area",
+            "it is written without the exception, so KiCad's DRC reports their copper inside it",
+            &excepted,
+        );
         Ok(KicadExported {
             pcb: path.display().to_string(),
             project: pro.display().to_string(),
             rules: dru.display().to_string(),
             footprints: out.footprints,
-            tracks: b.tracks.len(),
-            vias: b.vias.len(),
-            zones: b.zones.len(),
+            tracks,
+            vias,
+            zones,
             warnings: out.warnings,
         })
     }

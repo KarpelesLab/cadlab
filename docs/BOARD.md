@@ -31,7 +31,8 @@ Board
 ├── vias          position, drill, diameter, net, layer span (through by default)
 ├── zones         polygon, layer(s), net, priority, clearance, min width, thermal relief settings
 ├── keepouts      polygon, layers, what is forbidden (tracks, vias, pours, footprints); forbidding
-│                 nothing: a named rule area for custom rules
+│                 nothing: a named rule area for custom rules; `allow_nets`: nets excepted from it
+│                 (see "Keep-outs and net exceptions")
 ├── holes         mounting holes: name (H1), center, drill, plated pad diameter and net (none = NPTH)
 ├── graphics      silkscreen/fab/user drawings, filled polygons and texts; on copper layers they
 │                 are netless copper
@@ -73,7 +74,8 @@ For each zone and each of its layers, in priority order (higher first, ties in b
    rule, else its local clearance, else its net's class clearance, else the rules'), so a zone clearance set
    below the rules (as KiCad zones often are) never makes the fill violate the DRC; NPTH holes (slots as
    stadiums) inflated by the zone clearance; higher-priority fills of other nets inflated by
-   the larger of both zones' clearances; keep-outs with `no_pours` on that layer.
+   the larger of both zones' clearances; keep-outs with `no_pours` on that layer, unless they except the
+   zone's net (`allow_nets`).
 3. Same-net pads, by the pad's own zone connection (`footprint.set --zone-connection`, pad then
    footprint), else the zone's: `solid` merges them; `thermal` keeps a `thermal_gap` around the pad
    (default: the clearance) and adds `thermal_spokes` spokes (default 4, evenly spaced) of width
@@ -122,6 +124,33 @@ base copper with its local settings, NPTH holes and slots, and the clearance res
 also depends on library footprints through custom rules and local clearances, D40) and reuses one only when every input compares equal (the board first by pointer: an
 unchanged project shares it), so repeated queries on the same state in one MCP or batch session cost a few
 milliseconds (5 ms on the synthetic board below, the NPTH list included).
+
+## Keep-outs and net exceptions (D76)
+
+A keep-out forbids tracks, vias, pours and/or footprints inside its outline, on its copper layers (all when it
+names none). `allow_nets` lists nets it does not apply to: an antenna or RF feed keep-out that the feed net
+itself crosses, a guard area only its own net may enter. One keep-out does it; before D76 the feed needed two
+rectangles, one each side of the track.
+
+- **What an exception covers:** the copper of the net: its tracks (`no_tracks`), vias (`no_vias`) and pours
+  (`no_pours`). Footprints stay forbidden (`no_footprints`): a courtyard has no single net. Netless copper is
+  never excepted. An exception on a keep-out that forbids no copper is refused (`keepout.nothing_excepted`).
+- **Stored** as net names, sorted, without duplicates (`allow_nets`, absent when empty: boards without
+  exceptions are saved exactly as before, so there is no schema migration). `net.rename` and net merges rename
+  the entries. An entry whose net is gone excepts nothing and is a DRC warning (`drc.keepout_net`).
+- **Honored by** the DRC (`drc.keepout` skips copper of an excepted net), zone fill (an excepted net's pour
+  fills the keep-out; every other pour is knocked out of it), the router in every search and step (grid,
+  gridless rooms, gridless refinement, fanout, push-and-shove, differential pairs: a coupled pair crosses a
+  keep-out only if it excepts both of its nets, length tuning) and `route.track`, which refuses any other
+  net's track through it (`route.track_blocked`). A routing failure at a keep-out hints at the exception.
+- **Exchange formats** have no per-net exception: Specctra DSN, IDF, IDX and KiCad rule areas get the
+  keep-out as it is *without* the exception (stricter, never looser), and each export says so with the warning
+  `export.keepout_net_exception` (subjects: the keep-out and its nets). The consequence differs: an external
+  autorouter keeps the excepted nets out too (route them in cadlab first; existing tracks are written as
+  wiring), KiCad's DRC reports their copper inside the rule area, an MCAD tool sees a plain keep-out (IDX
+  names the exception in the item's description). A `.kicad_pcb` cannot hold an exception, so an import never
+  creates one and a cadlab → KiCad → cadlab round trip loses it (add it back with `keepout.set`). IPC-2581,
+  Gerber and the renders carry no keep-outs at all.
 
 ## Local settings, net ties and custom rules (D40)
 
@@ -197,7 +226,7 @@ change).
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
 | `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
-| `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given; `rule_area`: forbid nothing, a named area for custom rules), `remove`, `list` |
+| `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given; `rule_area`: forbid nothing, a named area for custom rules; `allow_nets`: nets excepted, see "Keep-outs and net exceptions"), `set` (`allow_nets` adds exceptions, `forbid_nets` removes them), `remove`, `list` (with the exceptions) |
 | `drc` | `run` (plus `fab.check` warnings for the manifest `targets`; `unrouted`: `auto` lists up to 10 unrouted connections and summarizes more in one finding, `each`, `summary`; `severity`, `codes` (a code or a prefix: `fab.silk`), `limit` and `offset` select what is listed, never the counts; `by_code` counts errors and warnings per code; `show_waived`), `waive` (code, subjects, reason), `unwaive`, `waivers` |
 | `board` (stackup) | `stackup` (copper, dielectrics, line model per layer), `dielectric` (thickness, εr, material per gap; [ELECTRICAL.md](ELECTRICAL.md)) |
 | `impedance` | `calc` (Z0 / Zdiff of a width on a layer), `solve` (width for a target, optionally into a net class) |
@@ -328,7 +357,7 @@ the library stay).
 | footprints without pads (logos) | board graphics (copper, mask and paste polygons stay filled areas) |
 | `segment`, `arc`, `via` (through, blind, micro) | tracks (arcs keep their mid point), vias |
 | copper `zone` | zone: outline, net, layers, priority, clearance, minimum width, pad connection (`thru_hole_only`: `tht_thermal`), thermal gap and spoke; fills recomputed; values equal to cadlab's defaults left unset |
-| rule area (`keepout`) | keep-out: tracks, vias, copper pour, footprints (all copper layers = no layer list); one that forbids nothing is kept as a rule area when a custom rule names it (`enclosedByArea`), else reported (`import.rule_area`) |
+| rule area (`keepout`) | keep-out: tracks, vias, copper pour, footprints (all copper layers = no layer list), never with net exceptions (KiCad rule areas have none; the export writes cadlab's without them, `export.keepout_net_exception`); one that forbids nothing is kept as a rule area when a custom rule names it (`enclosedByArea`), else reported (`import.rule_area`) |
 | zone or rule area with several `polygon` outlines | their area under the even-odd rule (a polygon inside another is a hole): one zone or keep-out per separate part, holes joined to the outline by zero-width cuts (`import.zone_outlines`) |
 | `gr_line`/`gr_arc`/`gr_circle`/`gr_rect`/`gr_poly`, `gr_text` | board graphics (lines, arcs and circles as polylines; filled polygons, rectangles and circles as areas; texts with size and angle); on copper layers they are netless copper (a net they carry is reported, `import.copper_drawing_net`) |
 
@@ -584,7 +613,8 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.footprint_outside` | error | courtyard partly outside the board or over a cutout; the message says how far the courtyard reaches past the outer edge (a connector flush with the edge is a waiver, not a move) |
 | `drc.silk_over_pad` | warning | footprint or board silkscreen closer than `silk_to_pad` to a pad's exposed copper on that side, or (`silk_check: mask`) overlapping its solder mask opening (grown by its mask margin; non-plated holes included) |
 | `drc.silk_over_mask_opening` | warning | silkscreen overlapping a mask opening drawn by a footprint or on the board (`silk_check: mask`) |
-| `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers) |
+| `drc.keepout` | error | track, via or footprint courtyard inside a keep-out that forbids it (on its layers); tracks and vias of the keep-out's excepted nets (`allow_nets`) are not reported |
+| `drc.keepout_net` | warning | a keep-out excepts a net that does not exist (the exception does nothing) |
 | `drc.disallowed` | error (rule's severity) | a copper item of a kind a custom rule's `disallow` forbids in its scope |
 
 | `drc.unrouted` | error | a ratsnest connection, with both ends; `drc.run` reports more than 10 as one finding with the count per net (`unrouted: each` lists them) and the total in `unrouted` |
