@@ -456,21 +456,111 @@ fn route_phases(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'
             return route_pairs_first(p, scope, &names, opts, hooks);
         }
     }
-    let start = Instant::now();
-    let Run { result: mut first, missed } = route_run(p, scope, opts, hooks, Soft::No, &[], true)?;
-    if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
-        first = replan_boxed(p, scope, opts, hooks, first, &missed, start)?;
+    if !matches!(scope, Scope::Connection { .. }) {
+        let start = Instant::now();
+        let work0 = opts.work.used();
+        let (first, grid_bound) = route_whole(p, scope, opts, hooks)?;
+        let few = FINER_FEW.max(first.stats.connections / FINER_SHARE);
+        if grid_bound && first.stats.failed > 0 && first.stats.failed <= few && opts.grid.is_none() {
+            return finer_grid(p, scope, opts, hooks, first, start, work0);
+        }
+        return Ok(first);
     }
-    if first.stats.failed > 0 && !matches!(scope, Scope::Connection { .. }) {
-        return shove_leftovers(p, opts, hooks, first, start);
-    }
-    if !opts.shove || first.stats.failed == 0 || !matches!(scope, Scope::Connection { .. }) {
+    let first = route_run(p, scope, opts, hooks, Soft::No, &[], true)?.result;
+    if !opts.shove || first.stats.failed == 0 {
         return Ok(first);
     }
     if let Some(r) = push_and_shove(p, scope, opts, hooks)? {
         return Ok(r);
     }
     shove(p, scope, opts, hooks, first)
+}
+
+/// One run for [`Scope::All`] or [`Scope::Nets`] with what follows it for the connections it
+/// leaves unrouted: the re-plan of boxed pads, then push-and-shove of the leftovers. Also
+/// returns whether the run itself left a connection a finer grid may route (`Run::grid_bound`).
+fn route_whole(
+    p: &Project,
+    scope: &Scope,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+) -> Result<(RouteResult, bool), RouteError> {
+    let start = Instant::now();
+    let Run { result: mut first, missed, grid_bound } = route_run(p, scope, opts, hooks, Soft::No, &[], true)?;
+    if first.stats.failed > 0 {
+        first = replan_boxed(p, scope, opts, hooks, first, &missed, start)?;
+    }
+    if first.stats.failed > 0 {
+        first = shove_leftovers(p, opts, hooks, first, start)?;
+    }
+    Ok((first, grid_bound))
+}
+
+/// The runs [`finer_grid`] makes after a run that leaves connections unrouted: (divisor of
+/// the run's grid pitch, added to the seed), in order.
+const FINER_GRIDS: [(f64, u64); 6] = [(1.5, 0), (2.0, 0), (3.0, 0), (1.5, 1), (2.0, 1), (3.0, 1)];
+
+/// [`finer_grid`] is for runs that nearly made it: at most this many failed connections, or
+/// one in [`FINER_SHARE`] if that is more. A board that fails by more has another problem (a
+/// width that does not leave its pads, too few layers), and its runs would only cost time.
+const FINER_FEW: usize = 4;
+const FINER_SHARE: usize = 10;
+
+/// [`finer_grid`] makes its first run when the budget left is at least this many times what
+/// the run before took (a grid at half the pitch has four times the cells), and each further
+/// one when it is [`FINER_ROOM_NEXT`] times what the costliest run so far took.
+const FINER_ROOM: u32 = 4;
+const FINER_ROOM_NEXT: u32 = 2;
+
+/// A whole run ([`route_whole`]) that leaves connections unrouted well inside its budget (not
+/// for lack of time) is made again on finer grids ([`FINER_GRIDS`], then with another seed),
+/// until one routes everything; the run with the fewest failed connections is kept (the
+/// earlier one among equals). Only when the routing of other nets was in the way of one of
+/// them (congestion: a keep-out or a pad no track leaves fails on any grid, and the exact
+/// gridless search has been there), or with the grid search alone, which has no other way to
+/// leave its lines. The default pitch, half a track plus clearance, only holds the
+/// paths that lie on its lines; between parts placed for hand routing the passages are often
+/// narrower than a pitch and off those lines, and negotiation then never settles (nrfmicro: 20
+/// to 40 points still shared when it stops at 0.2 mm). Which of the finer grids settles is
+/// chaotic (a pitch that routes nrfmicro completely with one seed fails with the next), hence
+/// several.
+fn finer_grid(
+    p: &Project,
+    scope: &Scope,
+    opts: &RouteOptions,
+    hooks: &Hooks<'_>,
+    first: RouteResult,
+    start: Instant,
+    work0: u64,
+) -> Result<RouteResult, RouteError> {
+    let pitch = first.stats.grid.0 as f64;
+    // The costliest run so far: time and work.
+    let (mut took, mut used) = (start.elapsed(), opts.work.used().saturating_sub(work0));
+    let mut best = first;
+    let mut room = FINER_ROOM;
+    for (div, seed) in FINER_GRIDS {
+        if best.stats.failed == 0 || best.stats.budget_exhausted {
+            break;
+        }
+        let left = opts.budget.map(|b| b.saturating_sub(start.elapsed()));
+        if left.is_some_and(|l| l < took * room)
+            || opts.work.left().is_some_and(|l| l < used.saturating_mul(u64::from(room)))
+        {
+            break;
+        }
+        room = FINER_ROOM_NEXT;
+        let grid = Nm((pitch / div).round() as i64);
+        (hooks.progress)(0, None, &format!("finer grid: {} nm", grid.0));
+        let sub = RouteOptions { budget: left, grid: Some(grid), seed: opts.seed.wrapping_add(seed), ..opts.clone() };
+        let (t0, w0) = (Instant::now(), opts.work.used());
+        let (result, _) = route_whole(p, scope, &sub, hooks)?;
+        took = took.max(t0.elapsed());
+        used = used.max(opts.work.used().saturating_sub(w0));
+        if result.stats.failed < best.stats.failed {
+            best = result;
+        }
+    }
+    Ok(best)
 }
 
 /// Most connections of a net [`replan_boxed`] rips up and routes again.
@@ -1407,6 +1497,10 @@ struct Run {
     result: RouteResult,
     /// The fine-pitch pads the escape planning left without an exit (labels).
     missed: Vec<String>,
+    /// Whether a connection it reports as failed is one a finer grid may route
+    /// ([`finer_grid`]): the routing of other nets is in its way, or the grid search found
+    /// no path or no access and no gridless search followed.
+    grid_bound: bool,
 }
 
 /// One routing run whose escape planning serves the pads `prio` (labels) first; also returns
@@ -2229,6 +2323,7 @@ fn route_run(
     };
     let ck = Checker { rb: &rb, index: &index };
     let mut reports = Vec::new();
+    let mut grid_bound = false;
     for (ri, r) in routes.iter().enumerate() {
         for (ci, c) in r.conns.iter().enumerate() {
             let joined = match (island_at(&c.from, c.from_at), island_at(&c.to, c.to_at)) {
@@ -2247,6 +2342,11 @@ fn route_run(
                 subjects: vec![],
             };
             if !joined {
+                grid_bound |= match r.failed[ci] {
+                    Some(FailKind::Congestion) => true,
+                    Some(FailKind::Static | FailKind::NoAccess) => search == SearchKind::Grid,
+                    _ => false,
+                };
                 explain(&mut eng, &mut sc, &ck, r, ci, r.failed[ci], &drc_reason, ri, &slots, &mut rep);
                 dedup_hints(&mut rep);
             }
@@ -2332,7 +2432,7 @@ fn route_run(
         rerouted: vec![],
         pairs: vec![],
     };
-    Ok(Run { result, missed })
+    Ok(Run { result, missed, grid_bound })
 }
 
 /// Via cost of [`minimize_vias`] (grid steps; negotiation uses `Costs::via`).
@@ -2678,12 +2778,11 @@ fn make_grid(rb: &RouterBoard, routes: &[NetRoute], opts: &RouteOptions) -> grid
 /// Largest coarsening of the grid pitch that snaps it to a fine pad pitch (factor).
 const GRID_SNAP: f64 = 1.06;
 
-/// The grid pitch snapped to a fine pad pitch: `p / 2m` for the pad pitch `p` the most pads
-/// share (ties: the smaller) among those for which such a pitch lies in `[g, g × GRID_SNAP]`.
-/// Pad pitches are center distances (rounded to µm) from a routed single-layer pad to its
-/// nearest pad of the same component, counted when no track of the net passes between the two
-/// (fine-pitch rows); at least 8 pads must share one.
-fn snap_pitch(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> Option<f64> {
+/// The routed pads of fine-pitch rows: single-layer pads of multi-pin parts with no room for a
+/// track of their net between them and their nearest pad of the same component (as escapes
+/// see them; two-pad passives are no rows). Per pad: (terminal, center distance to that
+/// neighbor, whether the row runs along x).
+fn fine_row_pads(rb: &RouterBoard, routes: &[NetRoute]) -> Vec<(usize, f64, bool)> {
     let mut by_comp: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (ti, t) in rb.terminals.iter().enumerate() {
         if let Some((comp, _)) = t.label.split_once('.')
@@ -2700,8 +2799,7 @@ fn snap_pitch(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> Option<f64> {
             }
         }
     }
-    let mut count: BTreeMap<i64, usize> = BTreeMap::new();
-    // Rows of multi-pin parts only (as escapes): two-pad passives are no rows.
+    let mut out = Vec::new();
     for terms in by_comp.values().filter(|t| t.len() >= 4) {
         for &t in terms {
             let term = &rb.terminals[t];
@@ -2726,9 +2824,22 @@ fn snap_pitch(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> Option<f64> {
             };
             let pr = rb.profile(term.net);
             if gap < 2.0 * pr.hw + 2.0 * rb.c_pad_near(t) {
-                *count.entry((d / 1_000.0).round() as i64).or_default() += 1;
+                out.push((t, d, dx >= dy));
             }
         }
+    }
+    out
+}
+
+/// The grid pitch snapped to a fine pad pitch: `p / 2m` for the pad pitch `p` the most pads
+/// share (ties: the smaller) among those for which such a pitch lies in `[g, g × GRID_SNAP]`.
+/// Pad pitches are center distances (rounded to µm) from a routed single-layer pad to its
+/// nearest pad of the same component, counted when no track of the net passes between the two
+/// (fine-pitch rows, [`fine_row_pads`]); at least 8 pads must share one.
+fn snap_pitch(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> Option<f64> {
+    let mut count: BTreeMap<i64, usize> = BTreeMap::new();
+    for (_, d, _) in fine_row_pads(rb, routes) {
+        *count.entry((d / 1_000.0).round() as i64).or_default() += 1;
     }
     let snap = |p: f64| {
         let m = (p / (2.0 * g)).floor();
@@ -2741,20 +2852,48 @@ fn snap_pitch(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> Option<f64> {
         .and_then(|(um, _)| snap(um as f64 * 1_000.0))
 }
 
-/// Grid offset aligning cell centers with as many routed pad centers as possible.
+/// Grid offset per axis: the one that puts the most pads of the finest rows running along
+/// that axis on grid lines, then the most routed pad centers on cell centers. A pad of such a
+/// row leaves along its own line; off the grid lines it has to turn onto one within the row,
+/// and of a row of turning exits some pads get none (two neighbors turning the same way at
+/// the same depth come too close on their diagonals, and two turning towards each other end
+/// on adjacent lines: tinytapeout-demo's QFN-80, 0.0925 mm off the lines the majority of
+/// the board's pads chose, lost 10 of 75 exits). Other pads are reached by a stub from any
+/// cell, so they only break ties.
 fn alignment(rb: &RouterBoard, routes: &[NetRoute], g: f64) -> (f64, f64) {
-    let mut cx: BTreeMap<i64, usize> = BTreeMap::new();
-    let mut cy: BTreeMap<i64, usize> = BTreeMap::new();
+    // Offset (µm) → (fine-pitch row pads on its lines, routed pads).
+    let mut cx: BTreeMap<i64, (usize, usize)> = BTreeMap::new();
+    let mut cy: BTreeMap<i64, (usize, usize)> = BTreeMap::new();
+    let key = |v: f64, min: f64| ((v - min).rem_euclid(g) / 1_000.0).round() as i64;
     for r in routes {
         for isl in &r.islands {
             for &t in isl.terms.iter().filter(|&&t| rb.terminals[t].pad) {
                 let at = rb.terminals[t].at;
-                *cx.entry(((at.x - rb.bbox.min.x).rem_euclid(g) / 1_000.0).round() as i64).or_default() += 1;
-                *cy.entry(((at.y - rb.bbox.min.y).rem_euclid(g) / 1_000.0).round() as i64).or_default() += 1;
+                cx.entry(key(at.x, rb.bbox.min.x)).or_default().1 += 1;
+                cy.entry(key(at.y, rb.bbox.min.y)).or_default().1 += 1;
             }
         }
     }
-    let pick = |m: &BTreeMap<i64, usize>| -> f64 {
+    for (t, d, along_x) in fine_row_pads(rb, routes) {
+        let term = &rb.terminals[t];
+        let at = term.at;
+        // Only rows so fine that a track along the grid line nearest to a pad cannot clear the
+        // pad's neighbor when the pad is half a pitch off (the rows that get escapes), and whose
+        // pad pitch is a multiple of the grid's, so that one offset puts the whole row on lines.
+        let b = term.shape.bbox();
+        let size = if along_x { b.max.x - b.min.x } else { b.max.y - b.min.y };
+        if d - size / 2.0 - rb.profile(term.net).hw - g / 2.0 >= rb.c_pad_near(t) + index::TOL
+            || ((d / g).round() * g - d).abs() > 1_000.0
+        {
+            continue;
+        }
+        if along_x {
+            cx.entry(key(at.x, rb.bbox.min.x)).or_default().0 += 1;
+        } else {
+            cy.entry(key(at.y, rb.bbox.min.y)).or_default().0 += 1;
+        }
+    }
+    let pick = |m: &BTreeMap<i64, (usize, usize)>| -> f64 {
         m.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(k, _)| *k as f64 * 1_000.0).unwrap_or(0.0)
     };
     (pick(&cx).min(g - 1.0), pick(&cy).min(g - 1.0))

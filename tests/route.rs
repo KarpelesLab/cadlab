@@ -472,12 +472,15 @@ fn fine_pitch_escapes() {
         report(&format!("lqfp48 fanout={fanout} router={router}"), &o, 0);
         let errors: Vec<String> = drc_errors(&s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
         assert_eq!(errors, Vec::<String>::new());
-        results.push((completion(&o), o["output"]["stats"]["escapes"].as_u64().unwrap()));
+        let st = &o["output"]["stats"];
+        results.push((completion(&o), st["escapes"].as_u64().unwrap(), st["grid"].as_str().unwrap().to_string()));
     }
     assert_eq!(results[0].1, 0);
     assert!(results[1].1 > 10, "{results:?}");
-    assert!(results[1].0 > results[0].0, "escapes help the grid: {results:?}");
-    assert_eq!(results[1].0, 100.0);
+    // Without escapes the grid search does not reach every pad at its own pitch: the run is made
+    // again on finer grids (D84), or stays incomplete.
+    assert!(results[0].0 < 100.0 || results[0].2 != "0.225mm", "escapes help the grid: {results:?}");
+    assert_eq!((results[1].0, results[1].2.as_str()), (100.0, "0.225mm"), "{results:?}");
     assert_eq!(results[2].0, 100.0, "the gridless search needs no escapes: {results:?}");
 }
 
@@ -1263,4 +1266,181 @@ fn pads_cut_off_from_their_pour_are_routed() {
     // The pour alone no longer joins them: without GND's own routing they are apart.
     exec(&r, &mut s, "route.rip", json!({"nets": ["GND"]}));
     assert!(unrouted(&r, &mut s, "GND") >= 1, "the signal tracks were expected to cut the pour");
+}
+
+/// A USB-C-like row whose configuration pad sits between a no-connect pad and the pad whose
+/// exit turns towards it around the crossover via (corne-cherry's CC1): it has to turn away
+/// before that exit does, by less than the way to the next grid line, and at some offsets of
+/// the row against the grid (0.12 mm here) no line lies in what is left. The pad then turns by
+/// what it needs and reaches a cell further out, so it has an exit at every offset that needs
+/// one (D84).
+#[test]
+fn pad_beside_a_crossover_exit_gets_out_at_any_grid_offset() {
+    let r = Registry::with_builtins();
+    for step in 2..=8 {
+        let mut pins = numbered_pins(9);
+        pins.as_array_mut().unwrap().push(json!({"number": "S1", "name": "SHIELD", "kind": "passive"}));
+        let mut s = Session::new();
+        let _d = new_project(&r, &mut s);
+        exec(
+            &r,
+            &mut s,
+            "footprint.create",
+            json!({
+                "name": "ROW9",
+                "pads": [{"number": "1", "at": ["-2mm", "0mm"], "size": ["0.3mm", "1.3mm"], "shape": "rect",
+                          "count": 9, "pitch": ["0.5mm", "0mm"]},
+                         {"number": "S1", "at": ["0mm", "1.4mm"], "size": ["4.9mm", "0.6mm"], "shape": "rect"}]
+            }),
+        );
+        exec(
+            &r,
+            &mut s,
+            "part.create",
+            json!({"id": "ROW9", "category": "connector", "footprint": "ROW9", "pins": pins}),
+        );
+        exec(
+            &r,
+            &mut s,
+            "part.create",
+            json!({"id": "HDR8", "category": "connector", "package": "PinHeader 1x8", "pins": numbered_pins(8)}),
+        );
+        exec(&r, &mut s, "circuit.add", json!({"part": "ROW9", "refdes": "J1"}));
+        exec(&r, &mut s, "circuit.add", json!({"part": "HDR8", "refdes": "J2"}));
+        // Pads 2 and 8 stay unconnected; 3 is the configuration pad beside the crossing 4 to 7.
+        exec(&r, &mut s, "net.connect", json!({"net": "VB", "pins": ["J1.1", "J2.1"]}));
+        exec(&r, &mut s, "net.connect", json!({"net": "CC", "pins": ["J1.3", "J2.2"]}));
+        exec(&r, &mut s, "net.connect", json!({"net": "DB", "pins": ["J1.4", "J1.6", "J2.3"]}));
+        exec(&r, &mut s, "net.connect", json!({"net": "DA", "pins": ["J1.5", "J1.7", "J2.4"]}));
+        // The header's pads share one line of the grid: they set its offset, not the row.
+        exec(&r, &mut s, "net.connect", json!({"net": "E1", "pins": ["J2.5", "J2.6"]}));
+        exec(&r, &mut s, "net.connect", json!({"net": "E2", "pins": ["J2.7", "J2.8"]}));
+        exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["J1.S1"]}));
+        exec(&r, &mut s, "board.rules", json!({"track_width": "0.2mm", "clearance": "0.2mm"}));
+        exec(&r, &mut s, "netclass.set", json!({"name": "usb", "track_width": "0.25mm", "clearance": "0.2mm"}));
+        exec(&r, &mut s, "net.set", json!({"nets": ["VB", "CC", "DA", "DB"], "class": "usb"}));
+        exec(&r, &mut s, "board.outline", json!({"width": "30mm", "height": "26mm"}));
+        let x = format!("{}um", 12_000 + 20 * step);
+        exec(&r, &mut s, "place.set", json!({"refdes": "J1", "at": [x, "22mm"]}));
+        exec(&r, &mut s, "place.set", json!({"refdes": "J2", "at": ["24mm", "13mm"]}));
+        let f = cadlab::router::fanout(s.project.as_ref().unwrap(), &[], &[]).unwrap();
+        assert!(f.pads.iter().any(|p| p == "J1.3"), "offset {} um: exits for {:?}", 20 * step, f.pads);
+        let o = exec(&r, &mut s, "route.all", json!({"seed": 1}));
+        report(&format!("row {} um off", 20 * step), &o, 0);
+        assert_eq!(completion(&o), 100.0, "offset {} um: {o}", 20 * step);
+        assert_eq!(drc_errors(&s), Vec::<String>::new(), "offset {} um", 20 * step);
+    }
+}
+
+/// A QFN-40 (0.4 mm pitch, twice the 0.2 mm grid pitch) placed 0.09 mm and 0.07 mm off the
+/// positions of four 1x12 headers, which have more pads: the grid's lines follow the QFN's rows,
+/// whose pads would each have to turn onto a line otherwise (of tinytapeout-demo's QFN-80, 10
+/// of 75 pads then got no exit), and the headers' pads are reached by stubs. The QFN needs no
+/// escapes there, as where it shares the headers' lines (D84).
+#[test]
+fn grid_lines_follow_the_finest_rows() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "Q40", "category": "ic", "package": "QFN-40 5x5mm P0.4mm EP3.5mm", "pins": numbered_pins(41)}),
+    );
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "HDR12", "category": "connector", "package": "PinHeader 1x12", "pins": numbered_pins(12)}),
+    );
+    exec(&r, &mut s, "board.rules", json!({"track_width": "0.2mm", "clearance": "0.18mm", "min_track_width": "0.2mm"}));
+    exec(&r, &mut s, "board.setup", json!({"layers": 4}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "Q40", "refdes": "U1"}));
+    exec(&r, &mut s, "board.outline", json!({"width": "50mm", "height": "50mm"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "U1", "at": ["25.09mm", "25.07mm"]}));
+    for (k, (x, y, rot)) in [(6, 25, 0), (25, 6, 90), (44, 25, 0), (25, 44, 90)].iter().enumerate() {
+        let j = format!("J{}", k + 1);
+        exec(&r, &mut s, "circuit.add", json!({"part": "HDR12", "refdes": j}));
+        exec(
+            &r,
+            &mut s,
+            "place.set",
+            json!({"refdes": j, "at": [format!("{x}mm"), format!("{y}mm")], "rotation": rot}),
+        );
+        for i in 1..=10 {
+            let pin = k * 10 + i;
+            exec(
+                &r,
+                &mut s,
+                "net.connect",
+                json!({"net": format!("P{pin}"), "pins": [format!("U1.{pin}"), format!("{j}.{i}")]}),
+            );
+        }
+        exec(
+            &r,
+            &mut s,
+            "net.connect",
+            json!({"net": format!("X{k}"), "pins": [format!("{j}.11"), format!("{j}.12")]}),
+        );
+    }
+    let f = cadlab::router::fanout(s.project.as_ref().unwrap(), &["U1".to_string()], &[]).unwrap();
+    assert!(f.tracks.is_empty(), "every pad of the QFN is on a grid line: escapes for {:?}", f.pads);
+    // The same part where the headers' pads are (their lines were the grid's before): unchanged.
+    exec(&r, &mut s, "place.set", json!({"refdes": "U1", "at": ["25mm", "25mm"]}));
+    let f = cadlab::router::fanout(s.project.as_ref().unwrap(), &["U1".to_string()], &[]).unwrap();
+    assert!(f.tracks.is_empty(), "{:?}", f.pads);
+}
+
+/// Two pads that only join through a slot between two keep-outs, 0.24 mm wide for a 0.2 mm
+/// track and 0.07 mm off the lines of the default 0.2 mm grid: the grid search finds no way at
+/// that pitch. A run that leaves connections unrouted inside its budget is made again on finer
+/// grids, one of which has a line in the slot (D84). An explicit `grid` is used as given.
+#[test]
+fn finer_grids_after_a_run_that_leaves_connections() {
+    let r = Registry::with_builtins();
+    let board = |s: &mut Session| {
+        let _d = new_project(&r, s);
+        exec(
+            &r,
+            s,
+            "part.create",
+            json!({"id": "HDR1", "category": "connector", "package": "PinHeader 1x1", "pins": numbered_pins(1)}),
+        );
+        exec(&r, s, "circuit.add", json!({"part": "HDR1", "refdes": "J1"}));
+        exec(&r, s, "circuit.add", json!({"part": "HDR1", "refdes": "J2"}));
+        exec(&r, s, "net.connect", json!({"net": "N", "pins": ["J1.1", "J2.1"]}));
+        exec(&r, s, "board.rules", json!({"track_width": "0.2mm", "clearance": "0.2mm"}));
+        exec(&r, s, "board.outline", json!({"width": "20mm", "height": "12mm"}));
+        exec(&r, s, "place.set", json!({"refdes": "J1", "at": ["10mm", "3mm"]}));
+        exec(&r, s, "place.set", json!({"refdes": "J2", "at": ["10mm", "9mm"]}));
+        // A wall across the board between the two pads, open from x = 9.95 to 10.19 mm.
+        for (name, from, to) in [("left", "-1mm", "9.95mm"), ("right", "10.19mm", "21mm")] {
+            exec(
+                &r,
+                s,
+                "keepout.add",
+                json!({"name": name, "outline": {"rect": {"from": [from, "5.5mm"], "to": [to, "6.5mm"]}},
+                       "no_tracks": true, "no_vias": true}),
+            );
+        }
+        _d
+    };
+    use cadlab::router::{Hooks, RouteOptions, Scope, SearchKind, route};
+    let mut s = Session::new();
+    let _d = board(&mut s);
+    let p = s.project.as_ref().unwrap();
+    let hooks = Hooks { progress: &|_, _, _| {}, cancelled: &|| false };
+    let grid_only = RouteOptions { search: Some(SearchKind::Grid), ..Default::default() };
+    let fixed = RouteOptions { grid: Some(Nm::from_um(200)), ..grid_only.clone() };
+    let o = route(p, &Scope::All, &fixed, &hooks).unwrap();
+    assert_eq!(o.stats.failed, 1, "no line of the 0.2 mm grid lies in the slot: {:?}", o.stats);
+    assert_eq!(o.stats.grid, Nm::from_um(200));
+    let o = route(p, &Scope::All, &grid_only, &hooks).unwrap();
+    assert_eq!(o.stats.failed, 0, "{:?}", o.stats);
+    assert!(o.stats.grid < Nm::from_um(200), "routed on a finer grid: {:?}", o.stats);
+    let o = exec(&r, &mut s, "route.all", json!({"router": "grid"}));
+    report("slot off the grid", &o, 0);
+    assert_eq!(o["output"]["stats"]["failed"], 0, "{o}");
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
 }

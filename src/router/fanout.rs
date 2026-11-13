@@ -474,6 +474,107 @@ fn past_vias(rb: &RouterBoard, index: &Index, grid: &Grid, e: &Escape, layer: us
     None
 }
 
+/// Lateral step (nm) of the turns tried by [`free_exit`].
+const SIDE_STEP: f64 = 50_000.0;
+/// Farthest (nm) an exit moves sideways in [`free_exit`].
+const SIDE_MAX: f64 = 500_000.0;
+
+/// Cells straight ahead of the end of a [`free_exit`] that the static maps leave free: the exit
+/// ends beyond the parts behind the row, not in a pocket between them.
+const FREE_AHEAD: i32 = 5;
+
+/// An exit of `net` from `end` (a pad center) along `axis` that is not tied to the grid's lines:
+/// straight on, a 45° turn to either side by a multiple of [`SIDE_STEP`] (none first), straight
+/// on again, and a stub onto a grid cell from which the router can move outwards (`open`); the
+/// shallowest such way, the smaller sideways move among equals. The points after `end`; exact
+/// checks against `index`.
+#[allow(clippy::too_many_arguments)]
+fn free_exit(
+    rb: &RouterBoard,
+    index: &Index,
+    grid: &Grid,
+    open: &dyn Fn(u32, usize, (i32, i32), (i32, i32)) -> bool,
+    net: u32,
+    end: P,
+    layer: usize,
+    axis: P,
+) -> Option<Vec<P>> {
+    let ck = Checker { rb, index };
+    let pr = rb.profile(net);
+    let lat = P::new(-axis.y, axis.x);
+    let step = (axis.x as i32, axis.y as i32);
+    let margin = delta(pr.hw + pr.c, grid.g * std::f64::consts::SQRT_2 / 2.0);
+    let steps = (CROSS_DEPTH / CROSS_STEP).round() as i64;
+    // A cell ahead of `q`, within a pitch, that the router can use and leave.
+    let cell_at = |q: P| -> Option<(f64, P)> {
+        let (x0, y0, x1, y1) = grid.crange(&BoxF::of2(q, q).expand(grid.g))?;
+        let mut best: Option<(f64, P)> = None;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let c = grid.cell(x, y);
+                let dist = c.dist(q);
+                let ahead = (c.x - q.x) * axis.x + (c.y - q.y) * axis.y;
+                if ahead >= 0.0
+                    && dist <= grid.g
+                    && best.is_none_or(|b| dist < b.0)
+                    && (0..FREE_AHEAD).all(|i| open(net, layer, (x + i * step.0, y + i * step.1), step))
+                    && ck.seg_margin(layer, c, c, net, margin).is_none()
+                    && (dist < 1.0 || ck.seg(layer, q, c, net).is_none())
+                {
+                    best = Some((dist, c));
+                }
+            }
+        }
+        best
+    };
+    let mut best: Option<(f64, Vec<P>)> = None;
+    let sides = (SIDE_MAX / SIDE_STEP).round() as i64;
+    for m in 0..=2 * sides {
+        // 0, +1, -1, +2, -2, ... steps sideways.
+        let s = ((m + 1) / 2) as f64 * SIDE_STEP * if m % 2 == 1 { 1.0 } else { -1.0 };
+        for i in 0..=steps {
+            let d1 = i as f64 * CROSS_STEP;
+            if best.as_ref().is_some_and(|b| d1 + s.abs() >= b.0) {
+                break;
+            }
+            let q1 = P::new(end.x + axis.x * d1, end.y + axis.y * d1);
+            if i > 0 && ck.seg(layer, end, q1, net).is_some() {
+                break;
+            }
+            let q2 = P::new(q1.x + axis.x * s.abs() + lat.x * s, q1.y + axis.y * s.abs() + lat.y * s);
+            if m > 0 && ck.seg(layer, q1, q2, net).is_some() {
+                continue;
+            }
+            for j in 0..=steps {
+                let d2 = j as f64 * CROSS_STEP;
+                let depth = d1 + s.abs() + d2;
+                if best.as_ref().is_some_and(|b| depth >= b.0) {
+                    break;
+                }
+                let q3 = P::new(q2.x + axis.x * d2, q2.y + axis.y * d2);
+                if j > 0 && ck.seg(layer, q2, q3, net).is_some() {
+                    break;
+                }
+                if depth < 1.0 {
+                    continue;
+                }
+                if let Some((dist, c)) = cell_at(q3)
+                    && best.as_ref().is_none_or(|b| depth + dist < b.0)
+                {
+                    let mut pts = vec![end, q1, q2, q3, c];
+                    pts.dedup_by(|a, b| a.dist(*b) < 1.0);
+                    best = Some((depth + dist, pts.split_off(1)));
+                    break;
+                }
+            }
+            if m == 0 {
+                break;
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
 /// Result of [`crossovers`].
 #[derive(Default)]
 pub(crate) struct Crossovers {
@@ -814,7 +915,8 @@ const ESCAPE_SIDE: f64 = 2.0;
 /// The candidate exits of one pad, shallowest first (see [`escape`]): each legal against
 /// everything in `index`, apart from the escapes `done`, and ending on a cell from which the
 /// router can move outwards. When no exit turning at 45° straight onto its cell is legal, exits
-/// turning earlier and then running straight on to the cell are tried.
+/// turning earlier and then running straight on to the cell are tried, and when there is still
+/// none, one exit off the grid lines ([`free_exit`]).
 #[allow(clippy::too_many_arguments)]
 fn escape_cands(
     rb: &RouterBoard,
@@ -901,6 +1003,20 @@ fn escape_cands(
         }
         if out.len() == ESCAPE_CANDS {
             break;
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    // Still none: a turn by less than onto a grid line, then straight on and a stub onto a cell
+    // further out ([`free_exit`]). The pad beside a crossover's exit that turns towards it has
+    // to turn away before the exit does, with a no-connect pad's corner on its other side: no
+    // grid line lies in what is left (corne-cherry's CC1).
+    if let Some(more) = free_exit(rb, index, grid, open, term.net, term.at, layer, axis) {
+        let mut pts = vec![term.at];
+        pts.extend(more);
+        if done.iter().all(|o: &Escape| apart(rb, grid, o, term.net, layer, &pts)) {
+            out.push(pts);
         }
     }
     out
