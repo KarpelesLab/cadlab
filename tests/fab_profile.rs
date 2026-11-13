@@ -113,11 +113,16 @@ fn list_and_show() {
     }
     let o = exec(&r, &mut s, "fab.show", json!({"fab": "jlcpcb"}));
     let p = &o["output"]["profile"];
-    assert_eq!(p["verified_at"], "2026-10-04");
+    assert_eq!(p["verified_at"], "2026-11-13");
     assert!(p["sources"][0].as_str().unwrap().starts_with("https://jlcpcb.com/"));
     assert_eq!(p["process"][0]["min_track"], "0.1mm");
     assert_eq!(p["assembly"]["cpl"]["columns"][1]["header"], "Mid X");
-    assert!(o["output"]["unverified"].as_array().unwrap().iter().any(|u| u == "assembly.cpl.origin"));
+    // The CPL origin is sourced (D77); the file names stay partly unpublished.
+    let unverified = o["output"]["unverified"].as_array().unwrap();
+    assert!(unverified.iter().any(|u| u == "output.names"));
+    assert!(!unverified.iter().any(|u| u == "assembly.cpl.origin"));
+    assert_eq!(p["assembly"]["cite"]["cpl.origin"], "https://jlcpcb.com/blog/files-needed-for-pcb-assembly");
+    assert_eq!(p["assembly"]["min_package"], "01005");
 
     let f = r.execute(&mut s, "fab.show", json!({"fab": "jlcpbc"}), RunOptions::default()).unwrap_err();
     assert_eq!(f.error.diagnostic.code, "fab.unknown");
@@ -370,7 +375,7 @@ fn export_bundle_deterministic_zip_and_lock() {
     let lock: Value = serde_json::from_slice(&a["fab-lock.json"]).unwrap();
     assert_eq!(lock["lock_version"], 1);
     assert_eq!(lock["profile"]["id"], "jlcpcb");
-    assert_eq!(lock["profile"]["verified_at"], "2026-10-04");
+    assert_eq!(lock["profile"]["verified_at"], "2026-11-13");
     assert_eq!(lock["profile"]["source"], "builtin");
     assert_eq!(
         lock["process"],
@@ -399,6 +404,10 @@ fn export_bundle_deterministic_zip_and_lock() {
     let bom = String::from_utf8(w["p-BOM-pcbway.csv"].clone()).unwrap();
     assert!(bom.starts_with("Item #,Designator,Qty,Manufacturer,Mfg Part #,"), "{bom}");
     assert!(bom.contains(",U1,1,Diodes,AP2112K-3.3TRG1,"), "{bom}");
+    // The CPL has the headers of PCBWay's sample centroid file, from the outline's lower left corner.
+    let cpl = String::from_utf8(w["p-CPL-pcbway.csv"].clone()).unwrap();
+    assert!(cpl.starts_with("Designator,Footprint,Mid X,Mid Y,TB,Rotation,Comment\r\n"), "{cpl}");
+    assert!(cpl.contains("\r\nU1,"), "{cpl}");
 }
 
 #[test]

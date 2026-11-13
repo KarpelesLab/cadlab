@@ -220,6 +220,8 @@ KiCad writers and oracle checks already exist from M2–M4. This milestone adds 
   clearance tolerance kept at 2 µm (measured)
 - [x] More fab profiles: OSH Park, Aisler, Eurocircuits, Seeed Fusion, NextPCB, PCBgogo, ALLPCB, Elecrow (sourced,
   verified 2026-10-04; table in MANUFACTURING.md)
+- [x] Fab profiles re-checked against the fabs' pages 2026-11-13: unverified values closed where published,
+  JLCPCB minimum package and PCBWay/Eurocircuits/NextPCB assembly layouts corrected (D77)
 
 ## M8 — Advanced electrical (L)
 

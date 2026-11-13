@@ -10,16 +10,18 @@
 id = "jlcpcb"
 name = "JLCPCB"
 website = "https://jlcpcb.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://jlcpcb.com/capabilities/pcb-capabilities",
-    "https://jlcpcb.com/impedance",                      # stackups, read 2026-10-15
+    "https://jlcpcb.com/impedance",                      # stackups, read 2026-10-15 (not re-read 2026-11-13)
     "https://jlcpcb.com/capabilities/pcb-assembly-capabilities",
     "https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly",
     "https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly",
     "https://jlcpcb.com/help/article/How-to-generate-the-BOM-and-Centroid-file-from-KiCAD",
     "https://jlcpcb.com/help/article/suggested-naming-patterns",
     "https://jlcpcb.com/help/article/how-to-generate-gerber-and-drill-files-in-kicad-9",
+    "https://jlcpcb.com/help/article/pcb-assembly-faqs",
+    "https://jlcpcb.com/blog/files-needed-for-pcb-assembly",
 ]
 notes = """Rigid FR-4. Hole tolerance +0.13/-0.08 mm. Via 0.1 mm hole / 0.2 mm pad only on boards up to \
 1 mm thick with ENIG or OSP (not modelled). Castellated holes: hole >= 0.5 mm, hole to edge >= 1 mm, \
@@ -183,8 +185,10 @@ unverified = ["thickness"]
 include = ["copper", "mask", "paste", "silk", "profile", "drill"]
 archive = "{project}-jlcpcb.zip"
 drill_format = "excellon"
-# Paste extensions (.GTP/.GBP) are not in the naming article; whether the archive must be flat
-# was not stated.
+# The naming article lists .GTL/.GBL/.GTS/.GBS/.GTO/.GBO, .GKO, .G2L/.G3L (4 layers) and .XLN
+# drills, no paste layers; the KiCad 9 article accepts Protel extensions (it names .GTP, not .GBP)
+# and KiCad's separate -PTH.drl / -NPTH.drl files. .GBP and inner layers beyond .G3L are not
+# published. The archive is "one .zip or .rar"; whether it must be flat is not stated.
 unverified = ["archive", "names"]
 [output.cite]
 names = "https://jlcpcb.com/help/article/suggested-naming-patterns"
@@ -208,13 +212,14 @@ drill_npth = "{project}-NPTH.drl"
 
 [assembly]
 sides = ["top", "bottom"]     # Standard PCBA; Economic PCBA is single-sided
-min_package = "0201"          # Standard PCBA (Economic: 0402)
+min_package = "01005"         # Standard PCBA (Economic: 0402)
+# Basic parts are loaded on the machines, extended parts are loaded per order ("Preferred Extended"
+# parts are extended parts without the loading fee on Economic PCBA).
 part_classes = ["basic", "extended"]
 catalog = ["lcsc"]
-# Part classes were only seen in a search summary of the pricing page; the CPL origin is not
-# documented (cadlab writes Gerber coordinates).
-unverified = ["part_classes", "cpl.origin"]
 [assembly.cite]
+part_classes = "https://jlcpcb.com/help/article/pcb-assembly-faqs"
+"cpl.origin" = "https://jlcpcb.com/blog/files-needed-for-pcb-assembly"
 sides = "https://jlcpcb.com/capabilities/pcb-assembly-capabilities"
 min_package = "https://jlcpcb.com/capabilities/pcb-assembly-capabilities"
 bom = "https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly"
@@ -242,4 +247,5 @@ columns = [
 ]
 side_names = ["Top", "Bottom"]
 coordinate_suffix = "mm"      # as in the sample file
+# JLCPCB asks for one common origin for the Gerber and the placement files.
 origin = "board"              # same coordinates as the Gerber files

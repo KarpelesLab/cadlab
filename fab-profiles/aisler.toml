@@ -12,7 +12,7 @@
 id = "aisler"
 name = "AISLER"
 website = "https://aisler.net"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://community.aisler.net/t/2-layer-1-6mm-35-m-enig-design-rules/3732",
     "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735",
@@ -26,7 +26,8 @@ notes = """Rigid FR-4 made in Germany, 1.6 mm (0.8 mm also for 4 layers). Small 
 castellated edges or track/space below 200/150 um require ENIG. NPTH to copper >= 0.25 mm, NPTH \
 slot to copper >= 0.3 mm. Slots: NPTH >= 0.8 mm (milled from 1.8 mm, smaller ones nibbled), PTH \
 0.7-2.6 mm with a 0.3 mm ring. Buried, blind, micro and tented vias, pressfit parts and user \
-subpanels are not supported; silkscreen over 25% of a side is rejected. Assembly (Amazing \
+subpanels are not supported; silkscreen over 25% of a side is rejected. The 70 um stackups of the \
+portfolio (2 layers, 4 layers with 35 um inner copper) are not modelled. Assembly (Amazing \
 Assembly) is ordered from native CAD, ODB++ or IPC files; AISLER states no assembly is possible \
 from traditional Gerber files and publishes no BOM/CPL layout, so no [assembly] is modelled."""
 

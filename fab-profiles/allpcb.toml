@@ -9,7 +9,7 @@
 id = "allpcb"
 name = "ALLPCB"
 website = "https://www.allpcb.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://www.allpcb.com/standard_pcb_manufacturing_capability.html",
     "https://www.allpcb.com/pcb_assembly_capability.html",

@@ -1827,6 +1827,65 @@ deflate encoder and extras); file contents and names are unchanged. fstool needs
 *Why:* one less third-party dependency on the export path (and its extraction-side advisories), and archive
 handling stays in a crate the project's maintainer controls.
 
+### D77. Fab profiles re-checked: unverified values closed only from the fab's own pages and files (2026-11-13)
+Every built-in fab profile was read again against the fab's own pages, and the files those pages publish (PCBWay's
+sample centroid file, NextPCB's and Elecrow's BOM templates, the CPL files shown in Eurocircuits' upload guide, the
+Elecrow PDFs). A field left `unverified` only when its value was read there in that pass; `verified_at` moved to
+2026-11-13 for the ten fab profiles (`generic` is cadlab's own rule set and keeps 2026-10-04).
+
+Closed (now cited):
+- **JLCPCB** `cpl.origin = board`: its assembly files checklist asks for one common origin for the Gerber and the
+  centroid files. `part_classes` (basic, extended): its assembly FAQ.
+- **PCBWay** `cpl.columns`: the headers of its sample centroid file (`Designator, Footprint, Mid X, Mid Y, TB,
+  Rotation, Comment`; its `Ref X/Y` and `Pad X/Y` columns are left out). `cpl.origin`: its KiCad position file guide
+  puts the origin at the bottom left corner of the board frame, so the value changed from `board` to
+  `outline_lower_left`.
+- **OSH Park** `drill_format`: its KiCad Gerber guide states that drill files in inches and in millimeters both
+  work (decimal format, absolute origin).
+- **Eurocircuits** `cpl.columns`: headers and side names of the CPL file shown in its upload guide (`Designator,
+  Comment, Layer, Footprint, Center-X(mm), Center-Y(mm), Rotation`; `TopLayer`/`BottomLayer`).
+- **NextPCB** `bom.columns`: its BOM template (`Manufacturer Part Number, Qty, Designator, Customer Supply,
+  Customer Remark`), which replaces the three guessed headers.
+- **Elecrow** `bom.columns`: its BOM template has the stored headers, and explains `*Original` (Y: original brand
+  required, N: substitutes accepted), which cadlab leaves empty for the user.
+
+Corrected: **JLCPCB** `min_package` 0201 → 01005 (Standard PCBA row of the assembly capabilities table), so
+`fab.check` no longer reports 01005 parts as `fab.package_size` there. No other drift was found: the stored process
+values that were compared with the pages read in this pass were unchanged.
+
+Still unverified, with what was looked at:
+- **JLCPCB**: 1-layer copper weights and thickness per layer count (the capabilities table has no such rows; it only
+  says 2.5 mm and above need 12+ layers); `names` (the naming article has no paste layers and inner layers only to
+  `.G3L`; the KiCad 9 article names `.GTP` but not `.GBP`); `archive` (one zip or rar, flatness not stated).
+- **PCBWay**: copper weights and drill range (capabilities page: up to 8 oz, 0.15–6.0 mm; tolerances page: 1–3 oz,
+  0.2–6.3 mm; the stricter values stay), multilayer thickness (not per layer count), and the new `cpl.side_names`
+  (the sample only has `T` parts; the requirements page says "Top or Bottom"). The sample is in mils with a unit
+  suffix while the help page asks for mm; cadlab writes plain millimeters.
+- **Aisler** `drill_format`: the Gerber page still asks for inches 2:4 and does not mention metric files.
+- **Eurocircuits**: `hole_to_hole` (0.25 mm between tool sizes, a finished-size value is derived), `finishes`
+  (immersion silver is pooling in one list and non-pooling in the other), multilayer `thickness` (1.55 mm is listed
+  for 6 layers and up), `bom.columns` (the BOM shown is an EAGLE parts list without the required MPN column, so it
+  was not adopted), `cpl.origin` (units and origin are not stated). Its classification table is an image and was not
+  read again; the ring and hole values were confirmed on the service pages.
+- **Seeed**: outer copper (1–3 oz against 0.035–0.07 mm), inner spacing, 6-layer thickness (listed for "6 and 8
+  layers" while layers are 1–6), `names` (no paste or NPTH names), CPL columns and origin (not published). The
+  order page is rendered by script and was not read; the specification article was.
+- **NextPCB**: `min_drill` (0.15 mm only up to 1.2 mm thick, PTH from 0.2 mm), thickness and odd layer counts, CPL
+  columns and origin (the export guide only says KiCad's defaults are fine).
+- **PCBgogo**: `min_npth` (0.3 and 0.5 mm rows), `min_silk_height` (0.75 mm with a 0.8 mm note), odd layer counts,
+  double-sided assembly (implied only), CPL columns, bottom side name and origin (the sample is top-side Altium text
+  in mils; the page says to confirm the origin before release).
+- **ALLPCB**: nothing listed as unverified; thickness options, a minimum size and a BOM/CPL layout are still not
+  published, so they stay left out.
+- **Elecrow**: track/space (6 mil on the order page, 0.15 mm in the PDF), `min_drill` (0.25 mm vias, 0.3 mm holes,
+  0.3 mm in the comparison table), 6/8-layer rings, `names` (inner names only for 4 layers), CPL columns and origin.
+- JLCPCB's impedance stackups (read 2026-10-15) were not read again.
+
+*Why:* the unverified list is only useful if leaving it means something. Sample files and templates a fab publishes
+are as authoritative as its tables and are the only place the assembly layouts are written down; where a fab
+publishes nothing, "still unverified" with the pages that were read is the honest state, and the stricter stored
+value keeps `fab.check` on the safe side.
+
 ## Open questions
 
 

@@ -9,7 +9,7 @@
 id = "oshpark"
 name = "OSH Park"
 website = "https://oshpark.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://docs.oshpark.com/services/two-layer/",
     "https://docs.oshpark.com/services/two-layer-hhdc/",
@@ -20,6 +20,7 @@ sources = [
     "https://docs.oshpark.com/submitting-orders/board-outline/",
     "https://docs.oshpark.com/submitting-orders/naming-pattern/",
     "https://docs.oshpark.com/design-tools/kicad/",
+    "https://docs.oshpark.com/design-tools/kicad/generating-kicad-gerbers/",
     "https://docs.oshpark.com/tips+tricks/castellation/",
 ]
 notes = """Pooled rigid boards made in the USA: ENIG over purple mask both sides, silkscreen both sides. \
@@ -189,9 +190,8 @@ archive = "{project}-oshpark.zip"
 drill_format = "excellon"
 # No `names`: OSH Park detects KiCad's output names and Gerber X2 automatically; the suggested
 # Protel-style pattern is only for tools it cannot detect. Its drill page asks tools it has no guide
-# for to write Excellon in inches 2:4; cadlab's metric Excellon (as KiCad writes it) is not covered
-# by that page.
-unverified = ["drill_format"]
+# for to write Excellon in inches 2:4; its KiCad Gerber guide states that both inches and
+# millimeters work, with decimal format and absolute origin, which is what cadlab writes.
 [output.cite]
 names = "https://docs.oshpark.com/design-tools/kicad/"
-drill_format = "https://docs.oshpark.com/submitting-orders/drill-specs/"
+drill_format = "https://docs.oshpark.com/design-tools/kicad/generating-kicad-gerbers/"

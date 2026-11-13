@@ -10,7 +10,7 @@
 id = "nextpcb"
 name = "NextPCB"
 website = "https://www.nextpcb.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://www.nextpcb.com/pcb-capabilities",
     "https://www.nextpcb.com/pcb-assembly-capabilities",
@@ -119,23 +119,27 @@ drill_format = "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly
 sides = ["top", "bottom"]
 min_package = "01005"
 through_hole = true
-# NextPCB lists the centroid content (designator, X, Y, rotation, side) but not its column names,
-# units or origin; the exact BOM headers come from its template, which was not read.
-unverified = ["bom.columns", "cpl.columns", "cpl.origin"]
+# NextPCB lists the centroid content (designator, X, Y, rotation, optional side) but not its
+# column names, units or origin (its export guide: KiCad's defaults).
+unverified = ["cpl.columns", "cpl.origin"]
 [assembly.cite]
+"bom.columns" = "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly-files-explanation"
 sides = "https://www.nextpcb.com/pcb-assembly-capabilities"
 min_package = "https://www.nextpcb.com/pcb-assembly-capabilities"
 through_hole = "https://www.nextpcb.com/pcb-assembly-capabilities"
 bom = "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly-files-explanation"
 cpl = "https://support.nextpcb.com/portal/en/kb/articles/1-pcb-assembly-files-explanation"
 
-# Required BOM fields: Designator, Quantity, Manufacturer Part Number.
+# Columns of the BOM template attached to NextPCB's assembly files article. "Customer Supply" (Y
+# for parts the customer supplies, DNP for parts not to fit) is left empty.
 [assembly.bom]
 file = "{project}-BOM-nextpcb.csv"
 columns = [
-    { header = "Designator", field = "designators" },
-    { header = "Quantity", field = "quantity" },
     { header = "Manufacturer Part Number", field = "mpn" },
+    { header = "Qty", field = "quantity" },
+    { header = "Designator", field = "designators" },
+    { header = "Customer Supply", field = "empty" },
+    { header = "Customer Remark", field = "notes" },
 ]
 
 [assembly.cpl]

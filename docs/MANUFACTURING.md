@@ -244,21 +244,22 @@ Each manufacturer is described by a **fab profile**, a data file (TOML) shipped 
 Capabilities change over time, so every value carries its source URL and the date it was verified. The values
 must be filled from each fab's current published capabilities, not from memory.
 
-Built-in profiles live in `fab-profiles/` (embedded in the binary), all verified 2026-10-04 against the fab's own
-pages (`fab.show <id>` lists sources and unverified values):
+Built-in profiles live in `fab-profiles/` (embedded in the binary), verified 2026-10-04 against the fab's own
+pages and re-checked there on 2026-11-13 (D77; `generic` is cadlab's own and keeps its date). `fab.show <id>` lists
+sources and unverified values:
 
 | ID | Processes (layers) | Assembly (BOM/CPL layout) | File names | Unverified / left out (main ones) |
 |---|---|---|---|---|
-| `jlcpcb` | 1, 2, 4, 6–32 | yes, LCSC SKUs | JLCPCB's | CPL origin |
-| `pcbway` | 1–2, 4–14 | yes | generic | CPL columns/origin; drill and copper where its pages disagree |
-| `oshpark` | 2 (1 oz, 2 oz), 4, 6 | no service | generic (auto-detected) | drill format; no max drill (milled), no silk height |
+| `jlcpcb` | 1, 2, 4, 6–32 | yes, LCSC SKUs | JLCPCB's | 1-layer copper, thickness per layer count, `.GBP` and deeper inner-layer names, flat archive |
+| `pcbway` | 1–2, 4–14 | yes (sample centroid headers, origin at the outline's lower left) | generic | CPL bottom side name; drill and copper where its pages disagree; multilayer thickness |
+| `oshpark` | 2 (1 oz, 2 oz), 4, 6 | no service | generic (auto-detected) | none; no max drill (milled), no silk height |
 | `aisler` | 2 (ENIG, HASL), 4, 6–8 | not from Gerbers | Aisler's table | drill format (asks inch 2:4) |
-| `eurocircuits` | 1–2 and 4–8 pooling, PCB proto 2/4 | yes (content only) | generic | hole-to-hole (derived), finishes, multilayer thickness, BOM/CPL headers |
-| `seeed` | 1–2, 4, 6 | yes | Seeed's (one drill file) | outer copper, multilayer spacing, 6-layer thickness, names, CPL columns (JS-rendered pages) |
-| `nextpcb` | 1–2, 4, 6–32 | yes | generic | min drill, multilayer layers/thickness, BOM/CPL headers; no finish list |
+| `eurocircuits` | 1–2 and 4–8 pooling, PCB proto 2/4 | yes (CPL as in its upload guide, BOM content only) | generic | hole-to-hole (derived), finishes, multilayer thickness, BOM headers, CPL origin |
+| `seeed` | 1–2, 4, 6 | yes | Seeed's (one drill file) | outer copper, multilayer spacing, 6-layer thickness, names, CPL columns/origin (not published) |
+| `nextpcb` | 1–2, 4, 6–32 | yes (BOM template) | generic | min drill, multilayer layers/thickness, CPL columns/origin; no finish list |
 | `pcbgogo` | 1–2, 4–40 | yes | generic | min NPTH, silk height, double-sided assembly, CPL layout; no thickness/copper options |
 | `allpcb` | 1–14 (one table) | not published | generic | no thickness/copper options, min size, inner copper |
-| `elecrow` | 1–2, 4–8 | yes | Elecrow's | track/space, drill, multilayer rings, names, BOM/CPL headers |
+| `elecrow` | 1–2, 4–8 | yes (BOM template) | Elecrow's | track/space, drill, multilayer rings, names, CPL columns/origin |
 | `generic` | any | — | generic | cadlab's conservative IPC class 2 defaults, for any other fab |
 
 Values a fab does not publish are left out (not checked), never filled in from elsewhere. Users add profiles or override built-in ones with
@@ -305,6 +306,12 @@ Values that could not be confirmed on the fab's pages are either left out (not c
 `unverified`; `fab.show` lists them. Where a fab's own pages contradict each other (PCBWay's capabilities and
 tolerances pages), the stricter value is used and marked unverified. No per-package rotation offsets are shipped:
 neither fab publishes a table, so they are user data (see D21).
+
+A value leaves `unverified` only when it was read on the fab's own page or in a file the fab publishes (sample
+centroid file, BOM template), and `verified_at` moves only when the profile's pages were read again. What the
+2026-11-13 pass closed, corrected and left open is in D77. The CPL origins that are sourced: JLCPCB asks for one
+common origin for Gerber and placement files (`board`); PCBWay's KiCad guide puts the origin at the bottom left
+corner of the board frame (`outline_lower_left`). The other fabs do not document one and keep `board`, unverified.
 
 ### Commands (`fab.*`)
 

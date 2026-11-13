@@ -11,7 +11,7 @@
 id = "pcbgogo"
 name = "PCBgogo"
 website = "https://www.pcbgogo.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://www.pcbgogo.com/capabilities/fr-4-pcb-manufacturing.html",
     "https://www.pcbgogo.com/capabilities/pcba-capabilities.html",

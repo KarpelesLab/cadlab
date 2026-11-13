@@ -9,7 +9,7 @@
 id = "seeed"
 name = "Seeed Fusion"
 website = "https://www.seeedstudio.com/fusion.html"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://support.seeed.cc/portal/en/kb/articles/fusion-pcb-specification",
     "https://www.seeedstudio.com/fusion_pcb.html",

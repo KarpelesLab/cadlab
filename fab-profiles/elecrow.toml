@@ -12,7 +12,7 @@
 id = "elecrow"
 name = "Elecrow"
 website = "https://www.elecrow.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://www.elecrow.com/pcb-manufacturing.html",
     "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf",
@@ -123,10 +123,12 @@ sides = ["top", "bottom"]
 min_package = "0201"
 through_hole = true
 # Elecrow lists the coordinate file content (designator, X, Y, rotation, side) and shows Eagle's
-# mount.ulp output, without column names or origin. The BOM template's "*Original" column (Y/N) is
-# not explained and is left empty.
-unverified = ["bom.columns", "cpl.columns", "cpl.origin"]
+# mountsmd.ulp output, without column names or origin. The BOM template's "*Original" column (Y:
+# the original brand is required, N: substitutes with similar specifications are accepted) is left
+# empty for the user to fill.
+unverified = ["cpl.columns", "cpl.origin"]
 [assembly.cite]
+"bom.columns" = "https://www.elecrow.com/media/product/BOM_Template.xlsx"
 sides = "https://www.elecrow.com/pcb-assembly.html"
 min_package = "https://www.elecrow.com/pcb-assembly.html"
 through_hole = "https://www.elecrow.com/pcb-assembly.html"

@@ -13,7 +13,7 @@
 id = "eurocircuits"
 name = "Eurocircuits"
 website = "https://www.eurocircuits.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://www.eurocircuits.com/services/standard-pool/",
     "https://www.eurocircuits.com/services/pcb-proto/",
@@ -169,10 +169,12 @@ drill_format = "https://www.eurocircuits.com/technical-guidelines/pcb-design-gui
 sides = ["top", "bottom"]
 min_package = "0201"
 through_hole = true
-# Eurocircuits lists the required BOM and CPL content, not column headers (columns are mapped on
-# upload); the CPL origin is not documented.
-unverified = ["bom.columns", "cpl.columns", "cpl.origin"]
+# Eurocircuits lists the required BOM content, not column headers (its BOM illustration is an
+# EAGLE parts list without the required MPN column, so it is not used); the CPL origin and units
+# are not documented.
+unverified = ["bom.columns", "cpl.origin"]
 [assembly.cite]
+"cpl.columns" = "https://www.eurocircuits.com/user-guides/visualizer-user-guides/upload-cpl-data-user-guide/"
 sides = "https://www.eurocircuits.com/services/pcb-assembly-capabilities/"
 min_package = "https://www.eurocircuits.com/services/pcb-assembly-capabilities/"
 through_hole = "https://www.eurocircuits.com/services/pcb-assembly-capabilities/"
@@ -194,15 +196,18 @@ columns = [
 ]
 
 # Required CPL content: designator, X/Y of the component centre, rotation, side (Top or Bottom),
-# with a header row.
+# with a header row naming each column. Headers and side names are those of the CPL file shown in
+# the upload guide (its last column, Description, is left out).
 [assembly.cpl]
 file = "{project}-CPL-eurocircuits.csv"
 columns = [
     { header = "Designator", field = "designator" },
-    { header = "X", field = "x" },
-    { header = "Y", field = "y" },
+    { header = "Comment", field = "value" },
+    { header = "Layer", field = "side" },
+    { header = "Footprint", field = "footprint" },
+    { header = "Center-X(mm)", field = "x" },
+    { header = "Center-Y(mm)", field = "y" },
     { header = "Rotation", field = "rotation" },
-    { header = "Side", field = "side" },
 ]
-side_names = ["Top", "Bottom"]
+side_names = ["TopLayer", "BottomLayer"]
 origin = "board"

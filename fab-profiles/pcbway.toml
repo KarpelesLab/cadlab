@@ -10,7 +10,7 @@
 id = "pcbway"
 name = "PCBWay"
 website = "https://www.pcbway.com"
-verified_at = "2026-10-04"
+verified_at = "2026-11-13"
 sources = [
     "https://www.pcbway.com/capabilities.html",
     "https://www.pcbway.com/pcb_prototype/PCB_Manufacturing_tolerances.html",
@@ -20,6 +20,8 @@ sources = [
     "https://www.pcbway.com/helpcenter/pcb_assembly_ordering/What_file_format_should_BOM_be_.html",
     "https://www.pcbway.com/helpcenter/generate_gerber/Gerber_File_Extension_from_Different_Software.html",
     "https://www.pcbway.com/blog/help_center/Generate_Gerber_file_from_Kicad_5_1_6.html",
+    "https://www.pcbway.com/img/images/pcbway/a-sample-of-PCBWay-Centroid-File.txt",
+    "https://www.pcbway.com/blog/help_center/Generate_Position_File_in_Kicad.html",
 ]
 notes = """Rigid FR-4. Hole tolerance PTH +/-0.08 mm, NPTH +/-0.05 mm. Inner-layer hole-to-copper isolation: \
 4 layers 7 mil, 6 layers 8 mil, 8 layers 9 mil, 10+ layers 10 mil. Slots: plated >= 0.5 mm, \
@@ -98,9 +100,13 @@ archive = "https://www.pcbway.com/blog/help_center/Generate_Gerber_file_from_Kic
 [assembly]
 sides = ["top", "bottom"]
 min_package = "01005"
-# PCBWay publishes the placement file content, not its column names or origin.
-unverified = ["cpl.columns", "cpl.origin"]
+# The sample centroid file has only top-side parts ("T"); the requirements page words the side as
+# "Top or Bottom". The sample is in mils with a unit suffix while the help page asks for mm; cadlab
+# writes plain millimeters.
+unverified = ["cpl.side_names"]
 [assembly.cite]
+"cpl.columns" = "https://www.pcbway.com/img/images/pcbway/a-sample-of-PCBWay-Centroid-File.txt"
+"cpl.origin" = "https://www.pcbway.com/blog/help_center/Generate_Position_File_in_Kicad.html"
 sides = "https://www.pcbway.com/assembly-capabilities.html"
 min_package = "https://www.pcbway.com/assembly-capabilities.html"
 bom = "https://www.pcbway.com/helpcenter/pcb_assembly_ordering/What_file_format_should_BOM_be_.html"
@@ -122,15 +128,19 @@ columns = [
     { header = "Your Instructions / Notes", field = "notes" },
 ]
 
-# Content required by PCBWay: designator, X, Y, angle, side (Top/Bottom), in millimeters.
+# Content required by PCBWay: designator, X, Y, angle, side, in millimeters. Headers are those of
+# PCBWay's sample centroid file (its Ref X/Y and Pad X/Y columns are left out). PCBWay's KiCad
+# guide places the origin at the bottom left corner of the board frame.
 [assembly.cpl]
 file = "{project}-CPL-pcbway.csv"
 columns = [
     { header = "Designator", field = "designator" },
+    { header = "Footprint", field = "footprint" },
     { header = "Mid X", field = "x" },
     { header = "Mid Y", field = "y" },
-    { header = "Layer", field = "side" },
+    { header = "TB", field = "side" },
     { header = "Rotation", field = "rotation" },
+    { header = "Comment", field = "value" },
 ]
-side_names = ["Top", "Bottom"]
-origin = "board"
+side_names = ["T", "B"]
+origin = "outline_lower_left"
