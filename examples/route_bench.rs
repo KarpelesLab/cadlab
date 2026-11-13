@@ -19,6 +19,9 @@
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets. `CADLAB_BENCH_ORIGINAL=1` lists the connections
 //! the projects' own routing leaves open instead (the reference for residual failures).
+//! For looking at one place: `CADLAB_BENCH_DUMP=<refdes>[.<pad>][,<margin mm>]` lists the pads,
+//! tracks and vias of the result around a component or pad, and `CADLAB_BENCH_FANOUT=only` plans
+//! the fanout alone (dog bones, crossovers, escapes) and lists that.
 
 #[path = "../tests/common/routebench.rs"]
 mod routebench;
@@ -120,6 +123,28 @@ fn corpus(filters: &[String]) {
         }
         p.board_mut().tracks.clear();
         p.board_mut().vias.clear();
+        // `CADLAB_BENCH_FANOUT=only`: the fanout alone (dog bones, crossovers, escapes), listed
+        // around the component of `CADLAB_BENCH_DUMP`.
+        if std::env::var("CADLAB_BENCH_FANOUT").is_ok_and(|v| v == "only") {
+            match router::fanout(&p, &[], &[]) {
+                Ok(f) => {
+                    println!(
+                        "{}: fanout of {} pads, {} tracks, {} vias",
+                        e.name,
+                        f.pads.len(),
+                        f.tracks.len(),
+                        f.vias.len()
+                    );
+                    p.board_mut().tracks.extend(f.tracks);
+                    p.board_mut().vias.extend(f.vias);
+                    if let Ok(spec) = std::env::var("CADLAB_BENCH_DUMP") {
+                        dump(&p, &spec);
+                    }
+                }
+                Err(err) => eprintln!("{}: {err}", e.name),
+            }
+            continue;
+        }
         let errors_before = drc_errors(&p);
         let ropts = RouteOptions {
             budget: if work.is_some() { None } else { Some(Duration::from_millis(budget)) },
@@ -168,6 +193,9 @@ fn corpus(filters: &[String]) {
         if let Some(dir) = std::env::var_os("CADLAB_ROUTE_RENDER").map(PathBuf::from) {
             render(&q, &dir.join(format!("{}.png", e.name)), std::env::var("CADLAB_BENCH_AROUND").ok());
         }
+        if let Ok(spec) = std::env::var("CADLAB_BENCH_DUMP") {
+            dump(&q, &spec);
+        }
         println!(
             "| {} | {} | {} | {:.1}% | {} | {} | {} | {:.1} mm | {:.1} s | {:.1} M | {} | {} |",
             e.name,
@@ -203,6 +231,64 @@ fn corpus(filters: &[String]) {
         for (k, n) in &reasons {
             eprintln!("  {}: {n}× {k}", e.name);
         }
+    }
+}
+
+/// `CADLAB_BENCH_DUMP=<refdes>[.<pad>][,<margin mm>]`: the pads, tracks and vias of the routed
+/// board within the margin (default 2 mm) of a component's pads (or of one pad), in mm, for
+/// looking at a failing neighborhood.
+fn dump(p: &Project, spec: &str) {
+    let (what, margin) = spec.split_once(',').unwrap_or((spec, "2"));
+    let m = (margin.parse::<f64>().unwrap_or(2.0) * 1e6) as i64;
+    let (refdes, pad) = what.split_once('.').map_or((what, None), |(r, n)| (r, Some(n)));
+    let pads = cadlab::board::placed_pads(p);
+    let mine: Vec<_> = pads.iter().filter(|q| q.refdes == refdes && pad.is_none_or(|n| q.number == n)).collect();
+    if mine.is_empty() {
+        eprintln!("dump: no pad matches {what}");
+        return;
+    }
+    let xs = || mine.iter().map(|q| q.center.x.0);
+    let ys = || mine.iter().map(|q| q.center.y.0);
+    let (x0, x1) = (xs().min().unwrap_or(0) - m, xs().max().unwrap_or(0) + m);
+    let (y0, y1) = (ys().min().unwrap_or(0) - m, ys().max().unwrap_or(0) + m);
+    let inside = |q: cadlab::Point| (x0..=x1).contains(&q.x.0) && (y0..=y1).contains(&q.y.0);
+    let mm = |v: i64| v as f64 / 1e6;
+    eprintln!("dump {what}: x {:.3}..{:.3} y {:.3}..{:.3}", mm(x0), mm(x1), mm(y0), mm(y1));
+    for q in pads.iter().filter(|q| inside(q.center)) {
+        let Some(b) = q.shape.bbox() else { continue };
+        eprintln!(
+            "  pad {}.{} net {} at {:.4} {:.4} box {:.3} x {:.3} layers {:?}",
+            q.refdes,
+            q.number,
+            q.net.as_deref().unwrap_or("-"),
+            mm(q.center.x.0),
+            mm(q.center.y.0),
+            mm(b.max.x - b.min.x),
+            mm(b.max.y - b.min.y),
+            q.layers
+        );
+    }
+    for t in p.board().tracks.iter().filter(|t| inside(t.start) || inside(t.end)) {
+        eprintln!(
+            "  track {} {} ({:.4} {:.4}) -> ({:.4} {:.4}) w {:.3}",
+            t.net.as_deref().unwrap_or("-"),
+            t.layer,
+            mm(t.start.x.0),
+            mm(t.start.y.0),
+            mm(t.end.x.0),
+            mm(t.end.y.0),
+            mm(t.width.0)
+        );
+    }
+    for v in p.board().vias.iter().filter(|v| inside(v.at)) {
+        eprintln!(
+            "  via {} ({:.4} {:.4}) d {:.3} drill {:.3}",
+            v.net.as_deref().unwrap_or("-"),
+            mm(v.at.x.0),
+            mm(v.at.y.0),
+            mm(v.diameter.0),
+            mm(v.drill.0)
+        );
     }
 }
 
