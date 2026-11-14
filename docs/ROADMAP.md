@@ -465,10 +465,19 @@ Research-sized items beyond the milestones above; none blocks a release.
       network within 0.001. The built-in solver's board-level tests and the openEMS oracle run on both solvers.
       0.0.8 grew on lossy solid copper with slanted outlines on a fine mesh and ended the run as converged;
       0.0.9 has the fix
-- [ ] Switch `sim.sparams` to ems by default, then remove the built-in engine. Not yet (D89): ems loses 4 to 7 %
-      more than D52 on a 60 mm line of solid copper between microstrip ports from 6 GHz up, past the built-in
-      solver's test tolerance; with lossy slanted copper it needs three to four times the built-in solver's steps
-      to −70 dB; and the oracle job has yet to compare ems with openEMS (it does from this change on)
+- [x] ems 0.0.10 in `--solver ems` (D90): the laminate's Debye poles averaged at its surface as the built-in
+      solver's are (`PoleWeighting::Averaged`), ems's end criterion without the energy inside its conductor
+      models, its corrected loss on slanted `solid` copper. D89's three findings measured gone: the 60 mm line
+      within the built-in solver's 6 % (+5.3 % at most, +7.2 % before; the test's wider tolerance for ems is
+      removed), lossy copper to −60 and −70 dB in the built-in solver's steps, slanted `solid` copper 0.2 to
+      2.2 % below the built-in solver (10 to 14 % above). With `solid` copper ems is 1.2 to 4 times the faster
+      solver (the via transition at the default end criterion: 75 s against 204 s)
+- [ ] Switch `sim.sparams` to ems by default, then remove the built-in engine. Not yet (D90): four of D89's five
+      criteria are met, and run time within 1.5 times on every case but one: lossy `sheet` copper with slanted
+      outlines on a 0.25 mm mesh takes ems 1.8 times the built-in solver's time on three threads (its threads
+      gain little there). The switch itself is prepared (branch `ems-010-default`: ems the default where the
+      build has the feature, the built-in solver otherwise). Also to see first: the openEMS oracle job with
+      0.0.10
 
 ---
 

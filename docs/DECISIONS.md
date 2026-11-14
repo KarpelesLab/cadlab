@@ -2792,6 +2792,95 @@ oracle with ems, which has not run anywhere yet; the via transition on 0.2 mm ce
 are quoted in the table); times on a shared machine vary by a fifth; memory is the process's peak above its
 level before the run, which under-reports a run after a larger one.
 
+### D90. ems 0.0.10 in `sim.sparams --solver ems`: the three things D89 measured against it are gone; one case of the run-time criterion is left, and the built-in solver stays the default (2026-11-15)
+D89 ended on three things to change before the default could: (a) the long line's loss inside the built-in
+solver's tolerance, (b) lossy copper at −60 and −70 dB in about the built-in solver's steps, (c) the oracle job
+comparing ems with openEMS. ems 0.0.10 was written against (a) and (b) and against the 10 to 14 % of slanted
+`solid` copper. This change adopts it (`ems = "0.0.10"`), measures D89's five criteria again with both solvers,
+and decides on the numbers, not on ems's account of them. Developed against ems's source before the release; the
+released crate's `src` is that source byte for byte, and the 60 mm line was run again on it. The table is in
+ELECTRICAL.md, "ems as a second solver". No openEMS, CSXCAD or other GPL code was read; nothing was changed in
+ems.
+**Adopted in the adapter** (`fdtd::ems`):
+- `CompileOptions::with_pole_weighting(PoleWeighting::Averaged)`: an edge in a laminate's surface gets the Debye
+  poles by the share of its dual face the laminate fills, as it gets the static ε, and as the built-in solver
+  does (`engine.rs` averages a cell's Debye terms by area with its ε). ems's default is openEMS's rule, the whole
+  poles for such an edge, which is right for running openEMS's files and was the two points of D89's long line.
+- The check for a negative energy at the end of a run is gone: ems ends such a run as `Diverged` itself
+  (`sim.unstable`, as before).
+- Nothing for the end criterion: `RunOutcome::energy` is now the criterion's measure (the fields, without what
+  a conductor model holds inside), and the adapter only passes it on as the run's `energy_db`.
+`sim_sparams_microstrip_validation` holds ems to the built-in solver's 6 % again (8 % in D89). New:
+`measure_memory`, one run per process (`CADLAB_MEM_CASE`, `CADLAB_MEM_SOLVER`, `CADLAB_MEM_END`,
+`CADLAB_MEM_THREADS`), for memory and for a time taken alone.
+**The criteria, and what each measured** (release builds, three threads allowed, the built-in solver's default
+thread count within them; times vary by a fifth on this shared machine):
+1. *Every validation tolerance of the built-in solver's tests holds with ems.* Met. The long line (60 mm of
+   `solid` copper, 10 GHz, |S₂₁| against D52 within 3 % to 2.5 GHz and 6 % above): the built-in solver −2.3 to
+   +4.9 %, ems −1.3 to +5.3 % (0.0.9: −1.4 to +7.2 %), +4.9 / +4.5 / +5.3 % where 0.0.9 was over; Z₀, εeff and
+   |S₁₁| as before. Passivity next to the absorbing layer: Σ|S|² at most 1.0007 (the built-in solver 1.0010, of
+   1.0025). The solder mask: Z₀ 50.62 Ω, εeff 3.1542 (50.61 Ω, 3.1541). Parts: |S₂₁| within 0.0094 of theory
+   (the built-in solver 0.0116, of 0.02). The 45° line: 154.7° and 157.7° (154.8°, 157.5°), and 141.1° against
+   141.0° on its 2.5 million cells. Session 6: |S₂₁| 0.065 and |S₁₁| 0.094 from the ideal chain (of 0.1 and
+   0.15). The cavities and the lumped fixture as csx models read as in D89.
+2. *No case where ems is materially worse in accuracy.* Met. The long line is 0.4 points from the built-in
+   solver at 9 GHz (0.005 dB of 1.74 dB; two points before). Slanted `solid` copper: the conductor's part of
+   |S₂₁| on the bent line 0.2 to 0.9 % below the built-in solver's on 0.25 mm cells and 1.2 to 2.2 % below on
+   the default mesh (10 to 14 % above before); sheets 0 to 4.5 % above. The oracle's lines: the conductor's part
+   within 0.0001 dB (`solid`) and 3 to 4 % (sheets), |S₂₁| within 0.005 dB (sheets) and 0.010 dB (`solid`,
+   lumped ports; 0.006 dB before: the laminate's rule again, the copper's part is equal). The via transition:
+   0.018 dB at 4 GHz with conformal cells (0.012 dB before), 0.003 dB as staircases. The dielectric loss alone
+   against D52: ems −2.5 to +7.1 %, the built-in solver −5.3 to +9.0 %.
+3. *Run time within 1.5 times.* Met on what D89 named, lossy `solid` copper with vias, and on every case with
+   `solid` copper: the via transition to −40 dB 53 s against 126 s, to −60 dB (the default) 75 s against 204 s,
+   in 48 993 / 49 025 steps against 49 920 (0.0.9: 69 313); the oracle's `solid` line to −70 dB 35 s against
+   107 s in 42 721 steps against 42 400 (72 769); the bent line with `solid` copper to −70 dB 77 s against 91 s
+   on 0.25 mm cells and 12 s against 51 s on the default mesh, 13 665 and 13 729 steps against 13 408 and
+   13 440 (57 697, 58 305); the region of 25 194 cells with a via 24 s on three threads against 35 s, and 50 s
+   on one (1.45 times; 0.0.9: 102 s). With lossy sheets: the oracle's line 17 s against 45 s, the bent line on
+   the default mesh 8 s against 24 s, session 6 105 s against 83 s (1.26 times). **Not met on one case:** the
+   bent line with lossy sheets on 0.25 mm cells to −70 dB, 58.6, 62.7 and 64.8 s against 34.1, 40.1 and 34.8 s
+   (one run per process, alternating): 1.8 times, in the same steps (7809 against 7616; 0.0.9 took 22 593 and
+   was four times). On one thread it is 92 s against 78 s and on two 74 s against 45 s: ems gains a factor of
+   1.5 from three threads there and the built-in solver 2.2, so more threads would widen it.
+4. *Deterministic for any thread count.* Met: identical Touchstone data on one, two and three threads with
+   conformal cells (the via transition with lossy `solid` copper, the bent line with lossy sheets) and on one
+   and four (lossless, lossy sheets, lossy `solid` copper).
+5. *No panics, no instabilities.* Met: every run of the table ends, Σ|S|² at most 1.0006 with perfect copper
+   and 0.998 with lossy copper (`measure_diagonal_copper` asserts it for every copper model on both meshes).
+Memory, not a condition (D89), one run per process: the via transition 136 MB against 34 MB, the oracle's
+`solid` line 65 MB against 31 MB, the bent line on 0.25 mm cells 158 MB against 58 MB.
+**D89's condition (c)**: the oracle job ran on master with ems 0.0.9 and passed on its three cases for both
+solvers (the via transition within 0.06 dB of openEMS for ems and 0.05 dB for the built-in solver). It has not
+run with 0.0.10. To watch there: on the sheet line ems 0.0.9 was the solver nearer openEMS (its largest
+relative difference 30 % where the built-in solver's is 41 %, both at the lowest frequencies, where the absolute
+term of the test's 15 % + 0.025 dB carries them), because openEMS and ems 0.0.9 share the rule for the poles of
+a surface edge;
+with the averaged poles ems reads what the built-in solver reads there (0.005 dB apart), so its table should
+now look like the built-in solver's and pass as that one does.
+**Decision.** The default does not change, and `src/fdtd/engine.rs` stays. Four criteria are met and D89's (a),
+(b) and (c) with them; criterion 3 is not met on one case of D89's table, 1.8 times where 1.5 is the limit, and
+the limit is not moved for it. That case is not what `sim.sparams` runs unless asked (`copper: sheet` with a
+`max_cell` of half the default on slanted copper), and with the default copper ems is the faster solver by 1.2
+to 4 times; it is still a model a user can ask for where the default would get slower by switching, with
+session 6 (1.26 times, also sheets with diagonal tracks) pointing the same way. Switch when ems's lossy sheets
+with slanted outlines run in its threads on such a mesh (within 1.5 times of the built-in solver's 35 s on
+`CADLAB_MEM_CASE=bent CADLAB_MEM_END=70dB measure_memory`), and the oracle job has passed with 0.0.10.
+**The switch is prepared**, on the branch `ems-010-default`, one commit on top of this one: the default `Solver` is
+ems in a build with the cargo feature `ems` and the built-in one in a build without it (where `solver: ems`
+keeps answering `sim.solver_unavailable`), the output and the Touchstone header always name the solver, and the
+tests cover both builds. `ems` is already a default feature (D86), so nothing changes for cargo-deny (ems and
+csx are MIT, no further dependencies) or the MSRV (both declare 1.95).
+*Not established:* what keeps ems's threads from helping with lossy sheets and conformal cells on the fine mesh
+(perfect sheets with conformal cells take it 23 s there and lossy sheets as a staircase 31 s; ems's design notes
+say the sheets' surface edges run on one thread where its conformal cells act between the half-steps, and that
+cadlab's bent line on the default mesh has none that do; on the fine mesh ems reports 10 of 177 cut faces
+interpolated from 30 others, none merged, which may be that case and was not followed further); which solver is
+nearer a
+finer mesh on the via transition, now 0.018 dB apart; the time at the thread count an unshared machine would
+give (ems up to one per physical core, the built-in solver one per 131 072 nodes: this was measured with three
+allowed); the oracle with ems 0.0.10; the via transition on 0.2 mm cells, not run again.
+
 ### D91. guide 0.0.4 adopted: no fill at the end, the smallest via for escapes, and half the time budget kept for a second run on the routed board; the default unchanged (2026-11-15)
 guide 0.0.4 is the release for a host that gives a run a budget and fills its zones itself, which is cadlab with
 its 60 s (guide's `docs/benchmarks.md`, "PCB routing with a budget"). `guide = { version = "0.0.4",
