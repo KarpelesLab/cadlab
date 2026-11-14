@@ -1444,3 +1444,460 @@ fn finer_grids_after_a_run_that_leaves_connections() {
     assert_eq!(o["output"]["stats"]["failed"], 0, "{o}");
     assert_eq!(drc_errors(&s), Vec::<String>::new());
 }
+
+// ---- `router: guide` (D85) ---------------------------------------------------------------
+
+fn diag_codes(o: &Value) -> Vec<String> {
+    o["diagnostics"].as_array().unwrap().iter().map(|d| d["code"].as_str().unwrap().to_string()).collect()
+}
+
+fn other_errors(s: &Session) -> Vec<String> {
+    drc_errors(s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect()
+}
+
+/// The guide crate routes a two-layer board through `route.all`: complete, clean by cadlab's
+/// DRC, with stats in the native router's shape and progress around the one call it is.
+#[test]
+fn guide_routes_two_layer_boards() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    let progress = Collect(Default::default());
+    let out = r
+        .execute_with(
+            &mut s,
+            "route.all",
+            json!({"router": "guide"}),
+            RunOptions::default(),
+            &progress,
+            &cadlab::command::CancelToken::new(),
+        )
+        .unwrap();
+    let o = serde_json::to_value(&out).unwrap();
+    report("guide ldo", &o, 0);
+    render(&r, &mut s, "guide_ldo");
+    let st = &o["output"]["stats"];
+    assert_eq!((st["connections"].as_u64(), st["routed"].as_u64(), st["failed"].as_u64()), (Some(5), Some(5), Some(0)));
+    assert_eq!(st["completion"], 100.0);
+    assert_eq!(st["tracks"].as_u64().unwrap() as usize, s.project.as_ref().unwrap().board().tracks.len());
+    assert_eq!(st["vias"].as_u64().unwrap() as usize, s.project.as_ref().unwrap().board().vias.len());
+    assert_eq!(st["grid"], "0.225mm");
+    assert_eq!((st["drc_removed"].as_u64(), st["budget_exhausted"].as_bool()), (Some(0), Some(false)));
+    assert!(st["work"].as_u64().unwrap() > 0, "guide's expanded nodes: {st}");
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    assert_eq!(diag_codes(&o), Vec::<String>::new());
+    let st = exec(&r, &mut s, "route.status", json!({}));
+    assert_eq!(st["output"]["unrouted"], 0);
+    let msgs = progress.0.into_inner().unwrap();
+    assert!(msgs.iter().any(|m| m == "guide: routing") && msgs.iter().any(|m| m == "verifying"), "{msgs:?}");
+    assert_eq!(msgs.last().map(String::as_str), Some("done"));
+    // Nothing left: nothing attempted, nothing added.
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    assert_eq!(
+        (o["output"]["stats"]["connections"].as_u64(), o["output"]["stats"]["tracks"].as_u64()),
+        (Some(0), Some(0))
+    );
+
+    // The ATtiny85 board, auto-placed.
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    common::boards::build_board(&r, &mut s);
+    exec(&r, &mut s, "board.outline", json!({"width": "40mm", "height": "30mm", "corner_radius": "2mm"}));
+    exec(&r, &mut s, "place.auto", json!({"spacing": "1.5mm"}));
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide attiny", &o, 0);
+    render(&r, &mut s, "guide_attiny");
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    assert_eq!(o["output"]["stats"]["completion"], 100.0);
+}
+
+/// A four-layer board (SOIC-16s with permuted buses, GND and VCC on every part).
+#[test]
+fn guide_routes_a_four_layer_board() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    generated_board(&r, &mut s, 2, 2, 4, 3);
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide 4 layers", &o, 0);
+    render(&r, &mut s, "guide_4l");
+    assert_eq!(o["output"]["stats"]["completion"], 100.0);
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    let b = s.project.as_ref().unwrap().board();
+    assert!(b.vias.iter().all(|v| (v.from.as_str(), v.to.as_str()) == ("F.Cu", "B.Cu")), "through vias only");
+    // No via in a pad, as with the native router: guide places them on its own (40 of the 148
+    // vias of the benchmark's soic24-2l), so the adapter makes every pad a keep-out for vias.
+    assert!(!b.vias.is_empty());
+    let pads = cadlab::board::placed_pads(s.project.as_ref().unwrap());
+    for v in &b.vias {
+        let inside = pads
+            .iter()
+            .filter_map(|pp| Some((pp, pp.shape.bbox()?)))
+            .find(|(_, bb)| (bb.min.x..=bb.max.x).contains(&v.at.x.0) && (bb.min.y..=bb.max.y).contains(&v.at.y.0));
+        assert!(inside.is_none(), "via#{} is in pad {}.{}", v.id.0, inside.unwrap().0.refdes, inside.unwrap().0.number);
+    }
+}
+
+/// Keep-outs: guide routes around one, and a net exception (D76), which guide's keep-outs
+/// cannot hold, is passed the stricter way and named: the excepted net stays out too.
+#[test]
+fn guide_keeps_out_of_keepouts() {
+    let r = Registry::with_builtins();
+    let crossing = |s: &Session, x0: f64, x1: f64, y0: f64, y1: f64| {
+        let mm = |v: Nm| v.0 as f64 / 1e6;
+        s.project.as_ref().unwrap().board().tracks.iter().any(|t| {
+            let (xa, xb) = (mm(t.start.x).min(mm(t.end.x)), mm(t.start.x).max(mm(t.end.x)));
+            let (ya, yb) = (mm(t.start.y).min(mm(t.end.y)), mm(t.start.y).max(mm(t.end.y)));
+            xa < x1 && xb > x0 && ya < y1 && yb > y0
+        })
+    };
+    // A keep-out between U1 and C2 on both layers that leaves a way around.
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "block", "outline": {"rect": {"from": ["12.5mm", "4mm"], "to": ["13.5mm", "11mm"]}},
+               "no_tracks": true, "no_vias": true}),
+    );
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide around a keep-out", &o, 0);
+    render(&r, &mut s, "guide_keepout");
+    assert_eq!(o["output"]["stats"]["completion"], 100.0);
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    assert!(!crossing(&s, 12.5, 13.5, 4.0, 11.0));
+
+    // A wall across the board excepting 3V3: the native router takes 3V3 through it
+    // (`keepout_net_exceptions`); guide cannot, says so, and leaves both nets open there.
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    exec(
+        &r,
+        &mut s,
+        "keepout.add",
+        json!({"name": "wall", "outline": {"rect": {"from": ["12.5mm", "-1mm"], "to": ["13.5mm", "16mm"]}},
+               "no_tracks": true, "no_vias": true, "allow_nets": ["3V3"]}),
+    );
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide at a wall with an exception", &o, 0);
+    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "route.guide_keepout_exception");
+    let d = d.unwrap_or_else(|| panic!("{}", o["diagnostics"]));
+    assert_eq!(d["severity"], "warning");
+    assert!(d["subjects"].to_string().contains("keepout:wall") && d["subjects"].to_string().contains("3V3"), "{d}");
+    assert!(d["hint"].as_str().unwrap().contains("native router"), "{d}");
+    assert!(diag_codes(&o).contains(&"route.incomplete".to_string()));
+    let failed: std::collections::BTreeSet<&str> = o["output"]["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["status"] == "failed")
+        .map(|c| c["net"].as_str().unwrap())
+        .collect();
+    assert_eq!(failed.into_iter().collect::<Vec<_>>(), ["3V3", "GND"], "{}", o["output"]["connections"]);
+    for c in o["output"]["connections"].as_array().unwrap().iter().filter(|c| c["status"] == "failed") {
+        assert!(c["reason"].as_str().unwrap().contains("guide found no route"), "{c}");
+        assert!(c["hints"][0].as_str().unwrap().starts_with("`route.connection "), "{c}");
+    }
+    assert!(!crossing(&s, 12.5, 13.5, -1.0, 16.0));
+    assert_eq!(other_errors(&s), Vec::<String>::new());
+    // The native router completes what guide left, through the exception.
+    let o = exec(&r, &mut s, "route.nets", json!({"nets": ["3V3"]}));
+    assert_eq!(o["output"]["stats"]["failed"], 0, "{}", o["output"]);
+    assert!(crossing(&s, 12.5, 13.5, -1.0, 16.0));
+}
+
+/// Two nets between two pairs of 0402 resistors, as a differential pair: guide routes them
+/// side by side at the pair's gap, and the report measures the result as the native one does.
+#[test]
+fn guide_routes_a_differential_pair() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    exec(&r, &mut s, "board.outline", json!({"width": "34mm", "height": "20mm"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "R 22R 1% 0402", "count": 4}));
+    exec(&r, &mut s, "net.connect", json!({"net": "TX_P", "pins": ["R1.2", "R3.1"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "TX_N", "pins": ["R2.2", "R4.1"]}));
+    for (refdes, x, y) in [("R1", 6.0, 10.6), ("R2", 6.0, 9.4), ("R3", 28.0, 10.6), ("R4", 28.0, 9.4)] {
+        exec(&r, &mut s, "place.set", json!({"refdes": refdes, "at": [format!("{x}mm"), format!("{y}mm")]}));
+    }
+    exec(&r, &mut s, "netclass.set", json!({"name": "tx", "diff_pair_width": "0.2mm", "diff_pair_gap": "0.15mm"}));
+    exec(&r, &mut s, "net.set", json!({"nets": ["TX_P", "TX_N"], "class": "tx"}));
+    exec(&r, &mut s, "diffpair.add", json!({"p": "TX_P", "n": "TX_N"}));
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide pair", &o, 0);
+    render(&r, &mut s, "guide_pair");
+    assert_eq!(o["output"]["stats"]["completion"], 100.0, "{}", o["output"]);
+    assert_eq!(other_errors(&s), Vec::<String>::new());
+    let pr = &o["output"]["pairs"][0];
+    assert_eq!((pr["name"].as_str(), pr["status"].as_str()), (Some("TX"), Some("routed")), "{pr}");
+    assert_eq!((pr["width"].as_str(), pr["gap"].as_str()), (Some("0.2mm"), Some("0.15mm")), "{pr}");
+    assert_eq!((pr["connections"].as_u64(), pr["routed"].as_u64()), (Some(2), Some(2)), "{pr}");
+    let mm = |v: &Value| Nm::parse(v.as_str().unwrap()).unwrap().0 as f64 / 1e6;
+    assert!(mm(&pr["coupled"]) > 15.0, "most of the 22 mm between the parts runs coupled: {pr}");
+    let p = s.project.as_ref().unwrap();
+    assert!(p.board().tracks.iter().all(|t| t.width == Nm(200_000)), "the pair's width");
+    let cp = cadlab::lengths::coupling(p, &p.circuit().diffpairs["TX"], Nm(150_000));
+    assert!(!cp.sections.is_empty());
+    // At the gap or a few nanometres over it: guide offsets the two tracks from a centreline on
+    // its lattice (16 nm over here, where the native router is within 2 nm).
+    for sec in &cp.sections {
+        assert!((150_000..150_100).contains(&sec.gap.0), "{sec:?}");
+    }
+    // Uncoupled on request: the same two nets as any others.
+    exec(&r, &mut s, "route.rip", json!({"all": true}));
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "pairs": false}));
+    assert_eq!(o["output"]["stats"]["completion"], 100.0);
+    assert_eq!(o["output"].get("pairs"), None, "{}", o["output"]);
+}
+
+/// Routing already there stays: guide takes it as fixed copper of its net and completes it,
+/// and `route.nets` leaves the other nets alone.
+#[test]
+fn guide_completes_a_partial_routing() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    // 3V3 by hand, and a stub of VIN out of C1 with a via at its end.
+    exec(&r, &mut s, "track.add", json!({"layer": "F.Cu", "points": ["U1.VOUT", ["13mm", "9mm"], "C2.1"]}));
+    exec(&r, &mut s, "track.add", json!({"layer": "F.Cu", "net": "VIN", "points": ["C1.1", ["3mm", "7mm"]]}));
+    exec(&r, &mut s, "via.add", json!({"at": ["3mm", "7mm"], "net": "VIN"}));
+    let before = copper(&s);
+    let o = exec(&r, &mut s, "route.nets", json!({"nets": ["VIN"], "router": "guide"}));
+    report("guide partial, VIN", &o, 0);
+    assert_eq!(o["output"]["stats"]["completion"], 100.0, "{}", o["output"]);
+    assert!(o["output"]["connections"].as_array().unwrap().iter().all(|c| c["net"] == "VIN"));
+    let b = s.project.as_ref().unwrap().board();
+    let old: Vec<Value> = before.0.as_array().unwrap().clone();
+    let now = serde_json::to_value(&b.tracks).unwrap();
+    assert_eq!(now.as_array().unwrap()[..old.len()], old[..], "existing tracks are untouched");
+    assert!(b.tracks.iter().skip(old.len()).all(|t| t.net.as_deref() == Some("VIN")), "only VIN was routed");
+    assert_eq!(unrouted(&r, &mut s, "VIN"), 0);
+    assert!(unrouted(&r, &mut s, "GND") > 0);
+    assert_eq!(other_errors(&s), Vec::<String>::new());
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    assert!(o["output"]["connections"].as_array().unwrap().iter().all(|c| c["net"] == "GND"), "{}", o["output"]);
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+}
+
+/// guide has no threads and no seed: the same board gives the same copper and report on every
+/// run, inside thread pools of any size.
+#[test]
+fn guide_is_identical_for_any_thread_count() {
+    let r = Registry::with_builtins();
+    let mut results = Vec::new();
+    for threads in [1, 4, 1] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let res = pool.install(|| {
+            let mut s = Session::new();
+            let _d = new_project(&r, &mut s);
+            generated_board(&r, &mut s, 3, 2, 2, 3);
+            let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+            (copper(&s), o["output"].clone())
+        });
+        results.push(res);
+    }
+    assert!(results[0].0.0.as_array().is_some_and(|a| !a.is_empty()));
+    assert_eq!(results[0], results[1]);
+    assert_eq!(results[0], results[2]);
+}
+
+/// What guide cannot do is refused with a code, the option concerned and what to do instead;
+/// options it has nothing for are named in a warning; a cancelled run changes nothing.
+#[test]
+fn guide_refuses_and_warns() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    ldo_board(&r, &mut s);
+    let refused = |s: &mut Session, cmd: &str, args: Value| {
+        let f = r.execute(s, cmd, args, RunOptions::default()).expect_err("refused");
+        let d = f.error.diagnostic.clone();
+        assert_eq!(d.code, "route.guide_unsupported", "{}", f.error);
+        assert!(d.hint.is_some(), "{d:?}");
+        d.subjects.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
+    };
+    let conn = json!({"from": "U1.VOUT", "to": "C2.1", "router": "guide"});
+    assert_eq!(refused(&mut s, "route.connection", conn), "option:router");
+    assert_eq!(refused(&mut s, "route.all", json!({"router": "guide", "layers": ["F.Cu"]})), "option:layers");
+    assert_eq!(refused(&mut s, "route.all", json!({"router": "guide", "work_budget": 1000})), "option:work_budget");
+    assert_eq!(
+        refused(&mut s, "route.nets", json!({"nets": ["GND"], "router": "guide", "layers": ["B.Cu"]})),
+        "option:layers"
+    );
+    assert!(s.project.as_ref().unwrap().board().tracks.is_empty());
+
+    let cancel = cadlab::command::CancelToken::new();
+    cancel.cancel();
+    let f = r
+        .execute_with(
+            &mut s,
+            "route.all",
+            json!({"router": "guide"}),
+            RunOptions::default(),
+            &Collect(Default::default()),
+            &cancel,
+        )
+        .expect_err("cancelled");
+    assert_eq!(f.error.diagnostic.code, "cancelled");
+    assert!(s.project.as_ref().unwrap().board().tracks.is_empty());
+
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "seed": 3, "effort": "high", "arcs": true}));
+    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "route.guide_option_ignored");
+    let d = d.unwrap_or_else(|| panic!("{}", o["diagnostics"]));
+    let subjects = d["subjects"].to_string();
+    assert!(["option:seed", "option:effort", "option:arcs"].iter().all(|o| subjects.contains(o)), "{d}");
+    assert_eq!(o["output"]["stats"]["completion"], 100.0);
+    assert!(s.project.as_ref().unwrap().board().tracks.iter().all(|t| t.mid.is_none()), "no arcs from guide");
+}
+
+/// Pours with guide (the board of `pads_cut_off_from_their_pour_are_routed`): guide plans GND on
+/// its own fill of the zone, and what counts is the board as cadlab fills it around the new
+/// tracks, so the report is taken from that and GND's pads end up joined on it.
+#[test]
+fn guide_routes_a_board_with_a_pour() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    exec(
+        &r,
+        &mut s,
+        "footprint.create",
+        json!({
+            "name": "WALL6",
+            "pads": [{"number": "1", "at": ["0mm", "-5mm"], "size": ["1.2mm", "1.7mm"], "shape": "rect",
+                      "count": 6, "pitch": ["0mm", "2mm"]}]
+        }),
+    );
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"id": "WALL6", "category": "connector", "footprint": "WALL6", "pins": numbered_pins(6)}),
+    );
+    exec(&r, &mut s, "circuit.add", json!({"part": "WALL6", "refdes": "J1"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "WALL6", "refdes": "J2"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "C 1uF 16V X5R 0402", "count": 3}));
+    for i in 1..=6 {
+        let mut pins = vec![format!("J1.{i}"), format!("J2.{i}")];
+        if (2..=4).contains(&i) {
+            pins.push(format!("C{}.1", i - 1));
+        }
+        exec(&r, &mut s, "net.connect", json!({"net": format!("S{i}"), "pins": pins}));
+    }
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["C1.2", "C2.2", "C3.2"]}));
+    exec(&r, &mut s, "board.outline", json!({"width": "30mm", "height": "16mm"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J1", "at": ["4mm", "8mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J2", "at": ["26mm", "8mm"]}));
+    for (i, x) in [(1, "10mm"), (2, "15mm"), (3, "20mm")] {
+        let y = format!("{}mm", 4 + 2 * i);
+        exec(&r, &mut s, "place.set", json!({"refdes": format!("C{i}"), "at": [x, y]}));
+    }
+    exec(&r, &mut s, "zone.add", json!({"name": "gnd", "net": "GND", "layers": ["F.Cu"], "outline": "board"}));
+    assert_eq!(unrouted(&r, &mut s, "GND"), 0, "the pour joins the GND pads of the empty board");
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide pour", &o, 0);
+    render(&r, &mut s, "guide_pour");
+    assert_eq!(o["output"]["stats"]["failed"], 0, "{o}");
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    let st = exec(&r, &mut s, "route.status", json!({}));
+    assert_eq!(st["output"]["unrouted"], 0, "counted on the board with its pour filled again");
+    // The signal tracks cut the pour as cadlab fills it, which guide's own fill did not show:
+    // one pour round, on cadlab's fill, joined what was left (two calls of guide).
+    assert_eq!(o["output"]["stats"]["iterations"], 2, "{}", o["output"]["stats"]);
+}
+
+/// An unplated hole on the straight line between two pads, with no `hole_clearance` in the
+/// rules: the DRC and guide then only forbid copper over the hole, and the native router keeps
+/// the copper clearance from it all the same. The adapter gives the hole as copper of no net, so
+/// guide's route keeps that distance too.
+#[test]
+fn guide_keeps_clear_of_unplated_holes() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    exec(&r, &mut s, "board.outline", json!({"width": "24mm", "height": "12mm"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "R 22R 1% 0402", "count": 2}));
+    exec(&r, &mut s, "net.connect", json!({"net": "A", "pins": ["R1.2", "R2.1"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "R1", "at": ["4mm", "6mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "R2", "at": ["20mm", "6mm"]}));
+    exec(&r, &mut s, "board.hole", json!({"at": ["12mm", "6.3mm"], "drill": "2mm"}));
+    assert_eq!(s.project.as_ref().unwrap().board().rules.hole_clearance, Nm::ZERO);
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide past a hole", &o, 0);
+    render(&r, &mut s, "guide_hole");
+    assert_eq!(o["output"]["stats"]["completion"], 100.0, "{}", o["output"]);
+    assert_eq!(drc_errors(&s), Vec::<String>::new());
+    // Every track's edge is at least the clearance (0.2 mm) from the hole's (1 mm radius).
+    let p = s.project.as_ref().unwrap();
+    let clearance = p.board().rules.clearance.0 as f64;
+    let (hx, hy) = (12e6, 6.3e6);
+    for t in &p.board().tracks {
+        let (ax, ay, bx, by) = (t.start.x.0 as f64, t.start.y.0 as f64, t.end.x.0 as f64, t.end.y.0 as f64);
+        let (dx, dy) = (bx - ax, by - ay);
+        let u = if dx == 0.0 && dy == 0.0 {
+            0.0
+        } else {
+            (((hx - ax) * dx + (hy - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0)
+        };
+        let gap = (ax + u * dx - hx).hypot(ay + u * dy - hy) - 1e6 - t.width.0 as f64 / 2.0;
+        assert!(gap >= clearance - 1.0, "track {} is {gap} nm from the hole", t.id.0);
+    }
+}
+
+/// A length group with guide: four nets between two rows of resistors, the far row staggered
+/// so that their straight lengths differ by 1.5 mm steps. The group goes to guide as a skew
+/// limit (`LengthConstraint::max_skew`) and guide adds its meanders; the lengths are then
+/// measured the way the DRC measures them (`lengthgroup.list`).
+#[test]
+fn guide_matches_a_length_group() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let _d = new_project(&r, &mut s);
+    exec(&r, &mut s, "board.outline", json!({"width": "44mm", "height": "30mm"}));
+    exec(&r, &mut s, "circuit.add", json!({"part": "R 22R 1% 0402", "count": 8}));
+    let members: Vec<String> = (0..4).map(|k| format!("DQ{k}")).collect();
+    for k in 0..4 {
+        let y = 5.0 + 6.0 * k as f64;
+        let pins = [format!("R{}.2", k + 1), format!("R{}.1", k + 5)];
+        exec(&r, &mut s, "net.connect", json!({"net": format!("DQ{k}"), "pins": pins}));
+        exec(&r, &mut s, "place.set", json!({"refdes": format!("R{}", k + 1), "at": ["6mm", format!("{y}mm")]}));
+        let x = 26.0 + 1.5 * k as f64;
+        exec(
+            &r,
+            &mut s,
+            "place.set",
+            json!({"refdes": format!("R{}", k + 5), "at": [format!("{x}mm"), format!("{y}mm")]}),
+        );
+    }
+    exec(&r, &mut s, "lengthgroup.set", json!({"name": "DQ", "members": members, "tolerance": "0.1mm"}));
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
+    report("guide length group", &o, 0);
+    render(&r, &mut s, "guide_lengths");
+    assert_eq!(o["output"]["stats"]["completion"], 100.0, "{}", o["output"]);
+    assert_eq!(other_errors(&s), Vec::<String>::new());
+    let o = exec(&r, &mut s, "lengthgroup.list", json!({}));
+    let status = &o["output"]["groups"][0]["status"];
+    let lengths: Vec<i64> = status["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| Nm::parse(m["length"].as_str().unwrap()).unwrap().0)
+        .collect();
+    let (short, long) = (*lengths.iter().min().unwrap(), *lengths.iter().max().unwrap());
+    assert!(long > 23_000_000 && long - short <= 100_000, "{status}");
+    // The three shorter nets were made longer: without the group they are straight tracks.
+    let p = s.project.as_ref().unwrap();
+    let segments = |net: &str| p.board().tracks.iter().filter(|t| t.net.as_deref() == Some(net)).count();
+    assert!(segments("DQ0") > 1 && segments("DQ1") > 1 && segments("DQ2") > 1, "{status}");
+    let mismatch: Vec<String> = cadlab::drc::check(s.project.as_ref().unwrap())
+        .into_iter()
+        .filter(|d| d.code.starts_with("drc.length"))
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(mismatch, Vec::<String>::new());
+}

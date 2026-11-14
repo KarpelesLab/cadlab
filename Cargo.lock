@@ -162,6 +162,7 @@ dependencies = [
  "clap",
  "ems",
  "fstool",
+ "guide",
  "indexmap",
  "insta",
  "oxideav-gltf",
@@ -492,6 +493,15 @@ dependencies = [
  "libc",
  "r-efi",
  "rand_core",
+]
+
+[[package]]
+name = "guide"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89bab68ed03378c055ccdcf7a2e42d95467630f3d2a702cb64900e188d764421"
+dependencies = [
+ "polyclip",
 ]
 
 [[package]]

@@ -208,7 +208,34 @@ fn route_error(e: RouteError) -> CommandError {
                 .with_subject(ObjectRef::Named { kind: "lengthgroup".into(), name: n })
                 .with_hint("list groups with `lengthgroup.list`; define one with `lengthgroup.set`")
         }
+        RouteError::Unsupported { what, option, hint } => CommandError::invalid_args("route.guide_unsupported", what)
+            .with_subject(ObjectRef::Named { kind: "option".into(), name: option })
+            .with_hint(hint),
+        RouteError::Backend(m) => CommandError::new(
+            ErrorKind::Internal,
+            "route.guide_failed",
+            format!("guide could not route this board: {m}"),
+        )
+        .with_hint("route with the native router (leave `router` out); the board is unchanged"),
     }
+}
+
+/// Options given with `router: guide` that guide has nothing for: named in one warning, so a
+/// run never looks as if they had taken effect.
+fn guide_ignored(ctx: &mut Context<'_>, given: &[(&str, bool)]) {
+    let names: Vec<&str> = given.iter().filter(|(_, set)| *set).map(|(n, _)| *n).collect();
+    if names.is_empty() {
+        return;
+    }
+    let mut d = Diagnostic::warning(
+        "route.guide_option_ignored",
+        format!("`router: guide` has no equivalent of {}: ignored", names.join(", ")),
+    )
+    .with_hint("guide takes no seed, effort, fanout, neck-down, any-angle, gridless or arc option; leave them out, or use the native router");
+    for n in names {
+        d = d.with_subject(ObjectRef::Named { kind: "option".into(), name: n.to_string() });
+    }
+    ctx.report(d);
 }
 
 /// One line about a pair.
@@ -411,9 +438,28 @@ fn run_router(
         router::route(p, &scope, &opts, &Hooks { progress: &progress, cancelled: &cancelled }).map_err(route_error)?
     };
     apply_result(ctx, &result)?;
+    let guide = opts.search == Some(SearchKind::Guide);
+    for d in result.notes.iter().cloned() {
+        ctx.report(d);
+    }
+    if guide && let Some(b) = opts.budget.filter(|b| start.elapsed() > *b) {
+        ctx.report(
+            Diagnostic::info(
+                "route.guide_no_budget",
+                format!(
+                    "the run took {:.1} s, over the {:.1} s budget: guide has no time limit, so a budget cannot \
+                     stop it",
+                    start.elapsed().as_secs_f64(),
+                    b.as_secs_f64()
+                ),
+            )
+            .with_hint("route fewer nets at a time (`route.nets`), or use the native router, which keeps its budget"),
+        );
+    }
     let mut out =
         Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted, pairs: result.pairs };
-    if leftovers == Leftovers::Shove {
+    // Push-and-shove of the leftovers is the native router's: guide has none.
+    if leftovers == Leftovers::Shove && !guide {
         shove_leftovers(ctx, &mut out, &opts, start)?;
     }
     for c in out.connections.iter_mut().filter(|c| c.status == ConnStatus::Failed) {
@@ -582,6 +628,9 @@ pub struct RouteAll {
     /// Path search: `grid` (A* on the routing grid), `gridless` (shape-based: expansion rooms
     /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
     /// then the gridless search for what it left unrouted).
+    /// `guide` routes with the guide crate's PCB router instead (whole nets: its own escapes,
+    /// planes, rip-up and cleanup; no seed, budget, cancellation or progress, and none of the
+    /// options above), checked by the same DRC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<SearchKind>,
     /// Neck-down (default true): a net whose width cannot leave one of its pads between the
@@ -617,6 +666,21 @@ impl Command for RouteAll {
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         opts.search = self.router;
         opts.neck = self.neck;
+        if self.router == Some(SearchKind::Guide) {
+            guide_ignored(
+                ctx,
+                &[
+                    ("seed", self.seed.is_some()),
+                    ("effort", self.effort.is_some()),
+                    ("fanout", self.fanout.is_some()),
+                    ("any_angle", self.any_angle.is_some()),
+                    ("gridless", self.gridless.is_some()),
+                    ("neck", self.neck.is_some()),
+                    ("arcs", self.arcs.is_some()),
+                    ("arc_radius", self.arc_radius.is_some()),
+                ],
+            );
+        }
         run_router(ctx, Scope::All, opts, Leftovers::Report)
     }
 
@@ -668,6 +732,9 @@ pub struct RouteNets {
     /// Path search: `grid` (A* on the routing grid), `gridless` (shape-based: expansion rooms
     /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
     /// then the gridless search for what it left unrouted).
+    /// `guide` routes with the guide crate's PCB router instead (whole nets: its own escapes,
+    /// planes, rip-up and cleanup; no seed, budget, cancellation or progress, and none of the
+    /// options above), checked by the same DRC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<SearchKind>,
     /// Neck-down (default true): a net whose width cannot leave one of its pads between the
@@ -727,6 +794,22 @@ impl Command for RouteNets {
         shape_options(&mut opts, self.gridless, self.arcs, self.arc_radius)?;
         opts.search = self.router;
         opts.neck = self.neck;
+        if self.router == Some(SearchKind::Guide) {
+            guide_ignored(
+                ctx,
+                &[
+                    ("seed", self.seed.is_some()),
+                    ("effort", self.effort.is_some()),
+                    ("fanout", self.fanout.is_some()),
+                    ("any_angle", self.any_angle.is_some()),
+                    ("gridless", self.gridless.is_some()),
+                    ("neck", self.neck.is_some()),
+                    ("arcs", self.arcs.is_some()),
+                    ("arc_radius", self.arc_radius.is_some()),
+                    ("shove", self.shove.is_some()),
+                ],
+            );
+        }
         run_router(
             ctx,
             Scope::Nets(nets),
@@ -794,6 +877,8 @@ pub struct RouteConnection {
     /// Path search: `grid` (A* on the routing grid), `gridless` (shape-based: expansion rooms
     /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
     /// then the gridless search for what it left unrouted).
+    /// `guide` (the guide crate's router, for `route.all` and `route.nets`) is refused here: it
+    /// routes whole nets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<SearchKind>,
     /// Neck-down (default true): a net whose width cannot leave one of its pads between the

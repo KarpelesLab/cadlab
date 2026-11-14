@@ -58,6 +58,7 @@ mod fanout;
 mod geo;
 mod grid;
 mod gridless;
+mod guide;
 mod index;
 mod model;
 mod pairs;
@@ -120,6 +121,10 @@ pub enum SearchKind {
     /// default).
     #[default]
     Auto,
+    /// The `guide` crate's PCB router in place of cadlab's own (D85): whole nets only
+    /// (`route.all`, `route.nets`), verified by cadlab's DRC as any routing. It has no seed, no
+    /// budget, no cancellation and no progress: a run ends when guide ends it.
+    Guide,
 }
 
 /// Router options.
@@ -173,6 +178,11 @@ pub struct RouteOptions {
     /// neighboring pads is routed at the widest width that can (not under the board's
     /// `min_track_width`), and widened back to its class width wherever that fits afterwards.
     pub neck: Option<bool>,
+    /// With [`SearchKind::Guide`] only: let guide place vias in pads, as it does on its own
+    /// (its escapes of shut-in pads use them). The default, false, keeps the native router's
+    /// rule of no via in a pad (the adapter makes every pad a keep-out for vias). Not offered by
+    /// the commands: it exists to measure guide as it is (`route_bench`, `CADLAB_BENCH_VIA_IN_PAD`).
+    pub via_in_pad: bool,
 }
 
 /// Result of [`fanout`].
@@ -272,7 +282,8 @@ pub struct RouteStats {
     pub vias: usize,
     /// Total length of the added tracks.
     pub length: Nm,
-    /// Negotiation iterations run.
+    /// Negotiation iterations run (`router: guide`: runs of guide, the first and one per pour
+    /// round).
     pub iterations: usize,
     /// Overused grid points after each iteration.
     pub overuse: Vec<usize>,
@@ -287,6 +298,8 @@ pub struct RouteStats {
     /// Work done, in the units of `work_budget` (about one grid search step each): the same
     /// whatever the machine, its load or the threads, unless a time budget cut the run. A scale
     /// for choosing a `work_budget`; another budget is another run, since phases end at shares of it.
+    /// With `router: guide`: the search nodes guide expanded, a count of its own that no budget
+    /// can be given in.
     #[serde(default)]
     pub work: u64,
     /// Dog-bone fanout vias (included in `vias`).
@@ -326,6 +339,10 @@ pub struct RouteResult {
     /// Differential pairs routed first, as coupled traces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pairs: Vec<PairReport>,
+    /// What the backend could not take from the board (`router: guide`: keep-out net
+    /// exceptions, custom rules, net ties), as warnings with subjects and hints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<crate::diag::Diagnostic>,
 }
 
 /// Outcome of a differential pair.
@@ -423,6 +440,19 @@ pub enum RouteError {
     /// A length group does not exist.
     #[error("no length group `{0}`")]
     UnknownGroup(String),
+    /// The chosen backend (`router: guide`) cannot do what was asked.
+    #[error("{what}")]
+    Unsupported {
+        /// What it cannot do.
+        what: String,
+        /// The option that asked for it (`router`, `layers`, `work_budget`).
+        option: String,
+        /// What to do instead.
+        hint: String,
+    },
+    /// The backend failed on the board (invalid geometry for it, or a panic).
+    #[error("guide could not route this board: {0}")]
+    Backend(String),
 }
 
 /// The best negotiation state: (overused points, wires per net, failures per net).
@@ -442,6 +472,9 @@ fn costs(effort: Effort) -> Costs {
 /// Routes the connections in `scope`. The project is not modified. Differential pairs whose
 /// two nets are in scope are routed first, coupled (unless `opts.pairs` is `Some(false)`).
 pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
+    if opts.search == Some(SearchKind::Guide) {
+        return guide::route(p, scope, opts, hooks);
+    }
     let before = opts.work.used();
     let mut r = route_phases(p, scope, opts, hooks)?;
     r.stats.work = opts.work.used().saturating_sub(before);
@@ -2431,6 +2464,7 @@ fn route_run(
         removed_vias: vec![],
         rerouted: vec![],
         pairs: vec![],
+        notes: vec![],
     };
     Ok(Run { result, missed, grid_bound })
 }
