@@ -510,8 +510,8 @@ fn measure_via() {
     let args = json!({"dir": out, "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm",
         "pml_outside": true, "end_criteria": "40dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
     // With conformal cells (the default; the hole is a cell wide), as staircases, and with
-    // perfect copper; and to `sim.sparams`'s own end criterion of 60 dB, where ems's lossy copper
-    // takes more steps than the built-in solver's (D89).
+    // perfect copper; and to `sim.sparams`'s own end criterion of 60 dB (ems 0.0.9's lossy copper
+    // took 1.4 times the built-in solver's steps there, D89; 0.0.10 takes the same, D90).
     for (name, extra) in [
         ("via transition, 60 dB", json!({"name": "via_60", "end_criteria": "60dB"})),
         ("via transition", json!({})),
@@ -579,6 +579,70 @@ fn measure_threads_conformal() {
             }
         }
     }
+}
+
+/// The peak resident memory of this process (kB): `VmHWM`.
+fn peak_kb() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"));
+    line.and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// Memory, one run per process (a run after a larger one in the same process reads too little,
+/// D89): `CADLAB_MEM_CASE` (`via`: the oracle's via transition, lossy solid copper; `line`: the
+/// oracle's lossy line with solid copper between lumped ports; `bent`: the bent line with lossy
+/// sheets on 0.25 mm cells) on `CADLAB_MEM_SOLVER`, to −40 dB (or `CADLAB_MEM_END`), on
+/// `CADLAB_MEM_THREADS` threads when set. Prints the
+/// process's peak before the run (the board and the registry) and after it, and the run's time:
+/// a time taken alone, which the runs of a longer test are not on a shared machine.
+#[test]
+#[ignore]
+fn measure_memory() {
+    let case = std::env::var("CADLAB_MEM_CASE").unwrap_or_else(|_| "via".into());
+    let solver = std::env::var("CADLAB_MEM_SOLVER").unwrap_or_else(|_| "ems".into());
+    let r = Registry::with_builtins();
+    let (dir, mut s, args) = match case.as_str() {
+        "via" => {
+            let dir = tempfile::tempdir().unwrap();
+            let mut s = Session::new();
+            exec(&r, &mut s, "project.new", json!({"path": dir.path().join("via"), "name": "via"}));
+            via_transition(&r, &mut s);
+            let args = json!({"dir": dir.path().join("out"), "name": "via", "f_max": "4GHz", "points": 9,
+                "nets": ["RF"], "margin": "4mm", "pml_outside": true,
+                "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+            (dir, s, args)
+        }
+        "line" => {
+            let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0.02", "1mm", 24);
+            exec(&r, &mut s, "board.dielectric", json!({"ref_freq": "1GHz"}));
+            let track = format!("track#{id}");
+            let args = json!({"dir": dir.path().join("out"), "name": "line", "around": [track], "copper": "solid",
+                "thirds": true, "ports": [{"at": track}, {"at": track, "end": "end"}], "pml_outside": false,
+                "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6});
+            (dir, s, args)
+        }
+        _ => {
+            let (dir, s, a, b) = diagonal_board(&r, true);
+            let args = with(diagonal_args(dir.path(), a, b), json!({"max_cell": "0.25mm", "perfect_copper": false}));
+            (dir, s, args)
+        }
+    };
+    let before = peak_kb();
+    let end = std::env::var("CADLAB_MEM_END").unwrap_or_else(|_| "40dB".into());
+    let mut args = with(args, json!({"end_criteria": end}));
+    if let Some(threads) = std::env::var("CADLAB_MEM_THREADS").ok().and_then(|t| t.parse::<u32>().ok()) {
+        args["threads"] = json!(threads);
+    }
+    let ran = run(&r, &mut s, &args, &solver);
+    println!(
+        "## memory, {case} [{solver}]: {} cells, steps {:?}, {:.1} s; peak {:.0} MB before the run, {:.0} MB after",
+        ran.cells(),
+        ran.steps(),
+        ran.seconds,
+        before as f64 / 1024.0,
+        peak_kb() as f64 / 1024.0
+    );
+    drop(dir);
 }
 
 /// The same transition with perfect sheet copper, as a staircase and with conformal cells, on the

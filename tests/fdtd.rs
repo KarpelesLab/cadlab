@@ -962,11 +962,9 @@ fn sim_sparams_microstrip_validation_on(solver: &str) {
             let want_db = -20.0 * std::f64::consts::LOG10_E * p.alpha * l;
             // −2.3 % to +5.0 % (D68). Before D68 −9.5 % at 1.6 GHz: the side PML 4 h from the
             // strip drew energy from the line's near field (a lossless line read −0.06 Np/m).
-            // ems reads −1.4 % to +7.2 %, two points above the built-in solver from 2 GHz up and
-            // past its 6 % at 8, 8.5 and 9 GHz (+6.5, +6.8, +7.2 %): held to 8 % here, and one
-            // of the reasons it is not the default (DECISIONS D89).
-            let high = if solver == "ems" { 0.08 } else { 0.06 };
-            let tol = if *f < 2.5e9 { 0.03 } else { high };
+            // ems: −1.3 % to +5.3 % (0.0.9, with openEMS's rule for a laminate's poles at its surface:
+            // +7.2 %, D89, D90).
+            let tol = if *f < 2.5e9 { 0.03 } else { 0.06 };
             println!(
                 "{f}: |S21| {s21_db:.4} vs {want_db:.4} dB ({:+.1} %), |S11| {:.4}",
                 100.0 * (s21_db / want_db - 1.0),
