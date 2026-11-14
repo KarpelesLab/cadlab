@@ -385,7 +385,7 @@ fn measure_lossy_microstrip() {
     for (name, ports, copper) in cases {
         let mut common = json!({"dir": out, "name": name, "around": [track], "copper": copper, "thirds": true,
             "ports": ports, "pml_outside": false, "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm",
-            "max_cell": "0.5mm", "pml_cells": 6, "end_criteria": "50dB"});
+            "max_cell": "0.5mm", "pml_cells": 6, "end_criteria": "70dB"});
         if name.ends_with("rough") {
             // Hammerstad–Jensen, 1 µm RMS: a factor of 1.2 at 1 GHz and 1.7 at 6 GHz.
             common["roughness"] = json!("1um");
@@ -466,27 +466,34 @@ fn via_transition(r: &Registry, s: &mut Session) {
     exec(r, s, "zone.add", json!({"name": "GND_in", "net": "GND", "layers": ["In1.Cu", "In2.Cu"], "outline": "board"}));
 }
 
-/// A plated hole under two cells across: ems runs the region as a staircase and says so; on cells
-/// that resolve the hole it keeps its conformal cells.
+/// A plated hole of one cell (0.3 mm drill, 0.6 mm pads on 0.3 mm cells): ems keeps its conformal
+/// cells and has nothing to say about them (ems 0.0.7 read such a via further from a finer mesh
+/// than a staircase does, and cadlab ran it as one: D87, D89), and the transition loses less than
+/// its staircase, as it does in the built-in solver and on a finer mesh.
 #[test]
-fn ems_small_plated_holes_are_a_staircase() {
+fn ems_runs_a_via_of_one_cell() {
     let r = Registry::with_builtins();
     let dir = tempfile::tempdir().unwrap();
     let mut s = Session::new();
     exec(&r, &mut s, "project.new", json!({"path": dir.path().join("via"), "name": "via"}));
     via_transition(&r, &mut s);
     let args = json!({"dir": dir.path().join("out"), "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"],
-        "margin": "2mm", "air": "1mm", "pml_cells": 4, "copper": "sheet", "solver": "ems", "plan": true,
-        "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
-    let o = exec(&r, &mut s, "sim.sparams", args.clone());
-    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "sim.ems_staircase").expect("staircase");
-    assert!(d["message"].as_str().unwrap().contains("a plated hole of 0.3 mm"), "{d}");
-    assert!(d["hint"].as_str().unwrap().contains("`max_cell` to 0.15 mm"), "{d}");
-    // The built-in solver has nothing of the kind to say.
-    let b = exec(&r, &mut s, "sim.sparams", with(args.clone(), json!({"solver": "builtin"})));
-    assert!(!codes_of(&b).contains(&"sim.ems_staircase".to_string()));
-    let fine = exec(&r, &mut s, "sim.sparams", with(args, json!({"max_cell": "0.15mm"})));
-    assert!(!codes_of(&fine).contains(&"sim.ems_staircase".to_string()), "{:?}", codes_of(&fine));
+        "margin": "2mm", "air": "1mm", "pml_cells": 4, "copper": "sheet", "perfect_copper": true,
+        "end_criteria": "30dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+    let cut = run(&r, &mut s, &args, "ems");
+    let stair = run(&r, &mut s, &with(args, json!({"name": "stair", "conformal": false})), "ems");
+    for ran in [&cut, &stair] {
+        assert!(ran.out["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{}", ran.out);
+        assert!(!codes_of(&ran.out).iter().any(|c| c.starts_with("sim.ems_")), "{:?}", codes_of(&ran.out));
+        for m in &ran.ts.data {
+            let power = c64(&m[0]).abs().powi(2) + c64(&m[2]).abs().powi(2);
+            assert!(power < 1.01, "Σ|S|² {power}");
+            assert!((c64(&m[1]) - c64(&m[2])).abs() < 0.01, "reciprocity");
+        }
+    }
+    let (c4, s4) = (db(&cut.ts.data[8][2]), db(&stair.ts.data[8][2]));
+    println!("via of one cell, |S21| at 4 GHz: conformal {c4:.3} dB, staircase {s4:.3} dB");
+    assert!(c4 > s4 + 0.01 && c4 < s4 + 0.15, "conformal {c4} dB, staircase {s4} dB");
 }
 
 /// The via transition of the openEMS oracle (`via_transition_export`: the 4-layer board at 4 GHz,
@@ -502,9 +509,11 @@ fn measure_via() {
     let out = dir.path().join("out");
     let args = json!({"dir": out, "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm",
         "pml_outside": true, "end_criteria": "40dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
-    // With conformal cells asked for (the default: ems runs a staircase, the hole being a cell
-    // wide), as staircases, and with perfect copper (D87).
+    // With conformal cells (the default; the hole is a cell wide), as staircases, and with
+    // perfect copper; and to `sim.sparams`'s own end criterion of 60 dB, where ems's lossy copper
+    // takes more steps than the built-in solver's (D89).
     for (name, extra) in [
+        ("via transition, 60 dB", json!({"name": "via_60", "end_criteria": "60dB"})),
         ("via transition", json!({})),
         ("via transition, staircase", json!({"name": "via_stair", "conformal": false})),
         ("via transition, perfect copper", json!({"name": "via_pec", "perfect_copper": true})),
@@ -523,13 +532,63 @@ fn measure_via() {
     }
 }
 
+/// The via transition (lossy solid copper, conformal cells, a region of 2 mm around the nets) and
+/// the bent line with lossy sheet copper in ems on one, two and three threads: the same bytes.
+/// The built-in solver once, for its time on these small regions.
+#[test]
+#[ignore]
+fn measure_threads_conformal() {
+    let r = Registry::with_builtins();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::new();
+    exec(&r, &mut s, "project.new", json!({"path": dir.path().join("via"), "name": "via"}));
+    via_transition(&r, &mut s);
+    let via = json!({"dir": dir.path().join("out"), "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"],
+        "margin": "2mm", "air": "1mm", "pml_cells": 4, "end_criteria": "30dB",
+        "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+    let (bent, mut sb, a, b) = diagonal_board(&r, true);
+    let line = with(
+        diagonal_args(bent.path(), a, b),
+        json!({"f_max": "6GHz", "points": 7, "max_cell": "0.5mm", "margin": "3mm", "air": "3mm", "pml_cells": 4,
+            "end_criteria": "30dB", "perfect_copper": false}),
+    );
+    for (label, session, args) in [("via", &mut s, via), ("bent line", &mut sb, line)] {
+        let ran = run(&r, session, &args, "builtin");
+        println!(
+            "{label}, built-in: {} cells, steps {:?}, {:.1} s ({:.0} Mcells/s)",
+            ran.cells(),
+            ran.steps(),
+            ran.seconds,
+            ran.rate()
+        );
+        let mut first: Option<Ran> = None;
+        for threads in [1, 2, 3] {
+            let ran = run(&r, session, &with(args.clone(), json!({"threads": threads})), "ems");
+            println!(
+                "{label}, {threads} thread(s): {} cells, steps {:?}, {:.1} s ({:.0} Mcells/s), conformal edges {}",
+                ran.cells(),
+                ran.steps(),
+                ran.seconds,
+                ran.rate(),
+                ran.out["output"]["conformal_edges"]
+            );
+            if let Some(f) = &first {
+                assert!(f.ts.data == ran.ts.data, "{label}: {threads} threads changed the result");
+            } else {
+                first = Some(ran);
+            }
+        }
+    }
+}
+
 /// The same transition with perfect sheet copper, as a staircase and with conformal cells, on the
 /// default mesh (0.3 mm cells) and on cells of 0.2 mm (2.7 million cells, a quarter of an hour
 /// per run of the built-in solver): where each goes as the barrel and the pads are resolved.
-/// ems runs both as staircases since D87, which this measurement gave the reason for: with its
-/// conformal cells (`HOLE_CELLS` in `fdtd::ems` at 0) it read −0.579 dB at 4 GHz on the default
-/// mesh, where the staircases read −0.426 and −0.440 dB, the built-in solver's conformal cells
-/// −0.375 dB and its staircase on the fine mesh −0.348 dB.
+/// ems 0.0.7's conformal cells read −0.579 dB at 4 GHz on the default mesh, where the staircases
+/// read −0.426 and −0.440 dB, the built-in solver's conformal cells −0.375 dB and its staircase
+/// on the fine mesh −0.348 dB (D87); ems 0.0.8 integrates the faces a barrel crosses (D89).
+/// `CADLAB_VIA_FINE=1` runs the 0.2 mm mesh instead of the default one, `CADLAB_VIA_FINE=conformal`
+/// only its conformal runs.
 #[test]
 #[ignore]
 fn measure_via_convergence() {
@@ -542,8 +601,15 @@ fn measure_via_convergence() {
     let args = json!({"dir": out, "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm", "pml_outside": true,
         "end_criteria": "40dB", "copper": "sheet", "perfect_copper": true, "max_cells": 20_000_000,
         "timesteps": 60000, "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+    let fine = std::env::var("CADLAB_VIA_FINE").ok();
     for cell in [None, Some("0.2mm")] {
+        if cell.is_some() != fine.is_some() {
+            continue;
+        }
         for conformal in [false, true] {
+            if !conformal && fine.as_deref() == Some("conformal") {
+                continue;
+            }
             for solver in ["builtin", "ems"] {
                 let mut a = with(args.clone(), json!({"name": format!("v_{conformal}"), "conformal": conformal}));
                 if let Some(cell) = cell {
@@ -771,12 +837,12 @@ fn ems_runs_slanted_lossy_copper() {
         let v = c64(&ran.ts.data[6][2]);
         v.im.atan2(v.re).to_degrees()
     };
-    // The track on one cell: ems's conformal cells would leave it in pieces. A staircase, said.
+    // The track on one cell: warned of for both solvers; ems keeps its conformal cells (it keeps
+    // the edges whole where a cut would leave the track in pieces, D89).
     let coarse = with(base.clone(), json!({"solver": "ems", "plan": true, "max_cell": "1mm"}));
     let codes = codes_of(&exec(&r, &mut s, "sim.sparams", coarse));
-    for code in ["sim.slanted_copper_unresolved", "sim.ems_staircase"] {
-        assert!(codes.contains(&code.to_string()), "{codes:?}");
-    }
+    assert!(codes.contains(&"sim.slanted_copper_unresolved".to_string()), "{codes:?}");
+    assert!(!codes.iter().any(|c| c.starts_with("sim.ems_")), "{codes:?}");
     for copper in ["sheet", "solid"] {
         let args = with(base.clone(), json!({"copper": copper}));
         let lossy = run(&r, &mut s, &with(args.clone(), json!({"name": "lossy"})), "ems");
@@ -851,14 +917,16 @@ fn measure_diagonal() {
 
 /// The bent line with every copper model, both solvers: perfect and lossy, sheet and solid, and
 /// ems's staircase. Phase, loss and Σ|S|² (D87: ems's lossy models had not been run with its
-/// conformal outlines before).
+/// conformal outlines before). Every run has to end and stay passive: with ems 0.0.8 lossy solid
+/// copper on the 0.25 mm mesh grew, and ended "converged" on a negative energy with Σ|S|² 1.12
+/// (D89). To −70 dB, as the conductor's part is the difference of two runs.
 #[test]
 #[ignore]
 fn measure_diagonal_copper() {
     let r = Registry::with_builtins();
     let (dir, mut s, a, b) = diagonal_board(&r, true);
     for cell in [None, Some("0.25mm")] {
-        let mut base = with(diagonal_args(dir.path(), a, b), json!({"max_cells": 8_000_000, "end_criteria": "50dB"}));
+        let mut base = with(diagonal_args(dir.path(), a, b), json!({"max_cells": 8_000_000, "end_criteria": "70dB"}));
         if let Some(cell) = cell {
             base["max_cell"] = json!(cell);
         }
@@ -907,6 +975,8 @@ fn measure_diagonal_copper() {
                     s21.im.atan2(s21.re).to_degrees()
                 );
             }
+            assert!(ran.out["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{name}");
+            assert!(worst < 1.01, "{name} [{solver}], cell {cell:?}: Σ|S|² {worst}");
         }
     }
 }
@@ -1258,7 +1328,8 @@ fn measure_dielectric_loss() {
 }
 
 /// The same region at 1 and 4 worker threads, both solvers: identical Touchstone data, and the
-/// time each takes. The lossy model (Debye laminate, conducting sheets / surface impedance).
+/// time each takes. The lossy model (Debye laminate, conducting sheets / surface impedance), and
+/// lossy solid copper between lumped ports (a surface impedance on the faces of the volumes).
 #[test]
 #[ignore]
 fn measure_threads() {
@@ -1266,7 +1337,10 @@ fn measure_threads() {
     let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0.02", "1mm", 24);
     exec(&r, &mut s, "board.dielectric", json!({"ref_freq": "1GHz"}));
     let out = dir.path().join("out");
-    for (label, extra) in [("lossless", json!({"perfect_copper": true})), ("lossy", json!({}))] {
+    let track = format!("track#{id}");
+    let solid = json!({"copper": "solid", "ports": [{"at": track}, {"at": track, "end": "end"}]});
+    for (label, extra) in [("lossless", json!({"perfect_copper": true})), ("lossy", json!({})), ("lossy solid", solid)]
+    {
         if label == "lossless" {
             exec(&r, &mut s, "board.dielectric", json!({"loss_tangent": "0"}));
         } else {
@@ -1286,9 +1360,9 @@ fn measure_threads() {
         println!("{label}: ems plan (model compiled once) {:.2} s", t.elapsed().as_secs_f64());
         for solver in ["builtin", "ems"] {
             let one =
-                run(&r, &mut s, &with(args.clone(), json!({"threads": 1, "name": format!("{label}_t1")})), solver);
+                run(&r, &mut s, &with(args.clone(), json!({"threads": 1, "name": format!("{label} t1")})), solver);
             let four =
-                run(&r, &mut s, &with(args.clone(), json!({"threads": 4, "name": format!("{label}_t4")})), solver);
+                run(&r, &mut s, &with(args.clone(), json!({"threads": 4, "name": format!("{label} t4")})), solver);
             println!(
                 "{label} {solver}: {} cells, steps {:?}; 1 thread {:.1} s ({:.0} Mcells/s, {:.0} MB), 4 threads {:.1} s \
                  ({:.0} Mcells/s); identical {}",

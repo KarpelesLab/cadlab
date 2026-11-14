@@ -1,5 +1,5 @@
 //! `sim.sparams --solver ems`: the board region run by the [`ems`] crate's FDTD solver instead of
-//! [`super::engine`] (DECISIONS D86, D87; cargo feature `ems`).
+//! [`super::engine`] (DECISIONS D86, D87, D89; cargo feature `ems`).
 //!
 //! The region, its mesh, its ports and its parts are the ones the built-in solver gets
 //! ([`super::extract`], [`super::place_ports`]); the geometry is the property list of the openEMS
@@ -9,8 +9,8 @@
 //! this model leaves the export's (two conducting sheets per layer, roughness in the conductivity
 //! at f₀): solid copper stays metal volumes with a surface impedance on every face, sheet copper
 //! is a conducting sheet integrated as a rational two-port, both with the roughness model over
-//! the band ([`compile_options`]). Cells are cut where copper is oblique to the mesh
-//! ([`compile`]). Ports are ems lumped ports (a resistor of z0 with a Thevenin source, the
+//! the band, and cells are cut where copper is oblique to the mesh ([`compile_options`]).
+//! Ports are ems lumped ports (a resistor of z0 with a Thevenin source, the
 //! voltage the mean over the port's columns as in the built-in solver); a microstrip port is
 //! that source on the line plus a voltage probe and two current loops around its reference
 //! plane, read as the built-in solver reads them. The model is compiled once; one run per port,
@@ -40,11 +40,6 @@ const UNIT: f64 = 1e-3;
 const MAX_WARNINGS: usize = 12;
 /// Name prefix of this module's probes.
 const PROBE: &str = "cadlab_probe_";
-/// Open-area fractions below which ems takes a cut face's current from its neighbours, tried in
-/// this order before ems's own 0.5 (see [`compile`]).
-const SMALL_FACES: [f64; 3] = [0.05, 0.1, 0.2];
-/// The largest stability estimate (1: the limit) a run with one of [`SMALL_FACES`] is started on.
-const STABILITY_MARGIN: f64 = 0.9;
 
 /// A length in drawing units. Every coordinate goes through this one conversion, so a
 /// primitive's corner on a mesh line is the mesh line's own value.
@@ -84,7 +79,9 @@ fn structure(props: &[Prop], lines: &[Vec<i64>; 3]) -> Result<ContinuousStructur
     for (a, l) in lines.iter().enumerate() {
         m.grid.set_lines(a, l.iter().map(|&v| mm(v))).map_err(model_error)?;
     }
-    for p in props {
+    // (A property without primitives is the export's to write, the mask's openings on a board
+    // that has none; a model has no use for it.)
+    for p in props.iter().filter(|p| !p.prims.is_empty()) {
         let property = match &p.kind {
             Kind::Material { er, .. } => Property::material(p.name.as_str(), csx::Material::new(*er, 0.0)),
             Kind::Debye { eps_inf, sigma, terms } => Property::debye_material(
@@ -174,22 +171,21 @@ fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
         window: r.window,
     });
     let model = structure(&props, &r.lines)?;
-    // Where ems's conformal cells do worse than a staircase, the run is a staircase, and says so.
-    let staircase = unresolved(&r);
-    let compile = compile_options(o, o.conformal && staircase.is_none(), &props, band);
+    let compile = compile_options(o, &props, band);
     if o.conformal {
         super::unresolved(&r, &mut diags);
-        if let Some((what, hint, subject)) = staircase {
-            let mut d = Diagnostic::warning("sim.ems_staircase", format!("copper is a staircase in this run: {what}"))
-                .with_hint(format!("{hint}; `solver: builtin` keeps its conformal cells"));
-            if let Some(net) = subject {
-                d = d.with_subject(ObjectRef::Net(net));
-            }
-            diags.push(d);
-        }
     }
     let ports = super::place_ports(&r)?;
-    let parts: Vec<super::LumpedPart> = boxes.into_iter().map(|b| b.info).collect();
+    // The columns of mesh edges an element's box takes in, as the built-in solver counts them.
+    let within = |a: usize, lo: i64, hi: i64| r.lines[a].iter().filter(|&&v| lo <= v && v <= hi).count().max(1);
+    let parts: Vec<super::LumpedPart> = boxes
+        .into_iter()
+        .map(|b| {
+            let across = 1 - b.axis.min(1);
+            let columns = within(across, b.lo[across], b.hi[across]) * within(2, b.lo[2], b.hi[2]);
+            super::LumpedPart { columns: columns as u32, ..b.info }
+        })
+        .collect();
     super::notes(p, o, &r, &parts, &mut diags);
     let mut subjects: Vec<(String, Vec<ObjectRef>)> = props.into_iter().map(|p| (p.name, p.subjects)).collect();
     for (i, port) in r.ports.iter().enumerate() {
@@ -199,58 +195,6 @@ fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
         }
     }
     Ok(Prepared { region: r, model, compile, subjects, ports, parts, freqs, diags })
-}
-
-/// Plated holes narrower than this many cells are below what ems's conformal cells resolve.
-const HOLE_CELLS: f64 = 2.0;
-
-/// What ems's conformal cells cannot take in this region, if anything: what, the hint, the net.
-/// Measured (D87):
-///
-/// - A slanted track under 1.5 cells wide (an explicit `max_cell`: without one the mesh was
-///   refined) has no row of whole edges along it, and ems's cut edge is its open part in series
-///   with its covered part, so the track comes out in pieces. Session 6's matching network read
-///   |S21| 0.57 that way, 0.79 as a staircase, 0.80 in the built-in solver.
-/// - A plated hole under two cells across brings a barrel, pads and clearances of a cell or
-///   less in radius. On the four-layer via transition (0.3 mm drill, 0.6 mm pads, 0.3 mm cells,
-///   perfect sheet copper) |S21| at 4 GHz is −0.43 and −0.44 dB as staircases in the two
-///   solvers, −0.38 dB with the built-in solver's conformal cells, −0.35 dB on cells of 0.2 mm,
-///   and −0.58 dB with ems's conformal cells: further from the finer mesh than the staircase.
-fn unresolved(r: &Region) -> Option<(String, String, Option<String>)> {
-    for c in &r.copper {
-        if !super::conformal::narrow(&c.shape, &r.lines[0], &r.lines[1], super::UNRESOLVED).is_empty() {
-            return Some((
-                "ems's conformal cells would cut the unresolved diagonal track into separate pieces".into(),
-                "set `max_cell` as the warning about the track says, or leave it out to have the mesh refined".into(),
-                c.net.clone(),
-            ));
-        }
-    }
-    // The cell a point is in, along one axis.
-    let cell = |lines: &[i64], at: i64| {
-        let i = lines.partition_point(|&l| l <= at).clamp(1, lines.len().max(2) - 1);
-        lines.get(i).zip(lines.get(i - 1)).map_or(0, |(hi, lo)| hi - lo)
-    };
-    for h in r.holes.iter().filter(|h| h.plated && h.slot.is_none()) {
-        let size = cell(&r.lines[0], h.center.x.0).max(cell(&r.lines[1], h.center.y.0));
-        if ((2 * h.radius) as f64) < HOLE_CELLS * size as f64 {
-            return Some((
-                format!(
-                    "a plated hole of {} mm on cells of {} mm brings a barrel, pads and clearances that ems's \
-                     conformal cells do not resolve (a via transition read 0.23 dB from a finer mesh with them, \
-                     0.09 dB as a staircase)",
-                    crate::openems::mm(2 * h.radius),
-                    crate::openems::mm(size)
-                ),
-                format!(
-                    "set `max_cell` to {} mm or less for conformal cells",
-                    crate::openems::mm(((2 * h.radius) as f64 / HOLE_CELLS) as i64)
-                ),
-                h.net.clone(),
-            ));
-        }
-    }
-    None
 }
 
 fn roughness(r: Roughness) -> EmsRoughness {
@@ -265,10 +209,13 @@ fn roughness(r: Roughness) -> EmsRoughness {
 /// (solid metal and the outlines of sheets on mesh planes; copper along the mesh keeps the
 /// staircase the mesh was laid out for, as in the built-in solver) and, for lossy copper, a
 /// surface impedance fitted over the result's band on the faces of the copper volumes and as the
-/// two-port of the copper sheets, each with the roughness model.
-fn compile_options(o: &Options, conformal: bool, props: &[Prop], band: (f64, f64)) -> CompileOptions {
+/// two-port of the copper sheets, each with the roughness model. What a small cut face does, and
+/// whether a narrow slanted track or a barrel of a cell keeps whole edges, is ems's to decide
+/// (its `ConformalOptions::keep_stable` and `CompileOptions::conformal_bridges`, both on by
+/// default; cadlab chose a threshold and fell back to a staircase with ems 0.0.7, D87, D89).
+fn compile_options(o: &Options, props: &[Prop], band: (f64, f64)) -> CompileOptions {
     let mut c = CompileOptions::default()
-        .with_conformal(conformal)
+        .with_conformal(o.conformal)
         .with_conformal_outlines(ConformalOutlines::Slanted)
         .with_conformal_solids(ConformalOutlines::Slanted);
     let Some(sigma) = o.region.conductivity else { return c };
@@ -290,31 +237,10 @@ fn compile_options(o: &Options, conformal: bool, props: &[Prop], band: (f64, f64
     c
 }
 
-/// Compiles the model. With conformal cells, ems takes the current of a cut face of less than
-/// half its area from the faces around it, which keeps any mesh stable at its timestep and costs
-/// accuracy where a track is a few cells wide (the bent line of D73 on its default mesh, two
-/// cells across: 141° where the built-in solver reads 154.8° and the straight line 163.8°). A
-/// board's mesh has cells much thinner than wide, so its timestep is far below what the cut
-/// faces need: the threshold is lowered ([`SMALL_FACES`]) as far as ems's own stability estimate
-/// stays under [`STABILITY_MARGIN`]; on a mesh without that margin ems's default is used.
-fn compile(model: &ContinuousStructure, fdtd: &Fdtd, base: &CompileOptions) -> Result<CompiledModel, Error> {
-    if base.conformal {
-        for floor in SMALL_FACES {
-            let mut opts = base.clone();
-            opts.conformal_options.merge_below = floor;
-            opts.conformal_options.deviation_area = floor;
-            let compiled = CompiledModel::new(model, fdtd, &opts).map_err(solver_error)?;
-            // The estimate is made when an engine is built.
-            match compiled.simulation_driving(&[]).map_err(solver_error)?.boundaries().conformal {
-                None => return Ok(compiled),
-                // Nothing is cut: the threshold has nothing to act on.
-                Some(r) if r.edges + r.faces + r.sheet_edges + r.sheet_faces == 0 => return Ok(compiled),
-                Some(r) if r.verified && r.stability <= STABILITY_MARGIN => return Ok(compiled),
-                Some(_) => {}
-            }
-        }
-    }
-    CompiledModel::new(model, fdtd, base).map_err(solver_error)
+/// The mesh edges ems cut (those slanted or curved copper covers in part, and the ones it covers
+/// whole next to them), for the result's `conformal_edges`.
+fn cut_edges(sim: &ems::Simulation) -> usize {
+    sim.boundaries().conformal.map_or(0, |r| r.edges + r.sheet_edges)
 }
 
 /// Sets the simulation up and checks it, without running it.
@@ -323,11 +249,13 @@ pub(crate) fn plan(p: &Project, o: &Options) -> Result<Plan, Error> {
     // Compiling the model is what ems checks it with: its own warnings and timestep.
     let mut model = model;
     add_ports(&mut model, &region, &ports)?;
-    let sim =
-        self::compile(&model, &settings(o, &region, 1), &compile)?.simulation_driving(&[]).map_err(solver_error)?;
+    let sim = CompiledModel::new(&model, &settings(o, &region, 1), &compile)
+        .and_then(|c| c.simulation_driving(&[]))
+        .map_err(solver_error)?;
     warnings(&sim.diagnostics(), &subjects, &mut diags);
+    let cut = cut_edges(&sim);
     let dt = sim.engine().dt();
-    let mut plan = super::planned(region, o.courant, parts, 0, diags);
+    let mut plan = super::planned(region, o.courant, parts, cut, diags);
     plan.pulse_steps = (plan.pulse_steps as f64 * plan.timestep / dt).ceil() as u64;
     plan.timestep = dt;
     Ok(plan)
@@ -473,16 +401,17 @@ pub(crate) fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SPa
     let np = set.ports.len();
     let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
     let mut waves = Waves::new(np, freqs.len());
-    let mut timestep = 0.0;
+    let (mut timestep, mut conformal_edges) = (0.0, 0);
     // One compile; every run is a new engine from it, driving its own port.
     let added = add_ports(&mut model, &r, &set)?;
-    let compiled = self::compile(&model, &fdtd, &compile)?;
+    let compiled = CompiledModel::new(&model, &fdtd, &compile).map_err(solver_error)?;
     drop(model);
     for j in 0..np {
         let source = added.lumped[j].properties().and_then(|p| p.excitation.as_ref()).map(|e| e.0.as_str());
         let mut sim = compiled.simulation_driving(source.as_slice()).map_err(solver_error)?;
         if j == 0 {
             warnings(&sim.diagnostics(), &subjects, &mut diags);
+            conformal_edges = cut_edges(&sim);
         }
         timestep = sim.engine().dt();
         let mut cancelled = false;
@@ -516,6 +445,11 @@ pub(crate) fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SPa
             ems::engine::StopReason::Diverged => return Err(unstable()),
             _ => false,
         };
+        // The invariant of a stable scheme is not negative: such a run grew, whatever it ended on
+        // (ems 0.0.8 ended one as converged; D89 has the case).
+        if out.energy < -1e-12 * out.max_energy {
+            return Err(unstable());
+        }
         let energy_db = if out.max_energy > 0.0 && out.energy > 0.0 {
             10.0 * (out.energy / out.max_energy).log10()
         } else {
@@ -547,7 +481,7 @@ pub(crate) fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SPa
             waves.set(i, j, set.z0[i], &v, &cur);
         }
     }
-    Ok(waves.finish(r, freqs, set.z0, timestep, parts, 0, diags))
+    Ok(waves.finish(r, freqs, set.z0, timestep, parts, conformal_edges, diags))
 }
 
 #[cfg(test)]
