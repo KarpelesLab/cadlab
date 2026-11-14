@@ -36,7 +36,10 @@ oxideav-mesh3d crates and placed on footprints, D36) and `body3d` (package bodie
 package specs, shared by the 3D view and the STEP export, D47). Modules to come: `erc` (M2),
 `schematic` and `render` (M3), `board`, `drc`, `io` and `fab` (M4), `router` and `specctra`
 (DSN/SES exchange) (M5), `mcad` (STEP, IDF and IDX export, M9). Spin-off candidates: the
-router, Gerber/Excellon I/O, the footprint generator (`landpattern`).
+router, Gerber/Excellon I/O, the footprint generator (`landpattern`). `router::guide` (D85) is the adapter to
+[guide](https://crates.io/crates/guide), a standalone placement and routing engine in its own repository, as a
+second router backend (`router: guide`): the board goes to guide's `pcb::Design` through its API and its tracks
+and vias come back, verified by `drc` like the native router's; see [ROUTER.md](ROUTER.md), "guide as a backend".
 
 Dependency direction between modules is strictly downward, and enforced by review:
 
@@ -160,6 +163,7 @@ To confirm during M0. Listed so choices are deliberate, not accidental.
 | Errors | `thiserror` (libs), `anyhow` (binary only) |
 | Polygon booleans / offsetting | standalone MIT crate built to [POLYGON_LIB.md](POLYGON_LIB.md) (decided, D9) |
 | Spatial index | own packed R-tree, `geom::RTree` (decided, D42) |
+| Second router backend | `guide` (crates.io, `pcb` feature only: its one dependency is the same polyclip), behind `router::guide` (decided, D85) |
 | Graphs | `petgraph` |
 | Parallelism | `rayon` |
 | Rendering | own SVG writer, `resvg` + `tiny-skia` for PNG, `ab_glyph`/`fontdue` for text |

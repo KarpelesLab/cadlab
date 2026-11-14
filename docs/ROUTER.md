@@ -763,12 +763,104 @@ copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
+## guide as a backend (`router: guide`, D85)
+
+[guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
+in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
+`route.all` and `route.nets` runs it in place of cadlab's own search, through `router::guide`, an adapter in the
+library (no command, no file in between: the board goes to guide's `pcb::Design` and its tracks and vias come back
+through guide's API). The default router is unchanged, and so is everything the native router does. The dependency
+is `guide = { version = "0.0.2", default-features = false, features = ["pcb"] }`: its only dependency is polyclip
+0.0.6, the version cadlab uses, so the tree has one polyclip and nothing new besides guide itself.
+
+**What goes to guide** (`router::guide::adapt`):
+
+| cadlab | guide |
+|---|---|
+| copper layers of the stackup | `RuleSpec::layers`, by position |
+| nets (circuit, board copper, zones) | `NetId` by position in name order; `NetSpec { route, track_width, via }` from the net's class (the pair width for a pair's nets); only the nets with open connections in scope have `route` |
+| rules | `RuleSpec`: `min_track_width`, `clearance`, `min_clearance`, `hole_clearance`, `hole_to_hole`, `min_drill`, `min_annular_ring`; `copper_to_edge` as `Design::edge_clearance` |
+| net classes with a clearance | `NetClass` with that clearance override (guide resolves the larger of two nets', as the DRC does) |
+| differential pair gap (`diff_pair_gap`) | `RuleSpec::pairs`: the smaller of the gap and the clearance between the two nets, as the DRC allows |
+| pads | `drc::Pad` with the exact shape where the pad has one (`board::exact`: a circle, a segment or a polygon grown by a radius, which is guide's shape model too; chamfered round rectangles as their polygon), its layers, its hole (round or slot) and its local clearance |
+| pad stacks (another shape on some layers) | one `Pad` per distinct shape on its layers, and the plated barrel as a fixed `Via` of the pad's net (1 µm ring) that carries the hole and joins them, since a guide pad has one shape on all its layers |
+| unplated holes, mounting holes | a `Pad` with a hole and no copper layer when the rules set a `hole_clearance`; without one the DRC and guide only forbid copper over the hole while the native router keeps the copper clearance from it, so the hole is given as copper of no net on every layer and guide's routes keep that distance too (0.2 mm instead of 75 µm in `guide_keeps_clear_of_unplated_holes`) |
+| no via in a pad (the native router's rule; not a DRC rule) | a `drc::Keepout` for vias over every pad with copper, on its layers. guide has no such switch and puts vias in pads on its own: 40 of the 148 vias of soic24-2l, 52 of 106 on fine-4l, 353 of 613 on cynthion (`RouteOptions::via_in_pad`, which no command offers, leaves it to do so, for measuring) |
+| existing tracks (arcs with their middle) and vias (their layer span) | `drc::Track`, `drc::Via`: fixed copper, locked or not |
+| copper drawings and copper text | fixed `drc::Zone` of their net, or `Design::obstacles` without one |
+| keep-outs (`no_tracks`, `no_vias`, layers) | `drc::Keepout`; `no_pours` as `Zones::keepouts` |
+| outline and cutouts | `Design::outline`: one edge per segment of each contour (arcs at the copper tolerance) |
+| zones | `Design::zones`: outline, layers, net, priority and the effective fill settings (`zone_params`: clearance, minimum width, pad connection, thermal gap and spoke width), pad overrides as `Zones::pads` |
+| differential pairs in scope (`pairs` not false) | `Design::pairs` at the pair's width and gap; a pair's `max_skew` as a `LengthConstraint` |
+| length groups whose members are all routed | `Design::lengths`: `target ± tolerance`, or `max_skew = tolerance` without a target |
+
+**What comes back.** guide's tracks (straight, octilinear) and through vias become unlocked tracks and vias of
+their nets. Its zone fills are dropped: zone filling stays cadlab's (they are derived data here, and the DRC, the
+exports and the count all read cadlab's fill). The result is then treated as the native router's:
+
+- *Verification.* `drc::check_copper` on the board with the new copper; a connected piece of new copper (tracks
+  sharing an end, vias at an end) holding a flagged item is taken out, a net's whole new copper after three
+  rounds; `stats.drc_removed` counts the items. Nothing the DRC flags is ever applied.
+- *Pour rounds.* guide plans a net with zones on its own fill of them, which is not cadlab's (thermal spokes, what
+  counts as an island, the edge): a pad its fill joins can be open on the board as cadlab fills it. After the run
+  the nets with zones that the board (filled by cadlab around the new copper) still has open go to guide again,
+  on the routed board with cadlab's fills of those nets as fixed copper of theirs and no zone to fill; a round is
+  kept when it leaves fewer connections open, up to three (`stats.iterations` is the number of calls of guide).
+  Only nets guide took for routed: one it reported unrouted has had its searches, and a round is not a second
+  attempt (corne-cherry has 77 such nets, and a round with them had not ended after 16 minutes).
+  buspirate-flash-sop and buspirate-rs232 each have one pad (C1.2 of `GND_CHIP`, J2.5 of `GND`) that guide reports
+  connected and cadlab's fill leaves open; one round joins it. A round is a whole run of guide, with nothing to
+  bound it: seconds on those boards, 250 s on lumenpnp-mobo.
+- *The count is the board's* (D80). Completion is read from the board with its pours filled again: failed
+  connections are the ratsnest lines the board has left for the nets in scope, pads cut off from a pour included;
+  routed ones are counted per island of the result (an island holding `k` of the planned islands stands for
+  `k − 1` connections), because guide joins a net as a tree of its own, not along the planned lines.
+- *Stats* in the native shape: `connections`, `routed`, `failed`, `completion`, `tracks`, `vias`, `length`,
+  `grid` (guide's lattice pitch, half the smallest width plus clearance of the routed nets, or `grid`),
+  `vias_removed` (guide's cleanup), `drc_removed`, `work` (guide's expanded search nodes: a count of its own, not
+  cadlab's work units), `budget_exhausted` always false. Pairs are reported as the native router reports them,
+  measured on the routed board (`lengths::coupling`).
+
+**Which operations.**
+
+| operation | with `router: guide` |
+|---|---|
+| `route.all` | routes every open connection |
+| `route.nets` | routes the listed nets; other nets' copper is fixed. `shove` (the native push-and-shove of leftovers) does not run |
+| `route.connection` | refused: `route.guide_unsupported` (subject `option:router`); guide routes whole nets and has no push-and-shove |
+| `route.track`, `route.fanout`, `route.diffpair`, `route.tune`, `route.rip`, `route.status`, `route.import_ses` | take no `router`: always native. They work on a board guide routed as on any other |
+
+**Options.** `pairs: false` routes a pair's nets uncoupled; `grid` sets guide's lattice pitch. `layers` and
+`work_budget` are refused (`route.guide_unsupported`, subject `option:layers` / `option:work_budget`: guide cannot
+be kept to some layers, and has no count to stop at). `seed`, `effort`, `fanout`, `neck`, `any_angle`, `gridless`,
+`arcs`, `arc_radius` and `shove` have no equivalent and are named in one warning, `route.guide_option_ignored`.
+The time budget cannot be kept: guide's PCB router has no time limit, no cancellation and no progress callback
+(0.0.2), so a run is one call that ends when guide ends it. Cancellation is honoured before and after that call
+(nothing is applied), progress says `guide: routing`, then what guide reports of the run, then `verifying`, and a
+run that took longer than its budget says so (`route.guide_no_budget`, info). guide uses one thread and no seed:
+the same board gives the same result on every run (`guide_is_identical_for_any_thread_count`).
+
+**What guide cannot express**, passed the stricter way and reported (warnings with subjects and hints):
+
+- `route.guide_keepout_exception`: a keep-out's `allow_nets` (D76). The keep-out is kept for every net, as for
+  the exchange formats without an exception, so the excepted nets are not routed through it.
+- `route.guide_custom_rules`: custom clearance rules and `disallow` rules by area, courtyard, layer or kind (D61).
+  guide gets the class and pad clearances only; copper that breaks a custom rule is taken out by the verification.
+- `route.guide_net_tie`: net ties. Their copper is fixed copper of one net, so the other tied net may be shut out
+  of its pad.
+
+Not passed at all: neck-down (a net has one width), smaller vias under BGAs (a net has one via), layer
+restrictions, a zone's number of thermal spokes and its spoke angle (guide's reliefs have four spokes, in the
+pad's own direction).
+A backend error (geometry guide rejects, or a panic, which is caught) is `route.guide_failed` and leaves the board
+unchanged.
+
 ## API surface
 
 | Command | Purpose |
 |---|---|
-| `route.all` | route all unrouted connections |
-| `route.nets` | route specific nets or net classes |
+| `route.all` | route all unrouted connections (`router: grid`, `gridless`, `auto` or `guide`) |
+| `route.nets` | route specific nets or net classes (the same choice of `router`) |
 | `route.connection` | route between two pads, pushing unlocked copper of other nets aside (`shove`) |
 | `route.track` | place a track along waypoints with push-and-shove (walkaround, shove, spring-back) |
 | `route.fanout` | fanout a component: BGA dog bones, fine-pitch escapes |
@@ -779,7 +871,8 @@ copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC
 | `route.tune` | meanders to bring length groups to target, pair skew compensation |
 
 Options: time budget, max iterations, seed, layer restrictions per net class, via cost, allowed angles,
-keep/rip existing copper, effort level.
+keep/rip existing copper, effort level. `router: guide` runs the guide crate's router instead of cadlab's and
+takes few of them ("guide as a backend", above).
 
 The result always says what happened: routed/failed per connection, failure reasons with locations ("no path from
 U3.12: blocked by J2 courtyard on F.Cu and via keepout on B.Cu"), and suggestions (move component, allow layer,
@@ -817,7 +910,9 @@ prints the table; `cargo test --release --test route_bench -- --ignored --nocapt
 With `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar` (and `JAVA_HOME` for the Java it needs) every board but
 `big-4l` is also routed by freerouting (external process on the exported DSN, `-mp 20 -mt 1`; the time includes
 the JVM start and file exchange) and imported through `route.import_ses`, then measured the same way.
-`CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results; `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search.
+`CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results; `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search,
+`CADLAB_BENCH_ROUTER=guide` the guide backend (here and in the corpus mode; it takes no seed and no budget, so a
+run is bounded from outside, one board per process under `timeout`), and `CADLAB_BENCH_SEED=<n>` the seed.
 `route_bench --corpus [names...]` re-routes the open-source corpus instead (below); there `CADLAB_BENCH_TRACE=1`
 prints a timeline of the router's phases and negotiation iterations (time and work), `CADLAB_BENCH_NETS=a,b` routes only
 those nets, `CADLAB_BENCH_ORIGINAL=1` lists the connections each project's own routing leaves open instead of
@@ -1186,6 +1281,145 @@ What is left, by cause:
 - *Congestion and budget*: the rest (glasgow-revD1 about 125, glasgow-revC3 35, cynthion about 22, tinytapeout-demo
   10 to 13 in seeds 2 and 3, lumenpnp-mobo 6 to 12, corne-cherry 2 to 5, buspirate5-rev10 1 to 2). All seven end on
   the 200 M budget or within 12 % of it.
+
+**Native router and guide, D85** (`router: guide`, "guide as a backend" above; the shared 64-core Linux machine).
+Both routers behind the same commands, on the seven generated boards and the twelve corpus boards, measured the
+same way: open connections on the routed board with its pours filled again by cadlab (`drc.unrouted`, D80), DRC
+errors other than unrouted by code, vias, track length, wall time.
+
+- *Native*: seeds 1, 2 and 3 (`CADLAB_BENCH_SEED`), 4 threads; the generated boards with the 120 s budget (never
+  reached), the corpus with `CADLAB_BENCH_WORK=200000000` as under D84, whose numbers these runs give again to
+  the connection (227 / 236 / 222 open). On one thread it took 35, 36 and 50 s on buspirate5-rev10,
+  lumenpnp-mobo and glasgow-revC3 (same results), so its threads are not what separates the two.
+- *guide* has no seed, so one run stands for the three: it is the same on every run, with 1 and 4 threads in the
+  pool around it and from one build to the next (checked on every board that was run twice). It has no budget
+  either, so each board is a process of its own under `timeout 1200`: 7 to 20 times what the native run took on
+  the large corpus boards (56 to 180 s), 100 times and more on the others. A run killed there has no result at
+  all, since guide returns nothing before it ends. It uses one thread; three or four such runs shared the machine
+  at a time, and times moved by up to a factor of two with what else ran (fine-4l 35 and 68 s, stm32-2l 110 and
+  192 s for the same result), so they say how many times slower, not how many percent.
+- Two rows for guide. *guide* is what `router: guide` runs: no via in a pad, the native router's rule, kept by
+  the adapter. *guide, vias in pads* is guide as it routes on its own (`CADLAB_BENCH_VIA_IN_PAD=1`, which no
+  command offers); *in SMD pads* counts the vias centred in the box of a surface-mount pad of their net.
+- Commands: `CADLAB_BENCH_SEED=<n> route_bench <board>` and `CADLAB_BENCH_SEED=<n> CADLAB_BENCH_WORK=200000000
+  route_bench --corpus <board>` for the native router; `CADLAB_BENCH_ROUTER=guide [CADLAB_BENCH_VIA_IN_PAD=1]
+  timeout 1200 route_bench [--corpus] <board>` for guide.
+
+| board | router | connections | open | completion | vias | in SMD pads | length | time | DRC errors |
+|---|---|---|---|---|---|---|---|---|---|
+| attiny-2l | native, seeds 1 / 2 / 3 | 22 | 0 | 100.0% | 4 | 0 | 104.1 / 104.0 / 104.0 mm | 0.1 s | 0 |
+| | guide | 22 | 0 | 100.0% | 0 | 0 | 127.8 mm | 0.0 s | 0 |
+| | guide, vias in pads | 22 | 0 | 100.0% | 0 | 0 | 127.8 mm | 0.0 s | 0 |
+| soic24-2l | native, seeds 1 / 2 / 3 | 184 | 0 | 100.0% | 141 / 139 / 139 | 0 | 1690.6 / 1696.5 / 1698.4 mm | 0.9 / 0.8 / 0.8 s | 0 |
+| | guide | 184 | 0 | 100.0% | 139 | 0 | 2146.2 mm | 1.8 s | 0 |
+| | guide, vias in pads | 184 | 0 | 100.0% | 148 | 40 | 2042.2 mm | 1.7 s | 0 |
+| stm32-2l | native, seeds 1 / 2 / 3 | 109 | 0 | 100.0% | 58 / 57 / 64 | 0 | 970.4 / 937.5 / 945.3 mm | 1.1 / 1.3 / 1.3 s | 0 |
+| | guide | 109 | 0 | 100.0% | 95 | 0 | 1139.5 mm | 81.8 s | 0 |
+| | guide, vias in pads | 109 | 0 | 100.0% | 113 | 11 | 1157.0 mm | 109.5 s | 0 |
+| stm32-4l | native, seeds 1 / 2 / 3 | 109 | 0 | 100.0% | 54 / 57 / 53 | 0 | 902.1 / 869.4 / 892.6 mm | 2.5 / 2.2 / 1.7 s | 0 |
+| | guide | 109 | 0 | 100.0% | 48 | 0 | 962.9 mm | 11.0 s | 0 |
+| | guide, vias in pads | 109 | 0 | 100.0% | 50 | 9 | 984.1 mm | 11.2 s | 0 |
+| qfp-qfn-4l | native, seeds 1 / 2 / 3 | 155 | 0 | 100.0% | 128 / 131 / 126 | 0 | 1934.5 / 1923.3 / 1922.6 mm | 7.4 / 5.5 / 7.5 s | 0 |
+| | guide | 155 | 0 | 100.0% | 181 | 0 | 1830.4 mm | 47.5 s | 0 |
+| | guide, vias in pads | 155 | 0 | 100.0% | 178 | 43 | 1846.1 mm | 29.3 s | 0 |
+| fine-4l | native, seeds 1 / 2 / 3 | 100 | 0 | 100.0% | 103 / 110 / 106 | 0 | 818.8 / 815.0 / 833.9 mm | 1.8 / 2.0 / 2.1 s | 0 |
+| | guide | 100 | 0 | 100.0% | 100 | 0 | 971.8 mm | 137.5 s | 0 |
+| | guide, vias in pads | 100 | 0 | 100.0% | 106 | 52 | 904.1 mm | 35.2 s | 0 |
+| bga144-4l | native, seeds 1 / 2 / 3 | 141 | 0 | 100.0% | 154 / 147 / 153 | 0 | 2211.2 / 2209.9 / 2207.1 mm | 11.5 / 10.6 / 8.8 s | 0 |
+| | guide | 141 | 14 | 90.1% | 177 | 0 | 2336.6 mm | 127.2 s | 0 |
+| | guide, vias in pads | 141 | 14 | 90.1% | 168 | 21 | 2365.7 mm | 80.7 s | 0 |
+
+| board | layers | router | open connections | vias | in SMD pads | length | time | DRC errors |
+|---|---|---|---|---|---|---|---|---|
+| nrfmicro | 2 | native, seeds 1 / 2 / 3 | 0 | 46 / 46 / 49 | 0 | 453.6 / 453.6 / 441.8 mm | 24.1 / 2.3 / 13.8 s | 0 |
+| | | guide | 15 | 49 | 0 | 461.3 mm | 69.5 s | 0 |
+| | | guide, vias in pads | 14 | 34 | 8 | 406.5 mm | 26.4 s | 0 |
+| buspirate-flash-sop | 2 | native, seeds 1 / 2 / 3 | 0 | 4 | 0 | 460.2 / 460.2 / 461.7 mm | 1.5 / 0.5 / 1.0 s | 0 |
+| | | guide | 0 | 7 | 0 | 522.7 mm | 2.8 s | 0 |
+| | | guide, vias in pads | 0 | 7 | 0 | 522.0 mm | 2.9 s | 0 |
+| buspirate-rs232 | 2 | native, seeds 1 / 2 / 3 | 0 | 10 | 0 | 280.9 mm | 1.2 / 0.5 / 0.9 s | 0 |
+| | | guide | 0 | 6 | 0 | 358.3 mm | 0.5 s | 0 |
+| | | guide, vias in pads | 0 | 8 | 0 | 372.6 mm | 5.4 s | 0 |
+| buspirate5-rev10 | 4 | native, seeds 1 / 2 / 3 | 2 / 4 / 1 | 313 / 302 / 324 | 0 | 3053.2 / 3172.6 / 3074.2 mm | 66.1 / 57.3 / 56.4 s | 0 |
+| | | guide | no result at 1200 s; 26 in a longer run | 390 | 2 | 3209.2 mm | 2351.4 s | 0 |
+| | | guide, vias in pads | no result at 1200 s; 17 in a longer run | 444 | 175 | 3172.4 mm | 1415.8 s | 0 |
+| lumenpnp-ringlight | 2 | native, seeds 1 / 2 / 3 | 0 | 2 / 4 / 4 | 0 | 180.4 / 181.1 / 181.1 mm | 1.1 / 1.5 / 1.2 s | 0 |
+| | | guide | 0 | 1 | 0 | 208.4 mm | 0.7 s | 0 |
+| | | guide, vias in pads | 0 | 8 | 8 | 191.7 mm | 0.6 s | 0 |
+| lumenpnp-mobo | 4 | native, seeds 1 / 2 / 3 | 8 / 14 / 14 | 341 / 348 / 324 | 0 | 5517.6 / 5420.2 / 5321.5 mm | 45.3 / 73.5 / 69.8 s | 0 |
+| | | guide | 21 | 474 | 3 | 6485.0 mm | 558.7 s | 0 |
+| | | guide, vias in pads | 21 | 436 | 129 | 6249.1 mm | 625.0 s | 0 |
+| sweep-v2.2 | 2 | native, seeds 1 / 2 / 3 | 3 | 21 / 26 / 28 | 0 | 2160.9 / 2159.3 / 2159.0 mm | 56.6 / 87.5 / 96.3 s | 0 |
+| | | guide | 8 | 42 | 0 | 2194.8 mm | 67.4 s | 0 |
+| | | guide, vias in pads | 8 | 42 | 0 | 2194.8 mm | 63.9 s | 0 |
+| corne-cherry | 2 | native, seeds 1 / 2 / 3 | 2 / 5 / 2 | 464 / 543 / 449 | 0 | 8116.8 / 8112.0 / 8070.7 mm | 56.2 / 50.9 / 50.3 s | 0 |
+| | | guide | 95 | 243 | 5 | 3816.8 mm | 270.3 s | 0 |
+| | | guide, vias in pads | 87 | 297 | 164 | 3931.6 mm | 198.9 s | 0 |
+| glasgow-revC3 | 4 | native, seeds 1 / 2 / 3 | 35 / 35 / 34 | 413 / 433 / 414 | 0 | 3423.6 / 3480.8 / 3420.9 mm | 57.9 / 85.1 / 94.1 s | 0 |
+| | | guide | not run (the run below was killed) | | | | | |
+| | | guide, vias in pads | no result: killed at 1200 s | | | | > 1200 s | |
+| glasgow-revD1 | 6 | native, seeds 1 / 2 / 3 | 122 / 131 / 124 | 1045 / 1041 / 1022 | 0 | 8812.7 / 8800.8 / 8744.4 mm | 96.3 / 118.8 / 180.0 s | 0 |
+| | | guide | not run (the run below was killed) | | | | | |
+| | | guide, vias in pads | no result: killed at 1200 s | | | | > 1200 s | |
+| cynthion | 4 | native, seeds 1 / 2 / 3 | 30 / 34 / 31 | 481 / 481 / 464 | 0 | 3201.3 / 3164.5 / 3085.9 mm | 91.4 / 100.2 / 78.4 s | 0 |
+| | | guide | no result at 1200 s; 28 in a longer run | 526 | 0 | 3544.9 mm | 1560.2 s | 0 |
+| | | guide, vias in pads | 8 | 613 | 353 | 3308.0 mm | 348.6 s | 0 |
+| tinytapeout-demo | 4 | native, seeds 1 / 2 / 3 | 25 / 10 / 13 | 241 / 278 / 279 | 0 | 4884.1 / 4854.0 / 4821.6 mm | 84.8 / 70.0 / 59.3 s | 0 |
+| | | guide | no result: killed at 1200 s | | | | > 1200 s | |
+| | | guide, vias in pads | no result: killed at 1200 s | | | | > 1200 s | |
+
+The native rows of buspirate5-rev10, lumenpnp-mobo and glasgow-revC3 were measured again after the outline fix
+below and are identical. Under the rule the few vias "in SMD pads" (corne-cherry 5, lumenpnp-mobo 3,
+buspirate5-rev10 2) are the box test's: corne-cherry's lie in the boxes of rotated pads and none overlaps their
+copper (counted by overlap in a run of its own); the other two were not recounted. Where guide had no result at
+1200 s on buspirate5-rev10 and cynthion, a run of its own with a limit of 1800 or 3600 s shows what it would
+have returned; the two glasgow boards and tinytapeout-demo did not get one.
+
+What the numbers say:
+
+- *Generated boards.* The native router routes all seven to 100 % on every seed. guide routes six, and leaves
+  14 of bga144-4l's 141 connections open: one net, VCC with 15 pads, which it reports unrouted as a whole. It
+  takes 2 to 70 times as long (soic24-2l 1.8 s against 0.8, stm32-2l 82 s against 1.1 to 1.3, fine-4l 138 s
+  against 1.8 to 2.1), 7 to 27 % more track on six boards (5 % less on qfp-qfn-4l) and from 10 % fewer vias
+  (stm32-4l) to 60 % more (stm32-2l, 95 against 57 to 64). attiny-2l is the exception in time (35 ms against 60
+  to 110 ms) and has no via at all.
+- *Corpus under cadlab's rules* (the rows "guide"). At the 1200 s limit guide has a result on seven of the
+  twelve boards. The three small ones the native router completes are complete (buspirate-flash-sop,
+  buspirate-rs232, lumenpnp-ringlight). On the other four the native router is ahead: nrfmicro 15 open against
+  0, sweep-v2.2 8 against 3 (the 3 that the original board leaves open too), corne-cherry 95 against 2 to 5,
+  lumenpnp-mobo 21 against 8 to 14. On those seven boards together guide leaves 139 connections open
+  and the native router 13 to 22. The longer runs: buspirate5-rev10 26 open after 2351 s (native 1 to 4 in 56 to
+  66 s), cynthion 28 after 1560 s (native 30 to 34 in 78 to 100 s): the one board where guide under the same
+  rules is level with the native router, at 16 to 20 times the time. tinytapeout-demo has no result at 1200 s,
+  and glasgow-revC3 none either way (glasgow-revD1 was killed with vias in pads allowed and not run again).
+- *corne-cherry* is routed with zones as wide tracks (933 zones on some 150 nets). guide takes every such net for a
+  plane net and reports 80 of them "with zones in pieces"; it has an option to treat zones as fills only
+  (`planes`), which the adapter leaves on, and a run with it off was stopped after 10 minutes without a result.
+- *guide as it is* (the rows "vias in pads"): cynthion 8 open in 349 s, where the native router leaves 30 to 34
+  and guide under the rule 28: the 8 are the Kelvin sense pads that no routing can reach under the board's rules
+  (D72). This is the one result where guide is clearly better, and it is bought with vias in pads: 353 of its
+  613 vias are in SMD pads, the ECP5's balls among them. Elsewhere vias in pads change little (lumenpnp-mobo 21
+  open, buspirate5-rev10 17 after 1416 s, corne-cherry 87, nrfmicro 14), and a tenth to more than half of
+  guide's vias are in pads (stm32-2l 11 of 113, soic24-2l 40 of 148, fine-4l 52 of 106).
+- *DRC.* Zero errors other than unrouted on every result of either router, and the verification took nothing
+  out of guide's results (`stats.drc_removed` 0 on every run): within the rules that could be given to it,
+  what guide routes is legal by cadlab's DRC. The one exception was cadlab's fault and is fixed here:
+  `board::exact::item_core` gave an exposed pad the outline of the thermal via pad at its center (two pads of
+  one footprint with the same number at the same position), so guide was told that the 3.2 mm pad under
+  buspirate5-rev10's RP2040 was a 0.6 mm circle, routed two nets across it, and the verification took 68 items
+  out (`drc.short`). lumenpnp-mobo (J7.2, U16.9) and glasgow-revC3 (U1.57) have such pads too. The DRC measures
+  exact distances with the same function; its error counts on the twelve boards as imported are the same
+  before and after.
+- *Pours.* guide's fill and cadlab's disagree on a pad on five boards (buspirate-flash-sop C1.2,
+  buspirate-rs232 J2.5, cynthion 2 nets, lumenpnp-mobo 1 to 2, corne-cherry 1): guide reports the net routed
+  and the refilled board has it open. A pour round joins it on the two small boards, cynthion and
+  corne-cherry, at the price of one more run of guide; on lumenpnp-mobo that run is 250 s of 560 for two nets
+  of 51 pads together, which it routes in part.
+- *Determinism.* Every board run more than once gave the same tracks, vias, length and expanded nodes: with 1
+  and 4 threads in the pool, under different loads and from three builds of the adapter (the generated boards,
+  nrfmicro, the two small buspirate boards, sweep-v2.2, cynthion). guide starts no thread of its own.
+
+The default is unchanged, and what the numbers say about when it could change is in DECISIONS D85.
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).

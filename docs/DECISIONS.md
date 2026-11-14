@@ -2361,6 +2361,93 @@ the pours' is the granularity of the re-plan. A fix was kept only where the corp
 both showed it, and the mechanism built for the first diagnosis was removed when the measurement said the
 simpler one did the work.
 
+### D85. guide as a second router backend: an adapter in the library, `router: guide` on `route.all` and `route.nets`, the default unchanged (2026-11-14)
+[guide](https://crates.io/crates/guide) (MIT, same owner, its own repository) is a placement and routing engine whose
+roadmap expects cadlab to adopt it. This pass makes cadlab able to route with it and measures both routers on the
+same boards, so that the adoption can be decided from numbers. It decides nothing about the native router.
+**Dependency.** `guide = { version = "0.0.2", default-features = false, features = ["pcb"] }`, from crates.io. Its one
+dependency is polyclip 0.0.6, the version cadlab uses, so the tree holds one polyclip and one new crate; `deny.toml`
+needs nothing (MIT, crates.io, no second version of anything; `cargo-deny` is not installed here, so this is read
+off the file and `Cargo.lock`, not run). MSRV 1.95 for both, checked with `cargo +1.95 check --all-features`.
+guide is 0.0.x: cargo treats each release as incompatible, and guide pins polyclip the same way, so the two move
+together or the tree gets two polyclips (D16: a standalone crate in its own repository, like polyclip, not a
+sub-crate of cadlab).
+**Adapter** (`router::guide`, an algorithm module: it uses `board`, `drc`, `lengths` and the model, nothing of the
+command layer). The board goes to `guide::pcb::Design` through guide's API and tracks and vias come back; no DSN
+file in between, which could carry neither zones nor edge clearance nor hole rules (ROUTER.md, "Specctra"). What
+maps to what is the table in ROUTER.md, "guide as a backend". Pads go over with their exact shapes where
+`board::exact` has one: guide's shape model is the same (a point, segment or polygon grown by a radius).
+**The same guarantees as the native router.** (1) *Verified by cadlab's DRC*: `drc::check_copper` on the board with
+the new copper; a connected piece holding a flagged item is taken out, and nothing flagged is applied. guide's own
+check is not consulted. (2) *The count is the board's* (D80): completion is read from the board with its pours
+filled again by cadlab. (3) *No via in a pad*: the native router's rule, which is not a DRC rule. guide places vias
+in pads on its own (40 of 148 vias on soic24-2l, 52 of 106 on fine-4l, 353 of 613 on cynthion) and has no switch,
+so the adapter makes every pad a keep-out for vias. A via in an SMD pad needs filling and capping, which the fab
+profiles record as an option several fabs do not offer; a result that uses them is not the same result.
+(4) *Zone filling stays cadlab's*: guide's fills are its plan and are dropped. They differ from cadlab's in places
+(a pad guide's fill joins and cadlab's does not: one each on buspirate-flash-sop and buspirate-rs232), so the nets
+with zones that the refilled board leaves open go to guide again on cadlab's fills as fixed copper (*pour rounds*,
+at most three, kept when fewer connections are open).
+**Where it is offered.** `router: guide` beside `grid | gridless | auto` on `route.all` and `route.nets`: a choice
+on the existing commands, not a command of its own. `route.connection` refuses it (`route.guide_unsupported`: guide
+routes whole nets and has no push-and-shove), and so do `layers` and `work_budget`. Options guide has nothing for
+(`seed`, `effort`, `fanout`, `neck`, `any_angle`, `gridless`, `arcs`, `arc_radius`, `shove`) are named in one
+warning rather than refused, so a script written for the native router still runs. The other `route.*` commands take
+no `router` and stay native.
+**What guide cannot be told**, passed the stricter way and reported (D76's rule for formats without an exception):
+keep-out net exceptions (`route.guide_keepout_exception`: the keep-out holds for every net), custom rules by area,
+courtyard or kind (`route.guide_custom_rules`: copper that breaks one is taken out by the verification), net ties
+(`route.guide_net_tie`). And what it cannot do: stop. guide's PCB router has no time limit, no work count to stop
+at, no cancellation and no progress callback, so the time budget of the commands cannot be kept and a run is one
+blocking call; a run over its budget says so (`route.guide_no_budget`). Running it on a thread and abandoning that
+thread at the budget was considered and not done: the thread would go on using a core for as long as guide needs,
+and there would still be no partial result to return.
+**Measured** (ROUTER.md, "Native router and guide, D85": the seven generated boards and the twelve corpus boards;
+the native router with seeds 1 to 3, the corpus at the 200 M work budget, reproducing D84 to the connection; guide
+once per board, as it has no seed, each run killed at 1200 s, which is 7 to 20 times the native run on the large
+boards). *Generated boards:* the native router 7 of 7 at 100 % on every seed; guide 6 of 7 (bga144-4l 90.1 %: one
+net of 15 pads unrouted as a whole), 2 to 70 times the time (stm32-2l 82 s against 1.2 s, fine-4l 138 s against
+2 s), 7 to 27 % more track on six boards. *Corpus under cadlab's rules:* at the limit guide has a result on seven
+boards and leaves 139 connections open on them where the native router leaves 13 to 22 (nrfmicro 15 against 0,
+corne-cherry 95 against 2 to 5, lumenpnp-mobo 21 against 8 to 14, sweep-v2.2 8 against 3; the three small boards
+the native router completes are complete). Given longer: buspirate5-rev10 26 open after 39 minutes (native 1 to 4
+in a minute), cynthion 28 after 26 minutes (native 30 to 34 in a minute and a half). No result on
+tinytapeout-demo and glasgow-revC3; glasgow-revD1 was killed with vias in pads allowed and not run again.
+*guide as it is, vias in pads allowed:* cynthion 8 open in 6 minutes, the 8 pads that are infeasible under the
+board's rules (D72), with 353 of 613 vias in SMD pads; elsewhere within a few connections of the rows above.
+*Both:* zero DRC errors other than unrouted on every result; nothing of guide's was taken out by the verification
+once the outline bug below was fixed; guide's results repeat exactly (1 and 4 threads around it, three builds).
+The native router on one thread took 35, 36 and 50 s on buspirate5-rev10, lumenpnp-mobo and glasgow-revC3, so its
+threads are not the difference.
+**Found on the way and fixed.** (1) `board::exact::item_core` found a pad by its number and position, and two pads
+of a footprint can share both (an exposed pad and the thermal via pad at its center: buspirate5-rev10's RP2040,
+glasgow-revC3's U1, two parts of lumenpnp-mobo). The exposed pad got the via pad's outline: guide was told a
+3.2 mm pad was a 0.6 mm circle and routed two nets across it (68 items taken out by the verification, `drc.short`),
+and the DRC measured exact distances to the wrong outline. The pad is now the one whose outline has the box of
+the item's copper. The DRC's error counts on the twelve corpus boards as imported and the native router's results
+on the three boards concerned are the same before and after. (2) A pour round first took every net with zones
+that was open, guide's own failures included; on corne-cherry, whose routing is zones used as wide tracks (933 of
+them), that was 77 nets and a second run that had not ended after 16 minutes. Rounds are for nets guide took for
+routed.
+**Default: unchanged.** The native router stays the default and `auto` its search. Under cadlab's rules there is
+no board in the measurement on which `router: guide` gives more than the native router: it is level on the three
+small boards and on cynthion (28 against 30 to 34, at 16 to 20 times the time), behind on every other board that
+ends, and has nothing to show on three. The one clear result in its favor, cynthion with vias in pads, is not
+offered by the commands: `RouteOptions::via_in_pad` exists in the library for the measurement, and offering it is
+a decision about what a fab is asked to do (fill and cap), to be taken for both routers or neither. So today
+`router: guide` is a second opinion for a board the native router leaves short, when the wait does not matter and
+nothing has to stop it. The default can be looked at again when guide (1) takes a limit on time or work, can be
+cancelled, reports progress and returns the best result so far: without that no command keeps its budget, and
+the agent loop of route, look, move a part cannot use it; (2) under the no-via-in-pad rule completes at least
+what the native router completes on the corpus in a comparable time; (3) reports what failed per connection,
+with a place and a cause, and keeps what it routed of a net it could not finish; (4) takes keep-out net
+exceptions and rules by area. The full list of what the adapter met, with a reproduction for each item, is in the
+report of this change and not kept in this repository.
+*Why:* an adoption decided on guide's own benchmarks would compare its boards, its DRC and its count of a
+connection with ours; behind the same commands, the same DRC, the same fill and the same rule about vias the two
+routers answer the same question, and the list of what the adapter had to work around is the list of what guide
+needs before it can replace anything.
+
 
 ### D86. `sim.sparams --solver ems`: the ems crate as a second full-wave solver on the same region; the built-in solver stays the default (2026-11-14)
 `ems` (crates.io, MIT, the same owner's clean-room FDTD solver meant to replace openEMS, on the geometry crate `csx`)

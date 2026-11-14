@@ -236,6 +236,15 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       USB-C corner is fitted to 10 µm, off the 0.2 mm grid), grid lines along the finest rows, exits turning by
       less than onto a line (open connections over seeds 1–3: 254/251/297 → 227/236/222; nrfmicro 2/2/3 → 0/0/0,
       tinytapeout-demo 29/23/28 → 25/10/13; pads cut off from pours diagnosed and left; DECISIONS D84)
+- [x] guide as a second backend, measured: `router: guide` on `route.all` and `route.nets` runs the
+      [guide](https://crates.io/crates/guide) crate's PCB router through an adapter in the library
+      (`router::guide`); its output is verified by cadlab's DRC, counted on the refilled board and kept to the
+      native router's rule of no via in a pad. Both routers on the generated suite and the corpus, seeds 1–3
+      (ROUTER.md, "Native router and guide, D85"): the native router completes more on every board where both
+      finish at the 1200 s given to guide, or as much (generated boards 7 of 7 at 100 % against 6 of 7; on the
+      seven corpus boards where guide ends, 13 to 22 connections open against 139), in a seventieth to a half of
+      the time on all but the smallest board, and guide cannot be given a budget, stopped or asked for a
+      partial result. The default stays the native router (DECISIONS D85)
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
