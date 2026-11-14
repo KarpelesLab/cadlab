@@ -251,6 +251,12 @@ fn board(r: &Registry, category: &str, params: Value, len: i64) -> (tempfile::Te
     (dir, s, [t1, t2])
 }
 
+/// The solvers of `sim.sparams` in this build: each is held to the same tolerances
+/// (DECISIONS D89).
+fn solvers() -> &'static [&'static str] {
+    if cfg!(feature = "ems") { &["builtin", "ems"] } else { &["builtin"] }
+}
+
 fn args(dir: &std::path::Path, t: [u64; 2], extra: Value) -> Value {
     let mut a = json!({"dir": dir, "name": "dut", "around": [format!("track#{}", t[0]), format!("track#{}", t[1])],
         "copper": "sheet", "perfect_copper": true,
@@ -267,11 +273,17 @@ fn args(dir: &std::path::Path, t: [u64; 2], extra: Value) -> Value {
 /// two runs stop after a few timesteps: only their outputs are checked).
 #[test]
 fn sim_sparams_models_parts() {
+    for solver in solvers() {
+        sim_sparams_models_parts_on(solver);
+    }
+}
+
+fn sim_sparams_models_parts_on(solver: &str) {
     let r = Registry::with_builtins();
     let (dir, mut s, t) = board(&r, "resistor", json!({"resistance": "50"}), 4);
     let out = dir.path().join("out");
     let coarse = json!({"f_max": "8GHz", "points": 5, "margin": "2mm", "air": "2mm", "max_cell": "1mm",
-        "pml_cells": 4, "end_criteria": "30dB"});
+        "pml_cells": 4, "end_criteria": "30dB", "solver": solver});
     let o = exec(&r, &mut s, "sim.sparams", args(&out, t, coarse.clone()));
     let x = &o["output"];
     assert_eq!(
@@ -314,6 +326,12 @@ fn sim_sparams_models_parts() {
 #[test]
 #[ignore]
 fn sim_sparams_parts_validation() {
+    for solver in solvers() {
+        sim_sparams_parts_validation_on(solver);
+    }
+}
+
+fn sim_sparams_parts_validation_on(solver: &str) {
     let r = Registry::with_builtins();
     for (params, cat, zf) in [
         (json!({"resistance": "50"}), "resistor", Box::new(|_: f64| C64::new(50.0, 0.0)) as Box<dyn Fn(f64) -> C64>),
@@ -327,16 +345,16 @@ fn sim_sparams_parts_validation() {
         let (dir, mut s, t) = board(&r, cat, params.clone(), 6);
         let out = dir.path().join("out");
         let fine = json!({"f_max": "6GHz", "f_min": "0.5GHz", "points": 12, "margin": "3mm", "air": "3mm",
-            "max_cell": "0.5mm", "pml_cells": 6});
+            "max_cell": "0.5mm", "pml_cells": 6, "solver": solver});
         let o = exec(&r, &mut s, "sim.sparams", args(&out, t, fine));
         assert!(o["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true));
         let ts = cadlab::touchstone::parse(&std::fs::read_to_string(out.join("dut.s2p")).unwrap(), Some(2)).unwrap();
         for (f, m) in ts.freqs.iter().zip(&ts.data) {
             let s21 = c64(&m[2]).abs();
             let want = (c(100.0) / (c(100.0) + zf(*f))).abs();
-            println!("{params}: {f}: |S21| {s21:.4} vs {want:.4}");
+            println!("{solver} {params}: {f}: |S21| {s21:.4} vs {want:.4}");
             let tol = 0.02;
-            assert!((s21 - want).abs() < tol, "{params}: {f}: |S21| {s21} vs {want}");
+            assert!((s21 - want).abs() < tol, "{solver} {params}: {f}: |S21| {s21} vs {want}");
         }
     }
 }
@@ -347,17 +365,19 @@ fn sim_sparams_parts_validation() {
 #[test]
 fn cut_cells_do_not_change_a_parts_columns() {
     let r = Registry::with_builtins();
-    let columns = |cut: bool, cell: &str| {
+    let columns = |solver: &str, cut: bool, cell: &str| {
         let (dir, mut s, t) = board(&r, "capacitor", json!({"capacitance": "1pF"}), 4);
         let out = dir.path().join("out");
         let a = json!({"f_max": "6GHz", "f_min": "0.5GHz", "points": 3, "margin": "3mm", "air": "3mm",
-            "max_cell": cell, "pml_cells": 6, "conformal": cut, "timesteps": 2});
+            "max_cell": cell, "pml_cells": 6, "conformal": cut, "timesteps": 2, "solver": solver});
         let o = exec(&r, &mut s, "sim.sparams", args(&out, t, a));
         assert_eq!(o["output"]["conformal_edges"].as_u64().is_some(), cut, "{}", o["output"]);
         o["output"]["parts"][0]["columns"].as_u64().unwrap()
     };
-    for (cell, want) in [("0.5mm", 3), ("0.25mm", 5)] {
-        assert_eq!(columns(false, cell), want, "{cell}");
-        assert_eq!(columns(true, cell), want, "{cell}");
+    for solver in solvers() {
+        for (cell, want) in [("0.5mm", 3), ("0.25mm", 5)] {
+            assert_eq!(columns(solver, false, cell), want, "{solver} {cell}");
+            assert_eq!(columns(solver, true, cell), want, "{solver} {cell}");
+        }
     }
 }

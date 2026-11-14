@@ -600,6 +600,12 @@ fn exec(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> Value {
     }
 }
 
+/// The solvers of `sim.sparams` in this build: each is held to the same tolerances
+/// (DECISIONS D89).
+fn solvers() -> &'static [&'static str] {
+    if cfg!(feature = "ems") { &["builtin", "ems"] } else { &["builtin"] }
+}
+
 /// A routed line: 8 mm, `run` in x and y at 45° (or the same length straight), 8 mm.
 fn board(w: &str, h: &str, er: &str, run: f64, diag: bool, extra: Value) -> (cadlab::touchstone::Touchstone, Value) {
     let r = Registry::with_builtins();
@@ -667,25 +673,30 @@ fn codes(o: &Value) -> Vec<String> {
 /// The option and what it reports (few timesteps: this checks the plumbing, not the result).
 #[test]
 fn sim_sparams_conformal_option() {
-    let few = |cut: bool| json!({"conformal": cut, "timesteps": 40, "max_cell": "0.5mm", "points": 5, "margin": "2mm", "air": "2mm"});
-    let (_, on) = board("1mm", "0.5mm", "4", 2.0, true, few(true));
-    let (_, off) = board("1mm", "0.5mm", "4", 2.0, true, few(false));
-    assert!(on["output"]["conformal_edges"].as_u64().unwrap() > 0, "{}", on["output"]);
-    assert!(off["output"].get("conformal_edges").is_none());
+    for solver in solvers() {
+        let few = |cut: bool| json!({"conformal": cut, "timesteps": 40, "max_cell": "0.5mm", "points": 5, "margin": "2mm", "air": "2mm", "solver": solver});
+        let (_, on) = board("1mm", "0.5mm", "4", 2.0, true, few(true));
+        let (_, off) = board("1mm", "0.5mm", "4", 2.0, true, few(false));
+        assert!(on["output"]["conformal_edges"].as_u64().unwrap() > 0, "{solver}: {}", on["output"]);
+        assert!(off["output"].get("conformal_edges").is_none(), "{solver}");
+    }
 }
 
 /// A trace narrower than the cells is an open circuit on any scheme: the mesh is refined for it
 /// unless `max_cell` is given, which warns instead.
 #[test]
 fn narrow_diagonal_track_refines_the_mesh() {
-    let few = json!({"timesteps": 10, "points": 3, "margin": "1mm", "air": "1mm"});
-    let (_, o) = board("0.3mm", "0.17mm", "4.3", 2.0, true, few);
-    assert!(codes(&o).iter().any(|c| c == "sim.mesh_refined"), "{:?}", codes(&o));
-    let cell: cadlab::units::Nm = serde_json::from_value(o["output"]["mesh"]["max_cell"].clone()).unwrap();
-    assert!(cell.0 <= 160_000, "{}", cell.0);
-    let fixed = json!({"timesteps": 10, "points": 3, "margin": "1mm", "air": "1mm", "max_cell": "0.7mm"});
-    let (_, o) = board("0.3mm", "0.17mm", "4.3", 2.0, true, fixed);
-    assert!(codes(&o).iter().any(|c| c == "sim.slanted_copper_unresolved"), "{:?}", codes(&o));
+    for solver in solvers() {
+        let few = json!({"timesteps": 10, "points": 3, "margin": "1mm", "air": "1mm", "solver": solver});
+        let (_, o) = board("0.3mm", "0.17mm", "4.3", 2.0, true, few);
+        assert!(codes(&o).iter().any(|c| c == "sim.mesh_refined"), "{solver}: {:?}", codes(&o));
+        let cell: cadlab::units::Nm = serde_json::from_value(o["output"]["mesh"]["max_cell"].clone()).unwrap();
+        assert!(cell.0 <= 160_000, "{}", cell.0);
+        let fixed = json!({"timesteps": 10, "points": 3, "margin": "1mm", "air": "1mm", "max_cell": "0.7mm",
+            "solver": solver});
+        let (_, o) = board("0.3mm", "0.17mm", "4.3", 2.0, true, fixed);
+        assert!(codes(&o).iter().any(|c| c == "sim.slanted_copper_unresolved"), "{solver}: {:?}", codes(&o));
+    }
 }
 
 /// Board level, through the command, the table of docs/ELECTRICAL.md: |S11| and the phase of S21
@@ -702,14 +713,14 @@ fn routed_45_degree_line() {
         ("1mm", "0.5mm", "4", Some("0.25mm"), true, true),
         ("0.3mm", "0.17mm", "4.3", None, true, true),
     ];
-    for (w, h, er, cell, diag, conf) in cases {
+    for (solver, (w, h, er, cell, diag, conf)) in solvers().iter().flat_map(|s| cases.iter().map(move |c| (s, *c))) {
         let extra = match cell {
-            Some(c) => json!({"max_cell": c, "conformal": conf}),
-            None => json!({"conformal": conf}),
+            Some(c) => json!({"max_cell": c, "conformal": conf, "solver": solver}),
+            None => json!({"conformal": conf, "solver": solver}),
         };
         let t = std::time::Instant::now();
         let (ts, o) = board(w, h, er, 10.0, diag, extra);
-        print!("W {w} diag {diag} conformal {conf} cell {cell:?}: {} cells:", o["output"]["mesh"]["cells"]);
+        print!("{solver}: W {w} diag {diag} conformal {conf} cell {cell:?}: {} cells:", o["output"]["mesh"]["cells"]);
         for fi in [12, 20, 40] {
             let s = &ts.data[fi];
             let (s11, s21) = (C64::new(s[0].re, s[0].im), C64::new(s[2].re, s[2].im));
@@ -724,7 +735,7 @@ fn routed_45_degree_line() {
         println!(" [{:.0} s]", t.elapsed().as_secs_f64());
         if diag && conf {
             let s21 = &ts.data[20][2];
-            assert!(C64::new(s21.re, s21.im).abs() > 0.9, "{w} {cell:?}: S21 {s21:?}");
+            assert!(C64::new(s21.re, s21.im).abs() > 0.9, "{solver} {w} {cell:?}: S21 {s21:?}");
         }
     }
 }
