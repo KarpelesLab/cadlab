@@ -304,10 +304,17 @@ fn ems_runs_the_region() {
         assert!((s21.abs() - c64(&n[2]).abs()).abs() < 0.05, "{f}: |S21| {} vs {}", s21.abs(), c64(&n[2]).abs());
     }
 
-    // What this path does not model is said: rough copper is at the pulse's center only.
-    let rough = with(args.clone(), json!({"solver": "ems", "plan": true, "roughness": "2um"}));
-    let o = exec(&r, &mut s, "sim.sparams", rough);
-    assert!(codes_of(&o).contains(&"sim.ems_roughness_at_f0".to_string()), "{:?}", codes_of(&o));
+    // Rough copper: a roughness factor over the band, more loss at every frequency and more
+    // at the high ones. Nothing of ems's own to say about either run.
+    let rough = run(&r, &mut s, &with(args.clone(), json!({"name": "rough", "roughness": "2um"})), "ems");
+    let extra: Vec<f64> = rough.ts.data.iter().zip(&e.ts.data).map(|(x, y)| db(&y[2]) - db(&x[2])).collect();
+    assert!(extra.iter().all(|d| *d > 0.0), "{extra:?}");
+    assert!(extra[extra.len() - 2] > 2.0 * extra[1], "{extra:?}");
+    for o in [&rough.out, &e.out] {
+        assert!(!codes_of(o).iter().any(|c| c.starts_with("sim.ems_")), "{:?}", codes_of(o));
+    }
+    // ems's own mesh check speaks where it has something to say: 1 mm cells at 10 GHz in εr 4.
+    assert!(codes_of(&le.out).contains(&"sim.ems_mesh_resolution".to_string()), "{:?}", codes_of(&le.out));
 
     // The guards are the built-in solver's.
     let big = with(args.clone(), json!({"solver": "ems", "max_cells": 1000}));
@@ -373,14 +380,20 @@ fn measure_lossy_microstrip() {
             "sheet",
         ),
         ("lumped", json!([{"at": track}, {"at": track, "end": "end"}]), "solid"),
+        ("lumped_rough", json!([{"at": track}, {"at": track, "end": "end"}]), "solid"),
     ];
     for (name, ports, copper) in cases {
-        let common = json!({"dir": out, "name": name, "around": [track], "copper": copper, "thirds": true,
+        let mut common = json!({"dir": out, "name": name, "around": [track], "copper": copper, "thirds": true,
             "ports": ports, "pml_outside": false, "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm",
             "max_cell": "0.5mm", "pml_cells": 6, "end_criteria": "50dB"});
+        if name.ends_with("rough") {
+            // Hammerstad–Jensen, 1 µm RMS: a factor of 1.2 at 1 GHz and 1.7 at 6 GHz.
+            common["roughness"] = json!("1um");
+        }
         let (b, e) =
             both(&format!("lossy microstrip, {copper} copper, {name} ports"), &r, &mut s, &common, (0.5e9, 6e9));
-        let perfect = with(common.clone(), json!({"name": format!("{name}_pec"), "perfect_copper": true}));
+        let mut perfect = with(common.clone(), json!({"name": format!("{name}_pec"), "perfect_copper": true}));
+        perfect.as_object_mut().unwrap().remove("roughness");
         let (bp, ep) = both(&format!("the same, perfect copper ({name})"), &r, &mut s, &perfect, (0.5e9, 6e9));
         for ((((f, x), y), xp), yp) in
             b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data).zip(&bp.ts.data).zip(&ep.ts.data)
@@ -453,6 +466,29 @@ fn via_transition(r: &Registry, s: &mut Session) {
     exec(r, s, "zone.add", json!({"name": "GND_in", "net": "GND", "layers": ["In1.Cu", "In2.Cu"], "outline": "board"}));
 }
 
+/// A plated hole under two cells across: ems runs the region as a staircase and says so; on cells
+/// that resolve the hole it keeps its conformal cells.
+#[test]
+fn ems_small_plated_holes_are_a_staircase() {
+    let r = Registry::with_builtins();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::new();
+    exec(&r, &mut s, "project.new", json!({"path": dir.path().join("via"), "name": "via"}));
+    via_transition(&r, &mut s);
+    let args = json!({"dir": dir.path().join("out"), "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"],
+        "margin": "2mm", "air": "1mm", "pml_cells": 4, "copper": "sheet", "solver": "ems", "plan": true,
+        "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+    let o = exec(&r, &mut s, "sim.sparams", args.clone());
+    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "sim.ems_staircase").expect("staircase");
+    assert!(d["message"].as_str().unwrap().contains("a plated hole of 0.3 mm"), "{d}");
+    assert!(d["hint"].as_str().unwrap().contains("`max_cell` to 0.15 mm"), "{d}");
+    // The built-in solver has nothing of the kind to say.
+    let b = exec(&r, &mut s, "sim.sparams", with(args.clone(), json!({"solver": "builtin"})));
+    assert!(!codes_of(&b).contains(&"sim.ems_staircase".to_string()));
+    let fine = exec(&r, &mut s, "sim.sparams", with(args, json!({"max_cell": "0.15mm"})));
+    assert!(!codes_of(&fine).contains(&"sim.ems_staircase".to_string()), "{:?}", codes_of(&fine));
+}
+
 /// The via transition of the openEMS oracle (`via_transition_export`: the 4-layer board at 4 GHz,
 /// lumped ports, the absorbing cells beyond the region), both solvers.
 #[test]
@@ -466,16 +502,76 @@ fn measure_via() {
     let out = dir.path().join("out");
     let args = json!({"dir": out, "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm",
         "pml_outside": true, "end_criteria": "40dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
-    let (b, e) = both("via transition", &r, &mut s, &args, (0.5e9, 4e9));
-    for ((f, x), y) in b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data) {
-        println!(
-            "{:.2} GHz: |S21| builtin {:.3} dB, ems {:.3} dB; |S11| builtin {:.2} dB, ems {:.2} dB",
-            f / 1e9,
-            db(&x[2]),
-            db(&y[2]),
-            db(&x[0]),
-            db(&y[0])
-        );
+    // With conformal cells asked for (the default: ems runs a staircase, the hole being a cell
+    // wide), as staircases, and with perfect copper (D87).
+    for (name, extra) in [
+        ("via transition", json!({})),
+        ("via transition, staircase", json!({"name": "via_stair", "conformal": false})),
+        ("via transition, perfect copper", json!({"name": "via_pec", "perfect_copper": true})),
+    ] {
+        let (b, e) = both(name, &r, &mut s, &with(args.clone(), extra), (0.5e9, 4e9));
+        for ((f, x), y) in b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data) {
+            println!(
+                "{name} {:.2} GHz: |S21| builtin {:.3} dB, ems {:.3} dB; |S11| builtin {:.2} dB, ems {:.2} dB",
+                f / 1e9,
+                db(&x[2]),
+                db(&y[2]),
+                db(&x[0]),
+                db(&y[0])
+            );
+        }
+    }
+}
+
+/// The same transition with perfect sheet copper, as a staircase and with conformal cells, on the
+/// default mesh (0.3 mm cells) and on cells of 0.2 mm (2.7 million cells, a quarter of an hour
+/// per run of the built-in solver): where each goes as the barrel and the pads are resolved.
+/// ems runs both as staircases since D87, which this measurement gave the reason for: with its
+/// conformal cells (`HOLE_CELLS` in `fdtd::ems` at 0) it read −0.579 dB at 4 GHz on the default
+/// mesh, where the staircases read −0.426 and −0.440 dB, the built-in solver's conformal cells
+/// −0.375 dB and its staircase on the fine mesh −0.348 dB.
+#[test]
+#[ignore]
+fn measure_via_convergence() {
+    let r = Registry::with_builtins();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::new();
+    exec(&r, &mut s, "project.new", json!({"path": dir.path().join("via"), "name": "via"}));
+    via_transition(&r, &mut s);
+    let out = dir.path().join("out");
+    let args = json!({"dir": out, "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm", "pml_outside": true,
+        "end_criteria": "40dB", "copper": "sheet", "perfect_copper": true, "max_cells": 20_000_000,
+        "timesteps": 60000, "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+    for cell in [None, Some("0.2mm")] {
+        for conformal in [false, true] {
+            for solver in ["builtin", "ems"] {
+                let mut a = with(args.clone(), json!({"name": format!("v_{conformal}"), "conformal": conformal}));
+                if let Some(cell) = cell {
+                    a["max_cell"] = json!(cell);
+                }
+                let ran = run(&r, &mut s, &a, solver);
+                let line: Vec<String> = [6, 7, 8]
+                    .iter()
+                    .map(|&i| {
+                        format!(
+                            "{:.2} GHz {:.3} dB, S11 {:.2} dB",
+                            ran.ts.freqs[i] / 1e9,
+                            db(&ran.ts.data[i][2]),
+                            db(&ran.ts.data[i][0])
+                        )
+                    })
+                    .collect();
+                println!(
+                    "## via, perfect sheet copper, cell {cell:?}, conformal {conformal} [{solver}]: {} cells, steps {:?}, \
+                     {:.0} s: {}; {}",
+                    ran.cells(),
+                    ran.steps(),
+                    ran.seconds,
+                    line.join("; "),
+                    ran.out["output"]["runs"]
+                );
+            }
+        }
     }
 }
 
@@ -598,61 +694,122 @@ fn measure_parts() {
 /// The 45° line of D73 (`tests/fdtd_conformal.rs`, `routed_45_degree_line`): 8 mm, a 45° run of
 /// 14.1 mm, 8 mm, sheet copper, W = 1 mm on 0.5 mm of εr 4; arg S21 at 10 GHz and |S11| against
 /// the straight line of that length, both solvers, at the default mesh and at 0.25 mm.
+/// The line of D73 on a board: 8 mm along x, 14.1 mm at 45° (or straight, of the same length),
+/// 8 mm along x; W = 1 mm on 0.5 mm of εr 4 over a ground plane. Returns the first and the last
+/// track.
+fn diagonal_board(r: &Registry, diag: bool) -> (tempfile::TempDir, Session, u64, u64) {
+    let run_mm = 10.0;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::new();
+    let s_ = &mut s;
+    exec(r, s_, "project.new", json!({"path": dir.path().join("line"), "name": "line"}));
+    exec(r, s_, "board.setup", json!({"layers": 2}));
+    exec(r, s_, "board.dielectric", json!({"thickness": "0.5mm", "er": "4", "loss_tangent": "0"}));
+    exec(r, s_, "board.outline", json!({"width": "60mm", "height": "40mm"}));
+    exec(
+        r,
+        s_,
+        "footprint.create",
+        json!({"name": "TP2", "pads": [
+            {"number": "1", "at": ["0mm", "0mm"], "size": ["1mm", "1mm"], "shape": "rect"},
+            {"number": "2", "at": ["2mm", "0mm"], "size": ["1mm", "1mm"], "shape": "rect"}]}),
+    );
+    exec(
+        r,
+        s_,
+        "part.create",
+        json!({"id": "TP", "category": "connector", "footprint": "TP2",
+            "pins": [{"number": "1", "name": "SIG"}, {"number": "2", "name": "GND"}]}),
+    );
+    exec(r, s_, "circuit.add", json!({"part": "TP", "count": 1}));
+    exec(r, s_, "net.connect", json!({"net": "RF", "pins": ["J1.1"]}));
+    exec(r, s_, "net.connect", json!({"net": "GND", "pins": ["J1.2"]}));
+    exec(r, s_, "place.set", json!({"refdes": "J1", "at": ["2mm", "37mm"]}));
+    let mm = |v: f64| format!("{v:.3}mm");
+    let pts: Vec<Value> = if diag {
+        vec![
+            json!(["8mm", "10mm"]),
+            json!(["16mm", "10mm"]),
+            json!([mm(16.0 + run_mm), mm(10.0 + run_mm)]),
+            json!([mm(24.0 + run_mm), mm(10.0 + run_mm)]),
+        ]
+    } else {
+        let l = run_mm * std::f64::consts::SQRT_2;
+        vec![json!(["8mm", "10mm"]), json!([mm(16.0 + l), "10mm"]), json!([mm(24.0 + l), "10mm"])]
+    };
+    let o = exec(r, s_, "track.add", json!({"layer": "F.Cu", "points": pts, "width": "1mm", "net": "RF"}));
+    let tr = o["output"]["tracks"].as_array().unwrap();
+    let (a, b) = (tr[0]["id"].as_u64().unwrap(), tr[tr.len() - 1]["id"].as_u64().unwrap());
+    exec(r, s_, "via.add", json!({"at": ["2mm", "30mm"], "net": "GND", "drill": "0.3mm", "diameter": "0.6mm"}));
+    exec(r, s_, "zone.add", json!({"name": "gnd", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
+    (dir, s, a, b)
+}
+
+/// `sim.sparams` arguments of [`diagonal_board`]: microstrip ports 4 mm in, 10 GHz, 41 points.
+fn diagonal_args(dir: &std::path::Path, a: u64, b: u64) -> Value {
+    json!({"dir": dir.join("out"), "name": "line", "around": [format!("track#{a}"), format!("track#{b}")],
+        "copper": "sheet", "f_max": "10GHz", "perfect_copper": true, "points": 41, "margin": "4mm", "air": "5mm",
+        "pml_cells": 6,
+        "ports": [{"at": format!("track#{a}"), "kind": "msl", "length": "4mm"},
+                  {"at": format!("track#{b}"), "end": "end", "kind": "msl", "length": "4mm"}]})
+}
+
+/// Lossy copper on a bent line, sheet and solid, with ems's conformal outlines: the run ends,
+/// stays passive, loses more than perfect copper, and has the phase of the conformal outline, not
+/// the staircase's. (ems 0.0.6's models met its outlines untested: the sheet model panicked on a
+/// slanted outline, D87.)
+#[test]
+fn ems_runs_slanted_lossy_copper() {
+    let r = Registry::with_builtins();
+    let (dir, mut s, a, b) = diagonal_board(&r, true);
+    let base = with(
+        diagonal_args(dir.path(), a, b),
+        json!({"f_max": "6GHz", "points": 7, "max_cell": "0.5mm", "margin": "3mm", "air": "3mm", "pml_cells": 4,
+            "end_criteria": "30dB", "perfect_copper": false}),
+    );
+    let phase = |ran: &Ran| {
+        let v = c64(&ran.ts.data[6][2]);
+        v.im.atan2(v.re).to_degrees()
+    };
+    // The track on one cell: ems's conformal cells would leave it in pieces. A staircase, said.
+    let coarse = with(base.clone(), json!({"solver": "ems", "plan": true, "max_cell": "1mm"}));
+    let codes = codes_of(&exec(&r, &mut s, "sim.sparams", coarse));
+    for code in ["sim.slanted_copper_unresolved", "sim.ems_staircase"] {
+        assert!(codes.contains(&code.to_string()), "{codes:?}");
+    }
+    for copper in ["sheet", "solid"] {
+        let args = with(base.clone(), json!({"copper": copper}));
+        let lossy = run(&r, &mut s, &with(args.clone(), json!({"name": "lossy"})), "ems");
+        let stair = run(&r, &mut s, &with(args.clone(), json!({"name": "stair", "conformal": false})), "ems");
+        let perfect = run(&r, &mut s, &with(args, json!({"name": "perfect", "perfect_copper": true})), "ems");
+        for ran in [&lossy, &stair, &perfect] {
+            assert!(ran.out["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{copper}");
+            assert!(!codes_of(&ran.out).iter().any(|c| c.starts_with("sim.ems_")), "{:?}", codes_of(&ran.out));
+            for m in &ran.ts.data {
+                let power = c64(&m[0]).abs().powi(2) + c64(&m[2]).abs().powi(2);
+                // (A run ended at −30 dB: ripples of a percent.)
+                assert!(power < 1.03, "{copper}: Σ|S|² {power}");
+                assert!((c64(&m[1]) - c64(&m[2])).abs() < 0.01, "{copper}: reciprocity");
+            }
+        }
+        // Measured at 6 GHz: sheet 0.05 dB below perfect copper, solid 0.06 dB.
+        for (x, y) in lossy.ts.data.iter().zip(&perfect.ts.data).skip(1) {
+            assert!(db(&x[2]) < db(&y[2]) - 0.005, "{copper}: {} {}", db(&x[2]), db(&y[2]));
+        }
+        // The staircase's line is longer: 10° to 14° more delay at 6 GHz on these cells.
+        let d = (phase(&lossy) - phase(&stair) + 540.0).rem_euclid(360.0) - 180.0;
+        assert!((5.0..25.0).contains(&d), "{copper}: conformal {}°, staircase {}°", phase(&lossy), phase(&stair));
+        assert!((phase(&lossy) - phase(&perfect)).abs() < 2.0, "{copper}");
+    }
+}
+
 #[test]
 #[ignore]
 fn measure_diagonal() {
     let r = Registry::with_builtins();
-    let run_mm = 10.0;
     for (diag, cell) in [(false, None), (true, None), (true, Some("0.25mm"))] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut s = Session::new();
-        let s_ = &mut s;
-        exec(&r, s_, "project.new", json!({"path": dir.path().join("line"), "name": "line"}));
-        exec(&r, s_, "board.setup", json!({"layers": 2}));
-        exec(&r, s_, "board.dielectric", json!({"thickness": "0.5mm", "er": "4", "loss_tangent": "0"}));
-        exec(&r, s_, "board.outline", json!({"width": "60mm", "height": "40mm"}));
-        exec(
-            &r,
-            s_,
-            "footprint.create",
-            json!({"name": "TP2", "pads": [
-                {"number": "1", "at": ["0mm", "0mm"], "size": ["1mm", "1mm"], "shape": "rect"},
-                {"number": "2", "at": ["2mm", "0mm"], "size": ["1mm", "1mm"], "shape": "rect"}]}),
-        );
-        exec(
-            &r,
-            s_,
-            "part.create",
-            json!({"id": "TP", "category": "connector", "footprint": "TP2",
-                "pins": [{"number": "1", "name": "SIG"}, {"number": "2", "name": "GND"}]}),
-        );
-        exec(&r, s_, "circuit.add", json!({"part": "TP", "count": 1}));
-        exec(&r, s_, "net.connect", json!({"net": "RF", "pins": ["J1.1"]}));
-        exec(&r, s_, "net.connect", json!({"net": "GND", "pins": ["J1.2"]}));
-        exec(&r, s_, "place.set", json!({"refdes": "J1", "at": ["2mm", "37mm"]}));
-        let mm = |v: f64| format!("{v:.3}mm");
-        let pts: Vec<Value> = if diag {
-            vec![
-                json!(["8mm", "10mm"]),
-                json!(["16mm", "10mm"]),
-                json!([mm(16.0 + run_mm), mm(10.0 + run_mm)]),
-                json!([mm(24.0 + run_mm), mm(10.0 + run_mm)]),
-            ]
-        } else {
-            let l = run_mm * std::f64::consts::SQRT_2;
-            vec![json!(["8mm", "10mm"]), json!([mm(16.0 + l), "10mm"]), json!([mm(24.0 + l), "10mm"])]
-        };
-        let o = exec(&r, s_, "track.add", json!({"layer": "F.Cu", "points": pts, "width": "1mm", "net": "RF"}));
-        let tr = o["output"]["tracks"].as_array().unwrap();
-        let (a, b) = (tr[0]["id"].as_u64().unwrap(), tr[tr.len() - 1]["id"].as_u64().unwrap());
-        exec(&r, s_, "via.add", json!({"at": ["2mm", "30mm"], "net": "GND", "drill": "0.3mm", "diameter": "0.6mm"}));
-        exec(&r, s_, "zone.add", json!({"name": "gnd", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
-        let out = dir.path().join("out");
-        let mut args = json!({"dir": out, "name": "line", "around": [format!("track#{a}"), format!("track#{b}")],
-            "copper": "sheet", "f_max": "10GHz", "perfect_copper": true, "points": 41, "margin": "4mm", "air": "5mm",
-            "pml_cells": 6,
-            "ports": [{"at": format!("track#{a}"), "kind": "msl", "length": "4mm"},
-                      {"at": format!("track#{b}"), "end": "end", "kind": "msl", "length": "4mm"}]});
+        let (dir, mut s, a, b) = diagonal_board(&r, diag);
+        let mut args = diagonal_args(dir.path(), a, b);
         if let Some(cell) = cell {
             args["max_cell"] = json!(cell);
         }
@@ -686,6 +843,68 @@ fn measure_diagonal() {
                     db(&m[2]),
                     s21.im.atan2(s21.re).to_degrees(),
                     codes_of(&ran.out)
+                );
+            }
+        }
+    }
+}
+
+/// The bent line with every copper model, both solvers: perfect and lossy, sheet and solid, and
+/// ems's staircase. Phase, loss and Σ|S|² (D87: ems's lossy models had not been run with its
+/// conformal outlines before).
+#[test]
+#[ignore]
+fn measure_diagonal_copper() {
+    let r = Registry::with_builtins();
+    let (dir, mut s, a, b) = diagonal_board(&r, true);
+    for cell in [None, Some("0.25mm")] {
+        let mut base = with(diagonal_args(dir.path(), a, b), json!({"max_cells": 8_000_000, "end_criteria": "50dB"}));
+        if let Some(cell) = cell {
+            base["max_cell"] = json!(cell);
+        }
+        let variants = [
+            ("perfect sheet", json!({}), "ems"),
+            ("perfect sheet", json!({}), "builtin"),
+            ("perfect sheet, staircase", json!({"conformal": false}), "ems"),
+            ("lossy sheet", json!({"perfect_copper": false}), "ems"),
+            ("lossy sheet", json!({"perfect_copper": false}), "builtin"),
+            ("lossy sheet, staircase", json!({"perfect_copper": false, "conformal": false}), "ems"),
+            ("perfect solid", json!({"copper": "solid"}), "ems"),
+            ("perfect solid", json!({"copper": "solid"}), "builtin"),
+            ("lossy solid", json!({"perfect_copper": false, "copper": "solid"}), "ems"),
+            ("lossy solid", json!({"perfect_copper": false, "copper": "solid"}), "builtin"),
+        ];
+        for (i, (name, extra, solver)) in variants.iter().enumerate() {
+            let ran =
+                run(&r, &mut s, &with(with(base.clone(), extra.clone()), json!({"name": format!("v{i}")})), solver);
+            let mut worst = 0.0f64;
+            for m in &ran.ts.data {
+                worst = worst.max(c64(&m[0]).abs().powi(2) + c64(&m[2]).abs().powi(2));
+            }
+            println!(
+                "## cell {cell:?}, {name} [{solver}]: {} cells, steps {:?}, {:.0} s, {:.0} MB, converged {:?}; max Σ|S|² \
+                 {worst:.4}; {:?}",
+                ran.cells(),
+                ran.steps(),
+                ran.seconds,
+                ran.mem_mb,
+                ran.out["output"]["runs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["converged"] == true)
+                    .collect::<Vec<_>>(),
+                codes_of(&ran.out)
+            );
+            for fi in [4, 12, 20, 28, 40] {
+                let m = &ran.ts.data[fi];
+                let s21 = c64(&m[2]);
+                println!(
+                    "   {:.2} GHz: S11 {:.1} dB, S21 {:.4} dB, {:.2}°",
+                    ran.ts.freqs[fi] / 1e9,
+                    db(&m[0]),
+                    db(&m[2]),
+                    s21.im.atan2(s21.re).to_degrees()
                 );
             }
         }

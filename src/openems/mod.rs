@@ -692,6 +692,7 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
         band: (script::f_start(o) as f64, o.f_max_hz as f64),
         conductivity: o.conductivity,
         roughness: o.roughness,
+        volumes: false,
         lines: [&r.lines[0], &r.lines[1], &r.lines[2]],
         window: r.window,
     };

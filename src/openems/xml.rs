@@ -16,6 +16,7 @@ use crate::electrical::dispersion::Dielectric as Dispersive;
 use crate::electrical::loss::{Roughness, skin_depth};
 use crate::fdtd::fit;
 use crate::geom::poly::{Polygon, Rect, Ring, ring_area2};
+use crate::refs::ObjectRef;
 
 /// Priorities: dielectrics below the solder mask (over the laminate, air above the copper where
 /// the mask over it is thinner, the mask over the copper, air in the pad openings), all below
@@ -30,6 +31,9 @@ const PRIO_PART: u32 = 9;
 const PRIO_METAL: u32 = 10;
 const PRIO_SHEET: u32 = 11;
 const PRIO_NPTH: u32 = 20;
+
+/// Name prefix of the properties that hold the copper of a net.
+pub(crate) const COPPER: &str = "copper_";
 
 pub(crate) struct Geometry<'a> {
     /// Board parts as lumped elements.
@@ -52,6 +56,10 @@ pub(crate) struct Geometry<'a> {
     pub conductivity: Option<f64>,
     /// Copper roughness.
     pub roughness: Roughness,
+    /// With a conductivity, copper with a thickness stays metal volumes (a solver with a surface
+    /// impedance on metal, ems, is told their conductivity) and only zero-thickness copper is a
+    /// conducting sheet. False: the export's two sheets on the faces of each layer.
+    pub volumes: bool,
     pub lines: [&'a [i64]; 3],
     pub window: Rect,
 }
@@ -109,6 +117,8 @@ pub(crate) struct Prop {
     pub(crate) kind: Kind,
     /// Comment lines written before it.
     pub(crate) comments: Vec<String>,
+    /// The design objects the property stands for (a net and its layer, a component).
+    pub(crate) subjects: Vec<ObjectRef>,
     pub(crate) prims: Vec<Prim>,
 }
 
@@ -195,6 +205,7 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
             name: format!("dielectric_{}", d.gap),
             kind,
             comments,
+            subjects: Vec::new(),
             prims: board_rings.iter().map(|r| ring_prim(r, d.bottom, d.top, PRIO_DIELECTRIC)).collect(),
         });
     }
@@ -212,7 +223,7 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
                 rings(&c.shape, a, b, PRIO_MASK_COPPER, &mut prims);
             }
         }
-        props.push(Prop { name: "solder_mask".into(), kind, comments, prims });
+        props.push(Prop { name: "solder_mask".into(), kind, comments, subjects: Vec::new(), prims });
         let mut prims = Vec::new();
         for m in g.masks {
             let (lo, hi) = (m.span.0.min(m.span.1), m.span.0.max(m.span.1));
@@ -230,6 +241,7 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
             name: "mask_openings".into(),
             kind: Kind::Material { er: 1.0, text: "1".into() },
             comments: vec!["air over the copper beyond its mask, and in the pad openings".into()],
+            subjects: Vec::new(),
             prims,
         });
     }
@@ -256,14 +268,17 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
         name
     };
     for net in nets {
-        let base = net.map_or("copper_nonet".to_string(), |n| format!("copper_{}", ident(n)));
+        let base = net.map_or(format!("{COPPER}nonet"), |n| format!("{COPPER}{}", ident(n)));
         // The net's comment goes before its first property.
         let mut comments: Vec<String> = net.iter().map(|n| format!("net {}", xml_text(n))).collect();
         let copper: Vec<&Copper> = g.copper.iter().filter(|c| c.net.as_ref() == net).collect();
         let holes: Vec<&Hole> = g.holes.iter().filter(|h| h.plated && h.net.as_ref() == net).collect();
         // With a conductivity the copper is all in the conducting sheets: a perfect conductor
-        // between the two sheets of solid copper took 40 % of their loss in openEMS (D68).
-        let volumes: Vec<&&Copper> = copper.iter().filter(|_| sheet_sigma.is_none()).collect();
+        // between the two sheets of solid copper took 40 % of their loss in openEMS (D68). For a
+        // solver with a surface impedance on metal (`volumes`), copper with a thickness stays metal.
+        let solid = |c: &Copper| g.volumes && g.layers[c.layer].top > g.layers[c.layer].bottom;
+        let subject: Vec<ObjectRef> = net.iter().map(|n| ObjectRef::Net((*n).clone())).collect();
+        let volumes: Vec<&&Copper> = copper.iter().filter(|c| sheet_sigma.is_none() || solid(c)).collect();
         if !volumes.is_empty() || !holes.is_empty() {
             let mut prims = Vec::new();
             for c in volumes {
@@ -286,11 +301,15 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
                 name: unique(base.clone()),
                 kind: Kind::Metal,
                 comments: std::mem::take(&mut comments),
+                subjects: subject.clone(),
                 prims,
             });
         }
         let Some((sigma, k)) = sheet_sigma else { continue };
         for c in copper {
+            if solid(c) {
+                continue;
+            }
             let l = &g.layers[c.layer];
             let mut comments = std::mem::take(&mut comments);
             if k != 1.0 {
@@ -310,6 +329,7 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
                 name: unique(format!("{base}_{}", ident(&l.name))),
                 kind: Kind::Sheet { conductivity: sigma, thickness: l.thickness as f64 * 1e-9 },
                 comments,
+                subjects: subject.iter().cloned().chain([ObjectRef::Layer(l.name.clone())]).collect(),
                 prims,
             });
         }
@@ -326,6 +346,7 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
             name: unique(format!("part_{}", ident(&b.info.refdes))),
             kind,
             comments: vec![xml_text(&b.info.pads.join(" to "))],
+            subjects: vec![ObjectRef::Name(b.info.refdes.clone())],
             prims: vec![Prim { shape: Shape::Box { lo: b.lo, hi: b.hi }, priority: PRIO_PART }],
         });
     }
@@ -340,6 +361,7 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
             name: "npth".into(),
             kind: Kind::Material { er: 1.0, text: "1".into() },
             comments: vec!["non-plated holes: air through the board".into()],
+            subjects: Vec::new(),
             prims,
         });
     }
