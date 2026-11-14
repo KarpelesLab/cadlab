@@ -48,7 +48,7 @@ doc = false
 [dependencies]
 polyclip = { version = "0.0.6", features = ["serde"] }
 # The guide routing engine as a second autorouter backend (D85); its polyclip is ours.
-guide = { version = "0.0.2", default-features = false, features = ["pcb"] }
+guide = { version = "0.0.3", default-features = false, features = ["pcb"] }
 
 indexmap = { version = "2.14", features = ["serde"] }
 schemars = "1.2"

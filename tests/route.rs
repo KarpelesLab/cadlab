@@ -1445,7 +1445,7 @@ fn finer_grids_after_a_run_that_leaves_connections() {
     assert_eq!(drc_errors(&s), Vec::<String>::new());
 }
 
-// ---- `router: guide` (D85) ---------------------------------------------------------------
+// ---- `router: guide` (D85, D88) ----------------------------------------------------------
 
 fn diag_codes(o: &Value) -> Vec<String> {
     o["diagnostics"].as_array().unwrap().iter().map(|d| d["code"].as_str().unwrap().to_string()).collect()
@@ -1456,7 +1456,7 @@ fn other_errors(s: &Session) -> Vec<String> {
 }
 
 /// The guide crate routes a two-layer board through `route.all`: complete, clean by cadlab's
-/// DRC, with stats in the native router's shape and progress around the one call it is.
+/// DRC, with stats in the native router's shape and progress from guide's phases.
 #[test]
 fn guide_routes_two_layer_boards() {
     let r = Registry::with_builtins();
@@ -1490,7 +1490,10 @@ fn guide_routes_two_layer_boards() {
     let st = exec(&r, &mut s, "route.status", json!({}));
     assert_eq!(st["output"]["unrouted"], 0);
     let msgs = progress.0.into_inner().unwrap();
-    assert!(msgs.iter().any(|m| m == "guide: routing") && msgs.iter().any(|m| m == "verifying"), "{msgs:?}");
+    assert!(
+        msgs.iter().any(|m| m.starts_with("guide: routing, ")) && msgs.iter().any(|m| m == "verifying"),
+        "{msgs:?}"
+    );
     assert_eq!(msgs.last().map(String::as_str), Some("done"));
     // Nothing left: nothing attempted, nothing added.
     let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
@@ -1527,7 +1530,8 @@ fn guide_routes_a_four_layer_board() {
     let b = s.project.as_ref().unwrap().board();
     assert!(b.vias.iter().all(|v| (v.from.as_str(), v.to.as_str()) == ("F.Cu", "B.Cu")), "through vias only");
     // No via in a pad, as with the native router: guide places them on its own (40 of the 148
-    // vias of the benchmark's soic24-2l), so the adapter makes every pad a keep-out for vias.
+    // vias of the benchmark's soic24-2l) unless told not to (`vias_in_pads`), which the adapter
+    // does.
     assert!(!b.vias.is_empty());
     let pads = cadlab::board::placed_pads(s.project.as_ref().unwrap());
     for v in &b.vias {
@@ -1539,8 +1543,7 @@ fn guide_routes_a_four_layer_board() {
     }
 }
 
-/// Keep-outs: guide routes around one, and a net exception (D76), which guide's keep-outs
-/// cannot hold, is passed the stricter way and named: the excepted net stays out too.
+/// Keep-outs: guide routes around one, and takes the nets a keep-out excepts (D76) through it.
 #[test]
 fn guide_keeps_out_of_keepouts() {
     let r = Registry::with_builtins();
@@ -1570,8 +1573,9 @@ fn guide_keeps_out_of_keepouts() {
     assert_eq!(drc_errors(&s), Vec::<String>::new());
     assert!(!crossing(&s, 12.5, 13.5, 4.0, 11.0));
 
-    // A wall across the board excepting 3V3: the native router takes 3V3 through it
-    // (`keepout_net_exceptions`); guide cannot, says so, and leaves both nets open there.
+    // A wall across the board excepting 3V3: guide takes 3V3 through it, as the native router
+    // does (`keepout_net_exceptions`), and leaves GND, which is not excepted, open there, with
+    // what it knows of why.
     let mut s = Session::new();
     let _d = new_project(&r, &mut s);
     ldo_board(&r, &mut s);
@@ -1584,30 +1588,19 @@ fn guide_keeps_out_of_keepouts() {
     );
     let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
     report("guide at a wall with an exception", &o, 0);
-    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "route.guide_keepout_exception");
-    let d = d.unwrap_or_else(|| panic!("{}", o["diagnostics"]));
-    assert_eq!(d["severity"], "warning");
-    assert!(d["subjects"].to_string().contains("keepout:wall") && d["subjects"].to_string().contains("3V3"), "{d}");
-    assert!(d["hint"].as_str().unwrap().contains("native router"), "{d}");
-    assert!(diag_codes(&o).contains(&"route.incomplete".to_string()));
-    let failed: std::collections::BTreeSet<&str> = o["output"]["connections"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["status"] == "failed")
-        .map(|c| c["net"].as_str().unwrap())
-        .collect();
-    assert_eq!(failed.into_iter().collect::<Vec<_>>(), ["3V3", "GND"], "{}", o["output"]["connections"]);
-    for c in o["output"]["connections"].as_array().unwrap().iter().filter(|c| c["status"] == "failed") {
-        assert!(c["reason"].as_str().unwrap().contains("guide found no route"), "{c}");
+    assert_eq!(diag_codes(&o), ["route.incomplete"], "{}", o["diagnostics"]);
+    let failed: Vec<&Value> =
+        o["output"]["connections"].as_array().unwrap().iter().filter(|c| c["status"] == "failed").collect();
+    assert!(!failed.is_empty() && failed.iter().all(|c| c["net"] == "GND"), "{}", o["output"]["connections"]);
+    for c in &failed {
+        assert!(c["reason"].as_str().unwrap().contains("guide found no way from"), "{c}");
+        assert!(c["subjects"].to_string().contains("GND"), "{c}");
         assert!(c["hints"][0].as_str().unwrap().starts_with("`route.connection "), "{c}");
+        assert!(c["hints"].to_string().contains("native router"), "{c}");
     }
-    assert!(!crossing(&s, 12.5, 13.5, -1.0, 16.0));
-    assert_eq!(other_errors(&s), Vec::<String>::new());
-    // The native router completes what guide left, through the exception.
-    let o = exec(&r, &mut s, "route.nets", json!({"nets": ["3V3"]}));
-    assert_eq!(o["output"]["stats"]["failed"], 0, "{}", o["output"]);
+    assert_eq!(unrouted(&r, &mut s, "3V3"), 0);
     assert!(crossing(&s, 12.5, 13.5, -1.0, 16.0));
+    assert_eq!(other_errors(&s), Vec::<String>::new());
 }
 
 /// Two nets between two pairs of 0402 resistors, as a differential pair: guide routes them
@@ -1684,8 +1677,8 @@ fn guide_completes_a_partial_routing() {
     assert_eq!(drc_errors(&s), Vec::<String>::new());
 }
 
-/// guide has no threads and no seed: the same board gives the same copper and report on every
-/// run, inside thread pools of any size.
+/// guide has no threads: the same board gives the same copper and report on every run, inside
+/// thread pools of any size, and so does the same seed.
 #[test]
 fn guide_is_identical_for_any_thread_count() {
     let r = Registry::with_builtins();
@@ -1697,38 +1690,37 @@ fn guide_is_identical_for_any_thread_count() {
             let _d = new_project(&r, &mut s);
             generated_board(&r, &mut s, 3, 2, 2, 3);
             let o = exec(&r, &mut s, "route.all", json!({"router": "guide"}));
-            (copper(&s), o["output"].clone())
+            let first = (copper(&s), o["output"].clone());
+            exec(&r, &mut s, "route.rip", json!({"all": true}));
+            let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "seed": 5}));
+            assert_eq!(diag_codes(&o), Vec::<String>::new());
+            (first, copper(&s), o["output"].clone())
         });
         results.push(res);
     }
-    assert!(results[0].0.0.as_array().is_some_and(|a| !a.is_empty()));
+    assert!(results[0].0.0.0.as_array().is_some_and(|a| !a.is_empty()));
     assert_eq!(results[0], results[1]);
     assert_eq!(results[0], results[2]);
+    // Another seed is another order of the nets: both complete, not the same copper.
+    assert_eq!(results[0].2["stats"]["completion"], 100.0);
+    assert_ne!(results[0].0.0, results[0].1);
 }
 
-/// What guide cannot do is refused with a code, the option concerned and what to do instead;
-/// options it has nothing for are named in a warning; a cancelled run changes nothing.
+/// One connection is refused with a code, the option concerned and what to do instead; options
+/// guide has nothing for are named in a warning; `layers` and the budgets are kept; a cancelled
+/// run changes nothing.
 #[test]
-fn guide_refuses_and_warns() {
+fn guide_refuses_warns_and_keeps_its_limits() {
     let r = Registry::with_builtins();
     let mut s = Session::new();
     let _d = new_project(&r, &mut s);
     ldo_board(&r, &mut s);
-    let refused = |s: &mut Session, cmd: &str, args: Value| {
-        let f = r.execute(s, cmd, args, RunOptions::default()).expect_err("refused");
-        let d = f.error.diagnostic.clone();
-        assert_eq!(d.code, "route.guide_unsupported", "{}", f.error);
-        assert!(d.hint.is_some(), "{d:?}");
-        d.subjects.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
-    };
     let conn = json!({"from": "U1.VOUT", "to": "C2.1", "router": "guide"});
-    assert_eq!(refused(&mut s, "route.connection", conn), "option:router");
-    assert_eq!(refused(&mut s, "route.all", json!({"router": "guide", "layers": ["F.Cu"]})), "option:layers");
-    assert_eq!(refused(&mut s, "route.all", json!({"router": "guide", "work_budget": 1000})), "option:work_budget");
-    assert_eq!(
-        refused(&mut s, "route.nets", json!({"nets": ["GND"], "router": "guide", "layers": ["B.Cu"]})),
-        "option:layers"
-    );
+    let f = r.execute(&mut s, "route.connection", conn, RunOptions::default()).expect_err("refused");
+    let d = f.error.diagnostic.clone();
+    assert_eq!(d.code, "route.guide_unsupported", "{}", f.error);
+    assert!(d.hint.is_some(), "{d:?}");
+    assert_eq!(d.subjects.iter().map(ToString::to_string).collect::<Vec<_>>(), ["option:router"]);
     assert!(s.project.as_ref().unwrap().board().tracks.is_empty());
 
     let cancel = cadlab::command::CancelToken::new();
@@ -1746,18 +1738,54 @@ fn guide_refuses_and_warns() {
     assert_eq!(f.error.diagnostic.code, "cancelled");
     assert!(s.project.as_ref().unwrap().board().tracks.is_empty());
 
+    // A work budget of one search node: the run stops there, the same on every run, and what
+    // is left open says why. No time budget was given, so nothing depends on the clock.
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "work_budget": 1}));
+    assert_eq!(o["output"]["stats"]["budget_exhausted"], true, "{}", o["output"]["stats"]);
+    assert_eq!(diag_codes(&o), ["route.incomplete"]);
+    let failed: Vec<&Value> =
+        o["output"]["connections"].as_array().unwrap().iter().filter(|c| c["status"] == "failed").collect();
+    assert!(!failed.is_empty());
+    assert!(
+        failed.iter().all(|c| c["reason"].as_str().unwrap().starts_with("the work budget was spent")),
+        "{failed:?}"
+    );
+    let first = (copper(&s), o["output"].clone());
+    exec(&r, &mut s, "route.rip", json!({"all": true}));
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "work_budget": 1}));
+    assert_eq!(first, (copper(&s), o["output"].clone()));
+    exec(&r, &mut s, "route.rip", json!({"all": true}));
+    // A time budget that is over before the run starts: nothing routed, and the run says so.
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "budget_ms": 0}));
+    assert_eq!(o["output"]["stats"]["routed"], 0, "{}", o["output"]["stats"]);
+    assert!(diag_codes(&o).contains(&"route.budget_cut".to_string()), "{}", o["diagnostics"]);
+    assert!(s.project.as_ref().unwrap().board().tracks.is_empty());
+
+    // `layers`: the tracks keep to them. The parts are on the front, so the front alone routes
+    // the board, without a via.
+    let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "layers": ["F.Cu"]}));
+    assert_eq!(o["output"]["stats"]["completion"], 100.0, "{}", o["output"]);
+    let b = s.project.as_ref().unwrap().board();
+    assert!(b.vias.is_empty() && b.tracks.iter().all(|t| t.layer == "F.Cu"));
+    let f = r
+        .execute(&mut s, "route.all", json!({"router": "guide", "layers": ["In9.Cu"]}), RunOptions::default())
+        .expect_err("no such layer");
+    assert_ne!(f.error.diagnostic.code, "route.guide_unsupported");
+    exec(&r, &mut s, "route.rip", json!({"all": true}));
+
     let o = exec(&r, &mut s, "route.all", json!({"router": "guide", "seed": 3, "effort": "high", "arcs": true}));
     let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "route.guide_option_ignored");
     let d = d.unwrap_or_else(|| panic!("{}", o["diagnostics"]));
     let subjects = d["subjects"].to_string();
-    assert!(["option:seed", "option:effort", "option:arcs"].iter().all(|o| subjects.contains(o)), "{d}");
+    assert!(["option:effort", "option:arcs"].iter().all(|o| subjects.contains(o)), "{d}");
+    assert!(!subjects.contains("option:seed"), "the seed is guide's: {d}");
     assert_eq!(o["output"]["stats"]["completion"], 100.0);
     assert!(s.project.as_ref().unwrap().board().tracks.iter().all(|t| t.mid.is_none()), "no arcs from guide");
 }
 
 /// Pours with guide (the board of `pads_cut_off_from_their_pour_are_routed`): guide plans GND on
-/// its own fill of the zone, and what counts is the board as cadlab fills it around the new
-/// tracks, so the report is taken from that and GND's pads end up joined on it.
+/// cadlab's fill of the zone, and what counts is the board as cadlab fills it again around the
+/// new tracks, so the report is taken from that and GND's pads end up joined on it.
 #[test]
 fn guide_routes_a_board_with_a_pour() {
     let r = Registry::with_builtins();
@@ -1806,8 +1834,8 @@ fn guide_routes_a_board_with_a_pour() {
     assert_eq!(drc_errors(&s), Vec::<String>::new());
     let st = exec(&r, &mut s, "route.status", json!({}));
     assert_eq!(st["output"]["unrouted"], 0, "counted on the board with its pour filled again");
-    // The signal tracks cut the pour as cadlab fills it, which guide's own fill did not show:
-    // one pour round, on cadlab's fill, joined what was left (two calls of guide).
+    // The signal tracks cut the pour that guide planned on (cadlab's fill of the empty board):
+    // a second run, on the routed board and its fill, joined what was left.
     assert_eq!(o["output"]["stats"]["iterations"], 2, "{}", o["output"]["stats"]);
 }
 

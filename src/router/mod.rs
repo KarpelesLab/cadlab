@@ -122,8 +122,8 @@ pub enum SearchKind {
     #[default]
     Auto,
     /// The `guide` crate's PCB router in place of cadlab's own (D85): whole nets only
-    /// (`route.all`, `route.nets`), verified by cadlab's DRC as any routing. It has no seed, no
-    /// budget, no cancellation and no progress: a run ends when guide ends it.
+    /// (`route.all`, `route.nets`), verified by cadlab's DRC as any routing, under the same
+    /// budgets, cancellation and progress (D88).
     Guide,
 }
 
@@ -180,8 +180,8 @@ pub struct RouteOptions {
     pub neck: Option<bool>,
     /// With [`SearchKind::Guide`] only: let guide place vias in pads, as it does on its own
     /// (its escapes of shut-in pads use them). The default, false, keeps the native router's
-    /// rule of no via in a pad (the adapter makes every pad a keep-out for vias). Not offered by
-    /// the commands: it exists to measure guide as it is (`route_bench`, `CADLAB_BENCH_VIA_IN_PAD`).
+    /// rule of no via in a pad (guide's `vias_in_pads` off). Not offered by the commands: it
+    /// exists to measure guide as it is (`route_bench`, `CADLAB_BENCH_VIA_IN_PAD`).
     pub via_in_pad: bool,
 }
 
@@ -282,8 +282,8 @@ pub struct RouteStats {
     pub vias: usize,
     /// Total length of the added tracks.
     pub length: Nm,
-    /// Negotiation iterations run (`router: guide`: runs of guide, the first and one per pour
-    /// round).
+    /// Negotiation iterations run (`router: guide`: runs of guide, the first and a second for
+    /// nets the refilled pours leave open).
     pub iterations: usize,
     /// Overused grid points after each iteration.
     pub overuse: Vec<usize>,
@@ -298,8 +298,7 @@ pub struct RouteStats {
     /// Work done, in the units of `work_budget` (about one grid search step each): the same
     /// whatever the machine, its load or the threads, unless a time budget cut the run. A scale
     /// for choosing a `work_budget`; another budget is another run, since phases end at shares of it.
-    /// With `router: guide`: the search nodes guide expanded, a count of its own that no budget
-    /// can be given in.
+    /// With `router: guide`: the search nodes guide expanded, the unit of `work_budget` there.
     #[serde(default)]
     pub work: u64,
     /// Dog-bone fanout vias (included in `vias`).
@@ -339,8 +338,8 @@ pub struct RouteResult {
     /// Differential pairs routed first, as coupled traces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pairs: Vec<PairReport>,
-    /// What the backend could not take from the board (`router: guide`: keep-out net
-    /// exceptions, custom rules, net ties), as warnings with subjects and hints.
+    /// What the backend could not take from the board (`router: guide`: custom rules that
+    /// are not a clearance inside an area), as warnings with subjects and hints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<crate::diag::Diagnostic>,
 }
@@ -445,7 +444,7 @@ pub enum RouteError {
     Unsupported {
         /// What it cannot do.
         what: String,
-        /// The option that asked for it (`router`, `layers`, `work_budget`).
+        /// The option that asked for it (`router`).
         option: String,
         /// What to do instead.
         hint: String,

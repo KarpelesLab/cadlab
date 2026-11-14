@@ -231,7 +231,7 @@ fn guide_ignored(ctx: &mut Context<'_>, given: &[(&str, bool)]) {
         "route.guide_option_ignored",
         format!("`router: guide` has no equivalent of {}: ignored", names.join(", ")),
     )
-    .with_hint("guide takes no seed, effort, fanout, neck-down, any-angle, gridless or arc option; leave them out, or use the native router");
+    .with_hint("guide takes no effort, fanout, neck-down, any-angle, gridless or arc option; leave them out, or use the native router");
     for n in names {
         d = d.with_subject(ObjectRef::Named { kind: "option".into(), name: n.to_string() });
     }
@@ -442,20 +442,6 @@ fn run_router(
     for d in result.notes.iter().cloned() {
         ctx.report(d);
     }
-    if guide && let Some(b) = opts.budget.filter(|b| start.elapsed() > *b) {
-        ctx.report(
-            Diagnostic::info(
-                "route.guide_no_budget",
-                format!(
-                    "the run took {:.1} s, over the {:.1} s budget: guide has no time limit, so a budget cannot \
-                     stop it",
-                    start.elapsed().as_secs_f64(),
-                    b.as_secs_f64()
-                ),
-            )
-            .with_hint("route fewer nets at a time (`route.nets`), or use the native router, which keeps its budget"),
-        );
-    }
     let mut out =
         Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted, pairs: result.pairs };
     // Push-and-shove of the leftovers is the native router's: guide has none.
@@ -629,8 +615,8 @@ pub struct RouteAll {
     /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
     /// then the gridless search for what it left unrouted).
     /// `guide` routes with the guide crate's PCB router instead (whole nets: its own escapes,
-    /// planes, rip-up and cleanup; no seed, budget, cancellation or progress, and none of the
-    /// options above), checked by the same DRC.
+    /// planes, rip-up and cleanup; budgets, `layers`, `seed`, `pairs`, no other option above),
+    /// checked by the same DRC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<SearchKind>,
     /// Neck-down (default true): a net whose width cannot leave one of its pads between the
@@ -670,7 +656,6 @@ impl Command for RouteAll {
             guide_ignored(
                 ctx,
                 &[
-                    ("seed", self.seed.is_some()),
                     ("effort", self.effort.is_some()),
                     ("fanout", self.fanout.is_some()),
                     ("any_angle", self.any_angle.is_some()),
@@ -733,8 +718,8 @@ pub struct RouteNets {
     /// of the free space, any position and angle the rules allow) or `auto` (default: the grid,
     /// then the gridless search for what it left unrouted).
     /// `guide` routes with the guide crate's PCB router instead (whole nets: its own escapes,
-    /// planes, rip-up and cleanup; no seed, budget, cancellation or progress, and none of the
-    /// options above), checked by the same DRC.
+    /// planes, rip-up and cleanup; budgets, `layers`, `seed`, `pairs`, no other option above),
+    /// checked by the same DRC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<SearchKind>,
     /// Neck-down (default true): a net whose width cannot leave one of its pads between the
@@ -798,7 +783,6 @@ impl Command for RouteNets {
             guide_ignored(
                 ctx,
                 &[
-                    ("seed", self.seed.is_some()),
                     ("effort", self.effort.is_some()),
                     ("fanout", self.fanout.is_some()),
                     ("any_angle", self.any_angle.is_some()),
