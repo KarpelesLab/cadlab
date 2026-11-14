@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/KarpelesLab/cadlab/compare/v0.0.4...v0.0.5) - 2026-11-14
+
+### Other
+
+- guide 0.0.3 as a backend, both routers measured again, what still blocks it (D88)
+- guide under the same budgets, with a seed when one is given (D88)
+- guide 0.0.3 in the adapter: budgets, causes and the host's board model in place of workarounds (D88)
+- ems 0.0.7 as the second solver, the two solvers measured again, the default as measured (D87)
+- sim.sparams --solver ems: ems 0.0.7's lossy copper, conformal outlines, typed warnings and one compile (D87)
+- guide as a backend, both routers on the generated boards and the corpus, the default as measured (D85)
+- the backend choice, the seed, DRC errors by code, vias in pads (D85)
+- guide as a second backend behind router: guide, verified and counted as the native router (D85)
+- the exact outline of a pad that shares its number and position with another (D85)
+- ems against the built-in solver on its validation cases, measured; what ems needs before it replaces it (D86)
+- the ems crate as a second solver on the built-in solver's region, sim.sparams --solver ems (D86)
+
 ## [0.0.4](https://github.com/KarpelesLab/cadlab/compare/v0.0.3...v0.0.4) - 2026-11-13
 
 ### Other
