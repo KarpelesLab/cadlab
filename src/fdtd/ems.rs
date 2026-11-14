@@ -1,5 +1,5 @@
 //! `sim.sparams --solver ems`: the board region run by the [`ems`] crate's FDTD solver instead of
-//! [`super::engine`] (DECISIONS D86, D87, D89; cargo feature `ems`).
+//! [`super::engine`] (DECISIONS D86, D87, D89, D90; cargo feature `ems`).
 //!
 //! The region, its mesh, its ports and its parts are the ones the built-in solver gets
 //! ([`super::extract`], [`super::place_ports`]); the geometry is the property list of the openEMS
@@ -16,7 +16,7 @@
 //! plane, read as the built-in solver reads them. The model is compiled once; one run per port,
 //! S = B A⁻¹ on the same waves.
 
-use ems::compile::{ConformalOutlines, SheetModel};
+use ems::compile::{ConformalOutlines, PoleWeighting, SheetModel};
 use ems::csx;
 use ems::csx::primitives::{BoxShape, Cylinder, LinPoly, Polygon};
 use ems::csx::properties::{DebyeMaterial, DebyePole, LumpedElement, LumpedElementType, ProbeBox, ProbeType};
@@ -209,7 +209,11 @@ fn roughness(r: Roughness) -> EmsRoughness {
 /// (solid metal and the outlines of sheets on mesh planes; copper along the mesh keeps the
 /// staircase the mesh was laid out for, as in the built-in solver) and, for lossy copper, a
 /// surface impedance fitted over the result's band on the faces of the copper volumes and as the
-/// two-port of the copper sheets, each with the roughness model. What a small cut face does, and
+/// two-port of the copper sheets, each with the roughness model. A laminate's Debye poles go to
+/// an edge in its surface by the share of the edge's dual face the laminate fills, as its static
+/// permittivity does and as the built-in solver's do (`PoleWeighting::Averaged`; openEMS's rule,
+/// ems's default, gives such an edge the whole poles: two points more loss on a 60 mm
+/// microstrip at 9 GHz, D89, D90). What a small cut face does, and
 /// whether a narrow slanted track or a barrel of a cell keeps whole edges, is ems's to decide
 /// (its `ConformalOptions::keep_stable` and `CompileOptions::conformal_bridges`, both on by
 /// default; cadlab chose a threshold and fell back to a staircase with ems 0.0.7, D87, D89).
@@ -217,7 +221,8 @@ fn compile_options(o: &Options, props: &[Prop], band: (f64, f64)) -> CompileOpti
     let mut c = CompileOptions::default()
         .with_conformal(o.conformal)
         .with_conformal_outlines(ConformalOutlines::Slanted)
-        .with_conformal_solids(ConformalOutlines::Slanted);
+        .with_conformal_solids(ConformalOutlines::Slanted)
+        .with_pole_weighting(PoleWeighting::Averaged);
     let Some(sigma) = o.region.conductivity else { return c };
     let rough = roughness(o.region.roughness);
     c = c.with_sheet_model(SheetModel::SurfaceImpedance);
@@ -445,11 +450,6 @@ pub(crate) fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SPa
             ems::engine::StopReason::Diverged => return Err(unstable()),
             _ => false,
         };
-        // The invariant of a stable scheme is not negative: such a run grew, whatever it ended on
-        // (ems 0.0.8 ended one as converged; D89 has the case).
-        if out.energy < -1e-12 * out.max_energy {
-            return Err(unstable());
-        }
         let energy_db = if out.max_energy > 0.0 && out.energy > 0.0 {
             10.0 * (out.energy / out.max_energy).log10()
         } else {
