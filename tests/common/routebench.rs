@@ -534,19 +534,17 @@ pub fn measure(router: &str, r: &Registry, s: &mut Session, ms: u128, drc_before
 /// Routes a case with cadlab (`route.all`, seed 1 or `CADLAB_BENCH_SEED`, `budget_ms`), optionally
 /// rendering the result to `render/<name>.png`. `CADLAB_BENCH_VERBOSE` prints the router's stats
 /// and failures. `CADLAB_BENCH_ROUTER` (`grid`, `gridless`, `auto`, `guide`) picks the search or
-/// the backend: `guide` is the guide crate's router (D85), which takes no seed and no budget, so
-/// neither is passed and the row is named after it.
+/// the backend: `guide` is the guide crate's router (D85, D88), under the same budget, with no
+/// seed unless `CADLAB_BENCH_SEED` gives one; the row is named after it.
 pub fn run_cadlab(case: &Case, budget_ms: u64, render: Option<&Path>) -> Metrics {
     let (_d, r, mut s) = (case.build)();
     let before = drc_errors(s.project.as_ref().unwrap());
     let t = Instant::now();
-    let seed: u64 = std::env::var("CADLAB_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-    let mut args = json!({"budget_ms": budget_ms, "seed": seed});
     let router = std::env::var("CADLAB_BENCH_ROUTER").ok();
     let guide = router.as_deref() == Some("guide");
-    if guide {
-        args = json!({});
-    }
+    // guide's default is no seed (0): its nets shortest first.
+    let seed: u64 = std::env::var("CADLAB_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::from(!guide));
+    let mut args = json!({"budget_ms": budget_ms, "seed": seed});
     if let Some(router) = &router {
         args["router"] = router.clone().into();
     }
@@ -554,7 +552,13 @@ pub fn run_cadlab(case: &Case, budget_ms: u64, render: Option<&Path>) -> Metrics
     // the library is called and its result applied as `route.all` applies it.
     let o = if guide && std::env::var_os("CADLAB_BENCH_VIA_IN_PAD").is_some() {
         use cadlab::router::{Hooks, RouteOptions, Scope, SearchKind, route};
-        let opts = RouteOptions { search: Some(SearchKind::Guide), via_in_pad: true, ..Default::default() };
+        let opts = RouteOptions {
+            search: Some(SearchKind::Guide),
+            via_in_pad: true,
+            budget: Some(std::time::Duration::from_millis(budget_ms)),
+            seed,
+            ..Default::default()
+        };
         let p = s.project.as_mut().unwrap();
         let res = route(p, &Scope::All, &opts, &Hooks::none()).expect("guide");
         for mut t in res.tracks {

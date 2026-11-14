@@ -6,13 +6,13 @@
 //! also routed by freerouting (external process, DSN/SES) for comparison. `CADLAB_ROUTE_RENDER=<dir>`
 //! renders cadlab's results; `CADLAB_BENCH_BUDGET_MS` sets the time budget (default 120000);
 //! `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search (default: the router's default) and
-//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85; here and in the corpus
-//! mode). guide takes no seed, no budget and no work budget, so those are not passed to it: bound
-//! a run from outside (`timeout 1200 route_bench --corpus <board>`), one board per process.
-//! `CADLAB_BENCH_VIA_IN_PAD=1` lets guide place vias in pads, as it does on its own; without it
-//! the adapter forbids them, as the native router does. With
+//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85, D88; here and in the
+//! corpus mode), under the same time budget or work budget (`CADLAB_BENCH_WORK`, in guide's
+//! search nodes there). `CADLAB_BENCH_VIA_IN_PAD=1` lets guide place vias in pads, as it does on
+//! its own; without it the adapter forbids them, as the native router does. With
 //! `CADLAB_BENCH_VERBOSE=1` both modes count the vias in surface-mount pads of their net.
-//! `CADLAB_BENCH_SEED=<n>` sets the seed (default 1).
+//! `CADLAB_BENCH_SEED=<n>` sets the seed (default 1; guide's default is none, its nets shortest
+//! first).
 //!
 //! **Corpus re-route mode**: `route_bench --corpus [names...]` imports the boards of the
 //! open-source corpus (`tests/corpus/projects.toml`, fetched by `scripts/fetch-corpus.sh` into
@@ -96,9 +96,9 @@ fn corpus(filters: &[String]) {
         toml::from_str(&std::fs::read_to_string(root.join("tests/corpus/projects.toml")).expect("manifest"))
             .expect("manifest syntax");
     let budget: u64 = std::env::var("CADLAB_BENCH_BUDGET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000);
-    // guide has no work budget (and no time budget): it runs until it is done.
+    // guide's default is no seed: its nets shortest first.
     let guide = search_kind() == Some(SearchKind::Guide);
-    let work: Option<u64> = std::env::var("CADLAB_BENCH_WORK").ok().and_then(|v| v.parse().ok()).filter(|_| !guide);
+    let work: Option<u64> = std::env::var("CADLAB_BENCH_WORK").ok().and_then(|v| v.parse().ok());
     let verbose = std::env::var_os("CADLAB_BENCH_VERBOSE").is_some();
     println!(
         "| board | layers | connections | completion | failed | DRC unrouted | vias | length | time | work | budget out | DRC errors |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
@@ -159,7 +159,7 @@ fn corpus(filters: &[String]) {
         let ropts = RouteOptions {
             budget: if work.is_some() { None } else { Some(Duration::from_millis(budget)) },
             work: work.map_or_else(Default::default, WorkMeter::limited),
-            seed: std::env::var("CADLAB_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+            seed: std::env::var("CADLAB_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::from(!guide)),
             search: search_kind(),
             fanout: std::env::var("CADLAB_BENCH_FANOUT").ok().map(|v| v != "0"),
             via_in_pad: std::env::var_os("CADLAB_BENCH_VIA_IN_PAD").is_some(),
