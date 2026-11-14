@@ -2691,4 +2691,104 @@ completion, so the 300 s and 1200 s columns stand as measured before; the native
 boards is still far ahead, and the default stays.
 
 
+### D89. ems 0.0.9 in `sim.sparams --solver ems`: the adapter's workarounds dropped; the default decided against five criteria, and the built-in solver stays the default (2026-11-15)
+D87 ended on: switch the default when ems's conformal cells hold on a via and its small-face threshold is its own,
+then run the oracle job on ems. ems 0.0.8 had both; 0.0.9, released while this was measured, fixes an instability
+0.0.8 had (below), and is what `Cargo.toml` asks for. This change adopts it and decides the default against
+criteria set before measuring. The table is in ELECTRICAL.md, "ems as a second solver". No openEMS, CSXCAD or
+other GPL code was read; the two small changes to ems below were made from its own code and documentation (MIT,
+clean-room, same owner).
+**Dropped from the adapter** (`fdtd::ems`), each because ems does it on any model since 0.0.8:
+- `SMALL_FACES`, `STABILITY_MARGIN` and the loop of up to three compiles that lowered ems's threshold for small
+  cut faces while its stability estimate stayed under 0.9. One `CompiledModel::new` with ems's defaults: a small
+  face keeps its own current where the cells around it are stable at the timestep by a cell-wise bound
+  (`ConformalOptions::keep_stable`). D73's bent line at two cells across the track: 154.7° (the built-in solver
+  154.8°, cadlab's threshold 153.6°, ems's old rule 141.6°).
+- The rule for diagonal tracks under 1.5 cells (`unresolved()`), with which such a region ran as a staircase:
+  ems keeps whole the edges that carry a narrow slanted conductor (`CompileOptions::conformal_bridges`), the
+  edge that continues a lumped element's column into its pad and a sheet's edges under a barrel. Session 6's
+  matching network, tracks 1.1 cells wide: |S₁₁| 0.5727 and |S₂₁| 0.7976 at 2.44 GHz with conformal cells, the
+  built-in solver 0.5733 and 0.7983 (ems 0.0.7: 0.790 and 0.574, and 0.581 and 0.791 as the staircase).
+- `HOLE_CELLS`, the staircase for a plated hole under two cells across: ems integrates the faces a barrel, a pad
+  or a corner crosses. The four-layer via transition (0.3 mm drill on 0.3 mm cells, lossy solid copper):
+  −0.396 dB at 4 GHz, the built-in solver −0.408 dB, within 0.012 dB at every frequency (ems 0.0.7: −0.598 dB
+  with its conformal cells, −0.456 dB as the staircase cadlab ran).
+- `sim.ems_staircase`, which those two rules raised. `conformal` means the same in both solvers again.
+`ConformalReport::bounded` is not passed on: it is false on ordinary runs that are fine (24 of 556 cut faces
+interpolated on the bent line at 0.25 mm), and in the one unstable run found (below) it was false with a
+stability estimate of 0.69, as on those. A diagnostic from it would have said nothing that helps.
+**Added to the adapter**, so that the built-in solver's tests can be run on ems unchanged: `conformal_edges` in
+the result (ems's count of cut edges), a part's `columns` (the mesh columns its box takes in), and properties
+without primitives are left out of the model (the mask's openings on a board that has none: ems answered
+`sim.ems_other`, "has no primitives"). A run that ends on a negative energy is `sim.unstable`.
+**An instability in ems 0.0.8**, found here by `measure_diagonal_copper` and in ems at the same time. The bent
+line with lossy `solid` copper on 0.25 mm cells grew: ems ended the run after 7553 of 10 900 steps as converged,
+the energy invariant having gone negative, and the result had |S₁₁|² + |S₂₁|² = 1.12 at 10 GHz and |S₁₁| −17.6 dB
+at 1 GHz for −43.6 dB. `sim.not_passive` was the only sign. ems's estimate read 0.69; with `keep_stable` off the
+run was stable, as was the default mesh. Cause: the cell-wise bound took the edges on the surface of lossy solid
+metal for perfect conductors, which they are in the coefficients when the conformal cells are applied; the
+surface impedance, installed after, gives them a voltage at their whole length. ems 0.0.9 gives such an edge
+the capacitance the faces beside it need (its 6ccf859); a fix of the same cause written here on ems's branch
+`cadlab-008` (the bound counting those edges, with a raised capacitance) was dropped for it unmerged. With 0.0.9:
+Σ|S|² 0.9985, arg S₂₁ 156.4° (the built-in solver 157.1°). Two small changes remain on `cadlab-008`, neither
+needed by cadlab: a negative energy invariant ends a run as `Diverged`, not as decayed; csx's "has no
+primitives" has a warning code.
+**The band's end.** D87 left open why ems's conductor loss on microstrip ports rose by a third at f_max (0.048
+against 0.036 dB at 6 GHz). It was the end criterion: the conductor's part is the difference of two runs, each
+ended at −50 dB. To −70 dB the two solvers read 0.0365 and 0.0352 dB there, 3 to 4 % apart as at every other
+frequency. The measurements that subtract two runs now end at −70 dB.
+**Tests.** The built-in solver's board-level tests take a solver and run on both: `sim_sparams_command`,
+`sim_sparams_models_parts`, `cut_cells_do_not_change_a_parts_columns`, `sim_sparams_conformal_option`,
+`narrow_diagonal_track_refines_the_mesh`, and behind `#[ignore]` `sim_sparams_microstrip_validation`,
+`lossless_line_near_the_pml_is_passive`, `sim_sparams_mask_validation`, `sim_sparams_parts_validation`,
+`routed_45_degree_line`. The engine-level tests of `tests/fdtd*.rs` build the built-in solver's own structures;
+their ems counterparts are the csx models of `tests/fdtd_ems.rs` (`measure_lumped_fixture`, `measure_cavities`).
+`ems_small_plated_holes_are_a_staircase` became `ems_runs_a_via_of_one_cell`. The openEMS oracle
+(`tests/openems.rs`) compares openEMS with each solver, to the same tolerance, cadlab's runs first, and a NaN
+fails a comparison instead of passing it; it was run here against a stand-in for openEMS only (CI has openEMS).
+**The criteria, and what each measured** (release builds, three threads, ems 0.0.9's source; the rows with
+perfect copper only were taken on 0.0.8 and not again):
+1. *Every validation tolerance of the built-in solver's tests holds with ems.* Not met, by one test.
+   `sim_sparams_microstrip_validation` (60 mm of `solid` copper between microstrip ports, 10 GHz, |S₂₁| against
+   D52 within 3 % to 2.5 GHz and 6 % above): the built-in solver −2.3 to +4.9 %, ems −1.4 to +7.2 %, over at
+   8.02, 8.52 and 9.01 GHz (+6.5, +6.8, +7.2 %); the test holds ems to 8 % and says so. Its Z₀ (within 3 %),
+   εeff (1.5 %) and |S₁₁| (0.04) hold, equal to the built-in solver's to 0.1 %. Met: the coarse line with its
+   mask, roughness and lumped ports; parts (|S₂₁| within 0.03 and 0.02 of theory, the same columns); passivity
+   next to the absorbing layer (Σ|S|² at most 1.0007, the built-in solver 1.0010, of 1.0025 allowed); the solder
+   mask (Z₀ 50.62 Ω, εeff 3.1542; the built-in solver 50.61 Ω, 3.1541); the 45° line; session 6 (|S₂₁| 0.066 and
+   |S₁₁| 0.094 from the ideal chain, of 0.1 and 0.15 allowed); the cavities and the lumped fixture as csx models.
+2. *No case where ems is materially worse in accuracy.* Not shown. The long line above is two points further
+   from D52 than the built-in solver from 2 GHz up (0.037 dB of 1.7 dB at 9 GHz), and on slanted `solid` copper
+   ems's conductor loss is 10 to 14 % above the built-in solver's (sheets: 3 %). Which is right is not
+   established in either case. Everything else agrees closer than before: via 0.012 dB, bent line 0.2° (sheets)
+   and 1.6° (`solid`) at two cells across the track, lossy lines 0.006 dB, parts 0.0011.
+3. *Run time within 1.5 times on what users hit, lossy solid copper with vias.* Met at end criteria of 40 and
+   50 dB: the via transition 82 s against 122 s, the oracle's solid line 18 s against 29 s, session 6 (sheets)
+   113 s against 79 s (1.4 times). Not met everywhere at deeper ones (`sim.sparams` ends at −60 dB by default): to
+   −70 dB ems takes 1.3 to 1.7 times the built-in solver's steps on the straight lossy lines (still faster in
+   time: 88 s against 105 s) and three to four times on the bent line (167 s against 41 s with sheets, 304 s
+   against 73 s with `solid` copper); with perfect copper the steps are equal. The via
+   transition to −60 dB: 1.4 times the steps, 169 s against 199 s. On one thread a small region with a via takes ems three times the built-in solver's time (102 s against 34 s on
+   25 194 cells; 38 s on three threads).
+4. *Deterministic for any thread count.* Met: identical Touchstone data on one and four threads (lossless,
+   lossy sheets, lossy solid copper), and on one, two and three with conformal cells (the via transition with
+   lossy solid copper, the bent line with lossy sheets).
+5. *No panics, no instabilities.* Not met by ems 0.0.8 (the run above); met by 0.0.9 on every case of the
+   table, `measure_diagonal_copper` now asserting that each copper model ends and stays passive.
+**Decision.** The default does not change, and `src/fdtd/engine.rs` stays. Criterion 1 fails by three points of
+one test and 2 with it, and 3 holds on the via transition at the default end criterion but not on lossy slanted copper at −70 dB
+(−60 dB was not measured there). Switch
+when (a) the long line's loss is inside the built-in solver's tolerance, or it is shown that ems is the one
+nearer the truth and the tolerance is moved for both, (b) ems's lossy copper reaches −60 and −70 dB in about
+the built-in solver's steps, (c) the oracle job has compared ems with openEMS on its three cases, which it does
+from this change on. Memory is not a condition. The default was switched in the worktree to run the built-in
+solver's tests on ems and switched back; the tests name their solver instead.
+*Not established:* which solver is right on the long line above 6 GHz (D52 is a quasi-static 2D model; the
+test's 6 % was set from the built-in solver's own +5.0 %) and on the loss of slanted `solid` copper; whether
+ems's excess on the long line is the measurement at a microstrip port on `solid` copper or the line (with lumped
+ports on 24 mm the two agree to 0.006 dB); what holds the energy of ems's lossy copper at −60 dB; the openEMS
+oracle with ems, which has not run anywhere yet; the via transition on 0.2 mm cells with ems (ems's own numbers
+are quoted in the table); times on a shared machine vary by a fifth; memory is the process's peak above its
+level before the run, which under-reports a run after a larger one.
+
 ## Open questions
