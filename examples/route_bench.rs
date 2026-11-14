@@ -5,7 +5,14 @@
 //! DRC errors per board. With `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar` every board is
 //! also routed by freerouting (external process, DSN/SES) for comparison. `CADLAB_ROUTE_RENDER=<dir>`
 //! renders cadlab's results; `CADLAB_BENCH_BUDGET_MS` sets the time budget (default 120000);
-//! `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search (default: the router's default).
+//! `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search (default: the router's default) and
+//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85; here and in the corpus
+//! mode). guide takes no seed, no budget and no work budget, so those are not passed to it: bound
+//! a run from outside (`timeout 1200 route_bench --corpus <board>`), one board per process.
+//! `CADLAB_BENCH_VIA_IN_PAD=1` lets guide place vias in pads, as it does on its own; without it
+//! the adapter forbids them, as the native router does. With
+//! `CADLAB_BENCH_VERBOSE=1` both modes count the vias in surface-mount pads of their net.
+//! `CADLAB_BENCH_SEED=<n>` sets the seed (default 1).
 //!
 //! **Corpus re-route mode**: `route_bench --corpus [names...]` imports the boards of the
 //! open-source corpus (`tests/corpus/projects.toml`, fetched by `scripts/fetch-corpus.sh` into
@@ -76,7 +83,8 @@ fn search_kind() -> Option<SearchKind> {
         "grid" => Some(SearchKind::Grid),
         "gridless" => Some(SearchKind::Gridless),
         "auto" => Some(SearchKind::Auto),
-        other => panic!("CADLAB_BENCH_ROUTER: unknown router `{other}` (grid, gridless, auto)"),
+        "guide" => Some(SearchKind::Guide),
+        other => panic!("CADLAB_BENCH_ROUTER: unknown router `{other}` (grid, gridless, auto, guide)"),
     }
 }
 
@@ -88,7 +96,9 @@ fn corpus(filters: &[String]) {
         toml::from_str(&std::fs::read_to_string(root.join("tests/corpus/projects.toml")).expect("manifest"))
             .expect("manifest syntax");
     let budget: u64 = std::env::var("CADLAB_BENCH_BUDGET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000);
-    let work: Option<u64> = std::env::var("CADLAB_BENCH_WORK").ok().and_then(|v| v.parse().ok());
+    // guide has no work budget (and no time budget): it runs until it is done.
+    let guide = search_kind() == Some(SearchKind::Guide);
+    let work: Option<u64> = std::env::var("CADLAB_BENCH_WORK").ok().and_then(|v| v.parse().ok()).filter(|_| !guide);
     let verbose = std::env::var_os("CADLAB_BENCH_VERBOSE").is_some();
     println!(
         "| board | layers | connections | completion | failed | DRC unrouted | vias | length | time | work | budget out | DRC errors |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
@@ -152,6 +162,7 @@ fn corpus(filters: &[String]) {
             seed: std::env::var("CADLAB_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
             search: search_kind(),
             fanout: std::env::var("CADLAB_BENCH_FANOUT").ok().map(|v| v != "0"),
+            via_in_pad: std::env::var_os("CADLAB_BENCH_VIA_IN_PAD").is_some(),
             ..Default::default()
         };
         let t = Instant::now();
@@ -182,6 +193,14 @@ fn corpus(filters: &[String]) {
         q.board_mut().tracks.extend(r.tracks.iter().cloned());
         q.board_mut().vias.extend(r.vias.iter().cloned());
         let drc = drc_errors(&q).saturating_sub(errors_before);
+        // The new errors by code: what the board has after routing, less what it had before.
+        let mut by_code = routebench::drc_codes(&q);
+        for (code, n) in routebench::drc_codes(&p) {
+            if let Some(m) = by_code.get_mut(&code) {
+                *m = m.saturating_sub(n);
+            }
+        }
+        by_code.retain(|_, n| *n > 0);
         // What `route.status` sees on the result (the router's own count is per planned connection).
         let unrouted = cadlab::drc::check(&q).iter().filter(|d| d.code == "drc.unrouted").count();
         if verbose && drc > 0 {
@@ -197,7 +216,7 @@ fn corpus(filters: &[String]) {
             dump(&q, &spec);
         }
         println!(
-            "| {} | {} | {} | {:.1}% | {} | {} | {} | {:.1} mm | {:.1} s | {:.1} M | {} | {} |",
+            "| {} | {} | {} | {:.1}% | {} | {} | {} | {:.1} mm | {:.1} s | {:.1} M | {} | {}{} |",
             e.name,
             e.layers,
             r.stats.connections,
@@ -209,10 +228,20 @@ fn corpus(filters: &[String]) {
             ms as f64 / 1000.0,
             r.stats.work as f64 / 1e6,
             if r.stats.budget_exhausted { "yes" } else { "no" },
-            drc
+            drc,
+            if by_code.is_empty() {
+                String::new()
+            } else {
+                let codes: Vec<String> = by_code.iter().map(|(c, n)| format!("{n}× {c}")).collect();
+                format!(" ({})", codes.join(", "))
+            }
         );
+        for n in &r.notes {
+            eprintln!("  {}: note {}: {}", e.name, n.code, n.message);
+        }
         if verbose {
             eprintln!("  stats: {}", serde_json::to_string(&r.stats).unwrap_or_default());
+            eprintln!("  {}: {} of {} via(s) in SMD pads", e.name, routebench::vias_in_pads(&q), q.board().vias.len());
         }
         let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
         for c in r.connections.iter().filter(|c| c.status == router::ConnStatus::Failed) {

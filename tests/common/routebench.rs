@@ -433,6 +433,8 @@ pub struct Metrics {
     pub drc_errors: usize,
     /// Whether the time budget ran out (cadlab only; the result then depends on the machine).
     pub budget_exhausted: bool,
+    /// The DRC errors by code (those of `drc_errors`, the board's own before routing included).
+    pub drc_codes: BTreeMap<String, usize>,
 }
 
 /// Counts corners of 90° or sharper (two segments of one net and layer meeting at a point
@@ -477,6 +479,34 @@ fn drc_errors(p: &Project) -> usize {
         .count()
 }
 
+/// Vias whose center lies in the box of a surface-mount pad of their net (via-in-pad: legal for
+/// the DRC, but a fab option; the native router never places one, the guide backend can).
+pub fn vias_in_pads(p: &Project) -> usize {
+    let pads = cadlab::board::placed_pads(p);
+    let smd: Vec<_> =
+        pads.iter().filter(|pp| pp.hole.is_none()).filter_map(|pp| Some((pp, pp.shape.bbox()?))).collect();
+    p.board()
+        .vias
+        .iter()
+        .filter(|v| {
+            smd.iter().any(|(pp, b)| {
+                pp.net == v.net && (b.min.x..=b.max.x).contains(&v.at.x.0) && (b.min.y..=b.max.y).contains(&v.at.y.0)
+            })
+        })
+        .count()
+}
+
+/// The DRC errors other than unrouted connections, counted by code.
+pub fn drc_codes(p: &Project) -> BTreeMap<String, usize> {
+    let mut codes = BTreeMap::new();
+    for d in cadlab::drc::check(p) {
+        if d.severity == cadlab::Severity::Error && d.code != "drc.unrouted" {
+            *codes.entry(d.code.to_string()).or_default() += 1;
+        }
+    }
+    codes
+}
+
 /// Metrics of the routed board in the session.
 pub fn measure(router: &str, r: &Registry, s: &mut Session, ms: u128, drc_before: usize) -> Metrics {
     let st = exec(r, s, "route.status", json!({}));
@@ -497,33 +527,67 @@ pub fn measure(router: &str, r: &Registry, s: &mut Session, ms: u128, drc_before
         ms,
         drc_errors: drc_errors(p).saturating_sub(drc_before),
         budget_exhausted: false,
+        drc_codes: drc_codes(p),
     }
 }
 
-/// Routes a case with cadlab (`route.all`, seed 1, `budget_ms`), optionally rendering the result
-/// to `render/<name>.png`. `CADLAB_BENCH_VERBOSE` prints the router's stats and failures.
-/// `CADLAB_BENCH_ROUTER` (`grid`, `gridless`, `auto`) picks the search.
+/// Routes a case with cadlab (`route.all`, seed 1 or `CADLAB_BENCH_SEED`, `budget_ms`), optionally
+/// rendering the result to `render/<name>.png`. `CADLAB_BENCH_VERBOSE` prints the router's stats
+/// and failures. `CADLAB_BENCH_ROUTER` (`grid`, `gridless`, `auto`, `guide`) picks the search or
+/// the backend: `guide` is the guide crate's router (D85), which takes no seed and no budget, so
+/// neither is passed and the row is named after it.
 pub fn run_cadlab(case: &Case, budget_ms: u64, render: Option<&Path>) -> Metrics {
     let (_d, r, mut s) = (case.build)();
     let before = drc_errors(s.project.as_ref().unwrap());
     let t = Instant::now();
-    let mut args = json!({"budget_ms": budget_ms, "seed": 1});
-    if let Ok(router) = std::env::var("CADLAB_BENCH_ROUTER") {
-        args["router"] = router.into();
+    let seed: u64 = std::env::var("CADLAB_BENCH_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let mut args = json!({"budget_ms": budget_ms, "seed": seed});
+    let router = std::env::var("CADLAB_BENCH_ROUTER").ok();
+    let guide = router.as_deref() == Some("guide");
+    if guide {
+        args = json!({});
     }
-    let o = exec(&r, &mut s, "route.all", args);
+    if let Some(router) = &router {
+        args["router"] = router.clone().into();
+    }
+    // `CADLAB_BENCH_VIA_IN_PAD=1` with guide: vias in pads allowed, which no command offers, so
+    // the library is called and its result applied as `route.all` applies it.
+    let o = if guide && std::env::var_os("CADLAB_BENCH_VIA_IN_PAD").is_some() {
+        use cadlab::router::{Hooks, RouteOptions, Scope, SearchKind, route};
+        let opts = RouteOptions { search: Some(SearchKind::Guide), via_in_pad: true, ..Default::default() };
+        let p = s.project.as_mut().unwrap();
+        let res = route(p, &Scope::All, &opts, &Hooks::none()).expect("guide");
+        for mut t in res.tracks {
+            t.id = p.alloc_id();
+            p.board_mut().tracks.push(t);
+        }
+        for mut v in res.vias {
+            v.id = p.alloc_id();
+            p.board_mut().vias.push(v);
+        }
+        json!({"output": {"stats": res.stats, "connections": res.connections}})
+    } else {
+        exec(&r, &mut s, "route.all", args)
+    };
     let ms = t.elapsed().as_millis();
     if std::env::var_os("CADLAB_BENCH_VERBOSE").is_some() {
         eprintln!("{}: {}", case.name, o["output"]["stats"]);
         for c in o["output"]["connections"].as_array().unwrap().iter().filter(|c| c["status"] != "routed") {
             eprintln!("  {} {} -> {}: {}", c["net"], c["from"], c["to"], c["reason"]);
         }
+        let p = s.project.as_ref().unwrap();
+        eprintln!("  {}: {} of {} via(s) in SMD pads", case.name, vias_in_pads(p), p.board().vias.len());
     }
     if let Some(dir) = render {
         let path = dir.join(format!("{}.png", case.name));
         exec(&r, &mut s, "render.board", json!({"path": path, "px_per_mm": 30}));
     }
-    let mut m = measure("cadlab", &r, &mut s, ms, before);
+    let name = match (guide, std::env::var_os("CADLAB_BENCH_VIA_IN_PAD").is_some()) {
+        (true, true) => "guide, vias in pads",
+        (true, false) => "guide",
+        _ => "cadlab",
+    };
+    let mut m = measure(name, &r, &mut s, ms, before);
     m.budget_exhausted = o["output"]["stats"]["budget_exhausted"].as_bool().expect("route.all stats.budget_exhausted");
     m
 }
@@ -578,7 +642,7 @@ pub const HEADER: &str = "| board | router | connections | completion | vias | l
 /// One table row.
 pub fn row(case: &Case, m: &Metrics) -> String {
     format!(
-        "| {} | {} | {} | {:.1}% | {} | {:.1} mm | {} | {} | {} ms | {} |",
+        "| {} | {} | {} | {:.1}% | {} | {:.1} mm | {} | {} | {} ms | {}{} |",
         case.name,
         m.router,
         m.connections,
@@ -588,6 +652,12 @@ pub fn row(case: &Case, m: &Metrics) -> String {
         m.segments,
         m.sharp_corners,
         m.ms,
-        m.drc_errors
+        m.drc_errors,
+        if m.drc_errors > 0 {
+            let codes: Vec<String> = m.drc_codes.iter().map(|(c, n)| format!("{n}× {c}")).collect();
+            format!(" ({})", codes.join(", "))
+        } else {
+            String::new()
+        }
     )
 }
