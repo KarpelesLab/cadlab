@@ -1,4 +1,5 @@
-//! Simulation commands: `sim.sparams` (the built-in FDTD solver, `crate::fdtd`).
+//! Simulation commands: `sim.sparams` (the built-in FDTD solver, `crate::fdtd`, or the ems crate's
+//! on the same region with `solver: ems`).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -28,7 +29,7 @@ pub(crate) fn register(r: &mut Registry) {
 /// Two-pin resistors, capacitors and inductors in the region are lumped elements from their part
 /// values (`resistance`, `capacitance`, `inductance`, and `esr` / `esl` when given).
 /// Long: reports progress and can be cancelled; `max_cells` guards the mesh size, and `plan` shows
-/// the mesh, ports, parts and warnings of a run, with its cost, without running it.
+/// a run's mesh, ports, parts, warnings and cost without running it.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SParams {
@@ -168,6 +169,12 @@ pub struct SParams {
     /// staircase).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conformal: Option<bool>,
+    /// `builtin` (default) or `ems` (the ems crate's FDTD, a cross-check).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver: Option<fdtd::Solver>,
+    /// Worker threads (default: automatic); the result does not depend on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u32>,
 }
 
 /// What a run will cost, from the plan.
@@ -235,6 +242,13 @@ pub struct Simulated {
     /// Mesh edges partly covered by diagonal or curved copper (conformal cells).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conformal_edges: usize,
+    /// The solver that ran, when not the built-in one.
+    #[serde(default, skip_serializing_if = "is_builtin")]
+    pub solver: fdtd::Solver,
+}
+
+fn is_builtin(s: &fdtd::Solver) -> bool {
+    *s == fdtd::Solver::Builtin
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -374,6 +388,8 @@ impl Command for SParams {
             parts: self.parts.unwrap_or(true),
             overrides: self.part_values.clone(),
             conformal: self.conformal.unwrap_or(true),
+            solver: self.solver.unwrap_or_default(),
+            threads: self.threads.unwrap_or(0) as usize,
             ..fdtd::Options::default()
         };
         let to_error = |e: fdtd::Error| {
@@ -423,6 +439,7 @@ impl Command for SParams {
                 nets: plan.nets,
                 parts: plan.parts,
                 conformal_edges: plan.conformal_edges,
+                solver: opts.solver,
             });
         }
         let mut result = {
@@ -430,7 +447,8 @@ impl Command for SParams {
             let cancelled = || ctx.check_cancelled().is_err();
             fdtd::sparams(p, &opts, &fdtd::Hooks { progress: &progress, cancelled: &cancelled }).map_err(to_error)?
         };
-        result.touchstone.comments = provenance(&result.ports, &result.parts, &result.window, &self.part_values);
+        result.touchstone.comments =
+            provenance(opts.solver, &result.ports, &result.parts, &result.window, &self.part_values);
         let dir = export::resolve(ctx, self.dir.as_deref(), PathBuf::from("out/sim"));
         let ts = &result.touchstone;
         let n = ts.ports;
@@ -477,13 +495,15 @@ impl Command for SParams {
             nets: result.nets,
             parts: result.parts,
             conformal_edges: result.conformal_edges,
+            solver: opts.solver,
         })
     }
 
     fn summarize(o: &Simulated) -> String {
         let mut s = format!(
-            "{} {} port(s) on {}×{}×{} lines ({} cells, smallest {} / {} / {}, timestep {:.3} ps)",
+            "{}{} {} port(s) on {}×{}×{} lines ({} cells, smallest {} / {} / {}, timestep {:.3} ps)",
             if o.planned { "plan (not run):" } else { "simulated" },
+            if o.solver == fdtd::Solver::Ems { " with ems:" } else { "" },
             o.ports.len(),
             o.mesh.lines[0],
             o.mesh.lines[1],
@@ -538,14 +558,19 @@ impl Command for SParams {
 
 /// The Touchstone header: what the data is, so the file explains itself away from this project.
 fn provenance(
+    solver: fdtd::Solver,
     ports: &[openems::PortInfo],
     parts: &[fdtd::LumpedPart],
     window: &(Point, Point),
     values: &BTreeMap<String, BTreeMap<String, Quantity>>,
 ) -> Vec<String> {
     let mut out = vec![format!(
-        "cadlab sim.sparams: board region ({}, {}) .. ({}, {})",
-        window.0.x, window.0.y, window.1.x, window.1.y
+        "cadlab sim.sparams{}: board region ({}, {}) .. ({}, {})",
+        if solver == fdtd::Solver::Ems { " (solver: ems)" } else { "" },
+        window.0.x,
+        window.0.y,
+        window.1.x,
+        window.1.y
     )];
     for p in ports {
         out.push(format!("port {}: {} on {} over {}, {}", p.number, p.at, p.layer, p.reference, p.z0));

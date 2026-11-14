@@ -160,6 +160,7 @@ name = "cadlab"
 version = "0.0.4"
 dependencies = [
  "clap",
+ "ems",
  "fstool",
  "indexmap",
  "insta",
@@ -343,6 +344,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
+name = "csx"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d0dffc04cc80f24e77e13b730febb44a4aafb29d8eaedd165081c8e77550f61"
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -353,6 +360,15 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "ems"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b5b7c54161c0d94b23d979277d11c2e69a85c9b42fd70ca2a504261cb8ccf60"
+dependencies = [
+ "csx",
+]
 
 [[package]]
 name = "encode_unicode"

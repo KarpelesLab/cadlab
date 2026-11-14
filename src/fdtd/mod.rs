@@ -27,6 +27,8 @@
 //!   terminations that are not exactly matched do not bias the result.
 
 pub mod conformal;
+#[cfg(feature = "ems")]
+pub(crate) mod ems;
 pub mod engine;
 pub mod fit;
 pub(crate) mod parts;
@@ -57,6 +59,17 @@ const UNRESOLVED: f64 = 1.5;
 /// Cells across the narrowest slanted track when the mesh is refined for it.
 const CELLS_ACROSS: f64 = 2.0;
 
+/// The solver that runs a region.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Solver {
+    /// cadlab's own FDTD.
+    #[default]
+    Builtin,
+    /// The `ems` crate's FDTD (D86).
+    Ems,
+}
+
 /// Simulation options: the region and mesh as for the openEMS export, plus the solver's limits.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -73,6 +86,10 @@ pub struct Options {
     /// Conformal copper (Dey–Mittra) where polygon edges are neither horizontal nor vertical;
     /// false: every edge is all conductor or all open (staircase).
     pub conformal: bool,
+    /// The solver.
+    pub solver: Solver,
+    /// Worker threads (0: from the grid size and the machine). The result does not depend on it.
+    pub threads: usize,
 }
 
 impl Default for Options {
@@ -89,6 +106,8 @@ impl Default for Options {
             parts: true,
             overrides: Overrides::new(),
             conformal: true,
+            solver: Solver::Builtin,
+            threads: 0,
         }
     }
 }
@@ -163,7 +182,7 @@ pub struct SParams {
 }
 
 /// How a port is measured.
-enum Measure {
+pub(crate) enum Measure {
     /// The lumped element's own voltage and current.
     Element,
     /// Voltage probe and the two current probes around the reference plane (probe indices), the
@@ -172,13 +191,19 @@ enum Measure {
     Line { v: usize, i: [usize; 2], w: [f64; 2], sign: f64 },
 }
 
+/// The ports of a region on its mesh: node boxes of the resistive sources, the probes of the
+/// microstrip ports and how each port is measured. Solver-neutral: mesh node indices only.
+pub(crate) struct PortSet {
+    pub(crate) ports: Vec<LumpedPort>,
+    pub(crate) measures: Vec<Measure>,
+    pub(crate) probes: Vec<Probe>,
+    pub(crate) z0: Vec<f64>,
+}
+
 /// The engine's view of a board region.
 struct Built {
     structure: Structure,
-    ports: Vec<LumpedPort>,
-    measures: Vec<Measure>,
-    probes: Vec<Probe>,
-    z0: Vec<f64>,
+    ports: PortSet,
     parts: Vec<LumpedPart>,
     conformal_edges: usize,
 }
@@ -308,40 +333,70 @@ fn build(
                 .push(conformal::Prism { shape: vec![shape], z: (r.layers[h.span.1].bottom, r.layers[h.span.0].top) });
         }
         conformal_edges = conformal::apply(&mut s, &prisms).partial_edges;
-        for c in &r.copper {
-            let lines = s.lines();
-            if let Some(&(width, cell)) = conformal::narrow(&c.shape, &lines[0], &lines[1], UNRESOLVED).first() {
-                let mut d = Diagnostic::warning(
-                    "sim.slanted_copper_unresolved",
-                    format!(
-                        "a diagonal track on {} ({} mm wide) spans too few mesh cells ({} mm each): it can come \
-                         out as an open circuit, and its impedance and delay are unreliable",
-                        r.layers[c.layer].name,
-                        openems::mm(width as i64),
-                        openems::mm(cell as i64),
-                    ),
-                )
-                .with_hint(format!(
-                    "set `max_cell` to {} mm or less, or leave it out to have the mesh refined",
-                    openems::mm((width / CELLS_ACROSS) as i64)
-                ));
-                if let Some(net) = &c.net {
-                    d = d.with_subject(ObjectRef::Net(net.clone()));
-                }
-                diags.push(d);
-            }
-        }
+        unresolved(r, diags);
     }
     let parts = parts::place(&mut s, r, parts, diags);
 
+    let ports = place_ports(r)?;
+    Ok(Built { structure: s, ports, parts, conformal_edges })
+}
+
+/// Warns of diagonal tracks narrower than [`UNRESOLVED`] cells on the region's mesh (with an
+/// explicit `max_cell`: otherwise the mesh was refined for them).
+pub(crate) fn unresolved(r: &Region, diags: &mut Vec<Diagnostic>) {
+    for c in &r.copper {
+        if let Some(&(width, cell)) = conformal::narrow(&c.shape, &r.lines[0], &r.lines[1], UNRESOLVED).first() {
+            let mut d = Diagnostic::warning(
+                "sim.slanted_copper_unresolved",
+                format!(
+                    "a diagonal track on {} ({} mm wide) spans too few mesh cells ({} mm each): it can come out as \
+                     an open circuit, and its impedance and delay are unreliable",
+                    r.layers[c.layer].name,
+                    openems::mm(width as i64),
+                    openems::mm(cell as i64),
+                ),
+            )
+            .with_hint(format!(
+                "set `max_cell` to {} mm or less, or leave it out to have the mesh refined",
+                openems::mm((width / CELLS_ACROSS) as i64)
+            ));
+            if let Some(net) = &c.net {
+                d = d.with_subject(ObjectRef::Net(net.clone()));
+            }
+            diags.push(d);
+        }
+    }
+}
+
+/// Index of the mesh line nearest to `at` (nm), the lower one on a tie: where the engines snap.
+pub(crate) fn node(lines: &[i64], at: i64) -> usize {
+    match lines.binary_search(&at) {
+        Ok(i) => i,
+        Err(0) => 0,
+        Err(i) if i >= lines.len() => lines.len() - 1,
+        Err(i) => {
+            if at - lines[i - 1] <= lines[i] - at {
+                i - 1
+            } else {
+                i
+            }
+        }
+    }
+}
+
+/// Places the region's ports on its mesh: lumped ports as columns of z edges between the copper
+/// surfaces, microstrip ports as the same source on the line with a voltage probe and two
+/// current loops around their reference plane.
+pub(crate) fn place_ports(r: &Region) -> Result<PortSet, Error> {
     let mut ports = Vec::new();
     let mut measures = Vec::new();
     let mut probes = Vec::new();
     let mut z0 = Vec::new();
-    let n = s.n();
+    let lines = &r.lines;
+    let n = [lines[0].len(), lines[1].len(), lines[2].len()];
     for p in &r.ports {
         z0.push(p.info.z0.to_f64());
-        let node = |a: usize, v: i64| s.node(a, v);
+        let node = |a: usize, v: i64| node(&lines[a], v);
         match p.info.kind {
             PortKind::Lumped => {
                 let mut lo = [0; 3];
@@ -420,8 +475,7 @@ fn build(
                 let i = probes.len();
                 probes.push(Probe::Current { axis: a, at: m - 1, lo: lo2, hi: hi2 });
                 probes.push(Probe::Current { axis: a, at: m, lo: lo2, hi: hi2 });
-                let (dm, dp) =
-                    ((s.lines()[a][m] - s.lines()[a][m - 1]) as f64, (s.lines()[a][m + 1] - s.lines()[a][m]) as f64);
+                let (dm, dp) = ((lines[a][m] - lines[a][m - 1]) as f64, (lines[a][m + 1] - lines[a][m]) as f64);
                 measures.push(Measure::Line {
                     v,
                     i: [i, i + 1],
@@ -431,7 +485,7 @@ fn build(
             }
         }
     }
-    Ok(Built { structure: s, ports, measures, probes, z0, parts, conformal_edges })
+    Ok(PortSet { ports, measures, probes, z0 })
 }
 
 /// Solves `S A = B` for S (N×N complex, row-major), by Gaussian elimination with partial
@@ -508,6 +562,15 @@ pub struct Plan {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// A region extracted and checked, before it is handed to a solver.
+pub(crate) struct Extracted {
+    pub(crate) region: Region,
+    pub(crate) freqs: Vec<f64>,
+    pub(crate) band: (f64, f64),
+    pub(crate) diags: Vec<Diagnostic>,
+    pub(crate) candidates: Vec<parts::Candidate>,
+}
+
 /// A region extracted, voxelized and checked, ready to run.
 struct Prepared {
     region: Region,
@@ -517,7 +580,9 @@ struct Prepared {
     diags: Vec<Diagnostic>,
 }
 
-fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
+/// The region with its mesh (refined for narrow diagonal tracks), the cell guard, the frequencies
+/// and the parts that may become lumped elements: what every solver starts from.
+pub(crate) fn extract(p: &Project, o: &Options) -> Result<Extracted, Error> {
     // The microstrip ports feed and measure on mesh lines.
     let mut region = openems::Options { port_planes: true, ..o.region.clone() };
     let mut r = openems::extract(p, &region)?;
@@ -592,16 +657,21 @@ fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
     } else {
         Vec::new()
     };
+    Ok(Extracted { region: r, freqs, band, diags, candidates })
+}
+
+fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
+    let Extracted { region: r, freqs, band, mut diags, candidates } = extract(p, o)?;
     let b = build(&r, band, candidates, o.conformal, &mut diags)?;
-    notes(p, o, &r, &b, &mut diags);
+    notes(p, o, &r, &b.parts, &mut diags);
     Ok(Prepared { region: r, built: b, freqs, band, diags })
 }
 
 /// What a designer should know before reading the result: which part values were ideal, what a
 /// port stands in for, parts in the absorbing layer, overrides that did nothing.
-fn notes(p: &Project, o: &Options, r: &Region, b: &Built, diags: &mut Vec<Diagnostic>) {
+pub(crate) fn notes(p: &Project, o: &Options, r: &Region, parts: &[LumpedPart], diags: &mut Vec<Diagnostic>) {
     for refdes in o.overrides.keys() {
-        if !b.parts.iter().any(|q| q.refdes == *refdes) {
+        if !parts.iter().any(|q| q.refdes == *refdes) {
             diags.push(
                 Diagnostic::warning(
                     "sim.override_unused",
@@ -612,7 +682,7 @@ fn notes(p: &Project, o: &Options, r: &Region, b: &Built, diags: &mut Vec<Diagno
             );
         }
     }
-    let ideal = parts::ideal(&b.parts);
+    let ideal = parts::ideal(parts);
     if !ideal.is_empty() {
         diags.push(
             Diagnostic::info(
@@ -646,8 +716,7 @@ fn notes(p: &Project, o: &Options, r: &Region, b: &Built, diags: &mut Vec<Diagno
     let n = o.region.pml_cells as usize;
     let lines = &r.lines;
     let pads = crate::board::placed_pads(p);
-    let in_pml: Vec<&str> = b
-        .parts
+    let in_pml: Vec<&str> = parts
         .iter()
         .filter(|q| {
             let at = |ls: &[i64], v: i64| ls.len() > 2 * n && (v < ls[n] || v > ls[ls.len() - 1 - n]);
@@ -668,13 +737,40 @@ fn notes(p: &Project, o: &Options, r: &Region, b: &Built, diags: &mut Vec<Diagno
     }
 }
 
+/// Without the `ems` feature: the solver is not in this build.
+#[cfg(not(feature = "ems"))]
+fn no_ems() -> Error {
+    Error::new(
+        "sim.solver_unavailable",
+        "this build of cadlab has no ems solver",
+        "build with the `ems` cargo feature (a default feature), or use `solver: builtin`",
+    )
+}
+
 /// Sets the simulation up and checks it, without running it.
 pub fn plan(p: &Project, o: &Options) -> Result<Plan, Error> {
+    if o.solver == Solver::Ems {
+        #[cfg(feature = "ems")]
+        return ems::plan(p, o);
+        #[cfg(not(feature = "ems"))]
+        return Err(no_ems());
+    }
     let Prepared { region: r, built: b, diags, .. } = prepare(p, o)?;
+    Ok(planned(r, o.courant, b.parts, b.conformal_edges, diags))
+}
+
+/// The plan of a region: its mesh, ports and the timestep at `courant` of the mesh's limit.
+pub(crate) fn planned(
+    r: Region,
+    courant: f64,
+    parts: Vec<LumpedPart>,
+    conformal_edges: usize,
+    diags: Vec<Diagnostic>,
+) -> Plan {
     let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
-    let timestep = r.mesh.timestep * o.courant;
+    let timestep = r.mesh.timestep * courant;
     let window = r.window;
-    Ok(Plan {
+    Plan {
         ports: r.ports.into_iter().map(|p| p.info).collect(),
         mesh: r.mesh,
         window: (Point::new(Nm(window.min.x), Nm(window.min.y)), Point::new(Nm(window.max.x), Nm(window.max.y))),
@@ -683,14 +779,134 @@ pub fn plan(p: &Project, o: &Options) -> Result<Plan, Error> {
         excitation: (r.f0, r.fc),
         timestep,
         pulse_steps: (excitation.end() / timestep).ceil() as u64,
-        parts: b.parts,
-        conformal_edges: b.conformal_edges,
+        parts,
+        conformal_edges,
         diagnostics: diags,
-    })
+    }
+}
+
+/// The power waves of every port in every run, as the runs deliver them: what S comes from.
+pub(crate) struct Waves {
+    np: usize,
+    /// Per frequency: `a[f][i * np + j]` = a of port i in run j.
+    a: Vec<Vec<C64>>,
+    b: Vec<Vec<C64>>,
+    runs: Vec<PortRun>,
+}
+
+impl Waves {
+    pub(crate) fn new(np: usize, nf: usize) -> Waves {
+        let a = vec![vec![C64::new(0.0, 0.0); np * np]; nf];
+        Waves { np, b: a.clone(), a, runs: Vec::new() }
+    }
+
+    /// Port `i` in run `j`: its voltage and the current into the structure at every frequency,
+    /// as waves on `z` ohms.
+    pub(crate) fn set(&mut self, i: usize, j: usize, z: f64, v: &[C64], cur: &[C64]) {
+        let k = C64::new(1.0 / (2.0 * z.sqrt()), 0.0);
+        for (fi, (v, cur)) in v.iter().zip(cur).enumerate() {
+            let zi = *cur * C64::new(z, 0.0);
+            self.a[fi][i * self.np + j] = (*v + zi) * k;
+            self.b[fi][i * self.np + j] = (*v - zi) * k;
+        }
+    }
+
+    /// Records run `j` (0-based), with the warnings of a run that did not converge.
+    pub(crate) fn ran(
+        &mut self,
+        j: usize,
+        steps: u64,
+        converged: bool,
+        energy_db: f64,
+        pulse_steps: u64,
+        diags: &mut Vec<Diagnostic>,
+    ) {
+        if !converged && steps < pulse_steps {
+            diags.push(
+                Diagnostic::warning(
+                    "sim.stopped_in_pulse",
+                    format!(
+                        "port {}: stopped after {steps} timesteps, inside the excitation pulse ({pulse_steps} \
+                         timesteps): the S-parameters mean nothing",
+                        j + 1,
+                    ),
+                )
+                .with_hint(format!(
+                    "raise `timesteps` well above {pulse_steps}; to see the mesh and ports without running, use `plan`"
+                )),
+            );
+        } else if !converged {
+            diags.push(
+                Diagnostic::warning(
+                    "sim.not_converged",
+                    format!(
+                        "port {}: the energy only decayed to {energy_db:.1} dB in {steps} timesteps: the \
+                         S-parameters are truncated",
+                        j + 1,
+                    ),
+                )
+                .with_hint("raise `timesteps`, or lower `end_criteria` (a resonant structure rings long)"),
+            );
+        }
+        self.runs.push(PortRun { port: j + 1, steps, converged, energy_db: round2(energy_db) });
+    }
+
+    /// S = B A⁻¹ at every frequency, as the result of the simulation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish(
+        self,
+        r: Region,
+        freqs: Vec<f64>,
+        z0: Vec<f64>,
+        timestep: f64,
+        parts: Vec<LumpedPart>,
+        conformal_edges: usize,
+        diags: Vec<Diagnostic>,
+    ) -> SParams {
+        let np = self.np;
+        let mut data = Vec::with_capacity(freqs.len());
+        for (a, b) in self.a.iter().zip(&self.b) {
+            let s = solve_s(a, b, np).unwrap_or_else(|| vec![C64::new(f64::NAN, f64::NAN); np * np]);
+            data.push(s.into_iter().map(|c| touchstone::Complex::new(sig(c.re), sig(c.im))).collect());
+        }
+        let ts = Touchstone {
+            version: "1.1".into(),
+            ports: np,
+            parameter: touchstone::Parameter::S,
+            format: touchstone::Format::RI,
+            reference: z0,
+            freqs,
+            data,
+            noise: Vec::new(),
+            warnings: Vec::new(),
+            comments: Vec::new(),
+        };
+        let window = r.window;
+        SParams {
+            touchstone: ts,
+            ports: r.ports.into_iter().map(|p| p.info).collect(),
+            mesh: r.mesh,
+            window: (Point::new(Nm(window.min.x), Nm(window.min.y)), Point::new(Nm(window.max.x), Nm(window.max.y))),
+            z_range: (Nm(r.z_range.0), Nm(r.z_range.1)),
+            nets: r.nets,
+            excitation: (r.f0, r.fc),
+            timestep,
+            runs: self.runs,
+            parts,
+            conformal_edges,
+            diagnostics: diags,
+        }
+    }
 }
 
 /// Simulates the region and returns its S-parameters.
 pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, Error> {
+    if o.solver == Solver::Ems {
+        #[cfg(feature = "ems")]
+        return ems::sparams(p, o, hooks);
+        #[cfg(not(feature = "ems"))]
+        return Err(no_ems());
+    }
     let Prepared { region: r, built: b, freqs, band, mut diags } = prepare(p, o)?;
     let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
     let pml = o.region.pml_cells as usize;
@@ -701,17 +917,14 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
         end_db: o.region.end_criteria_db as f64,
         excitation,
         freqs: freqs.clone(),
-        threads: 0,
+        threads: o.threads,
         surface: o.region.conductivity.map(|sigma| fit::surface_fit(sigma, &o.region.roughness, band.0, band.1)),
     };
-    let mut sim = Simulation::new(&b.structure, &b.ports, b.probes.clone(), settings)
+    let PortSet { ports, measures, probes, z0 } = b.ports;
+    let mut sim = Simulation::new(&b.structure, &ports, probes, settings)
         .map_err(|m| Error::new("sim.bad_setup", m, "grow the region or lower `pml_cells`"))?;
-    let np = b.ports.len();
-    let nf = freqs.len();
-    // Waves per frequency: a[f][i * np + j] = a_i in run j.
-    let mut a = vec![vec![C64::new(0.0, 0.0); np * np]; nf];
-    let mut bw = a.clone();
-    let mut runs = Vec::new();
+    let np = ports.len();
+    let mut waves = Waves::new(np, freqs.len());
     for j in 0..np {
         let progress = |done: u64, _total: Option<u64>, msg: &str| {
             (hooks.progress)(done, Some(o.region.timesteps), &format!("port {}/{np}: {msg}", j + 1));
@@ -727,91 +940,22 @@ pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, E
             ));
         }
         let pulse_steps = (excitation.end() / sim.dt()).ceil() as u64;
-        if !run.converged && run.steps < pulse_steps {
-            diags.push(
-                Diagnostic::warning(
-                    "sim.stopped_in_pulse",
-                    format!(
-                        "port {}: stopped after {} timesteps, inside the excitation pulse ({pulse_steps} timesteps): \
-                         the S-parameters mean nothing",
-                        j + 1,
-                        run.steps
-                    ),
-                )
-                .with_hint(format!(
-                    "raise `timesteps` well above {pulse_steps}; to see the mesh and ports without running, use `plan`"
-                )),
-            );
-        } else if !run.converged {
-            diags.push(
-                Diagnostic::warning(
-                    "sim.not_converged",
-                    format!(
-                        "port {}: the energy only decayed to {:.1} dB in {} timesteps: the S-parameters are truncated",
-                        j + 1,
-                        run.energy_db,
-                        run.steps
-                    ),
-                )
-                .with_hint("raise `timesteps`, or lower `end_criteria` (a resonant structure rings long)"),
-            );
-        }
-        for (i, m) in b.measures.iter().enumerate() {
-            let z = b.z0[i];
-            let k = 1.0 / (2.0 * z.sqrt());
-            for fi in 0..nf {
-                let (v, cur) = match *m {
-                    Measure::Element => (run.port_v[i][fi], run.port_i[i][fi]),
-                    Measure::Line { v, i: [i1, i2], w: [w1, w2], sign } => {
-                        let c = (run.probes[i1][fi] * C64::new(w1, 0.0) + run.probes[i2][fi] * C64::new(w2, 0.0))
-                            * C64::new(sign, 0.0);
-                        (run.probes[v][fi], c)
-                    }
-                };
-                let zi = cur * C64::new(z, 0.0);
-                a[fi][i * np + j] = (v + zi) * C64::new(k, 0.0);
-                bw[fi][i * np + j] = (v - zi) * C64::new(k, 0.0);
+        waves.ran(j, run.steps, run.converged, run.energy_db, pulse_steps, &mut diags);
+        for (i, m) in measures.iter().enumerate() {
+            match *m {
+                Measure::Element => waves.set(i, j, z0[i], &run.port_v[i], &run.port_i[i]),
+                Measure::Line { v, i: [i1, i2], w: [w1, w2], sign } => {
+                    let cur: Vec<C64> = run.probes[i1]
+                        .iter()
+                        .zip(&run.probes[i2])
+                        .map(|(x, y)| (*x * C64::new(w1, 0.0) + *y * C64::new(w2, 0.0)) * C64::new(sign, 0.0))
+                        .collect();
+                    waves.set(i, j, z0[i], &run.probes[v], &cur);
+                }
             }
         }
-        runs.push(PortRun {
-            port: j + 1,
-            steps: run.steps,
-            converged: run.converged,
-            energy_db: round2(run.energy_db),
-        });
     }
-    let mut data = Vec::with_capacity(nf);
-    for fi in 0..nf {
-        let s = solve_s(&a[fi], &bw[fi], np).unwrap_or_else(|| vec![C64::new(f64::NAN, f64::NAN); np * np]);
-        data.push(s.into_iter().map(|c| touchstone::Complex::new(sig(c.re), sig(c.im))).collect());
-    }
-    let ts = Touchstone {
-        version: "1.1".into(),
-        ports: np,
-        parameter: touchstone::Parameter::S,
-        format: touchstone::Format::RI,
-        reference: b.z0.clone(),
-        freqs,
-        data,
-        noise: Vec::new(),
-        warnings: Vec::new(),
-        comments: Vec::new(),
-    };
-    let window = r.window;
-    Ok(SParams {
-        touchstone: ts,
-        ports: r.ports.into_iter().map(|p| p.info).collect(),
-        mesh: r.mesh,
-        window: (Point::new(Nm(window.min.x), Nm(window.min.y)), Point::new(Nm(window.max.x), Nm(window.max.y))),
-        z_range: (Nm(r.z_range.0), Nm(r.z_range.1)),
-        nets: r.nets,
-        excitation: (r.f0, r.fc),
-        timestep: sim.dt(),
-        runs,
-        parts: b.parts,
-        conformal_edges: b.conformal_edges,
-        diagnostics: diags,
-    })
+    Ok(waves.finish(r, freqs, z0, sim.dt(), b.parts, b.conformal_edges, diags))
 }
 
 fn round2(v: f64) -> f64 {

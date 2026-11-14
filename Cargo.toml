@@ -10,7 +10,7 @@ keywords = ["eda", "pcb", "cad", "electronics", "mcp"]
 categories = ["science", "command-line-utilities"]
 
 [features]
-default = ["cli", "net", "png", "parallel", "models3d"]
+default = ["cli", "net", "png", "parallel", "models3d", "ems"]
 # The `cadlab` binary (CLI + MCP server). Library users can disable it to avoid the CLI dependencies.
 cli = ["dep:clap", "dep:rpassword"]
 # Network part research providers (DigiKey, ...).
@@ -32,6 +32,11 @@ models3d = [
     "dep:oxideav-step",
     "dep:oxideav-vrml",
 ]
+
+# `sim.sparams --solver ems`: the ems FDTD solver (crates.io `ems`, with its geometry crate `csx`;
+# both MIT, no further dependencies) as a second full-wave solver on the same board region
+# (DECISIONS D86). Without it the option is refused with `sim.solver_unavailable`.
+ems = ["dep:ems"]
 
 [[bin]]
 name = "cadlab"
@@ -63,6 +68,8 @@ oxideav-gltf = { version = "0.0.4", optional = true }
 oxideav-usdz = { version = "0.0.5", optional = true }
 oxideav-step = { version = "0.0.1", optional = true, features = ["registry"] }
 oxideav-vrml = { version = "0.0.1", optional = true, features = ["registry"] }
+# Second full-wave solver (D86); its `xml` feature (openEMS files) is not needed.
+ems = { version = "0.0.6", default-features = false, optional = true }
 # Fab archives (D75): the user's own fstool, zip writer and reader only.
 fstool = { version = "0.5.2", default-features = false, features = ["archive", "gzip"] }
 
@@ -71,6 +78,14 @@ insta = { version = "1.49", features = ["json"] }
 proptest = "1"
 rayon = "1.12"
 tempfile = "3"
+
+# The ems solver's tests run whole simulations: optimized in dev and test builds too (debug
+# assertions and overflow checks stay on), as ems does for its own tests.
+[profile.dev.package.ems]
+opt-level = 2
+
+[profile.dev.package.csx]
+opt-level = 2
 
 [lints.rust]
 unsafe_code = "forbid"

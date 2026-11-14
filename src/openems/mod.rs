@@ -20,7 +20,7 @@
 
 pub mod mesh;
 mod script;
-mod xml;
+pub(crate) mod xml;
 
 use std::collections::{BTreeMap, BTreeSet};
 
