@@ -46,15 +46,35 @@ pub fn item_core(p: &Project, item: &CopperItem) -> Option<Core> {
             let pf = board.footprints.get(refdes)?;
             let fp = footprint_for(p, refdes)?;
             let tf = transform(pf);
-            let pad = fp.pads.iter().find(|pad| &pad.number == number && tf(pad.at) == item.anchor)?;
             let copper = board.stackup.copper_names();
-            let shape = match item.layers.first() {
-                Some(l) => pad.shape_on(stack_layer(&copper, l, pf.side)),
-                None => &pad.shape,
+            let core_of = |pad: &crate::model::footprint::Pad| -> Option<Core> {
+                let shape = match item.layers.first() {
+                    Some(l) => pad.shape_on(stack_layer(&copper, l, pf.side)),
+                    None => &pad.shape,
+                };
+                let (points, closed, radius) = shape_core(shape)?;
+                let place = |q: Point| tf(q.rotated(pad.rotation) + pad.at);
+                Some(Core { points: points.into_iter().map(place).collect(), closed, radius })
             };
-            let (points, closed, radius) = shape_core(shape)?;
-            let place = |q: Point| tf(q.rotated(pad.rotation) + pad.at);
-            Some(Core { points: points.into_iter().map(place).collect(), closed, radius })
+            let mut same = fp.pads.iter().filter(|pad| &pad.number == number && tf(pad.at) == item.anchor);
+            let first = same.next()?;
+            let Some(second) = same.next() else { return core_of(first) };
+            // Several pads of a footprint can share a number and a position (an exposed pad
+            // with a thermal via pad at its center): the item's pad is the one whose outline
+            // has the box of the item's copper. None of them: no exact outline.
+            let want = polyclip::Geometry::bbox(&item.shape)?;
+            [first, second].into_iter().chain(same).filter_map(core_of).find(|c| {
+                let r = c.radius.round() as i64;
+                let xs = || c.points.iter().map(|q| q.x.0);
+                let ys = || c.points.iter().map(|q| q.y.0);
+                let (Some(x0), Some(x1), Some(y0), Some(y1)) = (xs().min(), xs().max(), ys().min(), ys().max()) else {
+                    return false;
+                };
+                // The copper polygon approximates arcs outward by up to 1 µm.
+                [x0 - r - want.min.x, y0 - r - want.min.y, x1 + r - want.max.x, y1 + r - want.max.y]
+                    .iter()
+                    .all(|d| d.abs() <= 3_000)
+            })
         }
         _ => None,
     }
