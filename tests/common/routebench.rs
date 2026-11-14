@@ -479,9 +479,13 @@ fn drc_errors(p: &Project) -> usize {
         .count()
 }
 
-/// Vias whose center lies in the box of a surface-mount pad of their net (via-in-pad: legal for
-/// the DRC, but a fab option; the native router never places one, the guide backend can).
+/// Vias whose center lies in the copper of a surface-mount pad of their net (via-in-pad: legal
+/// for the DRC, but a fab option; the native router never places one, the guide backend can).
+/// The copper is the pad's shape, not its box: a via beside a round pad, in the corner of its
+/// box and clear of the pad, is not in it (four boards of the corpus had 3 to 7 such vias of
+/// guide's counted by the box, D91, D93).
 pub fn vias_in_pads(p: &Project) -> usize {
+    use cadlab::geom::poly::{Location, Point, locate};
     let pads = cadlab::board::placed_pads(p);
     let smd: Vec<_> =
         pads.iter().filter(|pp| pp.hole.is_none()).filter_map(|pp| Some((pp, pp.shape.bbox()?))).collect();
@@ -490,7 +494,10 @@ pub fn vias_in_pads(p: &Project) -> usize {
         .iter()
         .filter(|v| {
             smd.iter().any(|(pp, b)| {
-                pp.net == v.net && (b.min.x..=b.max.x).contains(&v.at.x.0) && (b.min.y..=b.max.y).contains(&v.at.y.0)
+                pp.net == v.net
+                    && (b.min.x..=b.max.x).contains(&v.at.x.0)
+                    && (b.min.y..=b.max.y).contains(&v.at.y.0)
+                    && locate(&pp.shape, Point::new(v.at.x.0, v.at.y.0)) != Location::Outside
             })
         })
         .count()
