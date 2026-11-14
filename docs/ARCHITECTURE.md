@@ -30,7 +30,7 @@ reader for KiCad files), `netlist::import` (D27) and `kicad_import` (`.kicad_pcb
 added `electrical` (impedance: closed forms and a 2D boundary element field solver; IPC-2152 current), `lengths` (differential pairs, length groups), `spice` (SPICE netlist export) and `lint` (design lint beyond
 ERC), see [ELECTRICAL.md](ELECTRICAL.md); later `openems` (export of a board region to the openEMS full-wave
 solver), `fdtd` (the built-in 3D FDTD solver on the same region, D59; `fdtd::ems` runs that region on the `ems`
-crate's solver instead, cargo feature `ems`, D86) and `touchstone` (Touchstone S-parameter
+crate's solver instead, cargo feature `ems`, D86, D87) and `touchstone` (Touchstone S-parameter
 files). M9 added `models3d` (3D model files decoded through the
 oxideav-mesh3d crates and placed on footprints, D36) and `body3d` (package bodies generated from footprint
 package specs, shared by the 3D view and the STEP export, D47). Modules to come: `erc` (M2),

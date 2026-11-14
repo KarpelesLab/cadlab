@@ -435,9 +435,18 @@ Research-sized items beyond the milestones above; none blocks a release.
       `ems`), through the property list the openEMS export writes; measured against the built-in solver on its
       validation cases (lossless, Debye, lumped and cavity cases equal to 0.001, two to five times faster; lossy
       solid copper, conformal sheets and roughness not at parity). The built-in solver stays the default
-- [ ] Switch `sim.sparams` to ems by default, then remove the built-in engine: when ems has a surface impedance on
-      solid metal (or conformal conducting sheets), conformal sheets on mesh planes, roughness over the band and a
-      cheaper conducting sheet (D86)
+- [x] ems 0.0.7 in `--solver ems` (D87): lossy `solid` copper as metal with a surface impedance on every face,
+      sheets as rational two-ports, roughness over the band, conformal cells where copper is oblique to the mesh,
+      typed warnings as `sim.ems_<code>` with subjects, one compile for all ports, the port voltage as the mean
+      over its columns. Running ems's lossy copper with its conformal outlines for the first time found a panic,
+      a growing mode and a loss that depended on the direction; fixed in ems, with tests there. Lossy and
+      diagonal copper now agree with the built-in solver (0.006 dB on the oracle's line, 0.2° to 3.6° on D73's)
+- [ ] Switch `sim.sparams` to ems by default, then remove the built-in engine. ems 0.0.7 has what D86 asked for.
+      What is left (D87): conformal cells that hold on a via (ems runs a region with a plated hole under two cells
+      across, or a diagonal track under 1.5, as a staircase: its conformal cells read the via transition 0.19 dB
+      from the built-in solver and further from a finer mesh than the staircase), a small-face threshold chosen
+      by ems rather than by cadlab, ems's conductor loss at the end of the band, its memory, and the oracle job
+      comparing ems with openEMS
 
 ---
 
