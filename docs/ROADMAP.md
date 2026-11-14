@@ -252,9 +252,16 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       router and guide 0.0.3, D88"): the generated boards 7 of 7; on the corpus guide ends on eleven of twelve
       boards and leaves 351 connections open where the native router leaves 86 to 105, 281 of them pads it
       cannot leave without a via in the pad or a narrower track. The default stays the native router (D88)
+- [x] guide 0.0.4 adopted in the adapter: no fill of guide's at the end, the smallest via the rules allow for
+      its escapes (the native fanout's), half the time budget for the first run and a second run on the routed
+      board after a cut run too. Measured at the default 60 s (ROUTER.md, "Native router and guide 0.0.4, D91"):
+      589 connections open on the twelve corpus boards where guide 0.0.4 behind the adapter of D88 leaves 714
+      and guide 0.0.3 left 1023 (lumenpnp-mobo 48 to 9, corne-cherry 90 to 54, glasgow-revD1 394 to 349); 240
+      against the native router's 85 on the eleven boards both have a result for. The default stays the native
+      router (D91)
 - [ ] `router: guide` level with the native router on the corpus: needs, in guide, a way out of fine-pitch pads
-      without a via in them (neck-down, smaller fanout vias), the best result so far from a stopped run, and
-      the time (D88, "What still blocks it")
+      a track of the net's width does not leave, planning and zone joining that stop at the deadline, and the
+      time (D91, "What got in the way"; D88, "What still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
