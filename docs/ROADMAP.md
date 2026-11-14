@@ -421,6 +421,14 @@ Research-sized items beyond the milestones above; none blocks a release.
       (`pml_outside`), because a board edge next to the wall diverged in openEMS's PML and Mur; via barrels as node
       columns (they read open); two-pin R, L, C as `LumpedElement`s (`parts`), compared with `sim.sparams` and
       circuit theory; `openems.diverged`, `openems.edge_near_boundary`, `openems.mur_static_field`, `openems.part_in_pml`
+- [x] The ems crate as a second full-wave solver (D86; ELECTRICAL.md "ems as a second solver"): `sim.sparams
+      --solver ems` runs the region, mesh, ports and parts of the built-in solver on the `ems` FDTD (cargo feature
+      `ems`), through the property list the openEMS export writes; measured against the built-in solver on its
+      validation cases (lossless, Debye, lumped and cavity cases equal to 0.001, two to five times faster; lossy
+      solid copper, conformal sheets and roughness not at parity). The built-in solver stays the default
+- [ ] Switch `sim.sparams` to ems by default, then remove the built-in engine: when ems has a surface impedance on
+      solid metal (or conformal conducting sheets), conformal sheets on mesh planes, roughness over the band and a
+      cheaper conducting sheet (D86)
 
 ---
 

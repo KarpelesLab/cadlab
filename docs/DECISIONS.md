@@ -2362,6 +2362,59 @@ both showed it, and the mechanism built for the first diagnosis was removed when
 simpler one did the work.
 
 
+### D86. `sim.sparams --solver ems`: the ems crate as a second full-wave solver on the same region; the built-in solver stays the default (2026-11-14)
+`ems` (crates.io, MIT, the same owner's clean-room FDTD solver meant to replace openEMS, on the geometry crate `csx`)
+can now run what `sim.sparams` runs: `solver: ems`, default `builtin` unchanged. Table and mapping: ELECTRICAL.md,
+"ems as a second solver". Neither crate's source was changed; cadlab reads their public API and documentation
+(both MIT, both clean-room themselves), and no openEMS, CSXCAD or other GPL code was read.
+**One model, three consumers.** `openems::xml::write` built the export's XML directly from the region. It is now
+two steps: `xml::properties` turns the region into a list of properties with primitives (materials, Debye
+materials, metal, conducting sheets, lumped elements; boxes, prisms, cylinders, with the priorities), and the
+writer prints that list (the golden file is unchanged byte for byte). `fdtd::ems` turns the same list into a
+`csx::ContinuousStructure`. So "ems runs the model the export writes" is true by construction, and a change to
+the export's geometry reaches both. The region's preparation was split the same way: `fdtd::extract` (region,
+mesh refinement, cell guard, part candidates), `fdtd::place_ports` (ports and probes as mesh nodes) and
+`fdtd::Waves` (waves to S, the run warnings, the result) serve both solvers; only the voxelization and the time
+stepping are the built-in solver's own.
+**Not through csx's XML writer.** Writing `export.openems`'s file with `csx`'s XML writer was considered and
+left: its output is not the file the export writes (it adds colors, weights and isotropy attributes, prints
+floats rather than the exact decimal of the integer nanometers, and has no place for the comments that carry the
+stackup's εr and tan δ, the fit's band and the roughness factor), so the golden file and the documented format
+would change, and whether openEMS's reader takes the result the same way can only be shown by the oracle job,
+which does not run here. The shared property list gives the equivalence that mattered without touching the file.
+**Ports.** Lumped ports are ems's `LumpedPort`. Microstrip ports are not ems's `MslPort`: that helper needs a
+zero-thickness strip and three equally spaced mesh lines, and reports at its own extracted line impedance; cadlab
+writes the feed as a lumped port and the measurement as plain csx probes on the planes the built-in solver
+uses, so both solvers measure the same quantity at the same plane with the same reference impedance.
+**A feature, on by default.** `ems` and `csx` have no dependencies of their own and add 21 s to a release
+build, so the feature is in the default set, like `models3d`; without it the option answers
+`sim.solver_unavailable`. MSRV 1.95 and the license list hold (both MIT, from crates.io). Dev and test builds compile the
+two crates at `opt-level = 2` (`[profile.dev.package]`): the test that runs ems takes 37 s in a debug build
+instead of 218 s.
+**`threads`.** New on the command for both solvers (the box this was measured on is shared); results are
+bit-identical for one, three and four threads in both.
+**What was measured** (the table has the numbers; ems 0.0.6, csx 0.0.2). Lossless lines, a stripline, Debye
+laminates, lumped parts and the cavities agree to three or four digits, and ems is two to five times faster
+there. The plate cavity's Q from ems's conducting sheets is within 0.2 % of h/δ. Against that: (1) lossy `solid`
+copper, cadlab's default, has to be two sheets a copper thickness apart, and reads a conductor loss uneven over
+the band, 0.089 dB against 0.044 dB at 6 GHz on the oracle's line, with 43 % more timesteps to decay; (2) diagonal
+copper on sheet or lossy copper is a staircase (143.5° against 157.5° for arg S₂₁ at 10 GHz on D73's line, the
+built-in solver's own staircase value); (3) roughness is exact at f₀ only; (4) a ground plane of sheet edges
+makes ems two to six times slower than the built-in surface impedance, with 80 to 200 MB where that takes 10.
+On session 6's matching network (lossy sheet copper with diagonal tracks, both limits at once) the two differ by
+0.04 in |S11| and 0.018 in |S21| at 2.44 GHz, ems taking 271 to 338 s for the built-in solver's 83 s.
+**Decision.** The default does not change and `src/fdtd/engine.rs` stays. ems is the cross-check that runs
+everywhere (openEMS is CI only), and the faster solver for regions without lossy copper. Switch the default when
+ems has a surface impedance on the faces of solid metal or conformal conducting sheets (1, 2), conformal
+outlines for sheets on mesh planes (2), a roughness factor over the band (3) and a sheet that costs about what a
+surface impedance does (4), and the table above then holds within the built-in solver's test tolerances; delete
+the built-in solver one release after that, once the oracle job has compared ems with openEMS on the three
+oracle cases. Until then two solvers cost little: they share everything but the time stepping.
+*Not established:* why the two-sheet copper rings in ems and not in openEMS (the same model there agrees with
+the built-in solver within a few percent); the effect of ems's uncorrected sheet edges inside the absorbing
+layer, which it warns of on every lossy run (the lossy lines agree within 0.03 dB with them); memory was measured
+as the process's peak, compile step included, not per array.
+
 
 ## Open questions
 
