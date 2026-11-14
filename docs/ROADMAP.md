@@ -245,6 +245,16 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       seven corpus boards where guide ends, 13 to 22 connections open against 139), in a seventieth to a half of
       the time on all but the smallest board, and guide cannot be given a budget, stopped or asked for a
       partial result. The default stays the native router (DECISIONS D85)
+- [x] guide 0.0.3 adopted in the adapter: budgets, cancellation and progress through guide's run control,
+      guide's cause in every failed connection, cadlab's fills as the plan, keep-out exceptions, `layers`, `seed`,
+      pad stacks, net ties and area clearances passed instead of worked around (`route.guide_no_budget`,
+      `route.guide_keepout_exception` and `route.guide_net_tie` are gone). Measured again (ROUTER.md, "Native
+      router and guide 0.0.3, D88"): the generated boards 7 of 7; on the corpus guide ends on eleven of twelve
+      boards and leaves 351 connections open where the native router leaves 86 to 105, 281 of them pads it
+      cannot leave without a via in the pad or a narrower track. The default stays the native router (D88)
+- [ ] `router: guide` level with the native router on the corpus: needs, in guide, a way out of fine-pitch pads
+      without a via in them (neck-down, smaller fanout vias), the best result so far from a stopped run, and
+      the time (D88, "What still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to

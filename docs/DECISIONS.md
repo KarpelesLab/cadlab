@@ -2599,4 +2599,96 @@ microstrip ports rises at the end of the band (0.048 against 0.036 dB at 6 GHz o
 a power iteration from below, hence the margin of 0.9); memory was measured as the process's peak, compile step
 included.
 
+### D88. guide 0.0.3 adopted: run control, per-connection causes and the host's board model replace the adapter's workarounds; the default unchanged (2026-11-14)
+D85 ended on a list of what guide needed before `router: guide` could be more than a second opinion, and what
+the adapter had to work around. guide's next release (0.0.3: run control, the connections a run leaves open, and
+"what a host's board may say") answers most of it. This pass adopts that API, removes each workaround it covers,
+and measures again. `guide = { version = "0.0.3", default-features = false, features = ["pcb"] }`; developed
+against guide's master before the release.
+**What each workaround became** (`router::guide`; ROUTER.md, "guide as a backend"):
+- *No budget, no stop, no progress* (`route.guide_no_budget`, the `work_budget` refusal) → `pcb::route_with` with a
+  `RunControl`: `work_budget` is guide's own (search nodes, the same result on any machine), the time budget a
+  deadline at four fifths of it, cancellation a flag set from guide's progress callback (four times a second),
+  progress guide's phases and counts. A run a budget stops is verified and counted like any other and says so
+  (`budget_exhausted`, `route.budget_cut`, the reason of each connection left). Both codes are gone.
+- *"guide reports nets, not connections, and no place or cause"* → `Routed::open`: each failed connection of the
+  board carries guide's cause as its reason, place, layer, subjects and hints (a pad shut in and by what, no
+  way found, a search's node limit, the budget that ended, no common layer). `keep_partial` is on, so a net
+  that cannot be routed whole keeps what it could.
+- *No seed* → `seed` (other than 0) is guide's, and is no longer in `route.guide_option_ignored`.
+- *A via keep-out over every pad* → `vias_in_pads = false`.
+- *guide's own fill as its plan, and up to three pour rounds on cadlab's fills as fixed copper* → cadlab's fills
+  go over as `Zones::fills` and guide plans on them. One second run is kept, because it still pays: routes cut
+  a pad off from its pour on buspirate-flash-sop and lumenpnp-ringlight (one connection each, open without the
+  second run and closed with it) and on lumenpnp-mobo. `plane_coverage` stays 0: on corne-cherry 0.1, 0.25 and
+  0.5 gave 96 open in 45 s against 91 in 13 s.
+- *Keep-out net exceptions passed whole* (`route.guide_keepout_exception`) → `Keepout::except`; the code is gone,
+  and guide takes an excepted net through the keep-out as the native router does.
+- *`layers` refused* → `RouteOptions::layers`.
+- *A pad stack as one pad per shape and a 1 µm via for the barrel* → one `Pad` with `stack`.
+- *Net ties as fixed copper of one net* (`route.guide_net_tie`) → `Board::ties`, for the copper between a tie's
+  pads only: that is what `board::tied` lets the nets of the group touch. The pads are not tie items, since the
+  DRC flags a track of one net on the other net's pad, and guide's tie would allow it. The code is gone.
+- *Custom rules not passed* (`route.guide_custom_rules`) → those that are a clearance inside an area or a
+  courtyard go over as `RuleSpec::areas`. guide applies an area's clearance between two pieces of copper that
+  both touch it, the DRC when either does, so a rule that loosens is routed the stricter way where one piece is
+  outside, and one that tightens is left to the verification there. Still passed the stricter way and named by
+  the same code: rules by kind, by footprint, by containment, between two scopes, and `disallow`. Never passed:
+  a rule's track width and neck-down (guide routes a net at one width).
+- *The outline edge by edge* → `pcb::edges`. *Pad overrides by position* → `Zones::set_pad`. A geometry error
+  names the board's item (`RouteError::Item`). `fanout_vias` counts guide's escape vias (`Routed::via_kinds`).
+**Kept**: cadlab's DRC verifies the result and flagged copper is taken out; completion is counted on the board
+refilled by cadlab; no via in a pad; the same result for the same input unless a time budget cut the run;
+`route.connection` is still refused (`route.guide_unsupported`), and the default router is the native one.
+**Measured** (ROUTER.md, "Native router and guide 0.0.3, D88"). *Generated boards:* guide completes all seven
+(0.0.2: six) in 0.02 to 36 s (0.04 to 138 s), 0.7 to 26 times the native router's time. *Corpus, left to
+finish:* guide ends on eleven of twelve boards in 1 to 356 s (0.0.2: seven within 1200 s) and leaves 351
+connections open on them, the native router 86 at its default 60 s and 98 to 105 at 200 M work: level on three
+small boards, ahead on cynthion (25 against 27 to 34), behind on seven (corne-cherry 91 against 1 to 5,
+tinytapeout-demo 116 against 8 to 25, glasgow-revC3 71 against 34 to 35, lumenpnp-mobo 18 against 8 to 14,
+nrfmicro 13 against 0, buspirate5-rev10 11 against 1 to 4, sweep-v2.2 6 against 3); glasgow-revD1 is not
+done in 16 minutes. *At the default 60 s:* guide is cut on seven boards and leaves 890 open on the eleven where
+the native router leaves 86.
+**What still blocks it**, most blocking first. *Missing in guide:*
+1. *A way out of a fine-pitch pad without a via in it.* 281 of the 351 open connections are pads guide reports
+   shut in, 202 by nothing but their own footprint's neighbouring pads (tinytapeout-demo 99 of 116, glasgow-revC3
+   57 of 71, corne-cherry 40 of 91). The native router necks the track down or fans out with a smaller via;
+   guide has one width and one via for a net. `CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1
+   CADLAB_BENCH_BUDGET_MS=300000 route_bench --corpus tinytapeout-demo` lists them.
+2. *The best result so far when stopped.* A cut run returns the board of that moment, without the nets rip-up
+   has out: buspirate5-rev10 160 open cut at 48 s, 200 cut at 240 s, 11 when it ends at 356 s
+   (`CADLAB_BENCH_BUDGET_MS=60000`, `300000`, `1200000`). No time budget shorter than the whole run is safe.
+3. *Time.* 1 to 12 times the native router's on the boards over a minute (buspirate5-rev10 356 s against 30,
+   cynthion 352 against 62, glasgow-revC3 206 against 60), and glasgow-revD1 is cut at 960 s with 311 open.
+4. *Stopping on time.* After the deadline guide fills the zones around what it has, which the adapter drops: 8
+   to 15 s on cynthion, lumenpnp-mobo and glasgow-revD1, so a 60 s budget takes up to 67 s. A way to return
+   without filling would do.
+5. *Two escapes on one line.* With `vias_in_pads` off, the escapes of corne-cherry's `right/D+` and `right/D-`
+   overlap on B.Cu; guide's own `drc::check` finds the 5 shorts, and the verification takes 45 items out
+   (`CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1 route_bench --corpus corne-cherry`, `drc_removed`).
+6. *Fills as obstacles are slow to measure against:* lumenpnp-mobo's second run takes 66 s for five nets.
+*Adapter:* the second run is skipped after a cut run, so pads the routes cut off from a pour stay open there;
+the deadline's share of the budget is fixed, not measured; custom rules beyond an area's clearance, `effort`,
+`fanout`, `neck`, arcs and `route.connection` have no counterpart.
+**Found on the way, not touched:** the native router panics on glasgow-revD1 under the 60 s time budget (seed 1,
+3 threads: `engine.rs`, `pour_targets`, a pour index out of range); the work-budget runs do not meet it.
+**Default: unchanged.** D85's four conditions: (1) limits, cancellation and progress are there, the best result
+so far is not; (2) completion under the no-via-in-pad rule is behind on seven of twelve boards and the time on
+all large ones; (3) per-connection causes and partial nets are there; (4) keep-out exceptions and area
+clearances are there. So `router: guide` is now a backend that keeps the commands' contracts and says why it
+left what it left, and it is still the second opinion: (1) and (2) decide, and both are guide's to do.
+*Why:* a workaround in an adapter is a place where two programs disagree about the board; each one removed is
+one fewer way for guide's plan and cadlab's check to differ, and the measurement then shows the router, not the
+adapter.
+**As released:** the tables above were measured on guide's master before its last changes; 0.0.3 as published
+adds a stopped run that goes back to the routes that made the most connections, a net too wide to leave its pads
+routed narrower, the fix for two escapes sharing a channel, and `RunControl::fill_on_stop`, which the adapter
+turns off (cadlab refills). guide's own measurement through this adapter at the 60 s budget: 1023 open over the
+twelve corpus boards against 1681 before (buspirate5-rev10 24 against 160, glasgow-revC3 83 against 346,
+tinytapeout-demo 56 against 121, corne-cherry 63 against 91, cynthion 63 against 82, lumenpnp-mobo 56 against
+71, glasgow-revD1 659 against 791); the generated boards all complete, stm32-2l in 9.3 s. Not rerun here to
+completion, so the 300 s and 1200 s columns stand as measured before; the native router's 86 at 60 s on eleven
+boards is still far ahead, and the default stays.
+
+
 ## Open questions
