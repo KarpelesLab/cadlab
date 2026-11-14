@@ -1390,8 +1390,7 @@ pub(crate) fn necks(rb: &RouterBoard, index: &Index, slots: &[usize], nets: &[u3
 /// annular ring, when smaller than the net's via; `None` otherwise.
 fn small_via(rb: &RouterBoard, net: u32) -> Option<(Nm, Nm)> {
     let key = rb.profile(net).key;
-    let drill = rb.rules.min_drill.max(Nm(1_000));
-    let dia = Nm(drill.0 + 2 * rb.rules.min_annular_ring.0);
+    let (dia, drill) = super::smallest_via(&rb.rules);
     (dia < key.via_dia && drill <= key.via_drill).then_some((dia, drill))
 }
 

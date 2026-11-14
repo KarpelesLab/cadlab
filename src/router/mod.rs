@@ -2588,6 +2588,13 @@ fn route_batch(
     if stopped { Err(Stop) } else { Ok(()) }
 }
 
+/// The smallest via the rules allow, as (diameter, drill): the minimum drill with the minimum
+/// annular ring around it. The fanout's small via, and the one guide's escapes are given.
+pub(crate) fn smallest_via(rules: &crate::model::board::Rules) -> (Nm, Nm) {
+    let drill = rules.min_drill.max(Nm(1_000));
+    (Nm(drill.0 + 2 * rules.min_annular_ring.0), drill)
+}
+
 /// Routing layers (stackup indices) from layer names (all copper layers when empty).
 fn routing_slots(p: &Project, layers: &[String]) -> Result<Vec<usize>, RouteError> {
     if p.board().outline.contours.is_empty() {
