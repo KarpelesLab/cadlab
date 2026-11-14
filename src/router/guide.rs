@@ -12,8 +12,8 @@
 //! and counts completion on the board with its zones filled again by cadlab (D80). What the
 //! board leaves open is reported with guide's cause for it (`Routed::open`).
 //!
-//! guide plans on cadlab's fills (`Zones::fills`), not on a fill of its own, and what it
-//! returns of them is dropped: zone filling stays cadlab's. What guide's API cannot express is
+//! guide plans on cadlab's fills (`Zones::fills`), not on a fill of its own, and is asked for
+//! none at the end (`RouteOptions::fills`): zone filling stays cadlab's. What guide's API cannot express is
 //! passed the stricter way and named in [`RouteResult::notes`](super::RouteResult::notes):
 //! custom rules by kind, footprint or containment, rules between two different scopes and
 //! `disallow` rules (D61).
@@ -53,9 +53,22 @@ use super::{
 /// leaves 91 in 13 s (D88).
 const PLANE_COVERAGE: f64 = 0.0;
 
-/// The share of the time budget guide's run may take: the rest is for the verification, the
-/// refill and the report.
-const RUN_SHARE: f64 = 0.8;
+/// The share of the time budget guide's first run may take: the rest is for the verification,
+/// the refill, a second run on the routed board and the report. With four fifths, which left
+/// no time for a second run, the twelve corpus boards had 714 connections open at 60 s, and
+/// with half 600: lumenpnp-mobo 48 and 12, glasgow-revD1 394 and 349, corne-cherry 90 and 54
+/// (D91).
+const FIRST_SHARE: f64 = 0.5;
+
+/// How many times what the first run needed after it (the verification and the refill) is
+/// kept for after a second run, whose board has more copper.
+const AFTER_SHARE: f64 = 1.5;
+
+/// The time kept for the report.
+const REPORT: Duration = Duration::from_millis(500);
+
+/// The least time worth a second run.
+const SECOND_MIN: Duration = Duration::from_secs(1);
 
 /// The shortest time between two progress reports of a run, which is also how soon a
 /// cancellation is seen.
@@ -378,6 +391,11 @@ pub(crate) fn adapt(
                         spoke_width: zp.thermal_spoke.0.max(1),
                         islands: if z.net.is_some() { Islands::Remove } else { Islands::Keep },
                         spokes: zp.thermal_spokes,
+                        // Plane or pour is guide's to say (`CopperZone::plane`): the board has
+                        // no word for it. Every zone a plane, as before guide 0.0.4, left 86
+                        // connections open on corne-cherry where its own choice leaves 54, and
+                        // 30 against 12 on lumenpnp-mobo (D91).
+                        plane: None,
                         ..Default::default()
                     });
                     zones.zones.len() - 1
@@ -714,9 +732,13 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>) -> O
             };
             format!("{why} before guide had routed net {net} to {to}")
         }
+        // `Unknown`, and any cause newer than this adapter: guide has no say on the net.
         _ => {
+            hints.push(format!(
+                "route net {net} again (`route.nets {net} --router guide`): a run on the routed board may join it"
+            ));
             hints.push(native.clone());
-            format!("guide took net {net} for routed, and its result leaves {to} apart from {from}")
+            format!("guide left {to} apart from {from} on net {net} and gives no cause for it")
         }
     };
     if !hints.contains(&native) {
@@ -750,6 +772,30 @@ fn supported(scope: &Scope) -> Result<(), RouteError> {
         });
     }
     Ok(())
+}
+
+/// guide's options for a run of `opts` on `p`, the budgets apart. `slots` are the routing
+/// layers (`routing_slots`).
+fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptions {
+    let mut gopts = pcb::RouteOptions::default();
+    gopts.pitch = opts.grid.map(|g| g.0);
+    gopts.couple_pairs = opts.pairs != Some(false);
+    gopts.tune_lengths = opts.skew != Some(false);
+    gopts.vias_in_pads = opts.via_in_pad;
+    gopts.plane_coverage = PLANE_COVERAGE;
+    gopts.keep_partial = true;
+    // Zone filling is cadlab's: nothing here reads guide's fills, and the count is the board's.
+    gopts.fills = false;
+    // The smallest via the rules allow, for a pad trapped in its footprint: the native
+    // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
+    let (dia, drill) = super::smallest_via(&p.board().rules);
+    let layers = p.board().stackup.copper_names().len();
+    gopts.fanout_via = (layers > 1 && dia > drill).then_some(ViaSize { diameter: dia.0, drill: drill.0 });
+    gopts.seed = (opts.seed != 0).then_some(opts.seed);
+    if !opts.layers.is_empty() {
+        gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
+    }
+    gopts
 }
 
 /// One new item of the result: a track (index into the tracks) or a via.
@@ -971,6 +1017,23 @@ fn verify(
     }
 }
 
+/// The nets a run of guide tried and could not finish. A run that ended names them
+/// (`Routed::unrouted`). One that was stopped lists there what its board leaves in pieces, zones
+/// not counted, so its nets are those with a connection whose cause is a search that failed,
+/// not the stop.
+fn gave_up_on(ad: &Adapted, r: &pcb::Routed) -> BTreeSet<String> {
+    let name = |n: NetId| ad.nets.get(n.index()).cloned();
+    match r.stopped {
+        None => r.unrouted.iter().filter_map(|n| name(*n)).collect(),
+        Some(_) => r
+            .open
+            .iter()
+            .filter(|o| !matches!(o.cause, Cause::Stopped | Cause::Unknown))
+            .filter_map(|o| name(o.net))
+            .collect(),
+    }
+}
+
 /// What guide says of a run, for the progress sink.
 fn said(r: &pcb::Routed) -> String {
     let gs = &r.stats;
@@ -1002,15 +1065,19 @@ fn said(r: &pcb::Routed) -> String {
 ///
 /// **Budgets.** The work budget is guide's (`RouteOptions::work_budget`, in search nodes, which
 /// [`RouteStats::work`] reports): a run that spends it returns what it has, the same on any
-/// machine. The time budget is a deadline for guide's run at [`RUN_SHARE`] of it. Either way
-/// the result is verified and counted as any other, `budget_exhausted` is set, and what is
-/// left open says so.
+/// machine. The time budget is a deadline for guide's first run at [`FIRST_SHARE`] of it, and
+/// for the second at its end less what comes after a run, as measured on the first. Either
+/// way the result is verified and counted as any other, `budget_exhausted` is set, and what
+/// is left open says so. A run with a budget of either kind is not the run without one: guide
+/// then routes for the most connections soonest.
 ///
 /// **A second run.** guide plans on cadlab's fills of the zones, as they are before routing;
-/// routes change them. After the run the zones are filled again around the new copper, and the
-/// nets with zones that guide took for routed and the board still has open are given to guide
-/// once more, on the routed board and its fills. It is kept when it leaves fewer connections
-/// open. Not after a run that a budget stopped.
+/// routes change them. After the run the zones are filled again around the new copper, and
+/// guide is given the routed board and its fills once more: for the nets with zones that the
+/// board still has open, and after a run that its deadline stopped for every net it has open,
+/// in both cases without the nets guide tried and could not finish. It is kept when it leaves
+/// fewer connections open. Not after a run that the work budget stopped: nothing is left of
+/// it.
 pub(crate) fn route(
     p: &Project,
     scope: &Scope,
@@ -1063,26 +1130,15 @@ pub(crate) fn route(
     }
 
     // The run, under the hooks and the budgets.
-    let deadline = opts.budget.map(|b| start + b.mul_f64(RUN_SHARE));
-    let mut gopts = pcb::RouteOptions::default();
-    gopts.pitch = opts.grid.map(|g| g.0);
-    gopts.couple_pairs = opts.pairs != Some(false);
-    gopts.tune_lengths = opts.skew != Some(false);
-    gopts.vias_in_pads = opts.via_in_pad;
-    gopts.plane_coverage = PLANE_COVERAGE;
-    gopts.keep_partial = true;
-    gopts.seed = (opts.seed != 0).then_some(opts.seed);
-    if !opts.layers.is_empty() {
-        gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
-    }
+    let deadline = opts.budget.map(|b| start + b.mul_f64(FIRST_SHARE));
+    let mut gopts = options(p, opts, &slots);
     gopts.work_budget = opts.work.left();
     let routed = call(&ad, &gopts, deadline, hooks)?;
     opts.work.charge(routed.stats.work);
     (hooks.progress)(0, None, &said(&routed));
     let mut stopped = routed.stopped;
     let mut opens: Vec<Open> = routed.open.iter().map(|o| explain(&ad, o, stopped)).collect();
-    let mut gave_up: BTreeSet<String> =
-        routed.unrouted.iter().filter_map(|n| ad.nets.get(n.index())).cloned().collect();
+    let mut gave_up = gave_up_on(&ad, &routed);
     let mut escapes: BTreeSet<(i64, i64)> = routed
         .vias
         .iter()
@@ -1092,27 +1148,36 @@ pub(crate) fn route(
         .collect();
     let (mut tracks, mut vias) = convert(&ad, &routed);
     (hooks.progress)(0, None, "verifying");
+    let ran = Instant::now();
     let mut drc_reason: BTreeMap<String, String> = BTreeMap::new();
     let mut proj = verify(p, &mut tracks, &mut vias, &mut drc_reason, &mut stats.drc_removed);
     let mut fitems = geo::copper_items(&proj);
     let mut fisl = geo::islands(&fitems);
     let mut work = routed.stats.work;
     let mut calls = 1;
+    // What a run needs after it, as the first did: the verification and the refill.
+    let after = ran.elapsed();
 
-    // A second run: the nets with zones that guide took for routed and cadlab's fill around
-    // the routes leaves open.
+    // A second run: the nets with zones that cadlab's fill around the routes leaves open, and
+    // after a run that its deadline stopped every net left open; never a net guide gave up on.
     let poured: BTreeSet<&str> = p.board().zones.iter().filter_map(|z| z.net.as_deref()).collect();
     let open = |items: &[CopperItem], isl: &[usize]| -> Vec<RatLine> {
         geo::ratsnest_from(items, isl).into_iter().filter(|l| wanted(&l.net)).collect()
     };
+    // Its deadline: the end of the budget less twice what the first run needed after it and
+    // the report, and no sooner than the first run's.
+    let second = opts
+        .budget
+        .zip(deadline)
+        .map(|(b, d)| (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + REPORT).map_or(d, |t| t.max(d)));
     for round in 1..=POUR_ROUNDS {
-        if stopped.is_some() || deadline.is_some_and(|d| Instant::now() >= d) {
+        if stopped == Some(Stopped::WorkBudget) || second.is_some_and(|d| Instant::now() + SECOND_MIN >= d) {
             break;
         }
         let left = open(&fitems, &fisl);
         let again: BTreeSet<String> = left
             .iter()
-            .filter(|l| poured.contains(l.net.as_str()) && !gave_up.contains(&l.net))
+            .filter(|l| (stopped.is_some() || poured.contains(l.net.as_str())) && !gave_up.contains(&l.net))
             .map(|l| l.net.clone())
             .collect();
         if again.is_empty() {
@@ -1125,7 +1190,7 @@ pub(crate) fn route(
         );
         let ad = adapt(&proj, &fitems, &again, opts)?;
         gopts.work_budget = opts.work.left();
-        let more = call(&ad, &gopts, deadline, hooks)?;
+        let more = call(&ad, &gopts, second, hooks)?;
         opts.work.charge(more.stats.work);
         work += more.stats.work;
         calls += 1;
@@ -1146,8 +1211,8 @@ pub(crate) fn route(
         }
         (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
         (drc_reason, stats.drc_removed) = (reasons, removed);
-        stopped = more.stopped;
-        gave_up.extend(more.unrouted.iter().filter_map(|n| ad.nets.get(n.index())).cloned());
+        stopped = stopped.or(more.stopped);
+        gave_up.extend(gave_up_on(&ad, &more));
         escapes.extend(
             more.vias
                 .iter()
@@ -1157,7 +1222,7 @@ pub(crate) fn route(
         );
         // What this run says of its nets replaces what the first said of them.
         opens.retain(|o| !again.contains(&o.net));
-        opens.extend(more.open.iter().map(|o| explain(&ad, o, stopped)));
+        opens.extend(more.open.iter().map(|o| explain(&ad, o, more.stopped)));
     }
 
     // The report, from the board with its zones filled again around the new copper (D80).
@@ -1697,10 +1762,16 @@ mod tests {
         assert!(c.reason.as_deref().is_some_and(|m| m.starts_with("the work budget was spent")), "{c:?}");
         assert!(c.hints.iter().any(|h| h.contains("work_budget")), "{c:?}");
         assert_eq!(r, short());
-        // Enough of it: the full result.
-        let opts =
-            RouteOptions { pairs: Some(false), work: WorkMeter::limited(full.stats.work + 1), ..Default::default() };
-        assert_eq!(route(&p, &nets, &opts, &Hooks::none()).expect("route"), full);
+        // Enough of it: complete, and the same on every run. Not the run without a budget by
+        // rule: with one guide routes for the most connections soonest (D91).
+        let enough = || {
+            let work = WorkMeter::limited(full.stats.work * 100);
+            let opts = RouteOptions { pairs: Some(false), work, ..Default::default() };
+            route(&p, &nets, &opts, &Hooks::none()).expect("route")
+        };
+        let r = enough();
+        assert_eq!((r.stats.connections, r.stats.failed, r.stats.budget_exhausted), (3, 0, false), "{:?}", r.stats);
+        assert_eq!(r, enough());
         // A time budget that has ended: stopped by the deadline.
         let opts = RouteOptions { budget: Some(Duration::ZERO), ..Default::default() };
         let r = route(&p, &nets, &opts, &Hooks::none()).expect("route");
@@ -1730,6 +1801,22 @@ mod tests {
         assert_eq!(seeded(7), seeded(7));
         assert_eq!(seeded(7).stats.failed, 0);
         assert_eq!(seeded(0), full);
+    }
+
+    /// What guide is told beside the board: no fill of its own at the end, no via in a pad, and
+    /// for the escapes of trapped pads the smallest via the rules allow, the native fanout's.
+    #[test]
+    fn guide_gets_no_fill_and_the_smallest_via_for_escapes() {
+        let mut p = project();
+        p.board_mut().rules.min_drill = Nm(200_000);
+        p.board_mut().rules.min_annular_ring = Nm(100_000);
+        let g = options(&p, &RouteOptions::default(), &[0, 1]);
+        assert!(!g.fills && !g.vias_in_pads && g.keep_partial);
+        assert_eq!(g.fanout_via, Some(ViaSize { diameter: 400_000, drill: 200_000 }));
+        assert_eq!((g.seed, g.layers, g.work_budget), (None, None, None));
+        let opts = RouteOptions { seed: 7, layers: vec!["B.Cu".into()], ..Default::default() };
+        let g = options(&p, &opts, &[1]);
+        assert_eq!((g.seed, g.layers), (Some(7), Some(LayerSet::EMPTY.with(LayerId(1)))));
     }
 
     /// `layers`: tracks on the back only. SIG's through-hole pad J1.1 and its via are on both
