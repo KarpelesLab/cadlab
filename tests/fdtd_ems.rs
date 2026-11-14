@@ -278,7 +278,16 @@ fn ems_runs_the_region() {
     }
     // The result names its solver, in the output and in the file.
     assert_eq!(e.out["output"]["solver"], "ems");
-    assert!(b.out["output"].get("solver").is_none());
+    assert_eq!(b.out["output"]["solver"], "builtin");
+    let text = std::fs::read_to_string(b.out["output"]["touchstone"].as_str().unwrap()).unwrap();
+    assert!(text.starts_with("! cadlab sim.sparams (solver: builtin): board region"), "{text}");
+    // ems is the solver of a run that names none (DECISIONS D90): the same file.
+    let mut unnamed = with(args.clone(), json!({"name": "unnamed"}));
+    unnamed.as_object_mut().unwrap().remove("solver");
+    let d = exec(&r, &mut s, "sim.sparams", unnamed);
+    assert_eq!(d["output"]["solver"], "ems");
+    let file = std::fs::read_to_string(d["output"]["touchstone"].as_str().unwrap()).unwrap();
+    assert_eq!(cadlab::touchstone::parse(&file, Some(2)).unwrap().data, e.ts.data);
     let text = std::fs::read_to_string(e.out["output"]["touchstone"].as_str().unwrap()).unwrap();
     assert!(text.starts_with("! cadlab sim.sparams (solver: ems): board region"), "{text}");
 

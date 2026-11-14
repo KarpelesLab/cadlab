@@ -1,5 +1,5 @@
-//! Simulation commands: `sim.sparams` (the built-in FDTD solver, `crate::fdtd`, or the ems crate's
-//! on the same region with `solver: ems`).
+//! Simulation commands: `sim.sparams` (the ems crate's FDTD solver, or the built-in one of
+//! `crate::fdtd` on the same region with `solver: builtin`).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ pub(crate) fn register(r: &mut Registry) {
     r.register::<SParams>();
 }
 
-/// Simulate a board region with the built-in 3D full-wave solver (FDTD) and write its
+/// Simulate a board region with a 3D full-wave solver (FDTD) and write its
 /// S-parameters as a Touchstone file. The region, ports and mesh are those of
 /// `export.openems`: stackup dielectrics (εr, loss tangent, dispersive with a reference
 /// frequency), copper with skin-effect loss and roughness (a surface impedance), optional
@@ -169,7 +169,7 @@ pub struct SParams {
     /// staircase).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conformal: Option<bool>,
-    /// `builtin` (default) or `ems` (the ems crate's FDTD, a cross-check).
+    /// `ems` (default if built in; the ems crate's FDTD) or `builtin` (cadlab's own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver: Option<fdtd::Solver>,
     /// Worker threads (default: automatic); the result does not depend on it.
@@ -195,8 +195,7 @@ pub struct SimEstimate {
     /// That in minutes on one thread at 50 million cells per second, the rate of a release build
     /// with lossy copper and dispersive dielectrics (session 6): a rough figure, several times
     /// longer on a loaded machine.
-    /// The wall-clock time is about this over the threads the grid gets (one per 131072 nodes, up
-    /// to the machine's).
+    /// The wall-clock time is about this over the threads the solver gives the grid (`threads`).
     pub thread_minutes: f64,
 }
 
@@ -242,13 +241,9 @@ pub struct Simulated {
     /// Mesh edges partly covered by diagonal or curved copper (conformal cells).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conformal_edges: usize,
-    /// The solver that ran, when not the built-in one.
-    #[serde(default, skip_serializing_if = "is_builtin")]
+    /// The solver that ran (or would run).
+    #[serde(default)]
     pub solver: fdtd::Solver,
-}
-
-fn is_builtin(s: &fdtd::Solver) -> bool {
-    *s == fdtd::Solver::Builtin
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -297,7 +292,7 @@ fn decibels(q: Option<Quantity>, field: &str, default: u32) -> Result<u32, Comma
 impl Command for SParams {
     const NAME: &'static str = "sim.sparams";
     const SUMMARY: &'static str =
-        "Simulate a board region with the built-in 3D FDTD solver: S-parameters of its ports as Touchstone";
+        "Simulate a board region with a 3D FDTD solver: S-parameters of its ports as Touchstone";
     const KIND: CommandKind = CommandKind::Query;
     const POSITIONAL: &'static [&'static str] = &["dir"];
     type Output = Simulated;
@@ -503,7 +498,10 @@ impl Command for SParams {
         let mut s = format!(
             "{}{} {} port(s) on {}×{}×{} lines ({} cells, smallest {} / {} / {}, timestep {:.3} ps)",
             if o.planned { "plan (not run):" } else { "simulated" },
-            if o.solver == fdtd::Solver::Ems { " with ems:" } else { "" },
+            match o.solver {
+                fdtd::Solver::Ems => " with ems:",
+                fdtd::Solver::Builtin => " with the built-in solver:",
+            },
             o.ports.len(),
             o.mesh.lines[0],
             o.mesh.lines[1],
@@ -565,8 +563,11 @@ fn provenance(
     values: &BTreeMap<String, BTreeMap<String, Quantity>>,
 ) -> Vec<String> {
     let mut out = vec![format!(
-        "cadlab sim.sparams{}: board region ({}, {}) .. ({}, {})",
-        if solver == fdtd::Solver::Ems { " (solver: ems)" } else { "" },
+        "cadlab sim.sparams (solver: {}): board region ({}, {}) .. ({}, {})",
+        match solver {
+            fdtd::Solver::Ems => "ems",
+            fdtd::Solver::Builtin => "builtin",
+        },
         window.0.x,
         window.0.y,
         window.1.x,

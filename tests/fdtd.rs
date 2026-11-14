@@ -826,8 +826,20 @@ fn sim_sparams_command_on(solver: &str) {
     let o = base.clone();
     let x = &o["output"];
     assert!(o["diagnostics"].as_array().unwrap().is_empty(), "{}", o["diagnostics"]);
-    // (The output names the solver when it is not the built-in one.)
-    assert_eq!(x.get("solver").and_then(Value::as_str).unwrap_or("builtin"), solver);
+    assert_eq!(x["solver"], solver);
+    // Without `solver`: ems where the build has it, else the built-in one (DECISIONS D94).
+    let mut plan = args.clone();
+    plan["plan"] = json!(true);
+    plan.as_object_mut().unwrap().remove("solver");
+    let default = if cfg!(feature = "ems") { "ems" } else { "builtin" };
+    assert_eq!(exec(&r, &mut s, "sim.sparams", plan)["output"]["solver"], default);
+    // A build without ems says so when asked for it.
+    #[cfg(not(feature = "ems"))]
+    {
+        let mut ems = args.clone();
+        ems["solver"] = json!("ems");
+        assert_eq!(fail(&r, &mut s, "sim.sparams", ems), "sim.solver_unavailable");
+    }
     assert_eq!(x["runs"].as_array().unwrap().len(), 2);
     assert!(x["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{}", x["runs"]);
     assert_eq!(x["ports"][0]["reference_plane"], json!(["7mm", "12mm"]));

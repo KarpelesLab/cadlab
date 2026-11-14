@@ -496,8 +496,11 @@ PML diverged with a vacuum-only PML too (not explained, and not a configuration 
 The S-parameters of a board region computed in cadlab itself: a 3D finite-difference time-domain (FDTD)
 solver, `src/fdtd/` (DECISIONS D59). It takes exactly the region, stack, copper, holes, ports and graded mesh
 of `export.openems` (same arguments; the openEMS export stays available for larger or cross-checked runs),
-simulates once per port and writes a Touchstone file. `solver: ems` runs the same region on the `ems` crate's
-solver instead (see "ems as a second solver" below); everything in this section is the built-in one.
+simulates once per port and writes a Touchstone file. Two solvers run that region: the `ems` crate's, the
+default since D90 (see "ems, the default solver" below), and cadlab's own, `solver: builtin`, which is what a build
+without the cargo feature `ems` runs. The region, the mesh, the ports, the options, the diagnostics and the
+checks of this section are the same for both; the method described here is the built-in solver's, and the result
+names the solver that ran (`solver` in the output, `(solver: ems)` in the Touchstone file's first line).
 
 ```
 cadlab sim sparams --f-max 10GHz --around track#12 --copper sheet \
@@ -732,19 +735,21 @@ and several cells across the narrowest copper and dielectric (`max_cell` refines
 the edges). Runs are long on large regions: cut the region to the structure (`around` a via or connector,
 `margin`), use `sheet` copper, and keep `f_max` to what is needed.
 
-## Full-wave: ems as a second solver (`sim.sparams --solver ems`)
+## Full-wave: ems, the default solver (`sim.sparams`, `solver: ems`)
 
-`solver: ems` runs the region of `sim.sparams` on the FDTD solver of the [`ems`](https://crates.io/crates/ems)
-crate instead of cadlab's own (`solver: builtin`, the default, unchanged). ems is a clean-room, pure-Rust solver
-(MIT, with its geometry crate `csx`; no further dependencies) meant to replace openEMS; cadlab uses it through its
-Rust API, from crates.io, behind the cargo feature `ems` (a default feature: 21 s of a release build; without it
-the option is refused with `sim.solver_unavailable`). Code: `src/fdtd/ems.rs` (DECISIONS D86, D87, D89, D90). It is a
-second opinion on a result, runnable where openEMS is not installed, and the place where what ems would need to
-replace the built-in solver is measured.
+`sim.sparams` runs its region on the FDTD solver of the [`ems`](https://crates.io/crates/ems) crate unless told
+otherwise (D90; before, cadlab's own solver was the default and ems the option). ems is a clean-room, pure-Rust
+solver (MIT, with its geometry crate `csx`; no further dependencies) meant to replace openEMS; cadlab uses it
+through its Rust API, from crates.io, behind the cargo feature `ems` (a default feature: 21 s of a release build).
+`solver: builtin` runs cadlab's own solver on the same region: a second result on the same model, which needs
+nothing installed either. A build without the feature has the built-in solver only: it is that build's default,
+and `solver: ems` is refused there with `sim.solver_unavailable`. Code: `src/fdtd/ems.rs` (DECISIONS D86, D87,
+D89, D90).
 
 ```
-cadlab sim sparams --solver ems --f-max 6GHz --around track#12 --copper sheet \
+cadlab sim sparams --f-max 6GHz --around track#12 --copper sheet \
   --ports '[{"at": "track#12", "kind": "msl", "length": "4mm"}, {"at": "track#12", "end": "end", "kind": "msl", "length": "4mm"}]'
+cadlab sim sparams --solver builtin --name check ...   # the same region on cadlab's own solver
 ```
 
 **One region, two solvers.** The region, its graded mesh (thirds rule, refinement for narrow diagonal tracks),

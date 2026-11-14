@@ -1,5 +1,7 @@
-//! Built-in 3D full-wave solver (FDTD): S-parameters of a board region, `sim.sparams`. See
-//! `docs/ELECTRICAL.md`, "Full-wave solver".
+//! 3D full-wave solvers (FDTD): S-parameters of a board region, `sim.sparams`. See
+//! `docs/ELECTRICAL.md`, "Full-wave solver". Two solvers run the same region: the `ems` crate's
+//! ([`Solver::Ems`], the default where the build has the cargo feature `ems`; DECISIONS D94) and
+//! cadlab's own, described here ([`Solver::Builtin`]).
 //!
 //! The region, its geometry and its graded mesh come from the openEMS export
 //! ([`crate::openems`]): the same stack, copper, holes, ports and mesh lines, so both describe
@@ -60,13 +62,16 @@ const UNRESOLVED: f64 = 1.5;
 const CELLS_ACROSS: f64 = 2.0;
 
 /// The solver that runs a region.
+// The default is ems in a build with the cargo feature `ems` (a default feature) and the built-in
+// one in a build without it (DECISIONS D94).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Solver {
     /// cadlab's own FDTD.
-    #[default]
+    #[cfg_attr(not(feature = "ems"), default)]
     Builtin,
     /// The `ems` crate's FDTD (D86).
+    #[cfg_attr(feature = "ems", default)]
     Ems,
 }
 
@@ -106,7 +111,7 @@ impl Default for Options {
             parts: true,
             overrides: Overrides::new(),
             conformal: true,
-            solver: Solver::Builtin,
+            solver: Solver::default(),
             threads: 0,
         }
     }
@@ -743,7 +748,8 @@ fn no_ems() -> Error {
     Error::new(
         "sim.solver_unavailable",
         "this build of cadlab has no ems solver",
-        "build with the `ems` cargo feature (a default feature), or use `solver: builtin`",
+        "build with the `ems` cargo feature (a default feature), or leave `solver` out: this build's default is \
+         `builtin`",
     )
 }
 

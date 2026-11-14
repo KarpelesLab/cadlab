@@ -1,5 +1,6 @@
-//! `sim.sparams --solver ems`: the board region run by the [`ems`] crate's FDTD solver instead of
-//! [`super::engine`] (DECISIONS D86, D87, D89, D90; cargo feature `ems`).
+//! `sim.sparams` on ems, its default solver (`solver: ems`): the board region run by the [`ems`]
+//! crate's FDTD solver instead of [`super::engine`] (DECISIONS D86, D87, D89, D90, D94; cargo feature
+//! `ems`).
 //!
 //! The region, its mesh, its ports and its parts are the ones the built-in solver gets
 //! ([`super::extract`], [`super::place_ports`]); the geometry is the property list of the openEMS

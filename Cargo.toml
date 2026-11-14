@@ -33,9 +33,9 @@ models3d = [
     "dep:oxideav-vrml",
 ]
 
-# `sim.sparams --solver ems`: the ems FDTD solver (crates.io `ems`, with its geometry crate `csx`;
-# both MIT, no further dependencies) as a second full-wave solver on the same board region
-# (DECISIONS D86). Without it the option is refused with `sim.solver_unavailable`.
+# The ems FDTD solver (crates.io `ems`, with its geometry crate `csx`; both MIT, no further
+# dependencies): the default solver of `sim.sparams` (DECISIONS D86, D90). Without it the default
+# is the built-in solver and `solver: ems` is refused with `sim.solver_unavailable`.
 ems = ["dep:ems"]
 
 [[bin]]
@@ -70,7 +70,7 @@ oxideav-gltf = { version = "0.0.4", optional = true }
 oxideav-usdz = { version = "0.0.5", optional = true }
 oxideav-step = { version = "0.0.1", optional = true, features = ["registry"] }
 oxideav-vrml = { version = "0.0.1", optional = true, features = ["registry"] }
-# Second full-wave solver (D86); its `xml` feature (openEMS files) is not needed.
+# `sim.sparams`'s default solver (D86, D90); its `xml` feature (openEMS files) is not needed.
 ems = { version = "0.0.10", default-features = false, optional = true }
 # Fab archives (D75): the user's own fstool, zip writer and reader only.
 fstool = { version = "0.5.2", default-features = false, features = ["archive", "gzip"] }
