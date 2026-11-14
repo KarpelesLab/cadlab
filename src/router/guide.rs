@@ -711,6 +711,16 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>) -> O
                 format!("{to} is shut in by {}: no track of net {net} can leave it", parts.join(", "))
             }
         }
+        // After a run that its deadline stopped guide gives this cause without looking at
+        // what is around the pad.
+        Cause::NoPath if stopped == Some(Stopped::Deadline) => {
+            hints.push("give a larger `budget`: guide then says whether the pad is shut in, and by what".to_string());
+            hints.push(native.clone());
+            format!(
+                "guide found no way from {to} to {from} for net {net}; the time budget ended before it looked at \
+                 whether {to} is shut in"
+            )
+        }
         Cause::NoPath => {
             hints.push(native.clone());
             format!("guide found no way from {to} to {from} for net {net}; {to} is not shut in nearby")
@@ -1164,8 +1174,8 @@ pub(crate) fn route(
     let open = |items: &[CopperItem], isl: &[usize]| -> Vec<RatLine> {
         geo::ratsnest_from(items, isl).into_iter().filter(|l| wanted(&l.net)).collect()
     };
-    // Its deadline: the end of the budget less twice what the first run needed after it and
-    // the report, and no sooner than the first run's.
+    // Its deadline: the end of the budget less `AFTER_SHARE` times what the first run needed
+    // after it and the report, and no sooner than the first run's.
     let second = opts
         .budget
         .zip(deadline)
