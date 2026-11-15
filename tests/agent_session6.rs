@@ -691,14 +691,16 @@ fn rf_path_full_wave_ems() {
     for d in plan["diagnostics"].as_array().into_iter().flatten() {
         eprintln!("ems plan: {}: {}", d["code"].as_str().unwrap_or(""), d["message"].as_str().unwrap_or(""));
     }
+    // `CADLAB_S6_THREADS`: both solvers on that many threads (else each one's own count).
+    let threads = std::env::var("CADLAB_S6_THREADS").ok().and_then(|t| t.parse::<u32>().ok());
     for solver in ["builtin", "ems"] {
+        let mut args = json!({"name": format!("rf_{solver}"), "solver": solver, "points": 101, "end_criteria": "50dB",
+            "frequencies": ["2.44GHz"], "band": ["2.4GHz", "2.4835GHz"]});
+        if let Some(threads) = threads {
+            args["threads"] = json!(threads);
+        }
         let t = std::time::Instant::now();
-        let r = c.ok(
-            "sim",
-            "sparams",
-            sim_args(json!({"name": format!("rf_{solver}"), "solver": solver, "points": 101, "end_criteria": "50dB",
-                "frequencies": ["2.44GHz"], "band": ["2.4GHz", "2.4835GHz"]})),
-        );
+        let r = c.ok("sim", "sparams", sim_args(args));
         let secs = t.elapsed().as_secs_f64();
         let param =
             |n: &str| r["output"]["params"].as_array().unwrap().iter().find(|p| p["name"] == n).unwrap().clone();

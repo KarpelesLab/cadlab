@@ -588,13 +588,17 @@ fn peak_kb() -> u64 {
     line.and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
-/// Memory, one run per process (a run after a larger one in the same process reads too little,
-/// D89): `CADLAB_MEM_CASE` (`via`: the oracle's via transition, lossy solid copper; `line`: the
-/// oracle's lossy line with solid copper between lumped ports; `bent`: the bent line with lossy
-/// sheets on 0.25 mm cells) on `CADLAB_MEM_SOLVER`, to −40 dB (or `CADLAB_MEM_END`), on
-/// `CADLAB_MEM_THREADS` threads when set. Prints the
-/// process's peak before the run (the board and the registry) and after it, and the run's time:
-/// a time taken alone, which the runs of a longer test are not on a shared machine.
+/// Memory and time, one run per process (a run after a larger one in the same process reads too
+/// little memory, D89): `CADLAB_MEM_CASE` (`via`: the oracle's via transition, lossy solid copper;
+/// `via_small`: the same on the small region of `measure_threads_conformal`; `line`: the oracle's
+/// lossy line with solid copper between lumped ports; `line_sheet`: with sheets between microstrip
+/// ports; `bent`: the bent line with lossy sheets on 0.25 mm cells, `bent_solid` with solid copper,
+/// `bent_default` and `bent_default_solid` on the default mesh) on `CADLAB_MEM_SOLVER`, to −40 dB
+/// (or `CADLAB_MEM_END`), on `CADLAB_MEM_THREADS` threads when set (else each solver's own count
+/// within the pool, `RAYON_NUM_THREADS`). Prints the process's peak before the run (the board and
+/// the registry) and after it, and the run's time: a time taken alone, which the runs of a longer
+/// test are not on a shared machine. `CADLAB_MEM_KEEP` is where to copy the Touchstone file (D94:
+/// ems 0.0.11's against 0.0.10's, byte for byte).
 #[test]
 #[ignore]
 fn measure_memory() {
@@ -621,9 +625,37 @@ fn measure_memory() {
                 "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6});
             (dir, s, args)
         }
-        _ => {
+        "line_sheet" => {
+            let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0.02", "1mm", 24);
+            exec(&r, &mut s, "board.dielectric", json!({"ref_freq": "1GHz"}));
+            let track = format!("track#{id}");
+            let args = json!({"dir": dir.path().join("out"), "name": "line", "around": [track], "copper": "sheet",
+                "thirds": true, "pml_outside": false, "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm",
+                "max_cell": "0.5mm", "pml_cells": 6,
+                "ports": [{"at": track, "kind": "msl", "length": "4mm"},
+                          {"at": track, "end": "end", "kind": "msl", "length": "4mm"}]});
+            (dir, s, args)
+        }
+        "via_small" => {
+            let dir = tempfile::tempdir().unwrap();
+            let mut s = Session::new();
+            exec(&r, &mut s, "project.new", json!({"path": dir.path().join("via"), "name": "via"}));
+            via_transition(&r, &mut s);
+            let args = json!({"dir": dir.path().join("out"), "name": "via", "f_max": "4GHz", "points": 9,
+                "nets": ["RF"], "margin": "2mm", "air": "1mm", "pml_cells": 4,
+                "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+            (dir, s, args)
+        }
+        bent => {
             let (dir, s, a, b) = diagonal_board(&r, true);
-            let args = with(diagonal_args(dir.path(), a, b), json!({"max_cell": "0.25mm", "perfect_copper": false}));
+            let mut args =
+                with(diagonal_args(dir.path(), a, b), json!({"perfect_copper": false, "max_cells": 8_000_000}));
+            if !bent.contains("default") {
+                args["max_cell"] = json!("0.25mm");
+            }
+            if bent.contains("solid") {
+                args["copper"] = json!("solid");
+            }
             (dir, s, args)
         }
     };
@@ -642,6 +674,9 @@ fn measure_memory() {
         before as f64 / 1024.0,
         peak_kb() as f64 / 1024.0
     );
+    if let Ok(keep) = std::env::var("CADLAB_MEM_KEEP") {
+        std::fs::copy(ran.out["output"]["touchstone"].as_str().unwrap(), keep).unwrap();
+    }
     drop(dir);
 }
 
