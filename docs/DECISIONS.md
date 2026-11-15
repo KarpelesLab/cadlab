@@ -3055,5 +3055,90 @@ special wording and the time lost after a deadline; what it adds that the adapte
 (`tried` for the second run, `join` on) was measured before it was left, so the next reader does not have to
 wonder whether it was overlooked.
 
+### D94. ems 0.0.11, and `sim.sparams` runs on ems by default: D90's one case of run time measured again and met; `solver: builtin` kept (2026-11-15)
+D90 ended on one case of its third criterion: the bent line with lossy sheets on 0.25 mm cells to −70 dB took
+ems 1.8 times the built-in solver's time, where 1.5 is the limit, and the switch waited on the branch
+`ems-010-default`. ems 0.0.11 was written against that case. This change adopts it (`ems = "0.0.11"`; nothing
+changes in the adapter), measures criterion 3 again on every case of D90's table with both solvers, checks that
+the other four still hold, and switches the default. The table is in ELECTRICAL.md, "What ems 0.0.11 changed".
+Measured on ems's source before the release, through a path that was not committed; the released crate's `src`
+is that source byte for byte, and the blocking case was run again on it (35.5 s against 30.6 s). No openEMS,
+CSXCAD or other GPL code was read; nothing was changed in ems. The limit and the tolerances are D89's and
+D90's, unmoved.
+**How it was measured.** Release builds, one run per process (`measure_memory`, which now takes the rest of
+D90's cases and can keep its Touchstone file; session 6 through `rf_path_full_wave_ems`, which takes a thread
+count), the two solvers alternating, three runs each for the blocking case and session 6 and two for the
+others, on a shared machine with three threads to use. D90's times were taken with each solver's own thread
+count within three, which for the built-in solver is one thread on a region under 262 144 nodes; here both
+solvers were also given `threads: 3`, which is the harder comparison for ems on small regions, and the two
+cases that decide were run both ways.
+**Criterion 3, run time within 1.5 times** (built-in against ems, seconds):
+- *The blocking case*, both on three threads: 40.9, 47.1, 32.7 against 37.7, 37.5, 29.5 (0.8 to 0.9 times;
+  ems 0.0.10 the same way: 56.7). With each solver's own count, which is three for both on 578 680 cells: 38.6,
+  46.2, 34.0 against 37.7, 31.8, 32.9. On one thread 73.7 against 78.5. The same steps as before (7616 and
+  7809). Met.
+- *Session 6* (lossy sheets with diagonal tracks on a graded mesh, to −50 dB), both on three threads: 47.7,
+  46.8, 53.4 against 62.7, 60.8, 58.3: 1.31, 1.30 and 1.09 times in the three pairs, 1.34 the slowest of ems
+  over the fastest of the built-in solver. With each solver's own count, the built-in solver's one thread
+  (152 280 cells) and ems's three, as a run without `threads` goes: 78.8, 77.7, 75.8 against 66.5, 63.7, 58.5,
+  0.8 times. Met both ways. D90's 1.26 times (105 s against 83 s) was the second kind; with three threads each
+  0.0.10 took 102.8 s against 54.8 s, 1.9 times, which D90 did not measure and which would not have met the
+  limit.
+- *The rest of D90's table*, both on three threads: the bent line with `solid` copper on 0.25 mm cells 67 against
+  45 (0.0.10: 60), on the default mesh 17.6 against 7.5 with sheets and 34 against 12 with `solid` copper; the
+  oracle's line 34.5 against 14.6 with sheets and 66.8 against 30.6 with `solid` copper; the via transition 80
+  against 42 to −40 dB and 128 against 60.6 to −60 dB, `sim.sparams`'s default; the via on 25 194 cells 34
+  against 18 to 20 with ems on three threads, and 34.3 to 35.0 against 43.7 to 46.1 with one thread each, 1.27
+  to 1.34 times (1.45 with 0.0.10). Met on every case.
+**The other four**, as far as they were checked again:
+1. *Every validation tolerance.* The `#[ignore]` validations that take a solver were run on both solvers with
+   ems 0.0.11 from crates.io and pass at the built-in solver's tolerances: `sim_sparams_microstrip_validation`,
+   `lossless_line_near_the_pml_is_passive`, `sim_sparams_mask_validation`, `sim_sparams_parts_validation`,
+   `routed_45_degree_line`, and session 6's `rf_path_full_wave`, which ran on the default solver alone and now
+   names both.
+2. *No case materially worse in accuracy.* Nothing to measure again: 0.0.11's Touchstone files are 0.0.10's
+   byte for byte on the nine cases compared (the bent line with lossy sheets and with lossy `solid` copper on
+   both meshes, the oracle's two lines, the via transition to −40 and −60 dB, the small via region), so D90's
+   numbers stand.
+4. *Deterministic for any thread count.* The same bytes on one and three threads (the bent line with lossy
+   sheets on both meshes) and on one, two and three (the small via region with lossy `solid` copper).
+5. *No panics, no instabilities.* Every run above ended converged; `measure_diagonal_copper` (every copper model
+   on both meshes, each asserted to end and to stay passive) passes.
+**Decision.** `sim.sparams` runs on ems by default. The switch is D90's prepared commit: the default `Solver` is
+ems in a build with the cargo feature `ems` (a default feature) and the built-in one in a build without it,
+where `solver: ems` keeps answering `sim.solver_unavailable`; `solver: builtin` runs cadlab's own solver, and
+`src/fdtd/engine.rs` stays. For a user: the output's `solver` is always there (it was left out for the built-in
+solver), the text result says "with ems:" or "with the built-in solver:", and the Touchstone file's first line
+says `(solver: ems)` or `(solver: builtin)` (nothing, for the built-in solver, before); the numbers of a run
+that names no solver move by what the two solvers differ, which is the table's last column (session 6: |S₁₁|
+0.5726 for 0.5733 and |S₂₁| 0.7988 for 0.7983 at 2.44 GHz; the oracle's lines 0.005 and 0.010 dB; the via
+transition 0.018 dB at 4 GHz); ems's own warnings (`sim.ems_<code>`) can appear; a run takes more memory and,
+without `threads`, more threads. No golden file or snapshot changed: none holds a result of `sim.sparams`, and
+the `describe` schema of the command is 10 972 bytes of the 11 000 its test allows.
+**Tests.** Nothing is tested only as the default: every board-level test names its solver and runs on both
+(D89's list, and `rf_path_full_wave` from here on); `sim_sparams_command` and `ems_runs_the_region` check which
+solver a run without `solver` gets, in a build with the feature and in one without, and that it writes the file
+`solver: ems` writes. The openEMS oracle compares openEMS with both solvers by name, so the switch changes
+nothing in it.
+**Open, and not conditions of this decision:**
+- *Memory.* ems takes 1.6 to 4.4 times the built-in solver's (the process's peak: the via transition 150 MB
+  against 35 MB, the bent line on 0.25 mm cells 160 MB against 58 MB, on the default mesh 55 MB against 35 MB).
+  0.0.11 did not change it. D89 set memory aside as a condition; it is now what a default run costs.
+- *One thread with a Debye laminate.* 1.3 times the built-in solver's time on the region of 25 194 cells
+  (ems's own figure for small regions: 1.2 to 1.5 times). Within the limit, and not what a run without
+  `threads` does on a machine with more than one core.
+- *Session 6 at equal threads*, 1.1 to 1.3 times: the Debye poles on a graded mesh (ems's notes).
+- *The built-in engine* is not removed (D86's last step): it is the second result, the solver of a build
+  without the feature, and what ems is measured against.
+*Not established:* times on an unshared machine with more cores, where ems takes up to a thread per core of the
+pool (a thread per five x planes and 4096 cells) and the built-in solver one per 131 072 nodes: every time here
+was taken with three threads allowed, and they vary by a fifth between runs (the built-in solver's blocking case
+from 32.7 to 47.1 s); the openEMS oracle with ems 0.0.11, which runs in CI only (with 0.0.10 on master it
+passed for both solvers: the via transition within 0.07 dB for ems and 0.05 dB for the built-in solver, the
+lines' largest relative difference 36.0 and 40.6 % for ems and 40.6 and 42.0 % for the built-in solver, at the
+lowest frequencies where the test's absolute term carries them; 0.0.11 should read the same to the digit, its
+results being 0.0.10's); the via
+transition on 0.2 mm cells, not run again; which solver is nearer a finer mesh on the via transition (D90).
+
 
 ## Open questions
