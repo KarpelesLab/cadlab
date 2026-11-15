@@ -2964,4 +2964,96 @@ off as they are. Half is not derived, it is what the corpus measured better than
 fifths, and it should move when guide's planning can be stopped or its joining left out.
 
 
+### D93. guide 0.0.5 adopted: its joining of zones' pieces left out, the stopped connections told apart by `Routed::tried`, the half of the budget and the second run measured again and kept; the default unchanged (2026-11-15)
+guide 0.0.5 answers D91's list of what got in the way: every phase keeps the deadline, a budget is shared out
+between routing, cleanup and the joining of zones' pieces, a pad that is shut in says so after a stopped run,
+and `Routed::tried` names the nets that had a search (guide's `docs/benchmarks.md`, "PCB routing in parts").
+`guide = { version = "0.0.5", default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock`
+moves.
+**What the adapter takes from it** (`router::guide`; ROUTER.md, "guide as a backend"):
+- `RouteOptions::join = false`, in both runs. The joining is guide filling the zones around its routes and
+  joining what that fill leaves apart; cadlab fills again itself and gives guide what its own fill leaves
+  apart, in the second run. Measured off and on, the corpus at 60 s has the same count within what two runs
+  differ by (567 to 576 against 564 and 586), as guide's record says. It is off for what else it does: the
+  small boards take half the time, lumenpnp-mobo's first run has the time for its cleanup (about 690 vias
+  where it had 770), and a run with a work budget is not stopped by it. That last is a fault of guide 0.0.5
+  found here: with `join` on, a work budget of 20 M nodes and a board with zones, the run says the work budget
+  was spent after 13 000 to 50 000 nodes and leaves a connection open on each of buspirate-flash-sop,
+  buspirate-rs232 and lumenpnp-ringlight, which 0.0.4 completes and 0.0.5 with `join` off completes.
+- `Routed::tried`, for the reason of a connection the stop left open: a net not in it was never got to (`the
+  time budget ended before guide got to net N: <pad> is apart from <pad>`, a larger budget or fewer nets at a
+  time), a net in it had its turn and was without a way when the run stopped (`… before guide had routed net N
+  to <pad> again: the net had its turn, and was without a way there when the run stopped`, a larger budget or
+  the native router). guide's summary of a run in the progress says how many nets it got to.
+- *Not* `tried` for the second run's nets. D91 read the nets a stopped run tried and could not finish from the
+  causes, a net with a connection whose cause is neither `Stopped` nor `Unknown`. With `tried` in its place,
+  every net that had its turn left out, the twelve boards have 651 open where they have 564 to 586, and seven
+  boards get no second run: a stopped run has given nearly every net its turn (glasgow-revD1 all 561), and
+  what is open is mostly nets that another net's route left without a way, which the run on the routed board
+  finds a way for (glasgow-revD1 399 against 349, corne-cherry 62 against 51 to 54). What the second run must
+  leave out is the nets a search *failed* for, and that is the cause. So the rule stays, and `unrouted` of a
+  stopped run, which no longer lists every net with a zone, is still not read after a stop.
+- *No wording of its own for `NoPath` after a deadline.* guide looks at a pad's surroundings after a stopped
+  run too: glasgow-revC3, cut, has 65 pads shut in and 4 "found no way" (0.0.4: 1 and 68), with the blockers
+  as subjects and hints.
+- *A run that comes back before its deadline can be one that was stopped*, since routing ends at three
+  quarters of the time: `budget_exhausted` and `route.budget_cut` follow guide's `stopped` as before, so they
+  are set for such a run. That is right for the user (the budget is why connections are open) and needs no
+  change.
+**The half, measured again.** guide now keeps a quarter of what a run is given for after routing, so the
+first run's share was a question again. With `join` off: two fifths 572, half 571 and 573, three fifths 577,
+two thirds 593, three quarters 636; with `join` on, half 586 and 564, two thirds 587, four fifths 663. Level
+from two fifths to three fifths and worse above, because a second run on a large board plans for 8 to 13 s
+before it routes ("escapes and planes" on the routed board with cadlab's fills). Half stays. **The second
+run, measured again:** one run with nine tenths of the budget leaves 681. It is still what joins pads to
+cadlab's fill (lumenpnp-mobo: a first run that ends on its own reports every connection made, and the
+refilled board has 51 open) and what routes the nets a cut run left (glasgow-revD1 399 against 344 to 350).
+Not started after a run the work budget stopped, as before: allowed one with what the first left of the
+budget, the four boards a budget of 20 M stops had the same result to the via.
+**route_bench's via-in-pad count** tests the pad's copper (`polyclip::locate` on the pad's shape), not its
+box, for both routers: 0 on every corpus board for guide 0.0.4, guide 0.0.5 and the native router, where the
+box had 3 to 7 of guide's on four boards (D91, item 5), each beside a round pad in the corner of its box.
+**Measured** (ROUTER.md, "Native router and guide 0.0.5, D93"; the corpus at 60 s, each row of guide twice;
+*before* is guide 0.0.4 behind D91's adapter, the native router run here, seed 1, three threads). Open
+connections, native / before / after: buspirate-flash-sop, buspirate-rs232 and lumenpnp-ringlight 0 / 0 / 0;
+nrfmicro 0 / 11 / 8; sweep-v2.2 3 / 6 / 6; corne-cherry 3 / 54 / 54; tinytapeout-demo 8 / 50 and 53 / 45;
+buspirate5-rev10 2 / 14 / 16; lumenpnp-mobo 15 / 59 and 12 / 6 and 7; cynthion 28 / 34 and 36 / 23;
+glasgow-revC3 34 / 69 / 69; glasgow-revD1 201 / 350 and 349 / 349 and 344. Twelve boards: 647 and 604
+before, 576 and 572 after (D91 recorded 589 for the same *before*; guide's own record of 0.0.5 has 607 and
+567: the machine was shared each time, and the spread of *before* is lumenpnp-mobo's second run, which had no
+time left in one run of the two). The eleven without glasgow-revD1: 93 / 297 and 255 / 227 and 228. Zero DRC
+errors other than unrouted, nothing taken out by the verification, no call of guide over 60 s after (62.2
+and 65.1 s before). guide 0.0.5 behind D91's adapter unchanged: 586 and 564, so the release is the gain and
+the adapter's part is what `join` off gives beside the count.
+**Gaps, for guide's next release**, most useful first:
+1. *A work budget with `join` on stops a run that has spent a thousandth of it* (above;
+   `CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_WORK=20000000 route_bench --corpus buspirate-rs232` at cadlab
+   `d564baf` with guide 0.0.5: "49888 nodes; the work budget was spent", one connection open; the second run
+   of the adapter the same after 365 nodes with nothing open).
+2. *The nets a search failed for, as a list.* `tried` has every net that had its turn; a host that routes
+   again wants those whose last search ended with no way (as against those another net's route left without
+   one when the run stopped), which is what `unrouted` is after a run that ended. Read from the causes here.
+3. *The plan of a run on a routed board*: "escapes and planes" takes 8 to 13 s on lumenpnp-mobo, cynthion and
+   glasgow-revD1 for a second run of 1 to 135 nets, before any routing, and it is why the second run needs
+   half the budget. A plan for the nets to route only, or one kept from the first run, would let the first
+   run have more.
+4. *Rip-up that does not settle*, guide's own finding: 343 of glasgow-revD1's open connections and 18 of
+   corne-cherry's 54 are nets that had their turn and were without a way at the stop, and corne-cherry's other
+   36 are pads shut in, most by the routes of the pads beside them; the native router leaves 201 and 3 there
+   in the same time.
+5. *Fine-pitch pads*, still: 161 pads shut in at 60 s (glasgow-revC3's array 65, tinytapeout-demo, nrfmicro 8
+   open), D88's first item.
+6. *A first run's own account of its zones is not the host's*: lumenpnp-mobo's run reports 524 of 524
+   connections and the refilled board has 51 open. Harmless with the second run; it means `Stats::islands`
+   and `open` of a run with `fills` off cannot be shown to a user as the board's.
+**Default: unchanged.** The condition is that guide be at least as good as the native router on every board.
+At the same 60 s it is level on three, ahead on two (lumenpnp-mobo 6 and 7 against 15, cynthion 23 against
+28) and behind on seven, 227 open against 93 on the eleven boards and 344 to 349 against 201 on glasgow-revD1.
+`router: guide` stays the second opinion.
+*Why:* each release of guide has taken a workaround out of the adapter, and this one takes the reason for a
+special wording and the time lost after a deadline; what it adds that the adapter does not use as offered
+(`tried` for the second run, `join` on) was measured before it was left, so the next reader does not have to
+wonder whether it was overlooked.
+
+
 ## Open questions

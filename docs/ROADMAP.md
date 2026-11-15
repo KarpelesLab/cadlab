@@ -259,9 +259,16 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       and guide 0.0.3 left 1023 (lumenpnp-mobo 48 to 9, corne-cherry 90 to 54, glasgow-revD1 394 to 349); 240
       against the native router's 85 on the eleven boards both have a result for. The default stays the native
       router (D91)
+- [x] guide 0.0.5 adopted in the adapter: its joining of zones' pieces left out (`join` off; cadlab's fill and
+      the second run do it), the reason of a stopped connection by `Routed::tried`, no wording of its own for
+      "found no way" after a deadline; the half of the budget and the second run measured again and kept.
+      Measured at 60 s (ROUTER.md, "Native router and guide 0.0.5, D93"): 576 and 572 connections open on the
+      twelve corpus boards in two runs where guide 0.0.4 leaves 647 and 604 (nrfmicro 11 to 8, cynthion 34 to
+      23, lumenpnp-mobo 12 to 6); 227 against the native router's 93 on eleven boards, ahead on two, behind on
+      seven. route_bench counts a via in a pad by the pad's copper. The default stays the native router (D93)
 - [ ] `router: guide` level with the native router on the corpus: needs, in guide, a way out of fine-pitch pads
-      a track of the net's width does not leave, planning and zone joining that stop at the deadline, and the
-      time (D91, "What got in the way"; D88, "What still blocks it")
+      a track of the net's width does not leave, rip-up that settles, a cheaper plan for a run on a routed
+      board, and the time (D93, "Gaps"; D91, "What got in the way"; D88, "What still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
