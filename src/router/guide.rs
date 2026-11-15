@@ -1,5 +1,5 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85 and D88; docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91 and D93; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -13,8 +13,9 @@
 //! board leaves open is reported with guide's cause for it (`Routed::open`).
 //!
 //! guide plans on cadlab's fills (`Zones::fills`), not on a fill of its own, and is asked for
-//! none at the end (`RouteOptions::fills`): zone filling stays cadlab's. What guide's API cannot express is
-//! passed the stricter way and named in [`RouteResult::notes`](super::RouteResult::notes):
+//! none at the end (`RouteOptions::fills`) and for no joining of what its own fill leaves apart
+//! (`RouteOptions::join`): zone filling stays cadlab's, and what cadlab's fill leaves apart goes
+//! to a second run. What guide's API cannot express is passed the stricter way and named in [`RouteResult::notes`](super::RouteResult::notes):
 //! custom rules by kind, footprint or containment, rules between two different scopes and
 //! `disallow` rules (D61).
 
@@ -54,10 +55,13 @@ use super::{
 const PLANE_COVERAGE: f64 = 0.0;
 
 /// The share of the time budget guide's first run may take: the rest is for the verification,
-/// the refill, a second run on the routed board and the report. With four fifths, which left
-/// no time for a second run, the twelve corpus boards had 714 connections open at 60 s, and
-/// with half 600: lumenpnp-mobo 48 and 12, glasgow-revD1 394 and 349, corne-cherry 90 and 54
-/// (D91).
+/// the refill, a second run on the routed board and the report. guide itself ends its routing
+/// at three quarters of what it is given and cleans up in the rest (0.0.5). Measured again
+/// with that, the twelve corpus boards at 60 s: two fifths 572 connections open, half 571 and
+/// 573, three fifths 577, two thirds 593, three quarters 636, and with no second run 681. A
+/// second run on a large board spends 8 to 13 s on its plan before it routes, so it needs
+/// some 20 s (lumenpnp-mobo 7 and 51, glasgow-revD1 350 and 399 with half and without one).
+/// With guide 0.0.4 four fifths left 714 and half 589 (D91, D93).
 const FIRST_SHARE: f64 = 0.5;
 
 /// How many times what the first run needed after it (the verification and the refill) is
@@ -656,7 +660,11 @@ struct Open {
 
 /// What guide says of a connection it left open (`Routed::open`), as a reason with subjects
 /// and hints.
-fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>) -> Open {
+///
+/// `tried` is whether the net had a search of its own in the run (`Routed::tried`): a net the
+/// run was stopped before is one it never got to, or one that had its turn and was without a
+/// way when the run stopped.
+fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>, tried: bool) -> Open {
     let net = ad.nets.get(o.net.index()).cloned().unwrap_or_default();
     let pad = |e: &pcb::Endpoint| e.pad.and_then(|i| ad.pads.get(i)).cloned().unwrap_or_else(|| "a pad".to_string());
     let (from, to) = (pad(&o.from), pad(&o.to));
@@ -711,16 +719,8 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>) -> O
                 format!("{to} is shut in by {}: no track of net {net} can leave it", parts.join(", "))
             }
         }
-        // After a run that its deadline stopped guide gives this cause without looking at
-        // what is around the pad.
-        Cause::NoPath if stopped == Some(Stopped::Deadline) => {
-            hints.push("give a larger `budget`: guide then says whether the pad is shut in, and by what".to_string());
-            hints.push(native.clone());
-            format!(
-                "guide found no way from {to} to {from} for net {net}; the time budget ended before it looked at \
-                 whether {to} is shut in"
-            )
-        }
+        // Also after a run that was stopped: guide looks at what is around the pad then too
+        // (0.0.5), and a pad that is shut in has `Enclosed`.
         Cause::NoPath => {
             hints.push(native.clone());
             format!("guide found no way from {to} to {from} for net {net}; {to} is not shut in nearby")
@@ -734,13 +734,23 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>) -> O
                 Some(Stopped::WorkBudget) => "give a larger `work_budget`".to_string(),
                 _ => "give a larger `budget`".to_string(),
             });
-            hints.push("route fewer nets at a time (`route.nets`)".to_string());
             let why = match stopped {
                 Some(Stopped::WorkBudget) => "the work budget was spent",
                 Some(Stopped::Deadline) => "the time budget ended",
                 _ => "the run was stopped",
             };
-            format!("{why} before guide had routed net {net} to {to}")
+            if tried {
+                // It had its turn: another net's route took its way since, or its search was
+                // the one the stop cut short.
+                hints.push(native.clone());
+                format!(
+                    "{why} before guide had routed net {net} to {to} again: the net had its turn, and was \
+                     without a way there when the run stopped"
+                )
+            } else {
+                hints.push("route fewer nets at a time (`route.nets`)".to_string());
+                format!("{why} before guide got to net {net}: {to} is apart from {from}")
+            }
         }
         // `Unknown`, and any cause newer than this adapter: guide has no say on the net.
         _ => {
@@ -766,6 +776,12 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>) -> O
         hints,
         subjects,
     }
+}
+
+/// What a run of guide says of every connection it left open.
+fn explain_all(ad: &Adapted, r: &pcb::Routed) -> Vec<Open> {
+    let tried: BTreeSet<NetId> = r.tried.iter().copied().collect();
+    r.open.iter().map(|o| explain(ad, o, r.stopped, tried.contains(&o.net))).collect()
 }
 
 /// Whether guide can run this request at all; the refusal says what to do instead.
@@ -796,6 +812,12 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     gopts.keep_partial = true;
     // Zone filling is cadlab's: nothing here reads guide's fills, and the count is the board's.
     gopts.fills = false;
+    // Nor does it join the pieces its own fill leaves a zone's net in: cadlab fills again around
+    // the routes and gives guide what that fill leaves apart, in a second run. Left on, the
+    // twelve corpus boards have as many connections open at 60 s (564 and 586 against 567 to
+    // 573), and a run with a work budget on a board with zones says the budget was spent after
+    // a few thousand nodes (guide 0.0.5; D93).
+    gopts.join = false;
     // The smallest via the rules allow, for a pad trapped in its footprint: the native
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
     let (dia, drill) = super::smallest_via(&p.board().rules);
@@ -1028,9 +1050,11 @@ fn verify(
 }
 
 /// The nets a run of guide tried and could not finish. A run that ended names them
-/// (`Routed::unrouted`). One that was stopped lists there what its board leaves in pieces, zones
-/// not counted, so its nets are those with a connection whose cause is a search that failed,
-/// not the stop.
+/// (`Routed::unrouted`). After one that was stopped they are the nets with a connection whose
+/// cause is a search that failed, not the stop. `Routed::tried` is not that list: it has every
+/// net that had its turn, and so the nets that were without a way when the run stopped because
+/// another net's route took it. Those are worth a second run: without them in it the twelve
+/// corpus boards had 651 connections open at 60 s where they have 564 to 586 (D93).
 fn gave_up_on(ad: &Adapted, r: &pcb::Routed) -> BTreeSet<String> {
     let name = |n: NetId| ad.nets.get(n.index()).cloned();
     match r.stopped {
@@ -1049,11 +1073,12 @@ fn said(r: &pcb::Routed) -> String {
     let gs = &r.stats;
     let of = |kind: CopperKind| r.via_kinds.iter().filter(|k| **k == kind).count();
     format!(
-        "guide: {} of {} nets, {} of {} connections on its board, {} left open, {} rip-ups, {} nets to the finer \
-         pass, {} escape vias, {} stub vias to zones, {} nets with zones in pieces, {} of {} pairs side by side, \
-         {} of {} lengths met, {} nodes{}",
+        "guide: {} of {} nets, {} got to, {} of {} connections on its board, {} left open, {} rip-ups, {} nets \
+         to the finer pass, {} escape vias, {} stub vias to zones, {} nets with zones in pieces, {} of {} pairs \
+         side by side, {} of {} lengths met, {} nodes{}",
         gs.routed,
         gs.nets,
+        r.tried.len(),
         gs.islands.1,
         gs.islands.0,
         r.open.len(),
@@ -1147,7 +1172,7 @@ pub(crate) fn route(
     opts.work.charge(routed.stats.work);
     (hooks.progress)(0, None, &said(&routed));
     let mut stopped = routed.stopped;
-    let mut opens: Vec<Open> = routed.open.iter().map(|o| explain(&ad, o, stopped)).collect();
+    let mut opens: Vec<Open> = explain_all(&ad, &routed);
     let mut gave_up = gave_up_on(&ad, &routed);
     let mut escapes: BTreeSet<(i64, i64)> = routed
         .vias
@@ -1232,7 +1257,7 @@ pub(crate) fn route(
         );
         // What this run says of its nets replaces what the first said of them.
         opens.retain(|o| !again.contains(&o.net));
-        opens.extend(more.open.iter().map(|o| explain(&ad, o, more.stopped)));
+        opens.extend(explain_all(&ad, &more));
     }
 
     // The report, from the board with its zones filled again around the new copper (D80).
@@ -1786,7 +1811,11 @@ mod tests {
         let opts = RouteOptions { budget: Some(Duration::ZERO), ..Default::default() };
         let r = route(&p, &nets, &opts, &Hooks::none()).expect("route");
         assert!(r.stats.budget_exhausted && r.stats.failed == 3 && r.tracks.is_empty(), "{:?}", r.stats);
-        assert!(r.connections.iter().all(|c| c.reason.as_deref().is_some_and(|m| m.contains("time budget"))));
+        // No net had its turn (`Routed::tried`), and the reason says that.
+        let got_to = |c: &ConnectionReport| {
+            c.reason.as_deref().is_some_and(|m| m.starts_with("the time budget ended before guide got to net "))
+        };
+        assert!(r.connections.iter().all(got_to), "{:?}", r.connections);
         // Progress comes from guide's phases, and a cancellation seen there stops the run.
         let heard = std::cell::RefCell::new(Vec::new());
         let progress = |_: u64, _: Option<u64>, m: &str| heard.borrow_mut().push(m.to_string());
@@ -1813,7 +1842,8 @@ mod tests {
         assert_eq!(seeded(0), full);
     }
 
-    /// What guide is told beside the board: no fill of its own at the end, no via in a pad, and
+    /// What guide is told beside the board: no fill of its own at the end and no joining of zones'
+    /// pieces on it, no via in a pad, and
     /// for the escapes of trapped pads the smallest via the rules allow, the native fanout's.
     #[test]
     fn guide_gets_no_fill_and_the_smallest_via_for_escapes() {
@@ -1821,7 +1851,7 @@ mod tests {
         p.board_mut().rules.min_drill = Nm(200_000);
         p.board_mut().rules.min_annular_ring = Nm(100_000);
         let g = options(&p, &RouteOptions::default(), &[0, 1]);
-        assert!(!g.fills && !g.vias_in_pads && g.keep_partial);
+        assert!(!g.fills && !g.join && !g.vias_in_pads && g.keep_partial);
         assert_eq!(g.fanout_via, Some(ViaSize { diameter: 400_000, drill: 200_000 }));
         assert_eq!((g.seed, g.layers, g.work_budget), (None, None, None));
         let opts = RouteOptions { seed: 7, layers: vec!["B.Cu".into()], ..Default::default() };
