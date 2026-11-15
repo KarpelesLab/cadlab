@@ -632,6 +632,8 @@ fn wireless_node_through_mcp() {
 }
 
 /// The full-wave run: `cargo test --release --test agent_session6 -- --ignored`. Minutes per run.
+/// On each solver of this build (ems, `sim.sparams`'s default since D94, and the built-in one),
+/// held to the same tolerances.
 ///
 /// Compared with the ideal chain of `chain`: the layout's own pads and gaps are the difference, so
 /// agreement bounds the setup, not the RF performance of a real board: the parts here are ideal,
@@ -646,22 +648,27 @@ fn rf_path_full_wave() {
     circuit(&mut c);
     stackup_and_width(&mut c);
     layout(&mut c);
-    let r = c.ok(
-        "sim",
-        "sparams",
-        sim_args(json!({"name": "rf", "points": 101, "end_criteria": "50dB", "frequencies": ["2.44GHz"],
-            "band": ["2.4GHz", "2.4835GHz"]})),
-    );
-    assert!(r["output"]["runs"].as_array().unwrap().iter().all(|x| x["converged"] == true), "{r}");
-    assert!(diags(&r, "sim.not_passive").is_empty() && diags(&r, "sim.not_reciprocal").is_empty(), "{r}");
-    let param = |n: &str| r["output"]["params"].as_array().unwrap().iter().find(|p| p["name"] == n).unwrap().clone();
-    let (s11, s21) = chain(2.44e9, 0.8e-12, 3.9e-9, 10.6);
-    let abs = |c: (f64, f64)| (c.0 * c.0 + c.1 * c.1).sqrt();
-    let got11 = param("S11")["at"][0]["mag"].as_f64().unwrap();
-    let got21 = param("S21")["at"][0]["mag"].as_f64().unwrap();
-    eprintln!("|S11| {got11} (ideal chain {}), |S21| {got21} (ideal chain {})", abs(s11), abs(s21));
-    assert!((got21 - abs(s21)).abs() < S21_TOLERANCE, "|S21| {got21}, ideal chain {}", abs(s21));
-    assert!((got11 - abs(s11)).abs() < S11_TOLERANCE, "|S11| {got11}, ideal chain {}", abs(s11));
+    let solvers: &[&str] = if cfg!(feature = "ems") { &["builtin", "ems"] } else { &["builtin"] };
+    for solver in solvers {
+        let r = c.ok(
+            "sim",
+            "sparams",
+            sim_args(json!({"name": format!("rf_{solver}"), "solver": solver, "points": 101, "end_criteria": "50dB",
+                "frequencies": ["2.44GHz"], "band": ["2.4GHz", "2.4835GHz"]})),
+        );
+        assert_eq!(r["output"]["solver"], *solver, "{r}");
+        assert!(r["output"]["runs"].as_array().unwrap().iter().all(|x| x["converged"] == true), "{r}");
+        assert!(diags(&r, "sim.not_passive").is_empty() && diags(&r, "sim.not_reciprocal").is_empty(), "{r}");
+        let param =
+            |n: &str| r["output"]["params"].as_array().unwrap().iter().find(|p| p["name"] == n).unwrap().clone();
+        let (s11, s21) = chain(2.44e9, 0.8e-12, 3.9e-9, 10.6);
+        let abs = |c: (f64, f64)| (c.0 * c.0 + c.1 * c.1).sqrt();
+        let got11 = param("S11")["at"][0]["mag"].as_f64().unwrap();
+        let got21 = param("S21")["at"][0]["mag"].as_f64().unwrap();
+        eprintln!("{solver}: |S11| {got11} (ideal chain {}), |S21| {got21} (ideal chain {})", abs(s11), abs(s21));
+        assert!((got21 - abs(s21)).abs() < S21_TOLERANCE, "{solver}: |S21| {got21}, ideal chain {}", abs(s21));
+        assert!((got11 - abs(s11)).abs() < S11_TOLERANCE, "{solver}: |S11| {got11}, ideal chain {}", abs(s11));
+    }
 }
 
 /// Set from the session's run (docs/TESTING.md, session 6).
@@ -670,7 +677,7 @@ const S11_TOLERANCE: f64 = 0.15;
 
 /// The same run on the ems solver (`solver: ems`, DECISIONS D86) and on the built-in one: the
 /// matching network's |S11| and |S21| at 2.44 GHz and over the band, with what each run cost.
-/// A measurement (docs/ELECTRICAL.md, "ems as a second solver"): `cargo test --release --test
+/// A measurement (docs/ELECTRICAL.md, "ems, the default solver"): `cargo test --release --test
 /// agent_session6 -- --ignored --nocapture rf_path_full_wave_ems`.
 #[cfg(feature = "ems")]
 #[test]

@@ -1,7 +1,8 @@
-//! `sim.sparams --solver ems` (DECISIONS D86): the board region run by the ems crate's FDTD, against
-//! the built-in solver and the references its own tests use. The `#[ignore]` tests are the
-//! measurements behind the table in docs/ELECTRICAL.md ("ems as a second solver"); run them in
-//! release, one at a time: `cargo test --release --test fdtd_ems -- --ignored --nocapture <name>`.
+//! `sim.sparams` on ems, its default solver since D94 (DECISIONS D86): the board region run by the
+//! ems crate's FDTD, against the built-in solver and the references its own tests use. The
+//! `#[ignore]` tests are the measurements behind the table in docs/ELECTRICAL.md ("ems, the default
+//! solver"); run them in release, one at a time:
+//! `cargo test --release --test fdtd_ems -- --ignored --nocapture <name>`.
 #![cfg(feature = "ems")]
 
 use std::f64::consts::PI;
@@ -281,7 +282,7 @@ fn ems_runs_the_region() {
     assert_eq!(b.out["output"]["solver"], "builtin");
     let text = std::fs::read_to_string(b.out["output"]["touchstone"].as_str().unwrap()).unwrap();
     assert!(text.starts_with("! cadlab sim.sparams (solver: builtin): board region"), "{text}");
-    // ems is the solver of a run that names none (DECISIONS D90): the same file.
+    // ems is the solver of a run that names none (DECISIONS D94): the same file.
     let mut unnamed = with(args.clone(), json!({"name": "unnamed"}));
     unnamed.as_object_mut().unwrap().remove("solver");
     let d = exec(&r, &mut s, "sim.sparams", unnamed);
