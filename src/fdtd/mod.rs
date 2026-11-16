@@ -1,39 +1,34 @@
-//! 3D full-wave solvers (FDTD): S-parameters of a board region, `sim.sparams`. See
-//! `docs/ELECTRICAL.md`, "Full-wave solver". Two solvers run the same region: the `ems` crate's
-//! ([`Solver::Ems`], the default where the build has the cargo feature `ems`; DECISIONS D94) and
-//! cadlab's own, described here ([`Solver::Builtin`]).
+//! 3D full-wave simulation (FDTD): S-parameters of a board region, `sim.sparams`. See
+//! `docs/ELECTRICAL.md`, "Full-wave solver". The solver is the `ems` crate's (DECISIONS D86, D94,
+//! D100); this module builds its model from the board and reads the result.
 //!
 //! The region, its geometry and its graded mesh come from the openEMS export
 //! ([`crate::openems`]): the same stack, copper, holes, ports and mesh lines, so both describe
-//! the same simulation. [`engine`] is the Yee time stepping (written from the textbooks, no code
-//! of any other solver used); this module turns the region into voxels, places the ports and
-//! probes, runs once per port and assembles the S-parameters into a Touchstone file.
+//! the same simulation. This module extracts the region ([`extract`]), places the ports and
+//! probes on the mesh ([`place_ports`]), hands the model to ems ([`ems`](self::ems)), runs once
+//! per port and assembles the S-parameters into a Touchstone file ([`Waves`]).
 //!
-//! - Copper: perfect-conductor edges inside the copper volume (`solid`) or on the sheet
-//!   (`sheet`); plated holes and vias are metal cylinders. With a conductivity, a surface
-//!   impedance boundary condition on every copper surface gives the skin-effect loss (and
-//!   roughness), fitted over the band ([`fit::surface_fit`]). Cells cut by diagonal or curved
-//!   copper use their open lengths and area (Dey–Mittra, [`conformal`]).
+//! - Copper: metal volumes (`solid`) or sheets (`sheet`); plated holes and vias are metal
+//!   cylinders. With a conductivity, a surface impedance on the copper gives the skin-effect loss
+//!   (and roughness) over the band. Cells cut by diagonal or curved copper are conformal.
 //! - Dielectrics: the Djordjevic–Sarkar model through the stackup's εr and tan δ at their
 //!   reference frequency (at the pulse's center f₀ when the stackup gives none), as Debye terms
-//!   on shared relaxation times ([`fit::debye_fit`]) updated by auxiliary differential
-//!   equations; edges average the permittivity of the cells around them. Solder mask (an
-//!   option) is a dielectric layer over the outer layers.
+//!   on shared relaxation times ([`fit::debye_fit`]). Solder mask (an option) is a dielectric
+//!   layer over the outer layers.
 //! - Lumped ports are resistive voltage sources of the reference impedance, from the reference
 //!   copper to the signal copper; microstrip ports feed the same source on the line and measure
 //!   voltage and current on it at their reference plane.
 //! - Board parts: two-pin resistors, capacitors and inductors in the region are series R–L–C
-//!   lumped elements from their part values, across the gap between their pads ([`LumpedElement`]).
+//!   lumped elements from their part values, across the gap between their pads
+//!   ([`parts`](self::parts)).
 //! - Absorbing boundaries: CPML in the outer `pml_cells` cells of every side.
 //! - S = B A⁻¹ from the incident and reflected power waves of every port in every run, so
 //!   terminations that are not exactly matched do not bias the result.
 
-pub mod conformal;
-#[cfg(feature = "ems")]
 pub(crate) mod ems;
-pub mod engine;
 pub mod fit;
 pub(crate) mod parts;
+mod slanted;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -41,41 +36,93 @@ use serde::{Deserialize, Serialize};
 use crate::diag::Diagnostic;
 use crate::electrical::complex::C64;
 use crate::geom::Point;
-use crate::geom::poly::{self, Location};
 use crate::model::Project;
 use crate::openems::{self, MeshInfo, PortInfo, PortKind, Region};
 use crate::refs::ObjectRef;
 use crate::touchstone::{self, Touchstone};
 use crate::units::Nm;
 
-pub use engine::{
-    Cancelled, Gaussian, Hooks, LumpedElement, LumpedPort, Material, Probe, Run, Settings, Simulation, Structure,
-    SurfaceImpedance,
-};
 pub use parts::{LumpedPart, Overrides};
-
-use crate::electrical::dispersion::Dielectric as Dispersive;
 
 /// A slanted track under this many cells wide is unresolved (it can break up into separate pieces).
 const UNRESOLVED: f64 = 1.5;
 /// Cells across the narrowest slanted track when the mesh is refined for it.
 const CELLS_ACROSS: f64 = 2.0;
 
-/// The solver that runs a region.
-// The default is ems in a build with the cargo feature `ems` (a default feature) and the built-in
-// one in a build without it (DECISIONS D94).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Solver {
-    /// cadlab's own FDTD.
-    #[cfg_attr(not(feature = "ems"), default)]
-    Builtin,
-    /// The `ems` crate's FDTD (D86).
-    #[cfg_attr(feature = "ems", default)]
-    Ems,
+/// The solver of `sim.sparams`, as a result names it: the `ems` crate and the version this build
+/// depends on (`Cargo.toml` asks for exactly this one; a test holds the two together).
+pub const SOLVER: &str = "ems 0.0.12";
+
+/// A Gaussian-modulated pulse covering `f0 − fc .. f0 + fc` at −20 dB (a plain Gaussian, from
+/// DC, when `f0` is 0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gaussian {
+    /// Center frequency (Hz).
+    pub f0: f64,
+    /// 20 dB half-bandwidth (Hz).
+    pub fc: f64,
 }
 
-/// Simulation options: the region and mesh as for the openEMS export, plus the solver's limits.
+impl Gaussian {
+    /// Width τ of `exp(−((t − t0)/τ)²)`: its spectrum `exp(−(π f τ)²)` is 20 dB down at `fc`.
+    pub fn tau(&self) -> f64 {
+        std::f64::consts::LN_10.sqrt() / (std::f64::consts::PI * self.fc)
+    }
+    /// Delay of the peak (the pulse starts 106 dB below it).
+    pub fn t0(&self) -> f64 {
+        3.5 * self.tau()
+    }
+    /// When the pulse is over (symmetric around `t0`).
+    pub fn end(&self) -> f64 {
+        2.0 * self.t0()
+    }
+}
+
+/// Progress and cancellation callbacks.
+pub struct Hooks<'a> {
+    /// `(done, total, message)`.
+    pub progress: &'a dyn Fn(u64, Option<u64>, &str),
+    /// Polled regularly; `true` stops the run.
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+
+impl Hooks<'_> {
+    /// No progress, never cancelled.
+    pub fn none() -> Hooks<'static> {
+        Hooks { progress: &|_, _, _| {}, cancelled: &|| false }
+    }
+}
+
+/// A lumped port on the mesh: a resistive voltage source along `axis`, columns of edges at every
+/// node of the transverse ranges, from `lo[axis]` to `hi[axis]`, the total resistance `r` in
+/// series with the source.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LumpedPort {
+    /// Direction of the element (0 x, 1 y, 2 z).
+    pub(crate) axis: usize,
+    /// Lowest node (inclusive box).
+    pub(crate) lo: [usize; 3],
+    /// Highest node.
+    pub(crate) hi: [usize; 3],
+    /// The positive terminal (the signal) is at `hi[axis]`.
+    pub(crate) positive_high: bool,
+    /// Resistance (Ω).
+    pub(crate) r: f64,
+}
+
+/// A probe on the mesh, sampled every timestep and transformed to the frequencies of the run.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Probe {
+    /// Voltage `φ(from) − φ(to)`, the line integral of E from node `from` to the node at index
+    /// `to` along `axis`.
+    Voltage { axis: usize, from: [usize; 3], to: usize },
+    /// Current along `+axis` through the dual plane between nodes `at` and `at + 1`: the
+    /// circulation of H around the nodes `lo ..= hi` of the two other axes (taken in cyclic order
+    /// `axis + 1`, `axis + 2`).
+    Current { axis: usize, at: usize, lo: [usize; 2], hi: [usize; 2] },
+}
+
+/// Simulation options: the region and mesh as for the openEMS export, plus the run's limits.
 #[derive(Clone, Debug)]
 pub struct Options {
     /// Region, ports, frequencies, mesh (`boundary` is ignored: always CPML of `pml_cells`).
@@ -88,11 +135,9 @@ pub struct Options {
     pub parts: bool,
     /// Part values replacing the design's in this simulation only.
     pub overrides: Overrides,
-    /// Conformal copper (Dey–Mittra) where polygon edges are neither horizontal nor vertical;
-    /// false: every edge is all conductor or all open (staircase).
+    /// Conformal copper where polygon edges are neither horizontal nor vertical; false: every
+    /// edge is all conductor or all open (staircase).
     pub conformal: bool,
-    /// The solver.
-    pub solver: Solver,
     /// Worker threads (0: from the grid size and the machine). The result does not depend on it.
     pub threads: usize,
 }
@@ -111,7 +156,6 @@ impl Default for Options {
             parts: true,
             overrides: Overrides::new(),
             conformal: true,
-            solver: Solver::default(),
             threads: 0,
         }
     }
@@ -197,24 +241,12 @@ pub(crate) enum Measure {
 }
 
 /// The ports of a region on its mesh: node boxes of the resistive sources, the probes of the
-/// microstrip ports and how each port is measured. Solver-neutral: mesh node indices only.
+/// microstrip ports and how each port is measured, in mesh node indices.
 pub(crate) struct PortSet {
     pub(crate) ports: Vec<LumpedPort>,
     pub(crate) measures: Vec<Measure>,
     pub(crate) probes: Vec<Probe>,
     pub(crate) z0: Vec<f64>,
-}
-
-/// The engine's view of a board region.
-struct Built {
-    structure: Structure,
-    ports: PortSet,
-    parts: Vec<LumpedPart>,
-    conformal_edges: usize,
-}
-
-fn pt(x: i64, y: i64) -> poly::Point {
-    poly::Point::new(x, y)
 }
 
 fn port_error(code: &'static str, p: &openems::Port, message: String, hint: &str) -> Error {
@@ -223,134 +255,11 @@ fn port_error(code: &'static str, p: &openems::Port, message: String, hint: &str
     e
 }
 
-/// A dielectric as Debye terms on the structure's relaxation times: the Djordjevic–Sarkar
-/// model through its values (at `anchor` Hz when it has no reference frequency) fitted over
-/// `band`; lossless dielectrics stay plain.
-fn dielectric(s: &mut Structure, d: &Dispersive, anchor: f64, band: (f64, f64), taus: &[f64]) -> u16 {
-    if d.tan_d <= 0.0 {
-        return s.material(Material { eps_r: d.er, sigma: 0.0 });
-    }
-    let f = fit::debye_fit(&d.model(anchor), taus, band.0, band.1);
-    s.debye_material(Material { eps_r: f.eps_inf, sigma: f.sigma }, f.delta)
-}
-
-/// Voxelizes the region: dielectrics (dispersive) inside the board outline, the solder mask,
-/// non-plated holes as air, copper and plated holes as perfect conductors; ports and their
-/// probes. `band`: the frequencies of the result (Hz).
-fn build(
-    r: &Region,
-    band: (f64, f64),
-    parts: Vec<parts::Candidate>,
-    cut: bool,
-    diags: &mut Vec<Diagnostic>,
-) -> Result<Built, Error> {
-    let mut s = Structure::new(r.lines.clone())
-        .map_err(|m| Error::new("sim.bad_mesh", m, "check `max_cell`, `min_cell` and the region"))?;
-    let w = r.window;
-    let on_board = |x: i64, y: i64| poly::locate(&r.board, pt(x, y)) != Location::Outside;
-    let taus = fit::relaxation_times(band.0, band.1);
-    s.set_relaxation(taus.clone());
-    let f0 = r.f0 as f64;
-    for d in &r.diels {
-        let model = Dispersive {
-            er: d.d.er.to_f64(),
-            tan_d: d.d.loss_tangent.unwrap_or(crate::model::board::DEFAULT_LOSS_TANGENT).to_f64(),
-            ref_freq: crate::electrical::ref_freq(&d.d),
-        };
-        let m = dielectric(&mut s, &model, f0, band, &taus);
-        s.fill(m, [w.min.x, w.min.y, d.bottom], [w.max.x, w.max.y, d.top], &on_board);
-    }
-    if !r.masks.is_empty() {
-        let (er, tan) = r.mask_material;
-        let mask = dielectric(&mut s, &Dispersive::constant(er, tan), f0, band, &taus);
-        for m in &r.masks {
-            let span = |a: (i64, i64)| (a.0.min(a.1), a.0.max(a.1));
-            let (a, b) = span(m.laminate);
-            s.fill(mask, [w.min.x, w.min.y, a], [w.max.x, w.max.y, b], &on_board);
-            let (lo, hi) = span(m.span);
-            let (cu, over) = m.copper;
-            let clear = if over > cu { (over, hi) } else { (lo, over) };
-            for c in r.copper.iter().filter(|c| c.layer == m.layer) {
-                let Some(bb) = c.shape.iter().filter_map(|q| q.bbox()).reduce(|a, b| a.union(&b)) else { continue };
-                let inside = |x: i64, y: i64| poly::locate(&c.shape, pt(x, y)) != Location::Outside;
-                if clear.1 > clear.0 {
-                    s.fill(0, [bb.min.x, bb.min.y, clear.0], [bb.max.x, bb.max.y, clear.1], &inside);
-                }
-                let (a, b) = span(m.copper);
-                s.fill(mask, [bb.min.x, bb.min.y, a], [bb.max.x, bb.max.y, b], &inside);
-            }
-            if let Some(bb) = m.openings.iter().filter_map(|q| q.bbox()).reduce(|a, b| a.union(&b)) {
-                let inside = |x: i64, y: i64| poly::locate(&m.openings, pt(x, y)) != Location::Outside;
-                s.fill(0, [bb.min.x, bb.min.y, lo], [bb.max.x, bb.max.y, hi], &inside);
-            }
-        }
-    }
-    let z_board = (
-        r.layers.last().map_or(0, |l| l.bottom).min(r.diels.iter().map(|d| d.bottom).min().unwrap_or(0)),
-        r.layers.first().map_or(0, |l| l.top),
-    );
-    let z_board =
-        r.masks.iter().fold(z_board, |z, m| (z.0.min(m.span.0.min(m.span.1)), z.1.max(m.span.0.max(m.span.1))));
-    let in_hole = |h: &openems::Hole, x: i64, y: i64| match &h.slot {
-        Some(q) => poly::locate(std::slice::from_ref(q), pt(x, y)) != Location::Outside,
-        None => {
-            let (dx, dy) = ((x - h.center.x.0) as i128, (y - h.center.y.0) as i128);
-            dx * dx + dy * dy <= (h.radius as i128) * (h.radius as i128)
-        }
-    };
-    let hole_box = |h: &openems::Hole| match h.slot.as_ref().and_then(|q| q.bbox()) {
-        Some(b) => (b.min.x, b.min.y, b.max.x, b.max.y),
-        None => (h.center.x.0 - h.radius, h.center.y.0 - h.radius, h.center.x.0 + h.radius, h.center.y.0 + h.radius),
-    };
-    for h in r.holes.iter().filter(|h| !h.plated) {
-        let (x0, y0, x1, y1) = hole_box(h);
-        s.fill(0, [x0, y0, z_board.0], [x1, y1, z_board.1], &|x, y| in_hole(h, x, y));
-    }
-    for c in &r.copper {
-        let l = &r.layers[c.layer];
-        let Some(b) = c.shape.iter().filter_map(|q| q.bbox()).reduce(|a, b| a.union(&b)) else { continue };
-        s.pec([b.min.x, b.min.y, l.bottom], [b.max.x, b.max.y, l.top], &|x, y| {
-            poly::locate(&c.shape, pt(x, y)) != Location::Outside
-        });
-    }
-    for h in r.holes.iter().filter(|h| h.plated) {
-        let (z0, z1) = (r.layers[h.span.1].bottom, r.layers[h.span.0].top);
-        let (x0, y0, x1, y1) = hole_box(h);
-        s.pec([x0, y0, z0], [x1, y1, z1], &|x, y| in_hole(h, x, y));
-        // A barrel thinner than the cells still connects its layers: the nearest node column.
-        let (i, j) = (s.node(0, h.center.x.0), s.node(1, h.center.y.0));
-        let (x, y) = (s.lines()[0][i], s.lines()[1][j]);
-        s.pec([x, y, z0], [x, y, z1], &|_, _| true);
-    }
-    let mut conformal_edges = 0;
-    if cut {
-        let mut prisms: Vec<conformal::Prism> = r
-            .copper
-            .iter()
-            .map(|c| conformal::Prism { shape: c.shape.clone(), z: (r.layers[c.layer].bottom, r.layers[c.layer].top) })
-            .collect();
-        for h in r.holes.iter().filter(|h| h.plated) {
-            let shape = match &h.slot {
-                Some(q) => q.clone(),
-                None => conformal::disc(h.center.x.0, h.center.y.0, h.radius),
-            };
-            prisms
-                .push(conformal::Prism { shape: vec![shape], z: (r.layers[h.span.1].bottom, r.layers[h.span.0].top) });
-        }
-        conformal_edges = conformal::apply(&mut s, &prisms).partial_edges;
-        unresolved(r, diags);
-    }
-    let parts = parts::place(&mut s, r, parts, diags);
-
-    let ports = place_ports(r)?;
-    Ok(Built { structure: s, ports, parts, conformal_edges })
-}
-
 /// Warns of diagonal tracks narrower than [`UNRESOLVED`] cells on the region's mesh (with an
 /// explicit `max_cell`: otherwise the mesh was refined for them).
 pub(crate) fn unresolved(r: &Region, diags: &mut Vec<Diagnostic>) {
     for c in &r.copper {
-        if let Some(&(width, cell)) = conformal::narrow(&c.shape, &r.lines[0], &r.lines[1], UNRESOLVED).first() {
+        if let Some(&(width, cell)) = slanted::narrow(&c.shape, &r.lines[0], &r.lines[1], UNRESOLVED).first() {
             let mut d = Diagnostic::warning(
                 "sim.slanted_copper_unresolved",
                 format!(
@@ -373,7 +282,7 @@ pub(crate) fn unresolved(r: &Region, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Index of the mesh line nearest to `at` (nm), the lower one on a tie: where the engines snap.
+/// Index of the mesh line nearest to `at` (nm), the lower one on a tie.
 pub(crate) fn node(lines: &[i64], at: i64) -> usize {
     match lines.binary_search(&at) {
         Ok(i) => i,
@@ -567,7 +476,7 @@ pub struct Plan {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// A region extracted and checked, before it is handed to a solver.
+/// A region extracted and checked, before it is handed to the solver.
 pub(crate) struct Extracted {
     pub(crate) region: Region,
     pub(crate) freqs: Vec<f64>,
@@ -576,17 +485,8 @@ pub(crate) struct Extracted {
     pub(crate) candidates: Vec<parts::Candidate>,
 }
 
-/// A region extracted, voxelized and checked, ready to run.
-struct Prepared {
-    region: Region,
-    built: Built,
-    freqs: Vec<f64>,
-    band: (f64, f64),
-    diags: Vec<Diagnostic>,
-}
-
 /// The region with its mesh (refined for narrow diagonal tracks), the cell guard, the frequencies
-/// and the parts that may become lumped elements: what every solver starts from.
+/// and the parts that may become lumped elements: what the solver's model is built from.
 pub(crate) fn extract(p: &Project, o: &Options) -> Result<Extracted, Error> {
     // The microstrip ports feed and measure on mesh lines.
     let mut region = openems::Options { port_planes: true, ..o.region.clone() };
@@ -598,7 +498,7 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Extracted, Error> {
         let narrowest = r
             .copper
             .iter()
-            .flat_map(|c| conformal::narrow(&c.shape, &r.lines[0], &r.lines[1], UNRESOLVED))
+            .flat_map(|c| slanted::narrow(&c.shape, &r.lines[0], &r.lines[1], UNRESOLVED))
             .map(|x| x.0)
             .fold(f64::INFINITY, f64::min);
         if narrowest.is_finite() {
@@ -663,13 +563,6 @@ pub(crate) fn extract(p: &Project, o: &Options) -> Result<Extracted, Error> {
         Vec::new()
     };
     Ok(Extracted { region: r, freqs, band, diags, candidates })
-}
-
-fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
-    let Extracted { region: r, freqs, band, mut diags, candidates } = extract(p, o)?;
-    let b = build(&r, band, candidates, o.conformal, &mut diags)?;
-    notes(p, o, &r, &b.parts, &mut diags);
-    Ok(Prepared { region: r, built: b, freqs, band, diags })
 }
 
 /// What a designer should know before reading the result: which part values were ideal, what a
@@ -742,27 +635,9 @@ pub(crate) fn notes(p: &Project, o: &Options, r: &Region, parts: &[LumpedPart], 
     }
 }
 
-/// Without the `ems` feature: the solver is not in this build.
-#[cfg(not(feature = "ems"))]
-fn no_ems() -> Error {
-    Error::new(
-        "sim.solver_unavailable",
-        "this build of cadlab has no ems solver",
-        "build with the `ems` cargo feature (a default feature), or leave `solver` out: this build's default is \
-         `builtin`",
-    )
-}
-
 /// Sets the simulation up and checks it, without running it.
 pub fn plan(p: &Project, o: &Options) -> Result<Plan, Error> {
-    if o.solver == Solver::Ems {
-        #[cfg(feature = "ems")]
-        return ems::plan(p, o);
-        #[cfg(not(feature = "ems"))]
-        return Err(no_ems());
-    }
-    let Prepared { region: r, built: b, diags, .. } = prepare(p, o)?;
-    Ok(planned(r, o.courant, b.parts, b.conformal_edges, diags))
+    ems::plan(p, o)
 }
 
 /// The plan of a region: its mesh, ports and the timestep at `courant` of the mesh's limit.
@@ -907,61 +782,7 @@ impl Waves {
 
 /// Simulates the region and returns its S-parameters.
 pub fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, Error> {
-    if o.solver == Solver::Ems {
-        #[cfg(feature = "ems")]
-        return ems::sparams(p, o, hooks);
-        #[cfg(not(feature = "ems"))]
-        return Err(no_ems());
-    }
-    let Prepared { region: r, built: b, freqs, band, mut diags } = prepare(p, o)?;
-    let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
-    let pml = o.region.pml_cells as usize;
-    let settings = Settings {
-        pml: [pml; 6],
-        courant: o.courant,
-        max_steps: o.region.timesteps,
-        end_db: o.region.end_criteria_db as f64,
-        excitation,
-        freqs: freqs.clone(),
-        threads: o.threads,
-        surface: o.region.conductivity.map(|sigma| fit::surface_fit(sigma, &o.region.roughness, band.0, band.1)),
-    };
-    let PortSet { ports, measures, probes, z0 } = b.ports;
-    let mut sim = Simulation::new(&b.structure, &ports, probes, settings)
-        .map_err(|m| Error::new("sim.bad_setup", m, "grow the region or lower `pml_cells`"))?;
-    let np = ports.len();
-    let mut waves = Waves::new(np, freqs.len());
-    for j in 0..np {
-        let progress = |done: u64, _total: Option<u64>, msg: &str| {
-            (hooks.progress)(done, Some(o.region.timesteps), &format!("port {}/{np}: {msg}", j + 1));
-        };
-        let run = sim
-            .run(Some(j), &Hooks { progress: &progress, cancelled: hooks.cancelled })
-            .map_err(|_| Error::new("cancelled", "operation cancelled", "run it again"))?;
-        if run.port_v.iter().chain(&run.probes).flatten().any(|c| !c.re.is_finite() || !c.im.is_finite()) {
-            return Err(Error::new(
-                "sim.unstable",
-                "the simulation diverged",
-                "lower `courant`; report the case if it persists",
-            ));
-        }
-        let pulse_steps = (excitation.end() / sim.dt()).ceil() as u64;
-        waves.ran(j, run.steps, run.converged, run.energy_db, pulse_steps, &mut diags);
-        for (i, m) in measures.iter().enumerate() {
-            match *m {
-                Measure::Element => waves.set(i, j, z0[i], &run.port_v[i], &run.port_i[i]),
-                Measure::Line { v, i: [i1, i2], w: [w1, w2], sign } => {
-                    let cur: Vec<C64> = run.probes[i1]
-                        .iter()
-                        .zip(&run.probes[i2])
-                        .map(|(x, y)| (*x * C64::new(w1, 0.0) + *y * C64::new(w2, 0.0)) * C64::new(sign, 0.0))
-                        .collect();
-                    waves.set(i, j, z0[i], &run.probes[v], &cur);
-                }
-            }
-        }
-    }
-    Ok(waves.finish(r, freqs, z0, sim.dt(), b.parts, b.conformal_edges, diags))
+    ems::sparams(p, o, hooks)
 }
 
 fn round2(v: f64) -> f64 {
@@ -981,6 +802,14 @@ fn sig(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`SOLVER`] names the version `Cargo.toml` depends on.
+    #[test]
+    fn solver_names_the_dependency() {
+        let manifest = include_str!("../../Cargo.toml");
+        let version = SOLVER.strip_prefix("ems ").unwrap();
+        assert!(manifest.contains(&format!("ems = {{ version = \"{version}\"")), "{SOLVER}");
+    }
 
     #[test]
     fn s_from_waves() {

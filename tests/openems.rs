@@ -22,12 +22,6 @@ fn fail(r: &Registry, s: &mut Session, cmd: &str, args: Value) -> String {
     r.execute(s, cmd, args, RunOptions::default()).expect_err(cmd).error.diagnostic.code.to_string()
 }
 
-/// The solvers `sim.sparams` has in this build: every oracle case compares openEMS with each
-/// (D89).
-fn solvers() -> &'static [&'static str] {
-    if cfg!(feature = "ems") { &["builtin", "ems"] } else { &["builtin"] }
-}
-
 fn codes(o: &Value) -> Vec<String> {
     o["diagnostics"].as_array().unwrap().iter().map(|d| d["code"].as_str().unwrap().to_string()).collect()
 }
@@ -234,7 +228,7 @@ fn via_transition_export() {
 
     // Oracle: the driver run by openEMS (the absorbing layer beyond the region: D74, with it in the
     // region's outer cells this board's edge one cell from the wall diverges) passes the signal at
-    // 1 GHz and agrees with each of `sim.sparams`'s solvers on the same options.
+    // 1 GHz and agrees with `sim.sparams` on the same options.
     let Some(_openems) = oracle::optional(Oracle::OpenEms) else { return };
     let python = std::env::var("CADLAB_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("openems_via");
@@ -244,16 +238,12 @@ fn via_transition_export() {
     let mut args = common.clone();
     args["name"] = json!("oracle");
     let o = exec(&r, &mut s, "export.openems", args);
-    // cadlab's solvers first: a failure there shows before openEMS has run.
+    // `sim.sparams` first: a failure there shows before openEMS has run.
     let read = |f: &str| cadlab::touchstone::parse(&std::fs::read_to_string(out.join(f)).unwrap(), Some(2)).unwrap();
-    let mut ran = Vec::new();
-    for solver in solvers() {
-        let mut args = common.clone();
-        args["name"] = json!(solver);
-        args["solver"] = json!(solver);
-        exec(&r, &mut s, "sim.sparams", args);
-        ran.push((*solver, read(&format!("{solver}.s2p"))));
-    }
+    let mut args = common.clone();
+    args["name"] = json!("cadlab");
+    exec(&r, &mut s, "sim.sparams", args);
+    let cl = read("cadlab.s2p");
     let script = out.join("oracle.py");
     oracle::run(Path::new(&python), &[script.to_str().unwrap()]);
     let ts = o["output"]["touchstone"].as_str().unwrap().to_string();
@@ -265,32 +255,28 @@ fn via_transition_export() {
     let db = |v: &cadlab::touchstone::Complex| 20.0 * c(v).abs().log10();
     let mut md = String::new();
     let mut fails = Vec::new();
-    for (solver, cl) in &ran {
-        assert_eq!(oe.freqs, cl.freqs, "{solver}");
+    assert_eq!(oe.freqs, cl.freqs);
+    md += "\n#### Via transition\n\n| f (GHz) | |S21| openEMS (dB) | |S21| cadlab (dB) | |S11| openEMS (dB) | |S11| cadlab (dB) |\n|---|---|---|---|---|\n";
+    let mut worst = 0.0f64;
+    for ((f, a), b) in oe.freqs.iter().zip(&oe.data).zip(&cl.data) {
         md += &format!(
-            "\n#### Via transition, `solver: {solver}`\n\n| f (GHz) | |S21| openEMS (dB) | |S21| cadlab (dB) | |S11| openEMS (dB) | |S11| cadlab (dB) |\n|---|---|---|---|---|\n"
+            "| {:.2} | {:.3} | {:.3} | {:.2} | {:.2} |\n",
+            f / 1e9,
+            db(&a[2]),
+            db(&b[2]),
+            db(&a[0]),
+            db(&b[0])
         );
-        let mut worst = 0.0f64;
-        for ((f, a), b) in oe.freqs.iter().zip(&oe.data).zip(&cl.data) {
-            md += &format!(
-                "| {:.2} | {:.3} | {:.3} | {:.2} | {:.2} |\n",
-                f / 1e9,
-                db(&a[2]),
-                db(&b[2]),
-                db(&a[0]),
-                db(&b[0])
-            );
-            if *f >= 0.5e9 {
-                let d = (db(&a[2]) - db(&b[2])).abs();
-                worst = worst.max(d);
-                // (Written so that a NaN fails: `max` drops it.)
-                if d.partial_cmp(&0.25) != Some(std::cmp::Ordering::Less) {
-                    fails.push(format!("{solver} {f}: |S21| {} dB against openEMS's {} dB", db(&b[2]), db(&a[2])));
-                }
+        if *f >= 0.5e9 {
+            let d = (db(&a[2]) - db(&b[2])).abs();
+            worst = worst.max(d);
+            // (Written so that a NaN fails: `max` drops it.)
+            if d.partial_cmp(&0.25) != Some(std::cmp::Ordering::Less) {
+                fails.push(format!("{f}: |S21| {} dB against openEMS's {} dB", db(&b[2]), db(&a[2])));
             }
         }
-        md += &format!("\nFrom 0.5 GHz: |S21| within {worst:.2} dB of cadlab's ({solver}).\n");
     }
+    md += &format!("\nFrom 0.5 GHz: |S21| within {worst:.2} dB of cadlab's.\n");
     std::fs::write(out.join("summary_via.md"), &md).unwrap();
     eprintln!("{md}");
     assert!(s21 > -3.0 && s11 < -6.0, "S11 {s11} dB, S21 {s21} dB at 1 GHz\n{md}");
@@ -762,25 +748,15 @@ fn lumped_parts_oracle() {
         let read = |file: String| {
             cadlab::touchstone::parse(&std::fs::read_to_string(out.join(file)).unwrap(), Some(2)).unwrap()
         };
-        // cadlab's solvers first: a failure there shows before openEMS has run.
-        let mut cl = Vec::new();
-        for solver in solvers() {
-            a["name"] = json!(format!("{name}_{solver}"));
-            a["solver"] = json!(solver);
-            exec(&r, &mut s, "sim.sparams", a.clone());
-            cl.push(read(format!("{name}_{solver}.s2p")));
-        }
+        // `sim.sparams` first: a failure there shows before openEMS has run.
+        a["name"] = json!(format!("{name}_cadlab"));
+        exec(&r, &mut s, "sim.sparams", a.clone());
+        let cl = read(format!("{name}_cadlab.s2p"));
         oracle::run(Path::new(&python), &[out.join(format!("{name}.py")).to_str().unwrap()]);
         let oe = read(format!("{name}.s2p"));
-        for ts in &cl {
-            assert_eq!(oe.freqs, ts.freqs, "{name}");
-        }
-        let heads: Vec<String> = solvers().iter().map(|v| format!(" |S21| cadlab ({v}) |")).collect();
-        md += &format!(
-            "\n#### {name}\n\n| f (GHz) | |S21| openEMS |{} |S21| theory |\n|---|---|{}---|\n",
-            heads.concat(),
-            "---|".repeat(cl.len())
-        );
+        assert_eq!(oe.freqs, cl.freqs, "{name}");
+        md +=
+            &format!("\n#### {name}\n\n| f (GHz) | |S21| openEMS | |S21| cadlab | |S21| theory |\n|---|---|---|---|\n");
         for (i, (f, x)) in oe.freqs.iter().zip(&oe.data).enumerate() {
             let z = match cap {
                 None => C64::new(50.0, 0.0),
@@ -788,17 +764,14 @@ fn lumped_parts_oracle() {
             };
             let ideal = (C64::new(100.0, 0.0) / (C64::new(100.0, 0.0) + z)).abs();
             let sa = c(&x[2]).abs();
-            let sb: Vec<f64> = cl.iter().map(|ts| c(&ts.data[i][2]).abs()).collect();
-            let cols: Vec<String> = sb.iter().map(|v| format!(" {v:.4} |")).collect();
-            md += &format!("| {:.2} | {sa:.4} |{} {ideal:.4} |\n", f / 1e9, cols.concat());
+            let sb = c(&cl.data[i][2]).abs();
+            md += &format!("| {:.2} | {sa:.4} | {sb:.4} | {ideal:.4} |\n", f / 1e9);
             if !(0.5e9..=4.5e9).contains(f) {
                 continue;
             }
-            for (solver, sb) in solvers().iter().zip(&sb) {
-                // (Written so that a NaN fails.)
-                if (sa - sb).abs().partial_cmp(&0.03) != Some(std::cmp::Ordering::Less) {
-                    fails.push(format!("{name} {f}: openEMS {sa} against sim.sparams ({solver}) {sb}"));
-                }
+            // (Written so that a NaN fails.)
+            if (sa - sb).abs().partial_cmp(&0.03) != Some(std::cmp::Ordering::Less) {
+                fails.push(format!("{name} {f}: openEMS {sa} against sim.sparams {sb}"));
             }
             if (sa - ideal).abs() > 0.03 {
                 fails.push(format!("{name} {f}: openEMS {sa} against theory {ideal}"));
@@ -813,7 +786,7 @@ fn lumped_parts_oracle() {
 /// With openEMS installed (`CADLAB_ORACLES=1`, the `openEMS` executable or
 /// `CADLAB_ORACLE_OPENEMS`, and `CADLAB_ORACLE_PYTHON` with openEMS's Python modules): a lossy
 /// microstrip (Djordjevic–Sarkar laminate, 58 MS/m copper) exported and simulated by openEMS,
-/// against the built-in solver on the same region and mesh options, twice: sheet copper between
+/// against `sim.sparams` on the same region and mesh options, twice: sheet copper between
 /// microstrip ports (20 mm between the reference planes), and solid copper between lumped ports
 /// at the track's ends. Checked: |S21| (the loss), the line's Z₀ from the ABCD matrix (below the
 /// first half-wave resonance, where it is well conditioned; for the microstrip ports also
@@ -866,67 +839,61 @@ fn lossy_microstrip_oracle() {
         let read = |file: String| {
             cadlab::touchstone::parse(&std::fs::read_to_string(out.join(file)).unwrap(), Some(2)).unwrap()
         };
-        // cadlab's solvers first: a failure there shows before openEMS has run.
-        let mut ran = Vec::new();
-        for solver in solvers() {
-            let mut args = common.clone();
-            args["name"] = json!(format!("{name}_{solver}"));
-            args["solver"] = json!(solver);
-            exec(&r, &mut s, "sim.sparams", args);
-            ran.push((*solver, read(format!("{name}_{solver}.s2p"))));
-        }
+        // `sim.sparams` first: a failure there shows before openEMS has run.
+        let mut args = common.clone();
+        args["name"] = json!(format!("{name}_cadlab"));
+        exec(&r, &mut s, "sim.sparams", args);
+        let cl = read(format!("{name}_cadlab.s2p"));
         oracle::run(Path::new(&python), &[out.join(format!("{name}.py")).to_str().unwrap()]);
         let oe = read(format!("{name}.s2p"));
-        for (solver, cl) in &ran {
-            assert_eq!(oe.freqs, cl.freqs, "{name} {solver}");
+        assert_eq!(oe.freqs, cl.freqs, "{name}");
+        md += &format!(
+            "\n#### {title}\n\n| f (GHz) | \\|S21\\| openEMS (dB) | \\|S21\\| cadlab (dB) | Z₀ openEMS | Z₀ cadlab | \\|S11\\| openEMS |\n\
+             |---|---|---|---|---|---|\n"
+        );
+        let (mut loss, mut z_rel, mut z_2d, mut s11) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for ((f, a), b) in oe.freqs.iter().zip(&oe.data).zip(&cl.data) {
+            let db = |v: &cadlab::touchstone::Complex| 20.0 * c(v).abs().log10();
+            let ((za, _), (zb, _)) = (line_from_s(a, 50.0), line_from_s(b, 50.0));
             md += &format!(
-                "\n#### {title}, `solver: {solver}`\n\n| f (GHz) | \\|S21\\| openEMS (dB) | \\|S21\\| cadlab (dB) | Z₀ openEMS | Z₀ cadlab | \\|S11\\| openEMS |\n\
-                 |---|---|---|---|---|---|\n"
+                "| {:.2} | {:.4} | {:.4} | {:.2} | {:.2} | {:.4} |\n",
+                f / 1e9,
+                db(&a[2]),
+                db(&b[2]),
+                za.re,
+                zb.re,
+                c(&a[0]).abs()
             );
-            let (mut loss, mut z_rel, mut z_2d, mut s11) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-            for ((f, a), b) in oe.freqs.iter().zip(&oe.data).zip(&cl.data) {
-                let db = |v: &cadlab::touchstone::Complex| 20.0 * c(v).abs().log10();
-                let ((za, _), (zb, _)) = (line_from_s(a, 50.0), line_from_s(b, 50.0));
-                md += &format!(
-                    "| {:.2} | {:.4} | {:.4} | {:.2} | {:.2} | {:.4} |\n",
-                    f / 1e9,
-                    db(&a[2]),
-                    db(&b[2]),
-                    za.re,
-                    zb.re,
-                    c(&a[0]).abs()
-                );
-                if *f < 0.5e9 {
-                    continue;
-                }
-                // |S21| within 15 % and 0.025 dB (the coarse runs' noise on a lossless line); a NaN fails.
-                let d = (db(&a[2]) - db(&b[2])).abs();
-                loss = loss.max(d / db(&b[2]).abs());
-                if d.partial_cmp(&(0.15 * db(&b[2]).abs() + 0.025)) != Some(std::cmp::Ordering::Less) {
-                    fails.push(format!("{name} ({solver}) {f}: |S21| {} vs {} dB", db(&a[2]), db(&b[2])));
-                }
-                s11 = s11.max(c(&a[0]).abs());
-                if *f <= z_until {
-                    z_rel = z_rel.max((za.re - zb.re).abs() / zb.re);
-                    if name == "msl" {
-                        z_2d = z_2d.max((za.re - z2d).abs() / z2d);
-                    }
-                }
+            if *f < 0.5e9 {
+                continue;
             }
-            md += &format!(
-                "\nFrom 0.5 GHz: |S21| within {:.1} % of cadlab's ({solver}); Z₀ (to {:.1} GHz) within {:.1} % of cadlab's{}; openEMS |S11| at most {s11:.3}.\n",
-                100.0 * loss,
-                z_until / 1e9,
-                100.0 * z_rel,
+            // |S21| within 15 % and 0.025 dB (the coarse runs' noise on a lossless line); a NaN fails.
+            let d = (db(&a[2]) - db(&b[2])).abs();
+            loss = loss.max(d / db(&b[2]).abs());
+            if d.partial_cmp(&(0.15 * db(&b[2]).abs() + 0.025)) != Some(std::cmp::Ordering::Less) {
+                fails.push(format!("{name} {f}: |S21| {} vs {} dB", db(&a[2]), db(&b[2])));
+            }
+            s11 = s11.max(c(&a[0]).abs());
+            if *f <= z_until {
+                z_rel = z_rel.max((za.re - zb.re).abs() / zb.re);
                 if name == "msl" {
-                    format!(" and {:.1} % of the 2D solver's ({z2d:.2} Ω)", 100.0 * z_2d)
-                } else {
-                    String::new()
+                    z_2d = z_2d.max((za.re - z2d).abs() / z2d);
                 }
-            );
-            if !(z_rel < 0.05 && z_2d < 0.05 && s11 < 0.1) {
-                fails.push(format!("{name} ({solver}): Z₀ {z_rel} / {z_2d}, |S11| {s11}"));
             }
+        }
+        md += &format!(
+            "\nFrom 0.5 GHz: |S21| within {:.1} % of cadlab's; Z₀ (to {:.1} GHz) within {:.1} % of cadlab's{}; openEMS |S11| at most {s11:.3}.\n",
+            100.0 * loss,
+            z_until / 1e9,
+            100.0 * z_rel,
+            if name == "msl" {
+                format!(" and {:.1} % of the 2D solver's ({z2d:.2} Ω)", 100.0 * z_2d)
+            } else {
+                String::new()
+            }
+        );
+        if !(z_rel < 0.05 && z_2d < 0.05 && s11 < 0.1) {
+            fails.push(format!("{name}: Z₀ {z_rel} / {z_2d}, |S11| {s11}"));
         }
     }
     std::fs::write(out.join("summary.md"), &md).unwrap();

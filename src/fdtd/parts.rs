@@ -1,13 +1,12 @@
 //! Board parts as lumped elements: two-pin resistors, capacitors and inductors in the region,
 //! from their part values, placed across the gap between their two pads.
 //!
-//! A part's element is a series R–L–C ([`LumpedElement`]): a resistor is its `resistance` (plus
+//! A part's element is a series R–L–C: a resistor is its `resistance` (plus
 //! its `esl`), a capacitor its `capacitance` with its `esr` and `esl`, an inductor its
 //! `inductance` with its `esr`. Values come from the component's properties, else its part's
 //! parameters. The element lies on the pads' copper layer along the axis joining the pad
-//! centers, in the mesh cells between the two pads' copper (the edges that are not copper), over
-//! the nodes where the pads face each other and every copper surface node of the layer (both
-//! faces of solid copper).
+//! centers: a box between the two pads' facing edges ([`PartBox`]), over the width where the pads
+//! face each other and the layer's copper thickness.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -22,8 +21,6 @@ use crate::model::part::{Category, ParamValue};
 use crate::openems::Region;
 use crate::refs::ObjectRef;
 use crate::value::{Quantity, Unit};
-
-use super::engine::{LumpedElement, Structure};
 
 /// A board part simulated as a lumped element.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -111,7 +108,10 @@ pub(crate) fn candidates(
             _ => continue,
         };
         let mine: Vec<&PlacedPad> = pads.iter().filter(|q| q.refdes == *refdes).collect();
-        let inside = mine.iter().filter(|q| window.contains_point(super::pt(q.center.x.0, q.center.y.0))).count();
+        let inside = mine
+            .iter()
+            .filter(|q| window.contains_point(crate::geom::poly::Point::new(q.center.x.0, q.center.y.0)))
+            .count();
         if inside == 0 {
             continue;
         }
@@ -214,60 +214,8 @@ fn pad_layer(q: &PlacedPad) -> String {
     if q.layers.len() == 1 { q.layers[0].clone() } else { board::outer_layer(q.side).to_string() }
 }
 
-/// Places the candidates' elements in the voxelized structure (after the copper). Returns the
-/// parts modeled.
-pub(crate) fn place(
-    s: &mut Structure,
-    r: &Region,
-    parts: Vec<Candidate>,
-    diags: &mut Vec<Diagnostic>,
-) -> Vec<LumpedPart> {
-    let mut out = Vec::new();
-    for c in parts {
-        let refdes = c.info.refdes.clone();
-        let (la, lb) = (pad_layer(&c.pads[0]), pad_layer(&c.pads[1]));
-        let layer = match r.layers.iter().find(|l| l.name == la) {
-            Some(l) if la == lb => l,
-            _ => {
-                diags.push(skipped(
-                    &refdes,
-                    "its pads are on different copper layers".into(),
-                    "only parts with both pads on one copper layer are modeled",
-                ));
-                continue;
-            }
-        };
-        match element(s, layer, &c) {
-            Ok((e, from, to)) => {
-                // The part's terminals sit on its pads: copper cut by an outline between a pad's
-                // center and the element stays copper, or the column would hang on an open edge.
-                let (a, b) = (e.axis, 1 - e.axis);
-                for ib in e.lo[b]..=e.hi[b] {
-                    for k in e.lo[2]..=e.hi[2] {
-                        for ia in (from..e.lo[a]).chain(e.hi[a]..to) {
-                            let mut q = [0; 3];
-                            (q[a], q[b], q[2]) = (ia, ib, k);
-                            s.close_cut_edge(a, q);
-                        }
-                    }
-                }
-                let columns = (e.hi[b] - e.lo[b] + 1) * (e.hi[2] - e.lo[2] + 1);
-                s.element(LumpedElement { r: c.r, l: c.l, c: c.c, ..e });
-                out.push(LumpedPart { columns: columns as u32, ..c.info });
-            }
-            Err(why) => diags.push(skipped(
-                &refdes,
-                why,
-                "use a finer mesh (`max_cell`, `min_cell`), keep its nets' copper (`only_selected`), or place it \
-                 along x or y",
-            )),
-        }
-    }
-    out
-}
-
-/// A part's lumped element in the openEMS export: a box between its two pads' copper (nm), `axis`
-/// joining the pads, with the part's values.
+/// A part's lumped element: a box between its two pads' copper (nm), `axis` joining the pads, with
+/// the part's values. What the openEMS export writes and what `sim.sparams` hands ems.
 pub(crate) struct PartBox {
     pub(crate) info: LumpedPart,
     pub(crate) axis: usize,
@@ -278,9 +226,8 @@ pub(crate) struct PartBox {
     pub(crate) c: Option<f64>,
 }
 
-/// The candidates as boxes for the openEMS export, by the rules of [`place`] on the region's
-/// mesh rather than the voxelized copper (openEMS snaps the box to the same mesh lines as the
-/// pads): both pads on one layer, facing along x or y, at least one cell between them.
+/// The candidates as boxes on the region's mesh (a solver snaps the box to the same mesh lines as
+/// the pads): both pads on one layer, facing along x or y, at least one cell between them.
 pub(crate) fn boxes(r: &Region, parts: Vec<Candidate>, diags: &mut Vec<Diagnostic>) -> Vec<PartBox> {
     const HINT: &str = "use a finer mesh (`max_cell`, `min_cell`), or place it along x or y";
     let mut out = Vec::new();
@@ -331,83 +278,4 @@ pub(crate) fn boxes(r: &Region, parts: Vec<Candidate>, diags: &mut Vec<Diagnosti
         out.push(PartBox { info: c.info, axis: a, lo, hi, r: c.r, l: c.l, c: c.c });
     }
     out
-}
-
-/// The element's box between the two pads' copper.
-/// Also the mesh nodes of the two pads' centers along the element, between which it lies.
-fn element(
-    s: &Structure,
-    layer: &crate::openems::Layer,
-    c: &Candidate,
-) -> Result<(LumpedElement, usize, usize), String> {
-    let [p0, p1] = &c.pads;
-    let (dx, dy) = ((p1.center.x.0 - p0.center.x.0).abs(), (p1.center.y.0 - p0.center.y.0).abs());
-    let a = if dx >= dy { 0 } else { 1 };
-    let b = 1 - a;
-    let coord = |q: &PlacedPad, ax: usize| if ax == 0 { q.center.x.0 } else { q.center.y.0 };
-    let bbox = |q: &PlacedPad| {
-        let l = pad_layer(q);
-        q.shape_on(&l).bbox()
-    };
-    let (Some(b0), Some(b1)) = (bbox(p0), bbox(p1)) else { return Err("a pad has no copper shape".into()) };
-    let span = |r: Rect, ax: usize| if ax == 0 { (r.min.x, r.max.x) } else { (r.min.y, r.max.y) };
-    let (s0, s1) = (span(b0, b), span(b1, b));
-    let (o_lo, o_hi) = (s0.0.max(s1.0), s0.1.min(s1.1));
-    if o_lo > o_hi {
-        return Err("its pads do not face each other along x or y".into());
-    }
-    let (from, to) = {
-        let (u, v) = (s.node(a, coord(p0, a)), s.node(a, coord(p1, a)));
-        (u.min(v), u.max(v))
-    };
-    let (k0, k1) = {
-        let (u, v) = (s.node(2, layer.bottom), s.node(2, layer.top));
-        (u.min(v), u.max(v))
-    };
-    let at = |ia: usize, ib: usize, k: usize| {
-        let mut q = [0; 3];
-        (q[a], q[b], q[2]) = (ia, ib, k);
-        q
-    };
-    // The run of edges that are not copper between the pads, on one column. As voxelized, not as
-    // cut: a round track end poking past a pad would otherwise leave the element only the columns
-    // at the end's tip, and the current crowding into them acts as series inductance (|S21| of a
-    // 1 pF 0603 was up to 0.036 high, against 0.012 with all its columns).
-    let gap = |ib: usize, k: usize| -> Option<(usize, usize)> {
-        let mut i = from;
-        while i < to && s.is_voxel_pec(a, at(i, ib, k)) {
-            i += 1;
-        }
-        let start = i;
-        while i < to && !s.is_voxel_pec(a, at(i, ib, k)) {
-            i += 1;
-        }
-        let end = i;
-        (end > start
-            && (end..to).all(|j| s.is_voxel_pec(a, at(j, ib, k)))
-            && s.touches_pec(at(start, ib, k))
-            && s.touches_pec(at(end, ib, k)))
-        .then_some((start, end))
-    };
-    let mid = s.node(b, o_lo + (o_hi - o_lo) / 2);
-    let Some(run) = gap(mid, k1) else {
-        return Err("no mesh cell separates its pads' copper, or a pad has no copper in the region".into());
-    };
-    // Both faces of solid copper when the gap is the same there, else the top.
-    let ks = if (k0..=k1).all(|k| gap(mid, k) == Some(run)) { k0 } else { k1 };
-    // Columns across where the pads face each other with the same gap, contiguous around the middle.
-    let lines = &s.lines()[b];
-    let ok = |ib: usize| lines[ib] >= o_lo && lines[ib] <= o_hi && (ks..=k1).all(|k| gap(ib, k) == Some(run));
-    let (mut lo_b, mut hi_b) = (mid, mid);
-    while lo_b > 0 && ok(lo_b - 1) {
-        lo_b -= 1;
-    }
-    while hi_b + 1 < lines.len() && ok(hi_b + 1) {
-        hi_b += 1;
-    }
-    let (mut lo, mut hi) = ([0; 3], [0; 3]);
-    (lo[a], hi[a]) = run;
-    (lo[b], hi[b]) = (lo_b, hi_b);
-    (lo[2], hi[2]) = (ks, k1);
-    Ok((LumpedElement { axis: a, lo, hi, r: 0.0, l: 0.0, c: None }, from, to))
 }

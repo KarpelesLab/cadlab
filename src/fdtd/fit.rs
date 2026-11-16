@@ -1,16 +1,11 @@
-//! Rational fits for the time domain: Debye poles for dispersive dielectrics and a sum of
-//! first-order sections for the surface impedance of conductors, both by non-negative least
-//! squares over the simulated band (non-negative terms are passive, so the time stepping stays
-//! stable).
+//! A rational fit for the time domain: Debye poles for dispersive dielectrics, by non-negative
+//! least squares over the simulated band (non-negative terms are passive, so the time stepping
+//! stays stable). The openEMS export and `sim.sparams` hand the same terms to their solvers.
 //!
-//! - Dielectrics: ε(ω) ≈ ε∞ + σ/(jωε₀) + Σₚ Δεₚ / (1 + jωτₚ), with relaxation times τₚ shared
-//!   by every material of a run (so the permittivities of neighbouring cells average term by
-//!   term), fitted to the Djordjevic–Sarkar model ([`crate::electrical::dispersion`]). The
-//!   model is itself a continuum of Debye terms, so a few per decade reproduce it closely.
-//! - Conductors: Zs(s) ≈ r₀ + Σₚ rₚ s / (s + aₚ) (resistors and parallel R–L sections) fitted to
-//!   Zs(ω) = Rs(ω) K(ω) + j Rs(ω): the skin-effect surface impedance √(jωμ₀/σ) with the
-//!   roughness factor K on its resistance, as the loss model of D52 (the internal reactance
-//!   stays the smooth one).
+//! ε(ω) ≈ ε∞ + σ/(jωε₀) + Σₚ Δεₚ / (1 + jωτₚ), with relaxation times τₚ shared by every material
+//! of a run (so the permittivities of neighbouring cells average term by term), fitted to the
+//! Djordjevic–Sarkar model ([`crate::electrical::dispersion`]). The model is itself a continuum
+//! of Debye terms, so a few per decade reproduce it closely.
 //!
 //! The least-squares solver is Lawson and Hanson's active-set NNLS (C. L. Lawson, R. J. Hanson,
 //! *Solving Least Squares Problems*, 1974, ch. 23) on Householder QR.
@@ -19,9 +14,7 @@ use std::f64::consts::PI;
 
 use crate::electrical::complex::C64;
 use crate::electrical::dispersion::DjordjevicSarkar;
-use crate::electrical::loss::{Roughness, surface_resistance};
-
-use super::engine::{EPS0, SurfaceImpedance};
+use crate::openems::EPS0;
 
 /// Least squares `min |A x − b|` on the columns `cols` of `a` (column-major, `m` rows) by
 /// Householder QR; zero for a column that is (numerically) dependent on the previous ones.
@@ -200,57 +193,9 @@ pub fn debye_fit(m: &DjordjevicSarkar, taus: &[f64], lo: f64, hi: f64) -> DebyeF
     DebyeFit { eps_inf: 1.0 + x[0], sigma: x[1], delta: x[2..].to_vec() }
 }
 
-/// The surface impedance of a good conductor of conductivity `sigma` (S/m) with roughness:
-/// Rs K + j Rs.
-pub fn surface_impedance(f: f64, sigma: f64, roughness: &Roughness) -> C64 {
-    let rs = surface_resistance(f, sigma);
-    let k = roughness.factor(crate::electrical::loss::skin_depth(f, sigma));
-    C64::new(rs * k, rs)
-}
-
-/// Fits the surface impedance over `lo .. hi` (Hz): sections with corners two per decade from
-/// a decade below to a decade above the band, the resistance in relative terms at 64
-/// log-spaced frequencies, the reactance with a fiftieth of that weight.
-pub fn surface_fit(sigma: f64, roughness: &Roughness, lo: f64, hi: f64) -> SurfaceImpedance {
-    surface_fit_weighted(sigma, roughness, lo, hi, 0.02)
-}
-
-fn surface_fit_weighted(sigma: f64, roughness: &Roughness, lo: f64, hi: f64, x_weight: f64) -> SurfaceImpedance {
-    let freqs = log_space(lo, hi, 64);
-    let corners: Vec<f64> = corners(lo / 10.0, hi * 10.0, 2.0).iter().map(|f| 2.0 * PI * f).collect();
-    let n = corners.len() + 1;
-    let rows = 2 * freqs.len();
-    let mut a = vec![vec![0.0; rows]; n];
-    let mut b = vec![0.0; rows];
-    for (i, &f) in freqs.iter().enumerate() {
-        let z = surface_impedance(f, sigma, roughness);
-        let w = 2.0 * PI * f;
-        // The resistance (the loss) first: a rough surface's Rs K + j Rs is not a causal pair
-        // (a resistance rising faster than √f comes with more reactance), so the fit keeps the
-        // resistance and lets the reactance take its causal value (a small part of the line's
-        // inductance).
-        let (wr, wi) = (1.0 / z.re, x_weight / z.im);
-        b[2 * i] = z.re * wr;
-        b[2 * i + 1] = z.im * wi;
-        a[0][2 * i] = wr;
-        for (p, &c) in corners.iter().enumerate() {
-            // s/(s + a) = (ω² + jωa) / (ω² + a²).
-            let d = w * w + c * c;
-            a[1 + p][2 * i] = wr * w * w / d;
-            a[1 + p][2 * i + 1] = wi * w * c / d;
-        }
-    }
-    let x = nnls(&a, &b);
-    SurfaceImpedance {
-        r0: x[0],
-        terms: x[1..].iter().zip(&corners).filter(|(r, _)| **r > 0.0).map(|(r, c)| (*r, *c)).collect(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::electrical::loss::COPPER_CONDUCTIVITY;
 
     #[test]
     fn nnls_small() {
@@ -275,32 +220,6 @@ mod tests {
                 let (te, tw) = (-e.im / e.re, -w.im / w.re);
                 assert!((e.re - w.re).abs() < 1e-3 * w.re, "{f}: εr {} vs {}", e.re, w.re);
                 assert!((te - tw).abs() < 0.01 * tw, "{f}: tan δ {te} vs {tw}");
-            }
-        }
-    }
-
-    #[test]
-    fn surface_fit_reproduces_skin_effect() {
-        for rough in [
-            Roughness::Smooth,
-            Roughness::HammerstadJensen { rms: 1e-6 },
-            Roughness::Huray { radius: 0.5e-6, ratio: 2.0 },
-        ] {
-            let (lo, hi) = (1e8, 1e10);
-            let fit = surface_fit(COPPER_CONDUCTIVITY, &rough, lo, hi);
-            assert!(fit.r0 >= 0.0 && fit.terms.iter().all(|t| t.0 > 0.0 && t.1 > 0.0));
-            for f in log_space(lo, hi, 101) {
-                let (z, w) = (fit.z(f), surface_impedance(f, COPPER_CONDUCTIVITY, &rough));
-                // Smooth: both within 1 %. Rough: the resistance within 2.5 %, the reactance
-                // its causal value, larger than the smooth one D52 adds (at most twice).
-                let smooth = rough == Roughness::Smooth;
-                let tol = if smooth { 0.01 } else { 0.025 };
-                assert!((z.re - w.re).abs() < tol * w.re, "{rough:?} {f}: R {} vs {}", z.re, w.re);
-                if smooth {
-                    assert!((z.im - w.im).abs() < 0.01 * w.im, "{f}: X {} vs {}", z.im, w.im);
-                } else {
-                    assert!(z.im > 0.9 * w.im && z.im < 2.0 * w.im, "{rough:?} {f}: X {} vs {}", z.im, w.im);
-                }
             }
         }
     }

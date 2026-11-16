@@ -1,9 +1,8 @@
-//! `sim.sparams` on ems, its default solver (`solver: ems`): the board region run by the [`ems`]
-//! crate's FDTD solver instead of [`super::engine`] (DECISIONS D86, D87, D89, D90, D94, D98; cargo
-//! feature `ems`).
+//! `sim.sparams`'s solver: the board region run by the [`ems`] crate's FDTD (DECISIONS D86, D87,
+//! D89, D90, D94, D98, D100).
 //!
-//! The region, its mesh, its ports and its parts are the ones the built-in solver gets
-//! ([`super::extract`], [`super::place_ports`]); the geometry is the property list of the openEMS
+//! The region, its mesh, its ports and its parts come from [`super::extract`] and
+//! [`super::place_ports`]; the geometry is the property list of the openEMS
 //! export ([`crate::openems::xml::properties`]): Djordjevic–Sarkar dielectrics as Debye materials
 //! on the fitted terms, perfect copper as metal volumes or sheets, via barrels as cylinders plus
 //! their node column, the solder mask, board parts as lumped elements. Lossy copper is where
@@ -11,11 +10,10 @@
 //! at f₀): solid copper stays metal volumes with a surface impedance on every face, sheet copper
 //! is a conducting sheet integrated as a rational two-port, both with the roughness model over
 //! the band, and cells are cut where copper is oblique to the mesh ([`compile_options`]).
-//! Ports are ems lumped ports (a resistor of z0 with a Thevenin source, the
-//! voltage the mean over the port's columns as in the built-in solver); a microstrip port is
-//! that source on the line plus a voltage probe and two current loops around its reference
-//! plane, read as the built-in solver reads them. The model is compiled once; one run per port,
-//! S = B A⁻¹ on the same waves.
+//! Ports are ems lumped ports (a resistor of z0 with a Thevenin source, the voltage the mean over
+//! the port's columns); a microstrip port is that source on the line plus a voltage probe and two
+//! current loops around its reference plane. The model is compiled once; one run per port,
+//! S = B A⁻¹ on the waves.
 
 use ems::compile::{ConformalOutlines, PoleWeighting, SheetModel};
 use ems::csx;
@@ -25,14 +23,15 @@ use ems::csx::{ContinuousStructure, Primitive, Property};
 use ems::engine::surface::{Conductor, Roughness as EmsRoughness};
 use ems::{Boundaries, Boundary, CompileOptions, CompiledModel, Cpml, EndCriteria, Fdtd, WarningCode, Waveform};
 
-use super::engine::{EPS0, Gaussian, Hooks, LumpedPort, Probe};
-use super::{Error, Extracted, Measure, Options, Plan, PortSet, SParams, Waves, parts};
+use super::{
+    Error, Extracted, Gaussian, Hooks, LumpedPort, Measure, Options, Plan, PortSet, Probe, SParams, Waves, parts,
+};
 use crate::diag::Diagnostic;
 use crate::electrical::complex::C64;
 use crate::electrical::loss::Roughness;
 use crate::model::Project;
-use crate::openems::Region;
 use crate::openems::xml::{self, Kind, Prop, Shape};
+use crate::openems::{EPS0, Region};
 use crate::refs::ObjectRef;
 
 /// Drawing unit of the model: millimetres, as the export's file.
@@ -65,7 +64,7 @@ fn solver_error(e: ems::Error) -> Error {
     Error::new(
         "sim.ems_failed",
         format!("the ems solver refused the model: {e}"),
-        "run with `solver: builtin`; if the region is valid there, report the case to ems",
+        "check the region with `plan` and `export.openems`; if it is valid, report the case to ems",
     )
 }
 
@@ -177,7 +176,7 @@ fn prepare(p: &Project, o: &Options) -> Result<Prepared, Error> {
         super::unresolved(&r, &mut diags);
     }
     let ports = super::place_ports(&r)?;
-    // The columns of mesh edges an element's box takes in, as the built-in solver counts them.
+    // The columns of mesh edges an element's box takes in.
     let within = |a: usize, lo: i64, hi: i64| r.lines[a].iter().filter(|&&v| lo <= v && v <= hi).count().max(1);
     let parts: Vec<super::LumpedPart> = boxes
         .into_iter()
@@ -208,11 +207,11 @@ fn roughness(r: Roughness) -> EmsRoughness {
 
 /// How ems compiles the property list: conformal cells where copper is oblique to the mesh
 /// (solid metal and the outlines of sheets on mesh planes; copper along the mesh keeps the
-/// staircase the mesh was laid out for, as in the built-in solver) and, for lossy copper, a
+/// staircase the mesh was laid out for) and, for lossy copper, a
 /// surface impedance fitted over the result's band on the faces of the copper volumes and as the
 /// two-port of the copper sheets, each with the roughness model. A laminate's Debye poles go to
 /// an edge in its surface by the share of the edge's dual face the laminate fills, as its static
-/// permittivity does and as the built-in solver's do (`PoleWeighting::Averaged`; openEMS's rule,
+/// permittivity does (`PoleWeighting::Averaged`; openEMS's rule,
 /// ems's default, gives such an edge the whole poles: two points more loss on a 60 mm
 /// microstrip at 9 GHz, D89, D90). What a small cut face does, and
 /// whether a narrow slanted track or a barrel of a cell keeps whole edges, is ems's to decide
@@ -336,9 +335,9 @@ fn threads(o: &Options, r: &Region) -> usize {
     ems::engine::default_threads_for(nodes).min(most).max(1)
 }
 
-/// The solver settings of a region: the pulse, CPML of `pml_cells` on every face with the
-/// built-in solver's frequency shift at f₀, the end criterion, the step limit and the Courant
-/// fraction.
+/// The solver settings of a region: the pulse, CPML of `pml_cells` on every face with its
+/// frequency shift α at f₀ (2π ε₀ f₀: at a tenth of that a line near the absorber read gain, D68),
+/// the end criterion, the step limit and the Courant fraction.
 fn settings(o: &Options, r: &Region, threads: usize) -> Fdtd {
     let f0 = r.f0 as f64;
     let pml = Cpml::cells(o.region.pml_cells as usize).alpha_max(2.0 * std::f64::consts::PI * EPS0 * f0);
@@ -356,7 +355,7 @@ fn settings(o: &Options, r: &Region, threads: usize) -> Fdtd {
 /// the warning names, one diagnostic per code and property (at most [`MAX_WARNINGS`]).
 fn warnings(list: &[ems::Warning], subjects: &[(String, Vec<ObjectRef>)], diags: &mut Vec<Diagnostic>) {
     // The mesh, its grading into the absorbing layers and the copper and laminate running
-    // through them are cadlab's (the built-in solver runs the same), and the probes of this
+    // through them are cadlab's, and the probes of this
     // module are on dual planes on purpose: not news about this run. Nor is what lossy copper
     // is by construction here: the node column of a barrel is a wire without loss, and the
     // covered parts of the edges a slanted outline cuts are perfect conductors beside lossy
@@ -372,7 +371,8 @@ fn warnings(list: &[ems::Warning], subjects: &[(String, Vec<ObjectRef>)], diags:
         _ => false,
     };
     let shown: Vec<&ems::Warning> = list.iter().filter(|w| !ours(w)).collect();
-    let hint = "compare with `solver: builtin`; the result may still be valid";
+    let hint = "the result may still be valid: check its passivity and reciprocity (`checks`), and compare with a \
+                finer mesh or with openEMS on `export.openems`";
     for w in shown.iter().take(MAX_WARNINGS) {
         let code = format!("sim.ems_{}", w.code().as_str().replace('.', "_"));
         let mut d = Diagnostic::warning(code, format!("ems: {w}")).with_hint(hint);
@@ -441,7 +441,7 @@ pub(crate) fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SPa
             Error::new(
                 "sim.unstable",
                 "the simulation diverged (ems)",
-                "lower `courant`, or use `solver: builtin`; report the case to ems if it persists",
+                "lower `courant`; report the case to ems if it persists",
             )
         };
         let Some(out) = res.outcome().copied() else { return Err(unstable()) };

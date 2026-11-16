@@ -631,9 +631,8 @@ fn wireless_node_through_mcp() {
     outputs(&mut c, &project);
 }
 
-/// The full-wave run: `cargo test --release --test agent_session6 -- --ignored`. Minutes per run.
-/// On each solver of this build (ems, `sim.sparams`'s default since D94, and the built-in one),
-/// held to the same tolerances.
+/// The full-wave run: `cargo test --release --test agent_session6 -- --ignored --nocapture`. A
+/// minute or so. `CADLAB_S6_THREADS` sets the solver's thread count (else its own), for timing.
 ///
 /// Compared with the ideal chain of `chain`: the layout's own pads and gaps are the difference, so
 /// agreement bounds the setup, not the RF performance of a real board: the parts here are ideal,
@@ -648,91 +647,47 @@ fn rf_path_full_wave() {
     circuit(&mut c);
     stackup_and_width(&mut c);
     layout(&mut c);
-    let solvers: &[&str] = if cfg!(feature = "ems") { &["builtin", "ems"] } else { &["builtin"] };
-    for solver in solvers {
-        let r = c.ok(
-            "sim",
-            "sparams",
-            sim_args(json!({"name": format!("rf_{solver}"), "solver": solver, "points": 101, "end_criteria": "50dB",
-                "frequencies": ["2.44GHz"], "band": ["2.4GHz", "2.4835GHz"]})),
-        );
-        assert_eq!(r["output"]["solver"], *solver, "{r}");
-        assert!(r["output"]["runs"].as_array().unwrap().iter().all(|x| x["converged"] == true), "{r}");
-        assert!(diags(&r, "sim.not_passive").is_empty() && diags(&r, "sim.not_reciprocal").is_empty(), "{r}");
-        let param =
-            |n: &str| r["output"]["params"].as_array().unwrap().iter().find(|p| p["name"] == n).unwrap().clone();
-        let (s11, s21) = chain(2.44e9, 0.8e-12, 3.9e-9, 10.6);
-        let abs = |c: (f64, f64)| (c.0 * c.0 + c.1 * c.1).sqrt();
-        let got11 = param("S11")["at"][0]["mag"].as_f64().unwrap();
-        let got21 = param("S21")["at"][0]["mag"].as_f64().unwrap();
-        eprintln!("{solver}: |S11| {got11} (ideal chain {}), |S21| {got21} (ideal chain {})", abs(s11), abs(s21));
-        assert!((got21 - abs(s21)).abs() < S21_TOLERANCE, "{solver}: |S21| {got21}, ideal chain {}", abs(s21));
-        assert!((got11 - abs(s11)).abs() < S11_TOLERANCE, "{solver}: |S11| {got11}, ideal chain {}", abs(s11));
+    // What the solver says of the model before running it.
+    let plan = c.ok("sim", "sparams", sim_args(json!({"plan": true})));
+    for d in plan["diagnostics"].as_array().into_iter().flatten() {
+        eprintln!("plan: {}: {}", d["code"].as_str().unwrap_or(""), d["message"].as_str().unwrap_or(""));
     }
+    let mut args = json!({"name": "rf", "points": 101, "end_criteria": "50dB",
+        "frequencies": ["2.44GHz"], "band": ["2.4GHz", "2.4835GHz"]});
+    if let Some(threads) = std::env::var("CADLAB_S6_THREADS").ok().and_then(|t| t.parse::<u32>().ok()) {
+        args["threads"] = json!(threads);
+    }
+    let t = std::time::Instant::now();
+    let r = c.ok("sim", "sparams", sim_args(args));
+    let secs = t.elapsed().as_secs_f64();
+    assert_eq!(r["output"]["solver"], cadlab::fdtd::SOLVER, "{r}");
+    assert!(r["output"]["runs"].as_array().unwrap().iter().all(|x| x["converged"] == true), "{r}");
+    assert!(diags(&r, "sim.not_passive").is_empty() && diags(&r, "sim.not_reciprocal").is_empty(), "{r}");
+    let param = |n: &str| r["output"]["params"].as_array().unwrap().iter().find(|p| p["name"] == n).unwrap().clone();
+    let (s11, s21) = chain(2.44e9, 0.8e-12, 3.9e-9, 10.6);
+    let abs = |c: (f64, f64)| (c.0 * c.0 + c.1 * c.1).sqrt();
+    let got11 = param("S11")["at"][0]["mag"].as_f64().unwrap();
+    let got21 = param("S21")["at"][0]["mag"].as_f64().unwrap();
+    let codes: Vec<&str> =
+        r["diagnostics"].as_array().into_iter().flatten().filter_map(|d| d["code"].as_str()).collect();
+    eprintln!(
+        "{} cells, timestep {} s, runs {}, {secs:.1} s; |S11| {got11:.4} (ideal chain {:.4}), |S21| {got21:.4} (ideal \
+         chain {:.4}); S11 band {} .. {} dB, S21 band {} .. {} dB; checks {}; {codes:?}",
+        r["output"]["mesh"]["cells"],
+        r["output"]["timestep"],
+        r["output"]["runs"],
+        abs(s11),
+        abs(s21),
+        param("S11")["min"]["db"],
+        param("S11")["max"]["db"],
+        param("S21")["min"]["db"],
+        param("S21")["max"]["db"],
+        r["output"]["checks"],
+    );
+    assert!((got21 - abs(s21)).abs() < S21_TOLERANCE, "|S21| {got21}, ideal chain {}", abs(s21));
+    assert!((got11 - abs(s11)).abs() < S11_TOLERANCE, "|S11| {got11}, ideal chain {}", abs(s11));
 }
 
 /// Set from the session's run (docs/TESTING.md, session 6).
 const S21_TOLERANCE: f64 = 0.1;
 const S11_TOLERANCE: f64 = 0.15;
-
-/// The same run on the ems solver (`solver: ems`, DECISIONS D86) and on the built-in one: the
-/// matching network's |S11| and |S21| at 2.44 GHz and over the band, with what each run cost.
-/// A measurement (docs/ELECTRICAL.md, "ems, the default solver"): `cargo test --release --test
-/// agent_session6 -- --ignored --nocapture rf_path_full_wave_ems`.
-#[cfg(feature = "ems")]
-#[test]
-#[ignore]
-fn rf_path_full_wave_ems() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut c = Client::start(dir.path());
-    c.ok("project", "new", json!({"path": "node", "name": "ble-sensor-node", "targets": ["jlcpcb"]}));
-    parts(&mut c);
-    circuit(&mut c);
-    stackup_and_width(&mut c);
-    layout(&mut c);
-    let (s11, s21) = chain(2.44e9, 0.8e-12, 3.9e-9, 10.6);
-    let abs = |c: (f64, f64)| (c.0 * c.0 + c.1 * c.1).sqrt();
-    let mut got = Vec::new();
-    // What ems says of the model before running it.
-    let plan = c.ok("sim", "sparams", sim_args(json!({"solver": "ems", "plan": true})));
-    for d in plan["diagnostics"].as_array().into_iter().flatten() {
-        eprintln!("ems plan: {}: {}", d["code"].as_str().unwrap_or(""), d["message"].as_str().unwrap_or(""));
-    }
-    // `CADLAB_S6_THREADS`: both solvers on that many threads (else each one's own count).
-    let threads = std::env::var("CADLAB_S6_THREADS").ok().and_then(|t| t.parse::<u32>().ok());
-    for solver in ["builtin", "ems"] {
-        let mut args = json!({"name": format!("rf_{solver}"), "solver": solver, "points": 101, "end_criteria": "50dB",
-            "frequencies": ["2.44GHz"], "band": ["2.4GHz", "2.4835GHz"]});
-        if let Some(threads) = threads {
-            args["threads"] = json!(threads);
-        }
-        let t = std::time::Instant::now();
-        let r = c.ok("sim", "sparams", sim_args(args));
-        let secs = t.elapsed().as_secs_f64();
-        let param =
-            |n: &str| r["output"]["params"].as_array().unwrap().iter().find(|p| p["name"] == n).unwrap().clone();
-        let (m11, m21) =
-            (param("S11")["at"][0]["mag"].as_f64().unwrap(), param("S21")["at"][0]["mag"].as_f64().unwrap());
-        let codes: Vec<&str> =
-            r["diagnostics"].as_array().into_iter().flatten().filter_map(|d| d["code"].as_str()).collect();
-        eprintln!(
-            "{solver}: {} cells, timestep {} s, runs {}, {secs:.1} s; |S11| {m11:.4} (ideal chain {:.4}), |S21| {m21:.4} \
-             (ideal chain {:.4}); S11 band {} .. {} dB, S21 band {} .. {} dB; checks {}; {codes:?}",
-            r["output"]["mesh"]["cells"],
-            r["output"]["timestep"],
-            r["output"]["runs"],
-            abs(s11),
-            abs(s21),
-            param("S11")["min"]["db"],
-            param("S11")["max"]["db"],
-            param("S21")["min"]["db"],
-            param("S21")["max"]["db"],
-            r["output"]["checks"],
-        );
-        assert!(r["output"]["runs"].as_array().unwrap().iter().all(|x| x["converged"] == true), "{r}");
-        got.push((m11, m21));
-    }
-    // ems within the tolerances the built-in solver's run is held to against the ideal chain.
-    assert!((got[1].1 - abs(s21)).abs() < S21_TOLERANCE, "|S21| {}, ideal chain {}", got[1].1, abs(s21));
-    assert!((got[1].0 - abs(s11)).abs() < S11_TOLERANCE, "|S11| {}, ideal chain {}", got[1].0, abs(s11));
-}

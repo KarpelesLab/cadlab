@@ -6,8 +6,8 @@
 //! The export has two files:
 //!
 //! - `<name>.xml`: the CSXCAD geometry (a `<ContinuousStructure>` document): dielectrics from
-//!   the stackup (Debye terms of their Djordjevic–Sarkar model, as the built-in solver fits
-//!   them), copper of every layer as extruded polygons (or zero-thickness sheets), or as
+//!   the stackup (Debye terms of their Djordjevic–Sarkar model, the fit `sim.sparams`
+//!   runs), copper of every layer as extruded polygons (or zero-thickness sheets), or as
 //!   conducting sheets with a conductivity, plated holes and vias as metal cylinders,
 //!   non-plated holes as air, and a graded rectilinear mesh (lines at metal edges, λ/N
 //!   resolution);
@@ -195,7 +195,7 @@ pub struct Options {
     /// Thirds rule at copper edges (mesh lines a third of a cell inside and two thirds outside
     /// instead of one line on the edge).
     pub thirds: bool,
-    /// Mesh lines at the microstrip ports' feed and reference planes (where the built-in solver
+    /// Mesh lines at the microstrip ports' feed and reference planes (where `sim.sparams`
     /// feeds and measures).
     pub port_planes: bool,
     /// Solder mask on both outer layers (none by default).
@@ -205,7 +205,7 @@ pub struct Options {
     /// Copper surface roughness (on the surface resistance).
     pub roughness: Roughness,
     /// Write the region's two-pin resistors, capacitors and inductors as lumped elements
-    /// (`export` only: the built-in solver has its own option).
+    /// (`export` only: `sim.sparams` has its own option).
     pub parts: bool,
 }
 
@@ -583,7 +583,7 @@ fn hz(v: u64) -> f64 {
 }
 
 /// A board region extracted for full-wave simulation: the stack, the copper, holes, board
-/// shape, ports and the graded mesh. Shared by the openEMS export and the built-in FDTD solver
+/// shape, ports and the graded mesh. Shared by the openEMS export and `sim.sparams`
 /// ([`crate::fdtd`]).
 pub(crate) struct Region {
     pub(crate) layers: Vec<Layer>,
@@ -706,7 +706,7 @@ pub fn export(p: &Project, o: &Options) -> Result<Export, Error> {
     {
         // Seen with the openEMS oracle (DECISIONS D68): on a strip with thickness its
         // microstrip port's probes read εeff 3.6–6.8 for a 3.0 line, Z₀ with a large imaginary
-        // part; on a sheet they agree with the built-in solver.
+        // part; on a sheet they agree with `sim.sparams`.
         diags.push(
             Diagnostic::warning(
                 "openems.msl_solid_copper",

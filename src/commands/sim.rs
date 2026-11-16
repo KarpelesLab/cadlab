@@ -1,5 +1,4 @@
-//! Simulation commands: `sim.sparams` (the ems crate's FDTD solver, or the built-in one of
-//! `crate::fdtd` on the same region with `solver: builtin`).
+//! Simulation commands: `sim.sparams` (`crate::fdtd`, on the ems crate's FDTD solver).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -169,9 +168,6 @@ pub struct SParams {
     /// staircase).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conformal: Option<bool>,
-    /// `ems` (default if built in; the ems crate's FDTD) or `builtin` (cadlab's own).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub solver: Option<fdtd::Solver>,
     /// Worker threads (default: automatic); the result does not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<u32>,
@@ -241,9 +237,9 @@ pub struct Simulated {
     /// Mesh edges partly covered by diagonal or curved copper (conformal cells).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conformal_edges: usize,
-    /// The solver that ran (or would run).
+    /// The solver that ran (or would run) and its version: `ems 0.0.12`.
     #[serde(default)]
-    pub solver: fdtd::Solver,
+    pub solver: String,
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -383,7 +379,6 @@ impl Command for SParams {
             parts: self.parts.unwrap_or(true),
             overrides: self.part_values.clone(),
             conformal: self.conformal.unwrap_or(true),
-            solver: self.solver.unwrap_or_default(),
             threads: self.threads.unwrap_or(0) as usize,
             ..fdtd::Options::default()
         };
@@ -434,7 +429,7 @@ impl Command for SParams {
                 nets: plan.nets,
                 parts: plan.parts,
                 conformal_edges: plan.conformal_edges,
-                solver: opts.solver,
+                solver: fdtd::SOLVER.to_string(),
             });
         }
         let mut result = {
@@ -442,8 +437,7 @@ impl Command for SParams {
             let cancelled = || ctx.check_cancelled().is_err();
             fdtd::sparams(p, &opts, &fdtd::Hooks { progress: &progress, cancelled: &cancelled }).map_err(to_error)?
         };
-        result.touchstone.comments =
-            provenance(opts.solver, &result.ports, &result.parts, &result.window, &self.part_values);
+        result.touchstone.comments = provenance(&result.ports, &result.parts, &result.window, &self.part_values);
         let dir = export::resolve(ctx, self.dir.as_deref(), PathBuf::from("out/sim"));
         let ts = &result.touchstone;
         let n = ts.ports;
@@ -490,18 +484,15 @@ impl Command for SParams {
             nets: result.nets,
             parts: result.parts,
             conformal_edges: result.conformal_edges,
-            solver: opts.solver,
+            solver: fdtd::SOLVER.to_string(),
         })
     }
 
     fn summarize(o: &Simulated) -> String {
         let mut s = format!(
-            "{}{} {} port(s) on {}×{}×{} lines ({} cells, smallest {} / {} / {}, timestep {:.3} ps)",
+            "{} with {}: {} port(s) on {}×{}×{} lines ({} cells, smallest {} / {} / {}, timestep {:.3} ps)",
             if o.planned { "plan (not run):" } else { "simulated" },
-            match o.solver {
-                fdtd::Solver::Ems => " with ems:",
-                fdtd::Solver::Builtin => " with the built-in solver:",
-            },
+            if o.solver.is_empty() { "ems" } else { &o.solver },
             o.ports.len(),
             o.mesh.lines[0],
             o.mesh.lines[1],
@@ -556,7 +547,6 @@ impl Command for SParams {
 
 /// The Touchstone header: what the data is, so the file explains itself away from this project.
 fn provenance(
-    solver: fdtd::Solver,
     ports: &[openems::PortInfo],
     parts: &[fdtd::LumpedPart],
     window: &(Point, Point),
@@ -564,10 +554,7 @@ fn provenance(
 ) -> Vec<String> {
     let mut out = vec![format!(
         "cadlab sim.sparams (solver: {}): board region ({}, {}) .. ({}, {})",
-        match solver {
-            fdtd::Solver::Ems => "ems",
-            fdtd::Solver::Builtin => "builtin",
-        },
+        fdtd::SOLVER,
         window.0.x,
         window.0.y,
         window.1.x,

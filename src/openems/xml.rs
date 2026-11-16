@@ -6,7 +6,7 @@
 //! thickness) interfaces (DECISIONS D68).
 //!
 //! The region first becomes a list of properties with primitives ([`properties`]); the file is
-//! that list written out, and the ems solver (`crate::fdtd::ems`, D86) runs the same list.
+//! that list written out, and `sim.sparams`'s solver (`crate::fdtd::ems`, D86) runs the same list.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -124,7 +124,7 @@ pub(crate) struct Prop {
 
 /// A dielectric's property kind: a plain material (`er_text`) when lossless, else a Debye
 /// material holding the Djordjevic–Sarkar model (at its reference frequency, or anchored at
-/// f₀) fitted over the band as the built-in solver does: ε∞, a conductivity and Δε on the
+/// f₀) fitted over the band ([`fit::debye_fit`]): ε∞, a conductivity and Δε on the
 /// shared relaxation times `taus` (terms of zero weight left out). With the comment naming the
 /// fit.
 fn material(er_text: &str, d: &Dispersive, g: &Geometry<'_>, taus: &[f64]) -> (Kind, Option<String>) {
@@ -290,8 +290,8 @@ pub(crate) fn properties(g: &Geometry<'_>) -> Vec<Prop> {
                 hole_prims(h, z0, z1, PRIO_METAL, &mut prims);
                 if h.slot.is_none() {
                     // A barrel between mesh lines holds no mesh edge, so it conducts nothing (a
-                    // via read open in openEMS, D74): its nearest node column, as the built-in
-                    // solver adds it (D59). On mesh coordinates: a line between them is dropped.
+                    // via read open in openEMS, D74): its nearest node column, as
+                    // `sim.sparams` has had it since D59. On mesh coordinates: a line between them is dropped.
                     let near = |ls: &[i64], v: i64| ls.iter().copied().min_by_key(|l| (l - v).abs()).unwrap_or(v);
                     let (x, y) = (near(g.lines[0], h.center.x.0), near(g.lines[1], h.center.y.0));
                     prims.push(Prim { shape: Shape::Box { lo: [x, y, z0], hi: [x, y, z1] }, priority: PRIO_METAL });

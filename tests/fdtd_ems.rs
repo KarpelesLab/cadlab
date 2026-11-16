@@ -1,9 +1,9 @@
-//! `sim.sparams` on ems, its default solver since D94 (DECISIONS D86): the board region run by the
-//! ems crate's FDTD, against the built-in solver and the references its own tests use. The
-//! `#[ignore]` tests are the measurements behind the table in docs/ELECTRICAL.md ("ems, the default
-//! solver"); run them in release, one at a time:
+//! `sim.sparams` on ems, its solver (DECISIONS D86, D94, D100): the board region run by the ems
+//! crate's FDTD, against circuit theory, the 2D field solver, D52's loss model, its own result on
+//! another mesh or thread count, and the figures recorded from cadlab's own FDTD engine before it
+//! was removed (D100). The `measure_*` tests print what a run costs and reads (the tables in
+//! docs/ELECTRICAL.md, "ems, the solver"); run the `#[ignore]` tests in release, one at a time:
 //! `cargo test --release --test fdtd_ems -- --ignored --nocapture <name>`.
-#![cfg(feature = "ems")]
 
 use std::f64::consts::PI;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use cadlab::command::{Registry, RunOptions, Session};
 use cadlab::electrical::Model;
 use cadlab::electrical::complex::C64;
 use cadlab::electrical::fieldsolver::{self, Accuracy};
-use cadlab::fdtd::engine::C0;
+use cadlab::openems::C0;
 use serde_json::{Value, json};
 
 fn c(re: f64) -> C64 {
@@ -131,7 +131,7 @@ fn rss_kb() -> u64 {
         .map_or(0, |pages| pages * 4)
 }
 
-/// One solver's run of a case: its S-parameters and what it cost.
+/// A run of a case: its S-parameters and what it cost.
 struct Ran {
     ts: cadlab::touchstone::Touchstone,
     out: Value,
@@ -156,10 +156,9 @@ impl Ran {
     }
 }
 
-/// Runs `sim.sparams` with `args` (which name the output file) on `solver`.
-fn run(r: &Registry, s: &mut Session, args: &Value, solver: &str) -> Ran {
-    let name = format!("{}_{solver}", args["name"].as_str().unwrap());
-    let a = with(args.clone(), json!({"solver": solver, "name": name}));
+/// Runs `sim.sparams` with `args` (which name the output file).
+fn run(r: &Registry, s: &mut Session, args: &Value) -> Ran {
+    let a = args.clone();
     let base = rss_kb();
     let peak = Arc::new(AtomicU64::new(base));
     let stop = Arc::new(AtomicBool::new(false));
@@ -184,39 +183,17 @@ fn run(r: &Registry, s: &mut Session, args: &Value, solver: &str) -> Ran {
     Ran { ts, out, seconds, mem_mb }
 }
 
-/// Both solvers on one case, with the cost line of the table and the largest differences of
-/// |S11| and |S21| over `band` (Hz).
-fn both(case: &str, r: &Registry, s: &mut Session, args: &Value, band: (f64, f64)) -> (Ran, Ran) {
-    let b = run(r, s, args, "builtin");
-    let e = run(r, s, args, "ems");
-    let np = b.ts.ports;
-    let (mut d11, mut d21, mut d21_db) = (0.0f64, 0.0f64, 0.0f64);
-    for ((f, x), y) in b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data) {
-        if *f < band.0 || *f > band.1 {
-            continue;
-        }
-        d11 = d11.max((c64(&x[0]).abs() - c64(&y[0]).abs()).abs());
-        if np > 1 {
-            d21 = d21.max((c64(&x[np]).abs() - c64(&y[np]).abs()).abs());
-            d21_db = d21_db.max((db(&x[np]) - db(&y[np])).abs());
-        }
-    }
+/// A run with its cost line and what ems had to say of the model.
+fn measured(case: &str, r: &Registry, s: &mut Session, args: &Value) -> Ran {
+    let e = run(r, s, args);
     println!(
-        "## {case}: {} cells; builtin dt {:.4} ps, steps {:?}, {:.1} s ({:.0} Mcells/s), {:.0} MB; ems dt {:.4} ps, \
-         steps {:?}, {:.1} s ({:.0} Mcells/s), {:.0} MB; {:.2}-{:.2} GHz: max Δ|S11| {d11:.4}, Δ|S21| {d21:.4} ({d21_db:.3} dB)",
-        b.cells(),
-        b.dt_ps(),
-        b.steps(),
-        b.seconds,
-        b.rate(),
-        b.mem_mb,
+        "## {case}: {} cells, dt {:.4} ps, steps {:?}, {:.1} s ({:.0} Mcells/s), {:.0} MB",
+        e.cells(),
         e.dt_ps(),
         e.steps(),
         e.seconds,
         e.rate(),
         e.mem_mb,
-        band.0 / 1e9,
-        band.1 / 1e9,
     );
     let notes: Vec<String> = e.out["diagnostics"]
         .as_array()
@@ -224,8 +201,8 @@ fn both(case: &str, r: &Registry, s: &mut Session, args: &Value, band: (f64, f64
         .iter()
         .map(|d| format!("{}: {}", d["code"].as_str().unwrap(), d["message"].as_str().unwrap()))
         .collect();
-    println!("ems diagnostics:\n  {}", notes.join("\n  "));
-    (b, e)
+    println!("diagnostics:\n  {}", notes.join("\n  "));
+    e
 }
 
 fn field_solver(er: f64, h: f64, w: f64) -> fieldsolver::FieldLine {
@@ -244,9 +221,21 @@ fn field_solver(er: f64, h: f64, w: f64) -> fieldsolver::FieldLine {
     s.line(w, Accuracy::default()).unwrap()
 }
 
-/// The coarse line of `tests/fdtd.rs`'s `sim_sparams_command` on ems: it passes, is reciprocal,
-/// agrees with the built-in solver, and gives the same data again on any thread count; plan, lumped
-/// ports, lossy copper with its notes, the cell guard.
+/// |S11| and |S21| of [`ems_runs_the_region`]'s line between microstrip ports at its 11 frequencies
+/// (0.05 to 5 GHz), and |S21| between lumped ports (0.1 to 10 GHz), as cadlab's own FDTD engine
+/// read them on the same region and mesh: recorded at commit 3aa423f, the last with that engine
+/// (DECISIONS D100), in a debug build on Linux x86-64, four digits. A second solver's result, kept
+/// as numbers now that the solver is gone.
+const RECORDED_MSL_S11: [f64; 11] =
+    [0.0004, 0.0040, 0.0077, 0.0109, 0.0138, 0.0169, 0.0205, 0.0245, 0.0288, 0.0329, 0.0367];
+const RECORDED_MSL_S21: [f64; 11] =
+    [0.9998, 0.9991, 0.9983, 0.9975, 0.9968, 0.9962, 0.9956, 0.9951, 0.9944, 0.9935, 0.9925];
+const RECORDED_LUMPED_S21: [f64; 11] =
+    [0.9992, 0.9959, 0.9924, 0.9903, 0.9876, 0.9811, 0.9681, 0.9483, 0.9252, 0.9055, 0.8953];
+
+/// The coarse line of `tests/fdtd.rs`'s `sim_sparams_command`: it passes, is reciprocal, agrees
+/// with the recorded result of cadlab's removed FDTD engine, and gives the same data again on any
+/// thread count; plan, lumped ports, lossy copper with its notes, the cell guard.
 #[test]
 fn ems_runs_the_region() {
     let r = Registry::with_builtins();
@@ -258,42 +247,32 @@ fn ems_runs_the_region() {
         json!({"f_max": "5GHz", "points": 11, "margin": "4mm", "air": "3mm", "max_cell": "1mm", "pml_cells": 4,
             "end_criteria": "30dB"}),
     );
-    let e = run(&r, &mut s, &args, "ems");
-    let b = run(&r, &mut s, &args, "builtin");
+    let e = run(&r, &mut s, &args);
     assert!(e.out["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{}", e.out);
-    assert_eq!(e.out["output"]["mesh"], b.out["output"]["mesh"]);
-    assert_eq!(e.out["output"]["ports"], b.out["output"]["ports"]);
-    for ((f, m), n) in e.ts.freqs.iter().zip(&e.ts.data).zip(&b.ts.data) {
+    // The region the figures were recorded on.
+    assert_eq!(e.out["output"]["mesh"]["lines"], json!([27, 19, 15]));
+    for (((f, m), s11_ref), s21_ref) in e.ts.freqs.iter().zip(&e.ts.data).zip(RECORDED_MSL_S11).zip(RECORDED_MSL_S21) {
         let (s11, s12, s21) = (c64(&m[0]), c64(&m[1]), c64(&m[2]));
         assert!(s11.abs() < 0.2, "{f}: |S11| {}", s11.abs());
         assert!(s21.abs() > 0.9 && s21.abs() < 1.0, "{f}: |S21| {}", s21.abs());
         assert!((s12 - s21).abs() < 0.01, "{f}: reciprocity {s12:?} {s21:?}");
-        // Measured: |S21| within 0.0024, |S11| within 0.0043 of the built-in solver.
-        assert!((s21.abs() - c64(&n[2]).abs()).abs() < 0.01, "{f}: |S21| {} vs {}", s21.abs(), c64(&n[2]).abs());
-        assert!((s11.abs() - c64(&n[0]).abs()).abs() < 0.015, "{f}: |S11| {} vs {}", s11.abs(), c64(&n[0]).abs());
+        // Measured: |S21| within 0.0020, |S11| within 0.0034 of the recorded figures.
+        assert!((s21.abs() - s21_ref).abs() < 0.01, "{f}: |S21| {} vs {s21_ref}", s21.abs());
+        assert!((s11.abs() - s11_ref).abs() < 0.015, "{f}: |S11| {} vs {s11_ref}", s11.abs());
     }
     // The same run again, on one and on three threads: the same data.
     for threads in [1, 3] {
-        let t = run(&r, &mut s, &with(args.clone(), json!({"threads": threads})), "ems");
+        let t = run(&r, &mut s, &with(args.clone(), json!({"threads": threads})));
         assert_eq!(t.ts.data, e.ts.data, "{threads} thread(s)");
     }
-    // The result names its solver, in the output and in the file.
-    assert_eq!(e.out["output"]["solver"], "ems");
-    assert_eq!(b.out["output"]["solver"], "builtin");
-    let text = std::fs::read_to_string(b.out["output"]["touchstone"].as_str().unwrap()).unwrap();
-    assert!(text.starts_with("! cadlab sim.sparams (solver: builtin): board region"), "{text}");
-    // ems is the solver of a run that names none (DECISIONS D94): the same file.
-    let mut unnamed = with(args.clone(), json!({"name": "unnamed"}));
-    unnamed.as_object_mut().unwrap().remove("solver");
-    let d = exec(&r, &mut s, "sim.sparams", unnamed);
-    assert_eq!(d["output"]["solver"], "ems");
-    let file = std::fs::read_to_string(d["output"]["touchstone"].as_str().unwrap()).unwrap();
-    assert_eq!(cadlab::touchstone::parse(&file, Some(2)).unwrap().data, e.ts.data);
+    // The result names its solver and version, in the output and in the file.
+    assert_eq!(e.out["output"]["solver"], cadlab::fdtd::SOLVER);
     let text = std::fs::read_to_string(e.out["output"]["touchstone"].as_str().unwrap()).unwrap();
-    assert!(text.starts_with("! cadlab sim.sparams (solver: ems): board region"), "{text}");
+    let first = format!("! cadlab sim.sparams (solver: {}): board region", cadlab::fdtd::SOLVER);
+    assert!(text.starts_with(&first), "{text}");
 
     // A plan: nothing runs, the timestep is the solver's.
-    let p = exec(&r, &mut s, "sim.sparams", with(args.clone(), json!({"solver": "ems", "plan": true})));
+    let p = exec(&r, &mut s, "sim.sparams", with(args.clone(), json!({"plan": true})));
     assert_eq!(p["output"]["planned"], true);
     assert_eq!(p["output"]["timestep"], e.out["output"]["timestep"]);
     assert!(p["output"]["estimate"]["pulse_steps"].as_u64().unwrap() > 100);
@@ -304,19 +283,19 @@ fn ems_runs_the_region() {
         json!({"name": "lumped", "f_max": "10GHz",
             "ports": [{"at": format!("track#{id}")}, {"at": format!("track#{id}"), "end": "end"}]}),
     );
-    let (le, lb) = (run(&r, &mut s, &lumped, "ems"), run(&r, &mut s, &lumped, "builtin"));
-    for ((f, m), n) in le.ts.freqs.iter().zip(&le.ts.data).zip(&lb.ts.data) {
+    let le = run(&r, &mut s, &lumped);
+    for ((f, m), s21_ref) in le.ts.freqs.iter().zip(&le.ts.data).zip(RECORDED_LUMPED_S21) {
         let (s12, s21) = (c64(&m[1]), c64(&m[2]));
         assert!(s21.abs() > 0.7 && s21.abs() < 1.002, "{f}: |S21| {}", s21.abs());
         assert!((s12 - s21).abs() < 0.01, "{f}: reciprocity {s12:?} {s21:?}");
-        // Measured: within 0.008 to 6 GHz, 0.030 at 9 GHz on these 1 mm cells (the two solvers read a
-        // lumped port's voltage and current differently, and this copper is lossy).
-        assert!((s21.abs() - c64(&n[2]).abs()).abs() < 0.05, "{f}: |S21| {} vs {}", s21.abs(), c64(&n[2]).abs());
+        // Measured: within 0.0026 of the recorded figures (the two solvers read a lumped port's
+        // voltage and current differently, and this copper is lossy).
+        assert!((s21.abs() - s21_ref).abs() < 0.01, "{f}: |S21| {} vs {s21_ref}", s21.abs());
     }
 
     // Rough copper: a roughness factor over the band, more loss at every frequency and more
     // at the high ones. Nothing of ems's own to say about either run.
-    let rough = run(&r, &mut s, &with(args.clone(), json!({"name": "rough", "roughness": "2um"})), "ems");
+    let rough = run(&r, &mut s, &with(args.clone(), json!({"name": "rough", "roughness": "2um"})));
     let extra: Vec<f64> = rough.ts.data.iter().zip(&e.ts.data).map(|(x, y)| db(&y[2]) - db(&x[2])).collect();
     assert!(extra.iter().all(|d| *d > 0.0), "{extra:?}");
     assert!(extra[extra.len() - 2] > 2.0 * extra[1], "{extra:?}");
@@ -326,16 +305,16 @@ fn ems_runs_the_region() {
     // ems's own mesh check speaks where it has something to say: 1 mm cells at 10 GHz in εr 4.
     assert!(codes_of(&le.out).contains(&"sim.ems_mesh_resolution".to_string()), "{:?}", codes_of(&le.out));
 
-    // The guards are the built-in solver's.
-    let big = with(args.clone(), json!({"solver": "ems", "max_cells": 1000}));
+    // The guards.
+    let big = with(args.clone(), json!({"max_cells": 1000}));
     assert_eq!(fail(&r, &mut s, "sim.sparams", big), "sim.too_many_cells");
-    let none = with(args, json!({"solver": "ems", "ports": []}));
+    let none = with(args, json!({"ports": []}));
     assert_eq!(fail(&r, &mut s, "sim.sparams", none), "sim.no_ports");
 }
 
 /// Lossless microstrip, W = 1 mm on 0.5 mm of εr 4, sheet copper, 24 mm between microstrip ports
 /// (20 mm between the reference planes): Z₀ and εeff from the S-parameters against the 2D field
-/// solver, both solvers.
+/// solver.
 #[test]
 #[ignore]
 fn measure_microstrip() {
@@ -348,82 +327,25 @@ fn measure_microstrip() {
         json!({"f_max": "10GHz", "points": 21, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6,
             "perfect_copper": true}),
     );
-    let (b, e) = both("lossless microstrip", &r, &mut s, &args, (0.5e9, 9.5e9));
+    let e = measured("lossless microstrip", &r, &mut s, &args);
     let fs = field_solver(4.0, 0.5, 1.0);
-    for (name, ran) in [("builtin", &b), ("ems", &e)] {
-        for (f, sm) in ran.ts.freqs.iter().zip(&ran.ts.data) {
-            if (1e9..=3.6e9).contains(f) {
-                let (z0, gl) = line_from_s(sm, 50.0);
-                let ee = eps_eff(gl.im / 0.020, *f);
-                println!(
-                    "{name} {:.2} GHz: Z0 {:.2} ({:+.2} %), εeff {ee:.4} ({:+.2} %), |S11| {:.4}, |S21| {:.4}, |S11|²+|S21|² {:.5}",
-                    f / 1e9,
-                    z0.re,
-                    100.0 * (z0.re / fs.z0 - 1.0),
-                    100.0 * (ee / fs.er_eff - 1.0),
-                    c64(&sm[0]).abs(),
-                    c64(&sm[2]).abs(),
-                    c64(&sm[0]).abs().powi(2) + c64(&sm[2]).abs().powi(2)
-                );
-            }
-        }
-    }
-    println!("field solver: Z0 {:.2}, εeff {:.4}", fs.z0, fs.er_eff);
-}
-
-/// The lossy microstrip of the openEMS oracle (`tests/openems.rs`, `lossy_microstrip_oracle`:
-/// 24 mm of 1 mm strip on 0.5 mm of Djordjevic–Sarkar εr 4 / tan δ 0.02 at 1 GHz, 58 MS/m copper,
-/// 6 GHz, thirds rule), both variants, both solvers; with perfect copper too, for the conductor
-/// part.
-#[test]
-#[ignore]
-fn measure_lossy_microstrip() {
-    let r = Registry::with_builtins();
-    let (dir, mut s, id) = board_line(&r, "0.5mm", "4", "0.02", "1mm", 24);
-    exec(&r, &mut s, "board.dielectric", json!({"ref_freq": "1GHz"}));
-    let out = dir.path().join("out");
-    let track = format!("track#{id}");
-    let cases = [
-        (
-            "msl",
-            json!([{"at": track, "kind": "msl", "length": "4mm"}, {"at": track, "end": "end", "kind": "msl", "length": "4mm"}]),
-            "sheet",
-        ),
-        ("lumped", json!([{"at": track}, {"at": track, "end": "end"}]), "solid"),
-        ("lumped_rough", json!([{"at": track}, {"at": track, "end": "end"}]), "solid"),
-    ];
-    for (name, ports, copper) in cases {
-        let mut common = json!({"dir": out, "name": name, "around": [track], "copper": copper, "thirds": true,
-            "ports": ports, "pml_outside": false, "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm",
-            "max_cell": "0.5mm", "pml_cells": 6, "end_criteria": "70dB"});
-        if name.ends_with("rough") {
-            // Hammerstad–Jensen, 1 µm RMS: a factor of 1.2 at 1 GHz and 1.7 at 6 GHz.
-            common["roughness"] = json!("1um");
-        }
-        let (b, e) =
-            both(&format!("lossy microstrip, {copper} copper, {name} ports"), &r, &mut s, &common, (0.5e9, 6e9));
-        let mut perfect = with(common.clone(), json!({"name": format!("{name}_pec"), "perfect_copper": true}));
-        perfect.as_object_mut().unwrap().remove("roughness");
-        let (bp, ep) = both(&format!("the same, perfect copper ({name})"), &r, &mut s, &perfect, (0.5e9, 6e9));
-        for ((((f, x), y), xp), yp) in
-            b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data).zip(&bp.ts.data).zip(&ep.ts.data)
-        {
-            let ((zb, _), (ze, _)) = (line_from_s(x, 50.0), line_from_s(y, 50.0));
+    for (f, sm) in e.ts.freqs.iter().zip(&e.ts.data) {
+        if (1e9..=3.6e9).contains(f) {
+            let (z0, gl) = line_from_s(sm, 50.0);
+            let ee = eps_eff(gl.im / 0.020, *f);
             println!(
-                "{name} {:.2} GHz: |S21| builtin {:.4} dB, ems {:.4} dB; conductor part builtin {:.4}, ems {:.4} dB; \
-                 Z0 builtin {:.2}, ems {:.2}; |S11| builtin {:.4}, ems {:.4}",
+                "{:.2} GHz: Z0 {:.2} ({:+.2} %), εeff {ee:.4} ({:+.2} %), |S11| {:.4}, |S21| {:.4}, |S11|²+|S21|² {:.5}",
                 f / 1e9,
-                db(&x[2]),
-                db(&y[2]),
-                db(&xp[2]) - db(&x[2]),
-                db(&yp[2]) - db(&y[2]),
-                zb.re,
-                ze.re,
-                c64(&x[0]).abs(),
-                c64(&y[0]).abs()
+                z0.re,
+                100.0 * (z0.re / fs.z0 - 1.0),
+                100.0 * (ee / fs.er_eff - 1.0),
+                c64(&sm[0]).abs(),
+                c64(&sm[2]).abs(),
+                c64(&sm[0]).abs().powi(2) + c64(&sm[2]).abs().powi(2)
             );
         }
     }
+    println!("field solver: Z0 {:.2}, εeff {:.4}", fs.z0, fs.er_eff);
 }
 
 /// A 4-layer board: a 50 Ω microstrip on F.Cu from J1 to a via, continuing on B.Cu to J2, over GND
@@ -479,7 +401,7 @@ fn via_transition(r: &Registry, s: &mut Session) {
 /// A plated hole of one cell (0.3 mm drill, 0.6 mm pads on 0.3 mm cells): ems keeps its conformal
 /// cells and has nothing to say about them (ems 0.0.7 read such a via further from a finer mesh
 /// than a staircase does, and cadlab ran it as one: D87, D89), and the transition loses less than
-/// its staircase, as it does in the built-in solver and on a finer mesh.
+/// its staircase, as it does on a finer mesh.
 #[test]
 fn ems_runs_a_via_of_one_cell() {
     let r = Registry::with_builtins();
@@ -490,8 +412,8 @@ fn ems_runs_a_via_of_one_cell() {
     let args = json!({"dir": dir.path().join("out"), "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"],
         "margin": "2mm", "air": "1mm", "pml_cells": 4, "copper": "sheet", "perfect_copper": true,
         "end_criteria": "30dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
-    let cut = run(&r, &mut s, &args, "ems");
-    let stair = run(&r, &mut s, &with(args, json!({"name": "stair", "conformal": false})), "ems");
+    let cut = run(&r, &mut s, &args);
+    let stair = run(&r, &mut s, &with(args, json!({"name": "stair", "conformal": false})));
     for ran in [&cut, &stair] {
         assert!(ran.out["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{}", ran.out);
         assert!(!codes_of(&ran.out).iter().any(|c| c.starts_with("sim.ems_")), "{:?}", codes_of(&ran.out));
@@ -506,45 +428,8 @@ fn ems_runs_a_via_of_one_cell() {
     assert!(c4 > s4 + 0.01 && c4 < s4 + 0.15, "conformal {c4} dB, staircase {s4} dB");
 }
 
-/// The via transition of the openEMS oracle (`via_transition_export`: the 4-layer board at 4 GHz,
-/// lumped ports, the absorbing cells beyond the region), both solvers.
-#[test]
-#[ignore]
-fn measure_via() {
-    let r = Registry::with_builtins();
-    let dir = tempfile::tempdir().unwrap();
-    let mut s = Session::new();
-    exec(&r, &mut s, "project.new", json!({"path": dir.path().join("via"), "name": "via"}));
-    via_transition(&r, &mut s);
-    let out = dir.path().join("out");
-    let args = json!({"dir": out, "name": "via", "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm",
-        "pml_outside": true, "end_criteria": "40dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
-    // With conformal cells (the default; the hole is a cell wide), as staircases, and with
-    // perfect copper; and to `sim.sparams`'s own end criterion of 60 dB (ems 0.0.9's lossy copper
-    // took 1.4 times the built-in solver's steps there, D89; 0.0.10 takes the same, D90).
-    for (name, extra) in [
-        ("via transition, 60 dB", json!({"name": "via_60", "end_criteria": "60dB"})),
-        ("via transition", json!({})),
-        ("via transition, staircase", json!({"name": "via_stair", "conformal": false})),
-        ("via transition, perfect copper", json!({"name": "via_pec", "perfect_copper": true})),
-    ] {
-        let (b, e) = both(name, &r, &mut s, &with(args.clone(), extra), (0.5e9, 4e9));
-        for ((f, x), y) in b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data) {
-            println!(
-                "{name} {:.2} GHz: |S21| builtin {:.3} dB, ems {:.3} dB; |S11| builtin {:.2} dB, ems {:.2} dB",
-                f / 1e9,
-                db(&x[2]),
-                db(&y[2]),
-                db(&x[0]),
-                db(&y[0])
-            );
-        }
-    }
-}
-
 /// The via transition (lossy solid copper, conformal cells, a region of 2 mm around the nets) and
-/// the bent line with lossy sheet copper in ems on one, two and three threads: the same bytes.
-/// The built-in solver once, for its time on these small regions.
+/// the bent line with lossy sheet copper on one, two and three threads: the same bytes.
 #[test]
 #[ignore]
 fn measure_threads_conformal() {
@@ -563,17 +448,9 @@ fn measure_threads_conformal() {
             "end_criteria": "30dB", "perfect_copper": false}),
     );
     for (label, session, args) in [("via", &mut s, via), ("bent line", &mut sb, line)] {
-        let ran = run(&r, session, &args, "builtin");
-        println!(
-            "{label}, built-in: {} cells, steps {:?}, {:.1} s ({:.0} Mcells/s)",
-            ran.cells(),
-            ran.steps(),
-            ran.seconds,
-            ran.rate()
-        );
         let mut first: Option<Ran> = None;
         for threads in [1, 2, 3] {
-            let ran = run(&r, session, &with(args.clone(), json!({"threads": threads})), "ems");
+            let ran = run(&r, session, &with(args.clone(), json!({"threads": threads})));
             println!(
                 "{label}, {threads} thread(s): {} cells, steps {:?}, {:.1} s ({:.0} Mcells/s), conformal edges {}",
                 ran.cells(),
@@ -603,17 +480,17 @@ fn peak_kb() -> u64 {
 /// `via_small`: the same on the small region of `measure_threads_conformal`; `line`: the oracle's
 /// lossy line with solid copper between lumped ports; `line_sheet`: with sheets between microstrip
 /// ports; `bent`: the bent line with lossy sheets on 0.25 mm cells, `bent_solid` with solid copper,
-/// `bent_default` and `bent_default_solid` on the default mesh) on `CADLAB_MEM_SOLVER`, to −40 dB
-/// (or `CADLAB_MEM_END`), on `CADLAB_MEM_THREADS` threads when set (else each solver's own count
+/// `bent_default` and `bent_default_solid` on the default mesh), to −40 dB
+/// (or `CADLAB_MEM_END`), on `CADLAB_MEM_THREADS` threads when set (else the solver's own count
 /// within the pool, `RAYON_NUM_THREADS`). Prints the process's peak before the run (the board and
 /// the registry) and after it, and the run's time: a time taken alone, which the runs of a longer
 /// test are not on a shared machine. `CADLAB_MEM_KEEP` is where to copy the Touchstone file (D94:
-/// ems 0.0.11's against 0.0.10's, byte for byte; D98: 0.0.12's against 0.0.11's).
+/// ems 0.0.11's against 0.0.10's, byte for byte; D98: 0.0.12's against 0.0.11's). D98's table has
+/// the figures of cadlab's removed engine on the same cases.
 #[test]
 #[ignore]
 fn measure_memory() {
     let case = std::env::var("CADLAB_MEM_CASE").unwrap_or_else(|_| "via".into());
-    let solver = std::env::var("CADLAB_MEM_SOLVER").unwrap_or_else(|_| "ems".into());
     let r = Registry::with_builtins();
     let (dir, mut s, args) = match case.as_str() {
         "via" => {
@@ -675,9 +552,9 @@ fn measure_memory() {
     if let Some(threads) = std::env::var("CADLAB_MEM_THREADS").ok().and_then(|t| t.parse::<u32>().ok()) {
         args["threads"] = json!(threads);
     }
-    let ran = run(&r, &mut s, &args, &solver);
+    let ran = run(&r, &mut s, &args);
     println!(
-        "## memory, {case} [{solver}]: {} cells, steps {:?}, {:.1} s; peak {:.0} MB before the run, {:.0} MB after",
+        "## memory, {case}: {} cells, steps {:?}, {:.1} s; peak {:.0} MB before the run, {:.0} MB after",
         ran.cells(),
         ran.steps(),
         ran.seconds,
@@ -691,11 +568,12 @@ fn measure_memory() {
 }
 
 /// The same transition with perfect sheet copper, as a staircase and with conformal cells, on the
-/// default mesh (0.3 mm cells) and on cells of 0.2 mm (2.7 million cells, a quarter of an hour
-/// per run of the built-in solver): where each goes as the barrel and the pads are resolved.
+/// default mesh (0.3 mm cells) and on cells of 0.2 mm (2.7 million cells): where each goes as the
+/// barrel and the pads are resolved.
 /// ems 0.0.7's conformal cells read −0.579 dB at 4 GHz on the default mesh, where the staircases
-/// read −0.426 and −0.440 dB, the built-in solver's conformal cells −0.375 dB and its staircase
-/// on the fine mesh −0.348 dB (D87); ems 0.0.8 integrates the faces a barrel crosses (D89).
+/// read −0.426 and −0.440 dB, the conformal cells of cadlab's removed engine −0.375 dB and its
+/// staircase on the fine mesh −0.348 dB (D87); ems 0.0.8 integrates the faces a barrel crosses
+/// (D89).
 /// `CADLAB_VIA_FINE=1` runs the 0.2 mm mesh instead of the default one, `CADLAB_VIA_FINE=conformal`
 /// only its conformal runs.
 #[test]
@@ -719,33 +597,30 @@ fn measure_via_convergence() {
             if !conformal && fine.as_deref() == Some("conformal") {
                 continue;
             }
-            for solver in ["builtin", "ems"] {
-                let mut a = with(args.clone(), json!({"name": format!("v_{conformal}"), "conformal": conformal}));
-                if let Some(cell) = cell {
-                    a["max_cell"] = json!(cell);
-                }
-                let ran = run(&r, &mut s, &a, solver);
-                let line: Vec<String> = [6, 7, 8]
-                    .iter()
-                    .map(|&i| {
-                        format!(
-                            "{:.2} GHz {:.3} dB, S11 {:.2} dB",
-                            ran.ts.freqs[i] / 1e9,
-                            db(&ran.ts.data[i][2]),
-                            db(&ran.ts.data[i][0])
-                        )
-                    })
-                    .collect();
-                println!(
-                    "## via, perfect sheet copper, cell {cell:?}, conformal {conformal} [{solver}]: {} cells, steps {:?}, \
-                     {:.0} s: {}; {}",
-                    ran.cells(),
-                    ran.steps(),
-                    ran.seconds,
-                    line.join("; "),
-                    ran.out["output"]["runs"]
-                );
+            let mut a = with(args.clone(), json!({"name": format!("v_{conformal}"), "conformal": conformal}));
+            if let Some(cell) = cell {
+                a["max_cell"] = json!(cell);
             }
+            let ran = run(&r, &mut s, &a);
+            let line: Vec<String> = [6, 7, 8]
+                .iter()
+                .map(|&i| {
+                    format!(
+                        "{:.2} GHz {:.3} dB, S11 {:.2} dB",
+                        ran.ts.freqs[i] / 1e9,
+                        db(&ran.ts.data[i][2]),
+                        db(&ran.ts.data[i][0])
+                    )
+                })
+                .collect();
+            println!(
+                "## via, perfect sheet copper, cell {cell:?}, conformal {conformal}: {} cells, steps {:?}, {:.0} s: {}; {}",
+                ran.cells(),
+                ran.steps(),
+                ran.seconds,
+                line.join("; "),
+                ran.out["output"]["runs"]
+            );
         }
     }
 }
@@ -828,7 +703,7 @@ type Impedance = Box<dyn Fn(f64) -> C64>;
 
 /// Board parts (the openEMS oracle's `lumped_parts_oracle` setup): a series 50 Ω resistor, a
 /// series 1 pF capacitor and the capacitor with 1 nH ESL and 1 Ω ESR (resonant at 5.03 GHz) on a
-/// microstrip, both solvers against S21 = 2 Z₀ / (2 Z₀ + Z).
+/// microstrip, against S21 = 2 Z₀ / (2 Z₀ + Z).
 #[test]
 #[ignore]
 fn measure_parts() {
@@ -851,24 +726,23 @@ fn measure_parts() {
     for (name, category, params, z) in cases {
         let (dir, mut s, t) = part_board(&r, category, params, 6);
         let out = dir.path().join("out");
-        let (b, e) = both(name, &r, &mut s, &part_args(&out, t), (0.5e9, 4.5e9));
-        let (mut wb, mut we) = (0.0f64, 0.0f64);
-        for ((f, x), y) in b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data) {
+        let e = measured(name, &r, &mut s, &part_args(&out, t));
+        let mut worst = 0.0f64;
+        for (f, y) in e.ts.freqs.iter().zip(&e.ts.data) {
             let ideal = (c(100.0) / (c(100.0) + z(*f))).abs();
-            let (sb, se) = (c64(&x[2]).abs(), c64(&y[2]).abs());
-            println!("{name} {:.2} GHz: |S21| builtin {sb:.4}, ems {se:.4}, theory {ideal:.4}", f / 1e9);
+            let got = c64(&y[2]).abs();
+            println!("{name} {:.2} GHz: |S21| {got:.4}, theory {ideal:.4}", f / 1e9);
             if (0.5e9..=4.5e9).contains(f) {
-                wb = wb.max((sb - ideal).abs());
-                we = we.max((se - ideal).abs());
+                worst = worst.max((got - ideal).abs());
             }
         }
-        println!("{name}: 0.5-4.5 GHz against theory: builtin {wb:.4}, ems {we:.4}");
+        println!("{name}: 0.5-4.5 GHz against theory: {worst:.4}");
     }
 }
 
 /// The 45° line of D73 (`tests/fdtd_conformal.rs`, `routed_45_degree_line`): 8 mm, a 45° run of
 /// 14.1 mm, 8 mm, sheet copper, W = 1 mm on 0.5 mm of εr 4; arg S21 at 10 GHz and |S11| against
-/// the straight line of that length, both solvers, at the default mesh and at 0.25 mm.
+/// the straight line of that length, at the default mesh and at 0.25 mm.
 /// The line of D73 on a board: 8 mm along x, 14.1 mm at 45° (or straight, of the same length),
 /// 8 mm along x; W = 1 mm on 0.5 mm of εr 4 over a ground plane. Returns the first and the last
 /// track.
@@ -946,17 +820,17 @@ fn ems_runs_slanted_lossy_copper() {
         let v = c64(&ran.ts.data[6][2]);
         v.im.atan2(v.re).to_degrees()
     };
-    // The track on one cell: warned of for both solvers; ems keeps its conformal cells (it keeps
+    // The track on one cell: warned of; ems keeps its conformal cells (it keeps
     // the edges whole where a cut would leave the track in pieces, D89).
-    let coarse = with(base.clone(), json!({"solver": "ems", "plan": true, "max_cell": "1mm"}));
+    let coarse = with(base.clone(), json!({"plan": true, "max_cell": "1mm"}));
     let codes = codes_of(&exec(&r, &mut s, "sim.sparams", coarse));
     assert!(codes.contains(&"sim.slanted_copper_unresolved".to_string()), "{codes:?}");
     assert!(!codes.iter().any(|c| c.starts_with("sim.ems_")), "{codes:?}");
     for copper in ["sheet", "solid"] {
         let args = with(base.clone(), json!({"copper": copper}));
-        let lossy = run(&r, &mut s, &with(args.clone(), json!({"name": "lossy"})), "ems");
-        let stair = run(&r, &mut s, &with(args.clone(), json!({"name": "stair", "conformal": false})), "ems");
-        let perfect = run(&r, &mut s, &with(args, json!({"name": "perfect", "perfect_copper": true})), "ems");
+        let lossy = run(&r, &mut s, &with(args.clone(), json!({"name": "lossy"})));
+        let stair = run(&r, &mut s, &with(args.clone(), json!({"name": "stair", "conformal": false})));
+        let perfect = run(&r, &mut s, &with(args, json!({"name": "perfect", "perfect_copper": true})));
         for ran in [&lossy, &stair, &perfect] {
             assert!(ran.out["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{copper}");
             assert!(!codes_of(&ran.out).iter().any(|c| c.starts_with("sim.ems_")), "{:?}", codes_of(&ran.out));
@@ -988,44 +862,39 @@ fn measure_diagonal() {
         if let Some(cell) = cell {
             args["max_cell"] = json!(cell);
         }
-        let (bi, em) = both(&format!("45° line (diagonal {diag}, cell {cell:?})"), &r, &mut s, &args, (0.5e9, 10e9));
-        for (name, ran) in [("builtin", &bi), ("ems", &em)] {
-            for fi in [12, 20, 40] {
-                let m = &ran.ts.data[fi];
-                let s21 = c64(&m[2]);
-                println!(
-                    "{name} diagonal {diag} cell {cell:?} {:.1} GHz: S11 {:.1} dB, S21 {:.2} dB, {:.1}°",
-                    ran.ts.freqs[fi] / 1e9,
-                    db(&m[0]),
-                    db(&m[2]),
-                    s21.im.atan2(s21.re).to_degrees()
-                );
-            }
+        let ran = measured(&format!("45° line (diagonal {diag}, cell {cell:?})"), &r, &mut s, &args);
+        for fi in [12, 20, 40] {
+            let m = &ran.ts.data[fi];
+            let s21 = c64(&m[2]);
+            println!(
+                "diagonal {diag} cell {cell:?} {:.1} GHz: S11 {:.1} dB, S21 {:.2} dB, {:.1}°",
+                ran.ts.freqs[fi] / 1e9,
+                db(&m[0]),
+                db(&m[2]),
+                s21.im.atan2(s21.re).to_degrees()
+            );
         }
         if diag && cell.is_some() {
-            // Solid perfect copper: where ems's conformal cells apply.
+            // Solid perfect copper: its conformal cells are the volumes' own.
             let solid = with(args.clone(), json!({"copper": "solid", "name": "solid", "max_cells": 8_000_000}));
-            let e = run(&r, &mut s, &solid, "ems");
-            let b = run(&r, &mut s, &solid, "builtin");
-            for (name, ran) in [("builtin solid", &b), ("ems solid", &e)] {
-                let m = &ran.ts.data[40];
-                let s21 = c64(&m[2]);
-                println!(
-                    "{name}: {} cells, {:.0} s, 10 GHz: S11 {:.1} dB, S21 {:.2} dB, {:.1}°; {:?}",
-                    ran.cells(),
-                    ran.seconds,
-                    db(&m[0]),
-                    db(&m[2]),
-                    s21.im.atan2(s21.re).to_degrees(),
-                    codes_of(&ran.out)
-                );
-            }
+            let ran = run(&r, &mut s, &solid);
+            let m = &ran.ts.data[40];
+            let s21 = c64(&m[2]);
+            println!(
+                "solid: {} cells, {:.0} s, 10 GHz: S11 {:.1} dB, S21 {:.2} dB, {:.1}°; {:?}",
+                ran.cells(),
+                ran.seconds,
+                db(&m[0]),
+                db(&m[2]),
+                s21.im.atan2(s21.re).to_degrees(),
+                codes_of(&ran.out)
+            );
         }
     }
 }
 
-/// The bent line with every copper model, both solvers: perfect and lossy, sheet and solid, and
-/// ems's staircase. Phase, loss and Σ|S|² (D87: ems's lossy models had not been run with its
+/// The bent line with every copper model: perfect and lossy, sheet and solid, and the
+/// staircase. Phase, loss and Σ|S|² (D87: ems's lossy models had not been run with its
 /// conformal outlines before). Every run has to end and stay passive: with ems 0.0.8 lossy solid
 /// copper on the 0.25 mm mesh grew, and ended "converged" on a negative energy with Σ|S|² 1.12
 /// (D89). To −70 dB, as the conductor's part is the difference of two runs.
@@ -1040,26 +909,21 @@ fn measure_diagonal_copper() {
             base["max_cell"] = json!(cell);
         }
         let variants = [
-            ("perfect sheet", json!({}), "ems"),
-            ("perfect sheet", json!({}), "builtin"),
-            ("perfect sheet, staircase", json!({"conformal": false}), "ems"),
-            ("lossy sheet", json!({"perfect_copper": false}), "ems"),
-            ("lossy sheet", json!({"perfect_copper": false}), "builtin"),
-            ("lossy sheet, staircase", json!({"perfect_copper": false, "conformal": false}), "ems"),
-            ("perfect solid", json!({"copper": "solid"}), "ems"),
-            ("perfect solid", json!({"copper": "solid"}), "builtin"),
-            ("lossy solid", json!({"perfect_copper": false, "copper": "solid"}), "ems"),
-            ("lossy solid", json!({"perfect_copper": false, "copper": "solid"}), "builtin"),
+            ("perfect sheet", json!({})),
+            ("perfect sheet, staircase", json!({"conformal": false})),
+            ("lossy sheet", json!({"perfect_copper": false})),
+            ("lossy sheet, staircase", json!({"perfect_copper": false, "conformal": false})),
+            ("perfect solid", json!({"copper": "solid"})),
+            ("lossy solid", json!({"perfect_copper": false, "copper": "solid"})),
         ];
-        for (i, (name, extra, solver)) in variants.iter().enumerate() {
-            let ran =
-                run(&r, &mut s, &with(with(base.clone(), extra.clone()), json!({"name": format!("v{i}")})), solver);
+        for (i, (name, extra)) in variants.iter().enumerate() {
+            let ran = run(&r, &mut s, &with(with(base.clone(), extra.clone()), json!({"name": format!("v{i}")})));
             let mut worst = 0.0f64;
             for m in &ran.ts.data {
                 worst = worst.max(c64(&m[0]).abs().powi(2) + c64(&m[2]).abs().powi(2));
             }
             println!(
-                "## cell {cell:?}, {name} [{solver}]: {} cells, steps {:?}, {:.0} s, {:.0} MB, converged {:?}; max Σ|S|² \
+                "## cell {cell:?}, {name}: {} cells, steps {:?}, {:.0} s, {:.0} MB, converged {:?}; max Σ|S|² \
                  {worst:.4}; {:?}",
                 ran.cells(),
                 ran.steps(),
@@ -1085,14 +949,15 @@ fn measure_diagonal_copper() {
                 );
             }
             assert!(ran.out["output"]["runs"].as_array().unwrap().iter().all(|r| r["converged"] == true), "{name}");
-            assert!(worst < 1.01, "{name} [{solver}], cell {cell:?}: Σ|S|² {worst}");
+            assert!(worst < 1.01, "{name}, cell {cell:?}: Σ|S|² {worst}");
         }
     }
 }
 
 // ---------------------------------------------------------------------------------------------
-// ems alone, on the engine-level fixtures of `tests/fdtd_parts.rs` and `tests/fdtd.rs` rebuilt as
-// csx models: what ems does with the physics `sim.sparams` hands it.
+// ems itself, on csx models of the fixtures cadlab's removed engine was validated on (a lumped
+// element on a strip in a closed box; parallel-plate cavities): what ems does with the physics
+// `sim.sparams` hands it, against circuit theory and the cavities' analytic modes and Q.
 
 mod direct {
     use std::f64::consts::PI;
@@ -1100,8 +965,8 @@ mod direct {
     use cadlab::electrical::complex::C64;
     use cadlab::electrical::dispersion::Dielectric as Dispersive;
     use cadlab::electrical::loss::{self, COPPER_CONDUCTIVITY};
-    use cadlab::fdtd::engine::{C0, EPS0};
     use cadlab::fdtd::fit;
+    use cadlab::openems::{C0, EPS0};
     use ems::csx::primitives::BoxShape;
     use ems::csx::properties::{DebyeMaterial, DebyePole, LumpedElement, LumpedElementType, ProbeBox, ProbeType};
     use ems::csx::{self, ContinuousStructure, Primitive, Property};
@@ -1132,7 +997,7 @@ mod direct {
 
     pub(super) const FREQS: [f64; 8] = [0.5e9, 1e9, 1.5e9, 2e9, 2.5e9, 3e9, 3.5e9, 4e9];
 
-    /// `tests/fdtd_parts.rs`'s fixture: a strip 0.4 mm wide, 0.2 mm over the bottom wall of a closed
+    /// A strip 0.4 mm wide, 0.2 mm over the bottom wall of a closed
     /// 3 × 1 × 0.5 mm box (0.1 mm cells), between 50 Ω lumped ports at x = 0.5 and 2.5 mm, with `el`
     /// (R, L, C in series with each other) placed in series or shunt. (S11, S21) per frequency.
     pub(super) fn fixture(place: Place, el: Option<(f64, f64, Option<f64>)>) -> Vec<(f64, C64, C64)> {
@@ -1351,40 +1216,72 @@ mod direct {
     }
 }
 
-/// ems on the lumped-element fixture of `tests/fdtd_parts.rs`: series R 10 / 50 / 200 Ω, series
-/// 1 pF, 5 nH and 10 Ω + 4 nH + 1 pF, shunt 2 pF and a shunt 5 Ω + 2 nH + 2 pF notch, against
-/// circuit theory.
+/// ems's lumped elements against circuit theory, on the strip of [`direct::fixture`] between two
+/// 50 Ω ports: the plain strip is nearly transparent; a series R of 10 / 50 / 200 Ω has
+/// S21 = 2 Z₀ / (2 Z₀ + R) and S11 = R / (2 Z₀ + R); a series 1 pF, 5 nH and 10 Ω + 4 nH + 1 pF
+/// (a band-pass at 2.5 GHz) S21 = 2 Z₀ / (2 Z₀ + Z); a shunt 2 pF, a shunt 5 Ω + 2 nH + 2 pF notch
+/// and a shunt 50 Ω S21 = 2 Z / (2 Z + Z₀). The tolerances are those cadlab's removed engine was
+/// held to on the same fixture (D65; the shunt 50 Ω, which its tests did not have, is held to
+/// 0.003); measured with ems 0.0.12: series R within 0.0009 (|S11| 0.011), the reactive series
+/// elements 0.016, the shunt 2 pF 0.007, the notch 0.009, the shunt 50 Ω 0.0019.
 #[test]
-#[ignore]
-fn measure_lumped_fixture() {
+fn lumped_fixture_matches_circuit_theory() {
     use direct::{Place, worst};
     for (f, s11, s21) in direct::fixture(Place::Series, None) {
         println!("plain strip {:.1} GHz: |S21| {:.4}, |S11| {:.4}", f / 1e9, s21.abs(), s11.abs());
+        assert!(s11.abs() < 0.12, "{f}: |S11| {}", s11.abs());
+        assert!((s21.abs() - 1.0).abs() < 0.01, "{f}: |S21| {}", s21.abs());
     }
     for r in [10.0, 50.0, 200.0] {
-        worst(Place::Series, (r, 0.0, None), &format!("series R {r}"));
+        let (w21, w11) = worst(Place::Series, (r, 0.0, None), &format!("series R {r}"));
+        assert!(w21 < 0.003 && w11 < 0.015, "series R {r}: |S21| off by {w21}, |S11| by {w11}");
     }
-    worst(Place::Series, (0.0, 0.0, Some(1e-12)), "series 1 pF");
-    worst(Place::Series, (0.0, 5e-9, None), "series 5 nH");
-    worst(Place::Series, (10.0, 4e-9, Some(1e-12)), "series 10 Ω + 4 nH + 1 pF");
-    worst(Place::Shunt, (0.0, 0.0, Some(2e-12)), "shunt 2 pF");
-    worst(Place::Shunt, (5.0, 2e-9, Some(2e-12)), "shunt 5 Ω + 2 nH + 2 pF");
-    worst(Place::Shunt, (50.0, 0.0, None), "shunt 50 Ω");
+    for (el, label, tol) in [
+        ((0.0, 0.0, Some(1e-12)), "series 1 pF", 0.02),
+        ((0.0, 5e-9, None), "series 5 nH", 0.02),
+        ((10.0, 4e-9, Some(1e-12)), "series 10 Ω + 4 nH + 1 pF", 0.02),
+    ] {
+        let (w21, _) = worst(Place::Series, el, label);
+        assert!(w21 < tol, "{label}: |S21| off by {w21}");
+    }
+    for (el, label, tol) in [
+        ((0.0, 0.0, Some(2e-12)), "shunt 2 pF", 0.02),
+        ((5.0, 2e-9, Some(2e-12)), "shunt 5 Ω + 2 nH + 2 pF", 0.03),
+        ((50.0, 0.0, None), "shunt 50 Ω", 0.003),
+    ] {
+        let (w21, _) = worst(Place::Shunt, el, label);
+        assert!(w21 < tol, "{label}: |S21| off by {w21}");
+    }
 }
 
-/// ems on the cavities of `tests/fdtd.rs`: resonances of a PEC box, Q from a conductivity, from
-/// copper plates (conducting sheets) and from a Djordjevic–Sarkar filling as Debye terms.
+/// ems on parallel-plate cavities against their analytic modes: the TM110 and TM210 resonances of
+/// a PEC box (within 0.4 %: numerical dispersion at 31 cells per wavelength lowers them), Q from a
+/// conductivity standing for tan δ 0.01 (1 / tan δ within 3 %), Q from copper plates as
+/// conducting sheets at 1.4, 6.9 and 13.9 GHz (h / δ within 1 %), and a Djordjevic–Sarkar filling
+/// as the Debye terms `sim.sparams` fits, at 2.4, 9.0 and 14.8 GHz (resonance where ω √εr(ω) is
+/// the vacuum mode within 0.3 %, Q = 1 / tan δ(f) within 1 %). The tolerances are those cadlab's
+/// removed engine was held to on the same cavities (D59, D63); measured with ems 0.0.12:
+/// resonances −0.05 and −0.08 %, Q from σ +0.04 %, the plates' Q +0.08, −0.14 and −0.22 %, the
+/// Debye resonances −0.01 % and their Q −0.74, −0.65 and −0.67 %.
 #[test]
 #[ignore]
-fn measure_cavities() {
+fn cavities_match_their_modes() {
     for (label, got, want) in direct::cavities() {
-        println!("{label}: {got:.5e} vs {want:.5e} ({:+.2} %)", 100.0 * (got / want - 1.0));
+        let off = got / want - 1.0;
+        println!("{label}: {got:.5e} vs {want:.5e} ({:+.2} %)", 100.0 * off);
+        let tol = match label.as_str() {
+            l if l.starts_with("PEC cavity") => 0.004,
+            l if l.starts_with("cavity Q, tan") => 0.03,
+            l if l.starts_with("Debye cavity resonance") => 0.003,
+            _ => 0.01,
+        };
+        assert!(off.abs() < tol, "{label}: {got} vs {want}");
     }
 }
 
 /// The dielectric loss alone: the oracle's microstrip with perfect solid copper (35 µm) on the
 /// Djordjevic–Sarkar laminate, |S21| over the 20 mm between the reference planes against the
-/// field solver with the same model (D52), both solvers.
+/// field solver with the same model (D52).
 #[test]
 #[ignore]
 fn measure_dielectric_loss() {
@@ -1416,8 +1313,8 @@ fn measure_dielectric_loss() {
             json!({"name": format!("diel_{cell}"), "thirds": true, "f_max": "6GHz", "points": 13, "margin": "5mm",
                 "air": "5mm", "max_cell": cell, "pml_cells": 6, "end_criteria": "50dB", "perfect_copper": true, "copper": "solid"}),
         );
-        let (b, e) = both(&format!("dielectric loss, cell {cell}"), &r, &mut s, &args, (0.5e9, 6e9));
-        for ((f, x), y) in b.ts.freqs.iter().zip(&b.ts.data).zip(&e.ts.data) {
+        let e = measured(&format!("dielectric loss, cell {cell}"), &r, &mut s, &args);
+        for (f, y) in e.ts.freqs.iter().zip(&e.ts.data) {
             let p = loss::at(&m, *f, &perfect);
             let want = -20.0 * std::f64::consts::LOG10_E * p.alpha * 0.020;
             // The loss of the line itself: what the two ports do not reflect.
@@ -1425,10 +1322,8 @@ fn measure_dielectric_loss() {
                 10.0 * (c64(&v[2]).abs().powi(2) / (1.0 - c64(&v[0]).abs().powi(2))).log10()
             };
             println!(
-                "cell {cell} {:.2} GHz: D52 {want:.4} dB; builtin {:.4} ({:+.1} %), ems {:.4} ({:+.1} %)",
+                "cell {cell} {:.2} GHz: D52 {want:.4} dB; {:.4} ({:+.1} %)",
                 f / 1e9,
-                avail(x),
-                100.0 * (avail(x) / want - 1.0),
                 avail(y),
                 100.0 * (avail(y) / want - 1.0)
             );
@@ -1436,8 +1331,8 @@ fn measure_dielectric_loss() {
     }
 }
 
-/// The same region at 1 and 4 worker threads, both solvers: identical Touchstone data, and the
-/// time each takes. The lossy model (Debye laminate, conducting sheets / surface impedance), and
+/// The same region at 1 and 4 worker threads: identical Touchstone data, and the time each
+/// takes. The lossy model (Debye laminate, conducting sheets / surface impedance), and
 /// lossy solid copper between lumped ports (a surface impedance on the faces of the volumes).
 #[test]
 #[ignore]
@@ -1465,34 +1360,30 @@ fn measure_threads() {
             extra,
         );
         let t = Instant::now();
-        exec(&r, &mut s, "sim.sparams", with(args.clone(), json!({"solver": "ems", "plan": true})));
-        println!("{label}: ems plan (model compiled once) {:.2} s", t.elapsed().as_secs_f64());
-        for solver in ["builtin", "ems"] {
-            let one =
-                run(&r, &mut s, &with(args.clone(), json!({"threads": 1, "name": format!("{label} t1")})), solver);
-            let four =
-                run(&r, &mut s, &with(args.clone(), json!({"threads": 4, "name": format!("{label} t4")})), solver);
-            println!(
-                "{label} {solver}: {} cells, steps {:?}; 1 thread {:.1} s ({:.0} Mcells/s, {:.0} MB), 4 threads {:.1} s \
-                 ({:.0} Mcells/s); identical {}",
-                one.cells(),
-                one.steps(),
-                one.seconds,
-                one.rate(),
-                one.mem_mb,
-                four.seconds,
-                four.rate(),
-                one.ts.data == four.ts.data
-            );
-            assert!(one.ts.data == four.ts.data, "{label} {solver}: the thread count changed the result");
-        }
+        exec(&r, &mut s, "sim.sparams", with(args.clone(), json!({"plan": true})));
+        println!("{label}: plan (model compiled once) {:.2} s", t.elapsed().as_secs_f64());
+        let one = run(&r, &mut s, &with(args.clone(), json!({"threads": 1, "name": format!("{label} t1")})));
+        let four = run(&r, &mut s, &with(args.clone(), json!({"threads": 4, "name": format!("{label} t4")})));
+        println!(
+            "{label}: {} cells, steps {:?}; 1 thread {:.1} s ({:.0} Mcells/s, {:.0} MB), 4 threads {:.1} s \
+             ({:.0} Mcells/s); identical {}",
+            one.cells(),
+            one.steps(),
+            one.seconds,
+            one.rate(),
+            one.mem_mb,
+            four.seconds,
+            four.rate(),
+            one.ts.data == four.ts.data
+        );
+        assert!(one.ts.data == four.ts.data, "{label}: the thread count changed the result");
     }
 }
 
 /// A symmetric stripline: a 0.25 mm strip on In1.Cu between GND planes on F.Cu and In2.Cu, 0.3 mm
 /// of εr 4 on either side (lossless, sheet copper), 24 mm between microstrip-kind ports that feed
 /// against the lower plane, the planes stitched by vias beside each port. Z₀ and εeff from the
-/// S-parameters against the 2D field solver (εeff = εr exactly), both solvers.
+/// S-parameters against the 2D field solver (εeff = εr exactly).
 #[test]
 #[ignore]
 fn measure_stripline() {
@@ -1544,7 +1435,7 @@ fn measure_stripline() {
         "pml_cells": 6,
         "ports": [{"at": format!("track#{id}"), "kind": "msl", "length": "4mm", "reference": "In2.Cu"},
                   {"at": format!("track#{id}"), "end": "end", "kind": "msl", "length": "4mm", "reference": "In2.Cu"}]});
-    let (b, e) = both("stripline", &r, &mut s, &args, (0.5e9, 9.5e9));
+    let e = measured("stripline", &r, &mut s, &args);
     let st = fieldsolver::Structure {
         model: Model::Stripline,
         h: 0.3,
@@ -1558,21 +1449,19 @@ fn measure_stripline() {
         mask: None,
     };
     let fs = st.line(0.25, Accuracy::default()).unwrap();
-    for (name, ran) in [("builtin", &b), ("ems", &e)] {
-        for (f, sm) in ran.ts.freqs.iter().zip(&ran.ts.data) {
-            if (1e9..=3.1e9).contains(f) {
-                let (z0, gl) = line_from_s(sm, 50.0);
-                let ee = eps_eff(gl.im / 0.020, *f);
-                println!(
-                    "{name} {:.2} GHz: Z0 {:.2} ({:+.2} %), εeff {ee:.4} ({:+.2} %), |S11| {:.4}, |S21| {:.4}",
-                    f / 1e9,
-                    z0.re,
-                    100.0 * (z0.re / fs.z0 - 1.0),
-                    100.0 * (ee / fs.er_eff - 1.0),
-                    c64(&sm[0]).abs(),
-                    c64(&sm[2]).abs(),
-                );
-            }
+    for (f, sm) in e.ts.freqs.iter().zip(&e.ts.data) {
+        if (1e9..=3.1e9).contains(f) {
+            let (z0, gl) = line_from_s(sm, 50.0);
+            let ee = eps_eff(gl.im / 0.020, *f);
+            println!(
+                "{:.2} GHz: Z0 {:.2} ({:+.2} %), εeff {ee:.4} ({:+.2} %), |S11| {:.4}, |S21| {:.4}",
+                f / 1e9,
+                z0.re,
+                100.0 * (z0.re / fs.z0 - 1.0),
+                100.0 * (ee / fs.er_eff - 1.0),
+                c64(&sm[0]).abs(),
+                c64(&sm[2]).abs(),
+            );
         }
     }
     println!("field solver: Z0 {:.2}, εeff {:.4}", fs.z0, fs.er_eff);

@@ -10,7 +10,7 @@ keywords = ["eda", "pcb", "cad", "electronics", "mcp"]
 categories = ["science", "command-line-utilities"]
 
 [features]
-default = ["cli", "net", "png", "parallel", "models3d", "ems"]
+default = ["cli", "net", "png", "parallel", "models3d"]
 # The `cadlab` binary (CLI + MCP server). Library users can disable it to avoid the CLI dependencies.
 cli = ["dep:clap", "dep:rpassword"]
 # Network part research providers (DigiKey, ...).
@@ -33,11 +33,6 @@ models3d = [
     "dep:oxideav-vrml",
 ]
 
-# The ems FDTD solver (crates.io `ems`, with its geometry crate `csx`; both MIT, no further
-# dependencies): the default solver of `sim.sparams` (DECISIONS D86, D94, D98). Without it the default
-# is the built-in solver and `solver: ems` is refused with `sim.solver_unavailable`.
-ems = ["dep:ems"]
-
 [[bin]]
 name = "cadlab"
 path = "src/bin/cadlab/main.rs"
@@ -47,6 +42,10 @@ doc = false
 
 [dependencies]
 polyclip = { version = "0.0.6", features = ["serde"] }
+# The FDTD solver of `sim.sparams` (D86, D94, D100), with its geometry crate csx (through ems,
+# which exports it as `ems::csx`; both MIT, no further dependencies). Its `xml` feature (openEMS
+# files) is not needed.
+ems = { version = "0.0.12", default-features = false }
 # The guide routing engine as a second autorouter backend (D85); its polyclip is ours.
 guide = { version = "0.0.9", default-features = false, features = ["pcb"] }
 
@@ -70,8 +69,6 @@ oxideav-gltf = { version = "0.0.4", optional = true }
 oxideav-usdz = { version = "0.0.5", optional = true }
 oxideav-step = { version = "0.0.1", optional = true, features = ["registry"] }
 oxideav-vrml = { version = "0.0.1", optional = true, features = ["registry"] }
-# `sim.sparams`'s default solver (D86, D94, D98); its `xml` feature (openEMS files) is not needed.
-ems = { version = "0.0.12", default-features = false, optional = true }
 # Fab archives (D75): the user's own fstool, zip writer and reader only.
 fstool = { version = "0.5.2", default-features = false, features = ["archive", "gzip"] }
 
