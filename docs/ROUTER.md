@@ -1263,7 +1263,13 @@ and machine as D80, whose *after* is the *before* here: reproduced first, to the
 On 1 thread the result is the same, work included, for nrfmicro (seeds 1 to 3), lumenpnp-ringlight (1),
 buspirate5-rev10 (1, 2), corne-cherry (1, 3), tinytapeout-demo (1, 2), cynthion (2), lumenpnp-mobo (1) and
 glasgow-revD1 (1); on glasgow-revC3 (1) tracks, vias and length are the same and `stats.work` differs by 1108 units
-of 201 M between 1 or 2 threads and 4 or 8, which the version before does not show there (not diagnosed, D84).
+of 201 M between 1 or 2 threads and 4 or 8, which the version before does not show there (not diagnosed in D84; since found in polyclip 0.0.6, not in the
+router: one difference of the gridless pass's free space, 2872 clearance rings from a 43 × 33 mm region, comes out
+with 89 polygons and 6 % less area on 4 threads or more against 92 on 1 to 3, because the sweep's status keeps a
+block that a splice emptied while its own block split, and whether a sweep meets that depends on the bands polyclip
+cuts it into per thread; the net's rooms and their work follow. With that fixed in polyclip the run is the same on
+1, 2, 4 and 8 threads, work included; until cadlab depends on such a release, results of boards with booleans of
+2^15 edges or more can differ between fewer than 4 threads and more).
 DRC errors other than unrouted: 0 on every board and seed, before and after.)
 
 | board | layers | nets (two pads or more) | connections (seed 1) | open before | open after | failed before | failed after | vias (seed 1) | length (seed 1) | work (seed 1) |
