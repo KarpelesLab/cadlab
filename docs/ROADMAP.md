@@ -275,9 +275,20 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       more vias and track on corne-cherry and glasgow-revC3; against the native router's 294, ahead on three
       boards (glasgow-revD1 177 against 201), level on three, behind on six, 176 against 93 on the eleven
       without glasgow-revD1. The default stays the native router (D95)
-- [ ] `router: guide` level with the native router on the corpus: needs, in guide, routes that keep a pad's
-      way to the host's fill, a way out of the fine-pitch pads still shut in, rip-up that settles, a cheaper
-      plan for a run on a routed board, and the time (D95, "Gaps"; D93, "Gaps"; D91, "What got in the way";
+- [x] guide 0.0.7 adopted in the adapter: a courtyard's or an area's clearance rule goes over as a rule area
+      whatever other kinds it names, as long as tracks and vias are among them, raised to the later rules that
+      hold copper in it, and the last rule holding a pad is the pad's own clearance (a rule for the pads of a
+      footprint); the first run's 0.45 and the second run measured again and kept. Measured at 60 s over three
+      orders of the nets (ROUTER.md, "Native router and guide 0.0.7, D96"): 315, 275 and 300 connections open
+      on the twelve corpus boards where guide 0.0.6 leaves 412, 417 and 374 in the same runs (glasgow-revD1
+      228, 231, 201 to 168, 136, 150 by the release; tinytapeout-demo 40, 40, 37 to 14, 20, 20 by the rules);
+      against the native router's 285, ahead on two boards in every order, level on three, within the noise on
+      two, behind on five, 147, 139 and 150 against 93 on the eleven without glasgow-revD1. The default stays
+      the native router (D96)
+- [ ] `router: guide` level with the native router on the corpus: needs, in guide, a first run that ends
+      when it stops gaining, routes that keep a pad's way to the host's fill, rule areas by kind and
+      containment with a track width that is routed by, a way out of the fine-pitch pads still shut in,
+      rip-up that settles, and the time (D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way";
       D88, "What still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.

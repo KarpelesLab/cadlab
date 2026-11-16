@@ -3267,4 +3267,134 @@ them, all complete); budgets other than 60 s and 20 M nodes; the native router w
 oracles.
 
 
+### D96. guide 0.0.7 adopted: a courtyard's clearance rule goes over whatever other kinds it names, a rule for a footprint's pads as the pads' own clearance; the first run's share and the second run measured again and kept; the default unchanged (2026-11-16)
+guide 0.0.7 is the release whose plan is sooner: a host's fills are cut into their parts once, a fill is cut
+round new copper in a window, and global routing ends when it gains nothing (guide's `docs/benchmarks.md`, "PCB
+routing with ways out planned", the part on 0.0.7). Its API is that of 0.0.6. `guide = { version = "0.0.7",
+default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock` moves.
+**The gap in the adapter**, found by guide's side on tinytapeout-demo. The board's rules (its `.kicad_dru`,
+imported as custom rules) allow 0.16 mm for what is in the QFN-80's courtyard on the front and is no zone, and
+after that 0.18 mm for the part's pads; the board's clearance is 0.2 mm, its supplies and analog nets have 0.24
+and 0.25 mm, and the pads are 0.2 mm apart. D61's adapter took a rule as an area only when it named no kind of
+item, and named every other rule in `route.guide_custom_rules` as left to the verification. Both rules were
+left out, guide routed at the classes' clearances, and no track of a supply net, nor of the pad beside one,
+left the part: 29 of the 46 connections open were such pads.
+**How the three resolve a rule.** The DRC (`board::clearance`) gives each item the last rule in board order
+whose scope holds it (kind, layer, footprint, courtyard or area), and a pair the later of its two items' rules,
+in place of local and class clearances, never under `min_clearance`. The native router resolves the same for
+copper that does not exist yet (`router::scoped`: existing items by `Clearances`, new copper by where it is, a
+track split where its rules change), so it honours these rules already: tinytapeout-demo's 8 open, 6 in the
+run here, are with them. guide has two places: a rule area, whose clearance is between two pieces of copper
+that both touch it, in place of any other, the first area first; and a pad's own clearance, which replaces the
+rules' between it and anything.
+**What goes over now** (`router::guide::custom_rules`; ROUTER.md, "guide as a backend"):
+- *A rule is an area's* when its scope is `in_courtyard` or `touches_area` alone, with or without a layer, its
+  kinds take in tracks and vias, and it is between the scope and anything or the scope and itself. Every new
+  piece of copper in the area is then in the scope, and the DRC applies a rule to a pair when either item is
+  in it, so which other kinds the rule names (pads, drawings, not zones) changes nothing for a route. A rule
+  for tracks alone or vias alone stays out.
+- *A rule's clearance is the own clearance of the pads and copper drawings it is the last to hold*, in place
+  of their local one: what a rule for the pads of a footprint says, and what an area's rule asks between a pad
+  in it and a track outside it, where guide's area says nothing. A pad stack has one clearance: the larger of
+  its shapes' rules, and its local one when a shape has no rule.
+- *An area yields to nothing in guide, and to a later rule in the DRC.* So each area, each courtyard on its
+  own, has the largest of its rule's clearance, the clearances of the existing copper in it that a later rule
+  holds (zone fills apart, which cadlab fills again), and those of later rules that can hold a new track or via
+  and whose courtyards or areas meet its box. A pad's own clearance is raised the same way by such rules within
+  1 mm of it. tinytapeout-demo: the QFN's courtyard 0.18 mm and its 81 pads 0.18 mm, the two carrier
+  connectors' courtyards and 116 pads in them 0.16 mm (two of other parts), the USB connector's courtyard and pads 0.2 mm. guide's
+  side proposed the first half of this for one case (a later rule for the pads of the same footprint pattern
+  raises the courtyard's area); here it is from the items the DRC's own resolution says a later rule holds,
+  so a pad of another part in the courtyard counts too.
+- *Named in `route.guide_custom_rules`* only the rules that can hold new copper and are no area (tracks or
+  vias alone, `in_area`, both positional terms, two different scopes) and `disallow` rules. A rule for
+  footprints or for kinds that are neither track nor via is given whole and no longer named.
+- *Not looser than the DRC* but in what the verification is for, as before: a rule that is named above and
+  tightens the clearance, a track long enough to be in two areas far apart, copper that touches an area's
+  outline and reaches in by less than the DRC's micrometre. *Stricter than the DRC:* two tracks in the QFN's
+  courtyard keep 0.18 mm where the DRC asks 0.16, since the area's clearance replaces the pads' own; a track
+  in an area and one outside keep their classes'.
+- *Checked:* `a_courtyard_rule_and_a_rule_for_the_pads_of_the_footprint` (five pads 0.2 mm apart on a board at
+  0.25 mm: three shut in without the rules; with them one area at 0.18 mm, the pads at 0.18 mm, all five
+  routed, nothing taken out, `drc::check_copper` clean on the result and not clean with the rules removed; the
+  native router routes all five too), and on the corpus no run of the final adapter with anything taken out
+  for a clearance.
+**The first run's share**, 0.45 since D95, measured again because a second run now plans for 3 to 4 s where it
+took 8 to 15 (glasgow-revD1 3.3 s, cynthion 3.1 to 4.3 s, lumenpnp-mobo 2.9 to 3.3 s from the call to the
+first search). Connections open on the twelve boards at 60 s, summed over three orders of the nets (no seed,
+seeds 2 and 3): 0.35 920, 0.4 901, 0.45 890, half 971, 0.55 955, 0.6 1019, 0.65 1159, 0.7 1189. Two things
+pull apart. glasgow-revD1's first run gains nothing from more time and its second makes connections for as
+long as it has: 427, 432, 454, 550, 552, 640, 783, 821 along the row. The eleven others want the first run
+longer: 493, 469, 436, 421, 403, 379, 376, 368 (cynthion 90, 73, 73, 70, 51, 47, 42, 40; tinytapeout-demo 58 to
+41; corne-cherry 136 to 109). 0.45 has the least sum and stays. It is one board's edge against eleven boards'
+slope, and a first run of guide's that came back once it had stopped gaining would let the share go.
+**The second run** is still worth having: one run with nine tenths of the budget leaves 571, 569 and 480 over
+the three orders, 1620 against 890 (lumenpnp-mobo 61, 52, 46 against 10, 5, 7; corne-cherry 97, 88, 74 against
+45, 37, 35; glasgow-revD1 309, 313, 251 against 168, 136, 150; the three small boards 11 or 12 pads off their
+pours against none). cynthion is again better with one run, 17, 17 and 23.
+**Measured** (ROUTER.md, "Native router and guide 0.0.7, D96"; the corpus at 60 s, three orders of the nets,
+one thread a run and three runs at a time; *before* is guide 0.0.6 behind D95's adapter, master `c85fc3c`, run
+again here; the native router run here, seed 1, three threads). Open connections on the twelve boards over the
+three orders: before 412, 417, 374; guide 0.0.7 behind D95's adapter 338, 294, 298; after 315, 275, 300 (the
+first order again: 306); the native router 285. The eleven without glasgow-revD1: 184, 186, 173; 173, 158, 168;
+147, 139, 150; native 93. tinytapeout-demo 40, 40, 37; 40, 35, 44; 14, 20, 20 (and 11 twice more); native 6.
+Zero DRC errors other than unrouted on every run, no via in a pad of its net, no call over 59.0 s, nothing
+taken out by the verification in the four runs of *after*.
+**What moves between two runs.** D95 recorded 353 and 359 for the adapter that has 412 here in the same
+order: glasgow-revD1 177 and 174 then, 228 now, on a machine with a load of 7 to 12 on 64 cores from other
+work. A run that a deadline cuts moves with the machine: glasgow-revD1 by fifty, 168 and 157 in two runs of
+*after* in a row; the other boards by up to four (buspirate5-rev10 11 and 15, tinytapeout-demo 14 and 11).
+Between orders of the nets the twelve boards differ by forty. What is said here is what holds over the three
+orders.
+**Vias and track**, first order, guide after / native: lumenpnp-mobo 734 vias and 6330 mm / 347 and 5424 mm;
+tinytapeout-demo 568 and 5560 mm / 274 and 4913 mm (482 and 4994 mm before, with 26 more connections open);
+buspirate5-rev10 477 and 3523 mm / 313 and 3053 mm; cynthion 612 and 3765 mm / 476 and 3177 mm; glasgow-revC3
+573 and 4060 mm / 415 and 3436 mm; corne-cherry 609 and 7606 mm / 483 and 8276 mm; glasgow-revD1 1162 and
+8124 mm / 1046 and 8967 mm; sweep-v2.2 42 and 2231 mm / 21 and 2161 mm. Twice the native router's vias on
+lumenpnp-mobo, tinytapeout-demo and sweep-v2.2, a quarter to a half more on four, a ninth more on
+glasgow-revD1. The table in ROUTER.md has all of it per board.
+**Gaps, for guide's next release**, most useful first:
+1. *A first run that ends when it has stopped gaining.* glasgow-revD1's first run has 327 connections open
+   at 21 s, 321 at 27 s, 310 at 33 s and 309 at 42 s, and the host's second run on that board makes 150 more
+   in 24 s; every other board wants the first run longer. The share is a host's guess at what the run itself knows. With it gone the eleven
+   boards would have some 60 fewer open over three orders (436 to 376) and glasgow-revD1 none more.
+2. *Routes through a host's fill*, D95's item 1, as it was: one run leaves 97 on corne-cherry and 61 on
+   lumenpnp-mobo where two leave 45 and 10, and the three small boards 11 pads off their pours.
+3. *An area's clearance that does not replace a pad's own larger one*, or a clearance between an area's
+   copper and named pads. tinytapeout-demo's courtyard has to be given at 0.18 mm for its pads' sake, and
+   its tracks then keep 0.18 mm from each other where the board allows 0.16.
+4. *Rule areas by kind and by containment.* A rule for tracks alone, or for copper wholly inside an area
+   (KiCad's `enclosedByArea`; tinytapeout-demo's two breakout areas at 0.16 mm), has no place: an area takes
+   all copper that touches it. And *either* item in the area, as KiCad and cadlab's DRC apply a rule: guide's
+   area needs both, so a track in the courtyard keeps its class's clearance from one outside.
+5. *An area's track width in routing.* `Overrides::track_width` is checked and not routed by: tinytapeout-demo
+   allows 0.16 mm tracks in the courtyards, and its supplies' pads are 9 of the 14 it has open (+1V1, +3V3:
+   U6.5, U6.10, U6.24, U6.29, U6.51, U6.64 and the capacitors beside them). Their class is 0.25 mm wide, and
+   such a track out of a pad 0.2 mm wide is 0.175 mm from the pads beside it, under the 0.18 mm. Whether
+   `neck_down` reads an area's clearance was not looked into.
+6. *A via on a via.* On corne-cherry a second run put a via of GNDR where the board it was given has one of
+   the same net (`drc.hole_to_hole`, 0 mm apart), and the verification took the piece out, 43 items: once with
+   0.0.6 (seed 2) and once with 0.0.7 (no seed, the first run at 0.4), in thirty-four runs of the board.
+7. *Fine-pitch pads shut in*, still the most of what is open: of 315 in the first order 199 pads shut in, 46
+   that the budget ended before, 34 at a search's node limit, 22 "found no way", 14 pads the refilled pour does
+   not reach. corne-cherry 35 to 45 against the native router's 3.
+8. *Vias*, above: twice the native router's on three boards.
+9. *buspirate5-rev10* has 11 and 9 open in two of three orders with 0.0.7 where 0.0.6 has 6 and 6 (5 and 5 in
+   the third); 11 and 15 in two runs of the first order.
+**Default: unchanged.** The condition is that guide be at least as good as the native router on every board.
+At the same 60 s, over the three orders against the native router's one run: level on three
+(buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight); ahead on two in every order (glasgow-revD1 168,
+136, 150 against 192; lumenpnp-mobo 10, 5, 7 against 15); within what runs differ by on two (cynthion 19, 22,
+32 against 28; glasgow-revC3 34, 37, 40 against 36); behind on five in every order (buspirate5-rev10 11, 6, 5
+against 2; sweep-v2.2 6, 7, 6 against 3; nrfmicro 8, 5, 5 against 0; tinytapeout-demo 14, 20, 20 against 6;
+corne-cherry 45, 37, 35 against 3). 147, 139 and 150 open against 93 on the eleven boards; on the twelve 315,
+275 and 300 against 285, one order of three ahead. `router: guide` stays the second opinion.
+*Why:* the rules were the board's own and both other resolvers had them; the adapter's reading of "an area's
+rule" was narrower than what guide's area means for a route. The share was measured because its reason, the
+second run's plan, had changed, and the measurement says the reason left is one board.
+*Not measured:* the native router over three seeds; the share on a machine that is not shared; the generated
+boards with guide 0.0.7 through the adapter (guide's record has them, all complete); budgets other than 60 s;
+a work budget; cadlab's oracles; KiCad's DRC on a board guide routed under the rules.
+
+
 ## Open questions
