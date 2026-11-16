@@ -763,20 +763,22 @@ copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
 `route.all` and `route.nets` runs it in place of cadlab's own search, through `router::guide`, an adapter in the
 library (no command, no file in between: the board goes to guide's `pcb::Design` and its tracks and vias come back
 through guide's API). The default router is unchanged, and so is everything the native router does. The dependency
-is `guide = { version = "0.0.7", default-features = false, features = ["pcb"] }`: its only dependency is polyclip
+is `guide = { version = "0.0.8", default-features = false, features = ["pcb"] }`: its only dependency is polyclip
 0.0.6, the version cadlab uses, so the tree has one polyclip and nothing new besides guide itself. 0.0.3 was the
 release with run control and the host's board model (D88), 0.0.4 the one for a host with a budget that fills its
 zones itself (D91), 0.0.5 the one whose every phase keeps the deadline and that shares a budget out between
 routing and what comes after (D93), 0.0.6 the one that plans the ways out of fine rows and deep balls in a run
 with a budget, moves a net aside before it takes one out, and names the nets its own search found no way for
-(D95), 0.0.7 the one whose plan of a run takes a third of the time (D96); what this section says of 0.0.2 is
+(D95), 0.0.7 the one whose plan of a run takes a third of the time (D96), 0.0.8 the one in which a net that
+found no way in its corridor keeps what it reaches with nothing moved before any net crosses another's routes,
+and that joins the pads its routes cut off the fills it planned on (D97); what this section says of 0.0.2 is
 in D85.
 
 **What goes to guide** (`router::guide::adapt`):
@@ -784,7 +786,7 @@ in D85.
 | cadlab | guide |
 |---|---|
 | copper layers of the stackup | `RuleSpec::layers`, by position |
-| nets (circuit, board copper, zones) | `NetId` by position in name order; `NetSpec { route, track_width, via }` from the net's class (the pair width for a pair's nets); only the nets with open connections in scope have `route` |
+| nets (circuit, board copper, zones) | `NetId` by position in name order; `NetSpec { route, track_width, via }` from the net's class (the pair width for a pair's nets); the nets with open connections in scope have `route`, and in the first run the nets with zones in scope too, open or not (`first_nets`, D97: a net that cadlab's fill joins whole has no open connection, and the routes of the others cut its pads off their pour) |
 | rules | `RuleSpec`: `min_track_width`, `clearance`, `min_clearance`, `hole_clearance`, `hole_to_hole`, `min_drill`, `min_annular_ring`; `copper_to_edge` as `Design::edge_clearance` |
 | net classes with a clearance | `NetClass` with that clearance override (guide resolves the larger of two nets', as the DRC does) |
 | custom clearance rules that are an area's (D61, D96): scope `in_courtyard` or `touches_area` alone, with or without a layer, of kinds that take in tracks and vias (all kinds, or KiCad's "no zone"), between the scope and anything or the scope and itself | `RuleSpec::areas`: one `RuleArea` per courtyard or area outline, the last rule in board order first (the DRC's last rule wins, guide's first area). guide applies it between two pieces of copper that both touch the area, in place of their own clearances; the DRC applies a rule when either item is in its scope, and the later rule of the two items'. So an area has the largest of its rule's clearance, those of the existing pads, tracks, vias and drawings in it that a later rule holds, and those of later rules that can hold new copper and whose courtyards or areas meet it; a rule that loosens the clearance is routed the stricter way between a track in the area and one outside. The track width of a rule is not passed (guide routes a net at one width) |
@@ -802,6 +804,8 @@ in D85.
 | zones | `Design::zones`: outline, layers, net, priority and the effective fill settings (`zone_params`: clearance, minimum width, pad connection, thermal gap, spoke width and number of spokes), pad overrides through `Zones::set_pad`, and **cadlab's fill** of each zone on the board as it is, island by island, as `Zones::fills`: guide plans a net's stubs on the copper the board has, not on a fill of its own. A zone cadlab fills with nothing is not passed. `CopperZone::plane` is left to guide: the board does not say whether a zone is a plane or a pour between a few pads, and guide takes a zone as a plane unless its net has four pads or fewer and its outline is 32 lattice pitches wide or less (every zone a plane, as before 0.0.4: 86 open against 54 on corne-cherry and 30 against 12 on lumenpnp-mobo at 60 s, D91) |
 | the smallest via the rules allow (`min_drill` with `min_annular_ring` around it: the native fanout's small via, `router::smallest_via`) | `RouteOptions::fanout_via`: the via of the dog-bone of a pad trapped in its footprint where the net's own fits nowhere near; every other via is the net's |
 | zone filling (cadlab's, D80) | `RouteOptions::fills = false`: guide makes no fill at the end and returns none. `RouteOptions::join = false`: nor does it fill the zones around its routes to join the pieces that fill leaves a net in; cadlab's fill says what is apart, and the second run joins it (D93; measured again with 0.0.6, whose joining no longer stops a run with a work budget: 432 open on the corpus with it against 420, and the small boards take twice as long, D95) |
+| what the routes cut off the fills (D97) | `RouteOptions::pour_cuts = true`, guide's default: guide plans on cadlab's fills as they are before routing, keeps count on a grid of what its routes cut off them, and once routing is over joins the pads that are cut off to their fill again by stubs that move nothing. What cadlab's fill of the routed board still leaves apart goes to the second run |
+| the ways out of rows of fine pitch planned row by row (D97) | `RouteOptions::row_fanout = false`, guide's default: measured on the corpus, no gain (corne-cherry better, glasgow-revC3 and buspirate5-rev10 worse) |
 | `layers` | `RouteOptions::layers`: tracks on these layers only; vias go through the board all the same |
 | `seed` | `RouteOptions::seed`, when not 0: another order of the nets, the same result for the same seed. Without one guide routes shortest first |
 | differential pairs in scope (`pairs` not false) | `Design::pairs` at the pair's width and gap; a pair's `max_skew` as a `LengthConstraint` |
@@ -825,10 +829,16 @@ exports and the count all read cadlab's fill). The result is then treated as the
   them 401 to 419 (the first run at half the budget for both, D95). The run is kept when it leaves fewer
   connections open (`stats.iterations` is the number of runs of guide, 1 or 2). Not after a run that the work
   budget stopped. Measured without it: one connection open on each of those two boards, which it closes (D88,
-  and again with guide 0.0.5 and 0.0.6); and at 60 s, where the first run has 0.45 of the budget so that the
-  second has time, 315, 275 and 300 connections open on the twelve corpus boards over three orders of the nets
-  against 571, 569 and 480 with one run that has nine tenths of the budget (D96; 353 and 359 against 598 with
-  guide 0.0.6, D95; 564 to 586 against 681 with 0.0.5, D93; 589 against 714 with 0.0.4, D91).
+  and again with guide 0.0.5 and 0.0.6); and at 60 s with guide 0.0.7, where the first run had 0.45 of the budget
+  so that the second had time, 315, 275 and 300 connections open on the twelve corpus boards over three orders
+  of the nets against 571, 569 and 480 with one run that has nine tenths of the budget (D96; 353 and 359 against
+  598 with guide 0.0.6, D95; 564 to 586 against 681 with 0.0.5, D93; 589 against 714 with 0.0.4, D91). With
+  guide 0.0.8 the first run does itself most of what the second did on glasgow-revD1 (a net keeps what it
+  reaches with nothing moved before any crosses another), joins the pads it cut off the fills it planned on,
+  and has the nets with zones among its nets, open or not, and 0.7 of the budget: the second run is then for
+  what cadlab's fill of the routed board still leaves apart, 15 connections of 182 on glasgow-revD1 where it
+  made 111 of 325, and one of lumenpnp-mobo's ground where it was asked for 220 stubs (D97; one run alone was
+  not measured again).
 - *The count is the board's* (D80). Completion is read from the board with its pours filled again: failed
   connections are the ratsnest lines the board has left for the nets in scope, pads the routing cut off from a
   pour included; routed ones are counted per island of the result (an island holding `k` of the planned islands
@@ -873,18 +883,21 @@ exports and the count all read cadlab's fill). The result is then treated as the
 - *`work_budget`* is guide's `RouteOptions::work_budget`, in search nodes: the run stops when it is spent and
   returns what it has routed, the same result for the same budget on any machine. A second run draws on what
   the first left. The verification and the fills cost nothing in this unit.
-- *The time budget* (`budget`, `budget_ms`, 60 s by default): guide's first run has a deadline at 0.45 of it.
+- *The time budget* (`budget`, `budget_ms`, 60 s by default): guide's first run has a deadline at 0.7 of it.
   The verification and the refill that follow are timed, and the second run's deadline is the end of the budget
   less one and a half times that and half a second for the report; a second run that would have less than a
-  second is not started. Within a run guide shares its time out itself (0.0.5): routing ends at three quarters
-  of what is left when it begins, cleanup has the rest, and every phase looks at the deadline, the plan before
+  second is not started. Within a run guide shares its time out itself (0.0.5): routing ends at 0.92 of what is
+  left when it begins (three quarters with zones to join, which cadlab turns off), cleanup and the stubs to
+  what was cut off the fills have the rest, and every phase looks at the deadline, the plan before
   routing included; a run whose routing ended for its share says that it was stopped, though it comes back
   before its deadline. It makes no fill at the end and joins no zone's pieces (`RouteOptions::fills`,
   `RouteOptions::join`, `RunControl::fill_on_stop`). No call on the twelve corpus boards took longer than its
-  60 s (D93, D95, D96). The 0.45 is measured (D95; half until then, D91, D93), and again with guide 0.0.7,
-  whose second run plans for 3 to 4 s (D96): over three orders of the nets the twelve boards have 901 open with
-  two fifths, 890 with 0.45, 971 with half and 1189 with 0.7. glasgow-revD1 is better the sooner its second
-  run starts (432, 454, 550, 821), the eleven other boards the longer the first has (469, 436, 421, 368).
+  60 s (D93, D95, D96, D97). The share was 0.45 until guide 0.0.7 (D95, D96; half before, D91, D93): over three
+  orders of the nets the twelve boards had 901 open with two fifths, 890 with 0.45, 971 with half and 1189
+  with 0.7, glasgow-revD1 better the sooner its second run started (432, 454, 550, 821) and the eleven other
+  boards the longer the first had (469, 436, 421, 368). With guide 0.0.8 glasgow-revD1 is the same either way
+  (465 with 0.45, 422 with 0.7) and 0.7 is measured (D97): 917 with 0.45 and 783 with 0.7, and with the release's
+  source before it 863, 786 with 0.6, 781 and 821 with 0.8.
 - *A run with a budget is not the run without one* (guide 0.0.4): with a work budget or a deadline guide routes
   for the most connections soonest, whether the budget stops it or not, so its result differs from that of a
   run with neither, however large the budget. Each is the same on every run: with a work budget on any machine,
@@ -1352,7 +1365,8 @@ What is left, by cause:
 
 **Native router and guide 0.0.2, D85** (the adapter and guide as they were then; what they are now is measured
 under "Native router and guide 0.0.3, D88", "Native router and guide 0.0.4, D91", "Native router and guide
-0.0.5, D93", "Native router and guide 0.0.6, D95" and "Native router and guide 0.0.7, D96" below; the shared 64-core
+0.0.5, D93", "Native router and guide 0.0.6, D95", "Native router and guide 0.0.7, D96" and "Native router and
+guide 0.0.8, D97" below; the shared 64-core
 Linux machine).
 Both routers behind the same commands, on the seven generated boards and the twelve corpus boards, measured the
 same way: open connections on the routed board with its pours filled again by cadlab (`drc.unrouted`, D80), DRC
@@ -1908,6 +1922,87 @@ What the numbers say:
   3).
 
 The default is unchanged (DECISIONS D96).
+
+**Native router and guide 0.0.8, D97** (guide 0.0.8 from crates.io; the corpus at the default 60 s time budget; the
+same machine, shared, with a load of 5 to 9 from other work; six runs of guide at a time on one thread each; the
+native router one run at a time on three threads, seed 1). The same count as above. Every row of guide was run in
+three orders of its nets, no seed and seeds 2 and 3, and the three counts are given in that order; the vias, length
+and time are those of the first.
+
+- *0.0.7*: guide 0.0.7 behind the adapter of D96, master `ecf0242`, run again here.
+- *0.0.8*: guide 0.0.8 behind the same adapter (the first run with 0.45 of the budget).
+- *0.0.8, first run 0.7*: the same with the first run at 0.7 of the budget and nothing else.
+- *After*: guide 0.0.8 behind the adapter of this change: the first run at 0.7 of the budget and with the nets that
+  have zones among its nets, open or not; `pour_cuts` on and `row_fanout` off, as guide has them.
+- Commands: `RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_TRACE=1
+  CADLAB_BENCH_BUDGET_MS=60000 [CADLAB_BENCH_SEED=2|3] route_bench --corpus <board>`; `RAYON_NUM_THREADS=3
+  CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_BUDGET_MS=60000 route_bench --corpus <board>` for the native router. The two
+  middle rows are of a build with the share and the nets of the first run read from the environment, which is not
+  committed.
+
+| board | layers | native: open, vias, length, time | guide 0.0.7: open (three orders); vias, length, time | guide 0.0.8: open | guide 0.0.8, first run 0.7: open | guide after: open (three orders); vias, length, time |
+|---|---|---|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 4, 460.2 mm, 0.5 s | 0, 0, 0; 7, 496.9 mm, 0.8 s | 0, 0, 0 | 0, 0, 0 | 0, 0, 0; 7, 496.9 mm, 0.9 s |
+| buspirate-rs232 | 2 | 0, 10, 280.9 mm, 0.5 s | 0, 0, 0; 6, 356.2 mm, 0.7 s | 0, 0, 0 | 0, 0, 0 | 0, 0, 0; 6, 356.2 mm, 0.7 s |
+| lumenpnp-ringlight | 2 | 0, 2, 180.4 mm, 0.4 s | 0, 0, 0; 1, 208.7 mm, 0.3 s | 0, 0, 0 | 0, 0, 0 | 0, 0, 0; 1, 209.6 mm, 0.3 s |
+| nrfmicro | 2 | 0, 46, 453.6 mm, 11.0 s | 8, 5, 5; 48, 496.5 mm, 25.3 s cut | 4, 7, 7 | 4, 7, 7 | 4, 7, 7; 60, 495.0 mm, 25.5 s |
+| sweep-v2.2 | 2 | 3, 21, 2160.9 mm, 53.3 s | 6, 7, 6; 42, 2231.0 mm, 54.8 s cut | 6, 8, 6 | 6, 7, 6 | 6, 7, 6; 42, 2231.0 mm, 55.9 s cut |
+| corne-cherry | 2 | 3, 483, 8275.6 mm, 30.1 s | 45, 37, 42; 609, 7605.7 mm, 56.8 s cut | 41, 36, 43 | 36, 35, 38 | 36, 35, 38; 826, 8436.7 mm, 47.0 s cut |
+| tinytapeout-demo | 4 | 6, 274, 4913.3 mm, 60.0 s | 13, 20, 20; 572, 5530.5 mm, 40.1 s cut | 21, 14, 6 | 9, 8, 5 | 9, 8, 5; 605, 5799.4 mm, 49.3 s cut |
+| buspirate5-rev10 | 4 | 2, 313, 3053.2 mm, 29.7 s | 5, 9, 7; 436, 3536.4 mm, 45.2 s cut | 9, 6, 7 | 2, 6, 3 | 2, 6, 3; 501, 3815.8 mm, 40.5 s |
+| lumenpnp-mobo | 4 | 15, 347, 5423.7 mm, 62.4 s cut | 10, 5, 7; 734, 6330.2 mm, 38.9 s cut | 10, 10, 6 | 9, 10, 6 | 0, 1, 0; 713, 6544.4 mm, 32.2 s |
+| cynthion | 4 | 28, 476, 3177.0 mm, 61.3 s cut | 20, 22, 28; 593, 3682.1 mm, 42.8 s cut | 26, 23, 28 | 19, 14, 11 | 19, 15, 11; 660, 4064.3 mm, 57.4 s cut |
+| glasgow-revC3 | 4 | 36, 415, 3436.4 mm, 60.6 s cut | 34, 37, 40; 581, 4063.2 mm, 56.8 s cut | 46, 41, 41 | 38, 38, 37 | 38, 38, 37; 556, 3940.5 mm, 57.9 s cut |
+| glasgow-revD1 | 6 | 201, 1008, 8784.5 mm, 62.5 s cut | 213, 136, 188; 1098, 7532.8 mm, 58.7 s cut | 167, 157, 141 | 162, 136, 124 | 162, 136, 124; 1085, 7953.6 mm, 57.9 s cut |
+| all twelve | | 294 | 354, 278, 343 | 330, 302, 285 | 285, 261, 237 | 276, 253, 231 |
+| the eleven without glasgow-revD1 | | 93 | 141, 142, 155 | 163, 145, 144 | 123, 125, 113 | 114, 117, 107 |
+
+Zero DRC errors other than unrouted on every run, no via in a pad of its net, and no call of guide over 58.8 s. The
+verification took nothing out in any run of the four rows.
+
+What the numbers say:
+
+- *What two runs differ by.* The row of 0.0.7 is the adapter D96 recorded at 315, 275 and 300: glasgow-revD1 has
+  213, 136 and 188 here where it had 168, 136 and 150, and the same binary had 214, 252 and 163, and 155, 141 and
+  128, in two runs of this session two hours apart. A run that its deadline cuts depends on what else the machine
+  does. *After* a second time: 273, 255 and 235 for 276, 253 and 231. With 0.0.8 the boards that the budget cuts
+  repeat nearly to the connection: a pass that ends with fewer connections than its routes made at their best goes
+  back to those, and the best is reached before the cut.
+- *guide 0.0.8 itself, behind the same adapter*: 354, 278 and 343 to 330, 302 and 285. Nothing in sum, and not the
+  same runs: glasgow-revD1's first run has 182 of 1948 connections open at 27 s where 0.0.7's has 325, and its
+  second makes 15 where it made 111. tinytapeout-demo 13, 20 and 20 to 21, 14 and 6, 53 to 41: the supply pins of
+  its QFN are necked by the courtyard's clearance, and the pads its routes cut off their fills are joined by guide.
+- *The first run at 0.7*: 330, 302 and 285 to 285, 261 and 237. glasgow-revD1 167, 157 and 141 to 162, 136 and 124,
+  where 0.0.7 with 0.7 has 306, 272 and 243 (measured here two hours before, 1190 on the twelve boards for 851 with
+  0.45 in that hour): the board no longer needs its first run short. The eleven others 163, 145 and 144 to 123, 125
+  and 113: cynthion 26, 23 and 28 to 19, 14 and 11, corne-cherry 41, 36 and 43 to 36, 35 and 38, buspirate5-rev10 9,
+  6 and 7 to 2, 6 and 3. In the uncommitted build of 0.0.8's source, over the three orders: 0.45 863, 0.6 786, 0.7
+  781, 0.8 821; `row_fanout` on, 367 on the eleven boards for 358; `pour_cuts` off, 381.
+- *The nets with zones in the first run*: 285, 261 and 237 to 276, 253 and 231, all of it lumenpnp-mobo, 9, 10 and 6
+  to 0, 1 and 0. Its ground had no open connection before routing, as cadlab's fill of the F.Cu pour joins all its
+  pads, so the first run was not asked for it; the routes cut the pour, and the second run was asked for some 220
+  stubs to the plane on a board where nothing moves. In the first run guide makes them while the board is free: 813
+  of 813 connections in 21 s for 524 of 524 in 33 s, 713 vias for 748. With 0.45 and these nets: 908 over the three
+  orders for 760.
+- *Vias and track.* Beside the native router guide has twice the vias on lumenpnp-mobo (713 against 347),
+  tinytapeout-demo (605 against 274) and sweep-v2.2 (42 against 21), 1.3 to 1.7 times on nrfmicro, glasgow-revC3,
+  cynthion, buspirate5-rev10 and corne-cherry (826 against 483), and 1.08 times on glasgow-revD1; less track on
+  glasgow-revD1 (7954 against 8784 mm, with 39 fewer connections open), 2 to 28 % more on the others.
+- *What is open, by guide's cause*, of the 276 of the first order: 183 that the budget ended before, 70 pads shut
+  in, 14 "found no way", 6 at a search's node limit, 3 pads the refilled pour does not reach.
+- *Against the native router at the same 60 s*, three orders against its one run: level on the three small boards;
+  ahead in every order on glasgow-revD1 (162, 136 and 124 against 201), lumenpnp-mobo (0, 1 and 0 against 15) and
+  cynthion (19, 15 and 11 against 28); within what runs differ by on tinytapeout-demo (9, 8 and 5 against 6),
+  buspirate5-rev10 (2, 6 and 3 against 2) and glasgow-revC3 (38, 38 and 37 against 36); behind in every order on
+  nrfmicro (4, 7 and 7 against 0), sweep-v2.2 (6, 7 and 6 against 3) and corne-cherry (36, 35 and 38 against 3).
+  276, 253 and 231 against 294 on the twelve boards, 114, 117 and 107 against 93 on the eleven without
+  glasgow-revD1.
+- *The generated boards* through the adapter of this change, one run each with the default budget of 120 s: all
+  eight complete with no DRC error (attiny-2l 0 vias in 0.02 s, soic24-2l 159 in 1.4 s, stm32-2l 72 in 1.7 s,
+  stm32-4l 51 in 1.3 s, qfp-qfn-4l 172 in 5.4 s, fine-4l 105 in 3.9 s, bga144-4l 248 in 16.9 s, big-4l 1994 vias and
+  21 789 mm in 79 s).
+
+The default is unchanged (DECISIONS D97).
 
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).

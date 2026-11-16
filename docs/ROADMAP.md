@@ -285,11 +285,24 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       against the native router's 285, ahead on two boards in every order, level on three, within the noise on
       two, behind on five, 147, 139 and 150 against 93 on the eleven without glasgow-revD1. The default stays
       the native router (D96)
-- [ ] `router: guide` level with the native router on the corpus: needs, in guide, a first run that ends
-      when it stops gaining, routes that keep a pad's way to the host's fill, rule areas by kind and
-      containment with a track width that is routed by, a way out of the fine-pitch pads still shut in,
-      rip-up that settles, and the time (D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way";
-      D88, "What still blocks it")
+- [x] guide 0.0.8 adopted in the adapter: the first run has 0.7 of the budget, for 0.45, now that a net that
+      found no way in its corridor keeps what it reaches with nothing moved before any net crosses another's
+      routes (glasgow-revD1's first run has 182 connections open at 27 s for 325, and the board is the same with
+      either share), and the nets with zones are among the first run's, open or not (lumenpnp-mobo's ground,
+      which cadlab's fill joined whole and the routes then cut: 9, 10, 6 open to 0, 1, 0); `pour_cuts` on,
+      `row_fanout` off. Measured at 60 s over three orders of the nets (ROUTER.md, "Native router and guide
+      0.0.8, D97"): 276, 253 and 231 connections open on the twelve corpus boards where guide 0.0.7 leaves 354,
+      278 and 343 in the same runs; against the native router's 294, ahead in every order; ahead on three
+      boards in every order, level on three, within the noise on three, behind on three (corne-cherry 36, 35,
+      38 against 3; nrfmicro 4, 7, 7 against 0; sweep-v2.2 6, 7, 6 against 3); 114, 117 and 107 against 93 on
+      the eleven without glasgow-revD1, of which corne-cherry alone is more than the difference. The default
+      stays the native router (D97)
+- [ ] `router: guide` level with the native router on the corpus: needs, in guide, a way out of the pads of a
+      fine row that holds while routes are moved (corne-cherry's two QFN-56 and its USB receptacles), a ground
+      that is a pour on outer layers kept in one piece or routed (corne-cherry again), rip-up that settles and
+      the time it leaves unspent (nrfmicro), searches that end within their limit on a wide board (sweep-v2.2),
+      rule areas by kind and containment with a track width that is routed by, and fewer vias (D97, "Gaps";
+      D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
