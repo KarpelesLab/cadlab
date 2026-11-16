@@ -3341,6 +3341,10 @@ fn pour_round(
         }
         *term_island = snap.term_island;
         eng.pours = snap.pours;
+        // The plan gave every island the fills of its own board, the nets it left alone
+        // included: they are named by their place among the fills, which are the ones before
+        // again.
+        assign_pours(eng, routes, term_island);
         return None;
     }
     if !may_plan {
@@ -3638,4 +3642,135 @@ fn describe(rb: &RouterBoard, _ck: &Checker<'_>, blockers: &[(Blocker, usize, P)
 fn dedup_hints(rep: &mut ConnectionReport) {
     let mut seen = BTreeSet::new();
     rep.hints.retain(|h| seen.insert(h.clone()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kicad_import::{BoardImportOptions, import};
+
+    /// A 30 × 16 mm two-layer board at (100, 50)–(130, 66) with GND poured on the front and VCC
+    /// on the back. S joins two wide pads at the left and right edges: its track cuts the GND
+    /// pour in two, between the GND pads of R1 and R2. VCC has a through-hole pad (on its pour)
+    /// and a surface pad on the front, which a via into the pour joins.
+    const BOARD: &str = r#"(kicad_pcb (version 20221018) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "S")
+  (net 3 "VCC")
+  (footprint "T:T" (layer "F.Cu") (at 101.2 58)
+    (property "Reference" "J1") (property "Value" "T")
+    (pad "1" smd rect (at 0 0) (size 2 1) (layers "F.Cu" "F.Mask") (net 2 "S")))
+  (footprint "T:T" (layer "F.Cu") (at 128.8 58)
+    (property "Reference" "J2") (property "Value" "T")
+    (pad "1" smd rect (at 0 0) (size 2 1) (layers "F.Cu" "F.Mask") (net 2 "S")))
+  (footprint "R:R" (layer "F.Cu") (at 115 54)
+    (property "Reference" "R1") (property "Value" "R")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.5) (layers "F.Cu" "F.Mask") (net 1 "GND")))
+  (footprint "R:R" (layer "F.Cu") (at 115 62)
+    (property "Reference" "R2") (property "Value" "R")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.5) (layers "F.Cu" "F.Mask") (net 1 "GND")))
+  (footprint "H:H" (layer "F.Cu") (at 105 63)
+    (property "Reference" "J3") (property "Value" "H")
+    (pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net 3 "VCC")))
+  (footprint "R:R" (layer "F.Cu") (at 125 63)
+    (property "Reference" "R3") (property "Value" "R")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.5) (layers "F.Cu" "F.Mask") (net 3 "VCC")))
+  (gr_rect (start 100 50) (end 130 66) (stroke (width 0.1)) (fill none) (layer "Edge.Cuts"))
+  (zone (net 1) (net_name "GND") (layers "F.Cu") (name "gnd") (hatch edge 0.5)
+    (connect_pads yes (clearance 0.3)) (min_thickness 0.25)
+    (fill yes (thermal_gap 0.4) (thermal_bridge_width 0.35))
+    (polygon (pts (xy 100 50) (xy 130 50) (xy 130 66) (xy 100 66))))
+  (zone (net 3) (net_name "VCC") (layers "B.Cu") (name "vcc") (hatch edge 0.5)
+    (connect_pads yes (clearance 0.3)) (min_thickness 0.25)
+    (fill yes (thermal_gap 0.4) (thermal_bridge_width 0.35))
+    (polygon (pts (xy 100 50) (xy 130 50) (xy 130 66) (xy 100 66))))
+)"#;
+
+    /// A pour round that leaves more connections open is taken back: the fills are the ones
+    /// before it again, and so must be the fills each island names, also for the nets the round
+    /// left alone (VCC here), which the phases after it route again. They kept the indices
+    /// into the fills of the round: glasgow-revD1 panicked in `Engine::route_net` on one beyond
+    /// the fills that were left, and a smaller one names another fill.
+    #[test]
+    fn taking_a_pour_round_back_gives_the_islands_their_fills_back() {
+        let mut p = Project::new("t");
+        import(&mut p, BOARD, &BoardImportOptions { file_name: "t.kicad_pcb".into(), ..Default::default() })
+            .expect("import");
+        let (p, opts, scope) = (&p, RouteOptions::default(), Scope::All);
+        // The setup of `route_run`.
+        let slots = routing_slots(p, &opts.layers).expect("layers");
+        let items = geo_board::copper_items(p);
+        let isl = geo_board::islands(&items);
+        let rb = RouterBoard::build(p, &items, &isl);
+        let name = |r: &NetRoute| rb.nets[r.net as usize].as_str();
+        let mut routes = plan(&rb, &scope).expect("plan");
+        let mut active = vec![false; rb.profiles.len()];
+        for r in &routes {
+            active[r.prof] = true;
+        }
+        let grid = make_grid(&rb, &routes, &opts);
+        let pitch = grid.g;
+        let stop = || false;
+        let mut eng = Engine::new(&rb, grid, slots.clone(), &active, costs(opts.effort), &stop);
+        let mut term_island: Vec<usize> = rb.terminals.iter().map(|t| t.island).collect();
+        eng.pours = pours::build(&rb.fills, &rb, &eng.grid, &slots);
+        assign_pours(&eng, &mut routes, &term_island);
+        let mut index = Index::new(rb.bbox.expand(pitch * 4.0), (pitch * 8.0).max(500_000.0), reach(&rb));
+        for (i, ob) in rb.obstacles.iter().enumerate() {
+            index.insert(Item::Static(i as u32), ob.bbox);
+        }
+        let ck = Checker { rb: &rb, index: &index };
+        for r in &mut routes {
+            for island in &mut r.islands {
+                for &t in &island.terms {
+                    island.access.extend(eng.access(t, &ck));
+                }
+            }
+        }
+        let mut sc = eng.scratch();
+        let fills = |routes: &[NetRoute]| -> Vec<Vec<Vec<u32>>> {
+            routes.iter().map(|r| r.islands.iter().map(|i| i.pours.clone()).collect()).collect()
+        };
+
+        // The GND pour joins its pads: S and VCC are planned, VCC with its pour on one side.
+        assert_eq!(routes.iter().map(name).collect::<BTreeSet<_>>(), BTreeSet::from(["S", "VCC"]));
+        let vcc = routes.iter().position(|r| name(r) == "VCC").expect("VCC");
+        let planned = (eng.pours.len(), fills(&routes));
+        assert_eq!(planned.0, 2, "one fill per pour");
+        assert!(planned.1[vcc].iter().any(|f| !f.is_empty()), "the hole pad of VCC is on its pour");
+        for r in &mut routes {
+            eng.route_net(&mut sc, r, Mode::Hard).expect("no budget");
+            eng.commit(r);
+            assert!(r.failed.iter().all(Option::is_none), "{}: {:?}", name(r), r.failed);
+        }
+
+        // The track of S cut the GND pour: GND is planned, VCC is left alone, and its fill has
+        // another place among the fills of this board.
+        let mut pending = None;
+        let changed =
+            pour_round(p, &rb, &scope, &slots, &mut eng, &ck, &mut routes, &mut term_island, &mut pending, true)
+                .expect("a first round");
+        assert_eq!(changed.iter().map(|&ri| name(&routes[ri])).collect::<Vec<_>>(), ["GND"]);
+        assert!(pending.is_some() && eng.pours.len() > planned.0, "{} fills", eng.pours.len());
+        assert_ne!(fills(&routes)[vcc], planned.1[vcc]);
+
+        // What negotiation made of it has more connections open (GND is not routed, VCC lost
+        // its wire): back to the routing before.
+        eng.uncommit(&mut routes[vcc]);
+        routes[vcc].wires.clear();
+        let step =
+            pour_round(p, &rb, &scope, &slots, &mut eng, &ck, &mut routes, &mut term_island, &mut pending, false);
+        assert!(step.is_none() && pending.is_none());
+        assert_eq!((eng.pours.len(), fills(&routes)), planned);
+        assert_eq!(routes[vcc].wires.len(), 1);
+
+        // The phases after it route VCC again, onto its pour.
+        let r = &mut routes[vcc];
+        eng.uncommit(r);
+        eng.route_net(&mut sc, r, Mode::Hard).expect("no budget");
+        assert!(r.failed.iter().all(Option::is_none) && r.wires.len() == 1, "{:?}", r.failed);
+    }
 }
