@@ -1,11 +1,12 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93 and D95; docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95 and D96; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
 //! copper drawings, net ties, keep-outs with their net exceptions, the outline with its
 //! cutouts, the rules with net classes, pair gaps and the custom clearance rules that are an
-//! area's, differential pairs, length groups, and the zones with cadlab's own fills of them.
+//! area's or a footprint's pads' ([`custom_rules`]), differential pairs, length groups, and the
+//! zones with cadlab's own fills of them.
 //! [`route`] runs `guide::pcb::route_with` on it under the hooks (progress, cancellation), the
 //! time budget and the work budget, turns the result back into tracks and vias, verifies them
 //! with cadlab's own DRC as the native router's are (flagged copper is taken out and reported)
@@ -15,9 +16,9 @@
 //! guide plans on cadlab's fills (`Zones::fills`), not on a fill of its own, and is asked for
 //! none at the end (`RouteOptions::fills`) and for no joining of what its own fill leaves apart
 //! (`RouteOptions::join`): zone filling stays cadlab's, and what cadlab's fill leaves apart goes
-//! to a second run. What guide's API cannot express is passed the stricter way and named in [`RouteResult::notes`](super::RouteResult::notes):
-//! custom rules by kind, footprint or containment, rules between two different scopes and
-//! `disallow` rules (D61).
+//! to a second run. What guide's API cannot express is passed the stricter way and named in
+//! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
+//! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,7 +38,7 @@ use crate::geom::Point;
 use crate::geom::poly::PolygonSet;
 use crate::id::ObjectId;
 use crate::model::Project;
-use crate::model::board::{PadConnection, Track, Via};
+use crate::model::board::{ItemKind, PadConnection, RuleScope, Track, Via};
 use crate::refs::ObjectRef;
 use crate::units::Nm;
 
@@ -57,16 +58,18 @@ const PLANE_COVERAGE: f64 = 0.0;
 /// The share of the time budget guide's first run may take: the rest is for the verification,
 /// the refill, a second run on the routed board and the report. guide itself ends its routing
 /// at three quarters of what it is given and cleans up in the rest (0.0.5). Measured again
-/// with guide 0.0.6, the twelve corpus boards at 60 s, the second run taking every open net:
-/// a third 397 connections open, two fifths 366 and 369, 0.45 356 and 350, half 411 and 419,
-/// three fifths 499, and with no second run 598. Nine boards are the same from two fifths to
-/// half within what two runs differ by, and two decide: glasgow-revD1, whose first run has
-/// as many open at 30 s as at 27 s (327) while its second, which plans for 10 s before it
-/// routes, makes some ten connections a second (171 with 0.45, 232 and 238 with half, 321
-/// with three fifths), and cynthion, whose second run plans for 12 to 15 s and has too
-/// little left below 0.45 (34 and 36 with two fifths, 20 and 26 with 0.45, 22 and 24 with
-/// half). With guide 0.0.5 two fifths to three fifths were level at 571 to 577 and half was
-/// kept, with 0.0.4 four fifths left 714 and half 589 (D91, D93, D95).
+/// with guide 0.0.7, whose second run plans for 3 to 4 s where 0.0.6 took 8 to 15: the
+/// twelve corpus boards at 60 s, connections open summed over three orders of the nets, are
+/// 920 with 0.35, 901 with 0.4, 890 with 0.45, 971 with half, 955 with 0.55, 1019 with 0.6,
+/// 1159 with 0.65, 1189 with 0.7, and 1620 with one run at nine tenths. Two things pull
+/// apart. glasgow-revD1's first run gains nothing after some 20 s while its second makes
+/// connections for as long as it has: 427, 432, 454, 550, 552, 640, 783, 821 along that
+/// row. The eleven other boards want the first run longer: 493, 469, 436, 421, 403, 379,
+/// 376, 368 (cynthion 90 to 40, tinytapeout-demo 58 to 41). 0.45 is the least sum and is
+/// kept; without glasgow-revD1 it would be 0.65 or more. With guide 0.0.6: a third 397
+/// (one order), two fifths 366 and 369, 0.45 356 and 350, half 411 and 419, three fifths
+/// 499; with 0.0.5 two fifths to three fifths were level and half was kept, with 0.0.4 four
+/// fifths left 714 and half 589 (D91, D93, D95, D96).
 const FIRST_SHARE: f64 = 0.45;
 
 /// How many times what the first run needed after it (the verification and the refill) is
@@ -190,59 +193,200 @@ fn hole_shape(pp: &PlacedPad) -> Option<Shape> {
     }
 }
 
-/// The custom clearance rules that are an area's, as guide's rule areas, and a note naming
-/// the rules that are not.
+/// A box: its least corner and its greatest (x, y, x, y).
+type Bounds = [i64; 4];
+
+fn bounds(points: impl Iterator<Item = (i64, i64)>) -> Option<Bounds> {
+    points.fold(None, |b: Option<Bounds>, (x, y)| {
+        Some(b.map_or([x, y, x, y], |b| [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)]))
+    })
+}
+
+/// Whether two boxes are within `margin` of each other.
+fn near(a: &Bounds, b: &Bounds, margin: i64) -> bool {
+    a[0] - margin <= b[2] && b[0] - margin <= a[2] && a[1] - margin <= b[3] && b[1] - margin <= a[3]
+}
+
+/// How near a pad a later rule's courtyard or area must be for the rule to count at the pad
+/// ([`custom_rules`]): a via or the end of a track beside the pad can then be in it.
+const RULE_NEAR: i64 = 1_000_000;
+
+/// The board's custom clearance rules as guide takes them ([`custom_rules`]).
+struct Custom {
+    /// The rules that are an area's, the last in board order first.
+    areas: Vec<RuleArea>,
+    /// By copper item, the clearance of its own that the last rule holding it gives a pad or a
+    /// copper drawing.
+    own: Vec<Option<i64>>,
+}
+
+/// The custom clearance rules as guide can take them, and a note naming those it cannot.
 ///
-/// A rule goes over when its scope is one positional term that copper is in by touching
-/// (`in_courtyard` or `touches_area`), with or without a layer, on every kind of item, and
-/// it is between the scope and anything or between the scope and itself. guide applies an
-/// area's clearance between two pieces of copper that both touch it; the DRC applies the
-/// rule when either does. So a rule that loosens the clearance is routed the stricter way
-/// where only one piece is in the area, and one that tightens it is left to the verification
-/// there. The last rule in board order wins in the DRC and the first area in guide: the
-/// areas are in reverse order.
-fn rule_areas(p: &Project, layers: &[String], notes: &mut Vec<Diagnostic>) -> Result<Vec<RuleArea>, RouteError> {
+/// The DRC (`board::clearance`) gives every item the last rule in board order whose scope
+/// holds it, and a pair of items the later of their two rules, in place of their local and
+/// class clearances; the native router routes by the same resolution (`router::scoped`).
+/// guide has two places for that:
+///
+/// - *A rule area* (`RuleSpec::areas`), whose clearance is between two pieces of copper that
+///   both touch it, in place of any other. A rule goes over as one when its scope is one
+///   positional term that copper is in by touching (`in_courtyard` or `touches_area`), with or
+///   without a layer, its kinds take in tracks and vias (every piece of new copper in the area
+///   is then in the scope, and the DRC applies the rule to a pair when either item is: which
+///   other kinds it names does not matter), and it is between the scope and anything or
+///   between the scope and itself. The first area wins in guide and the last rule in the DRC:
+///   the areas are in reverse order.
+/// - *A clearance of an item's own* (`Pad::clearance`), which replaces the rules' between it
+///   and anything else, as a rule that holds a pad does in the DRC: every pad and copper
+///   drawing has the clearance of the last rule holding it, in place of its local one. That is
+///   where a rule for the pads of a footprint goes, and what an area's rule asks between a pad
+///   in it and a track outside it.
+///
+/// An area's clearance replaces the items' own in guide, where the DRC takes the later rule.
+/// So each area (each courtyard on its own) has the largest of its rule's clearance, those of
+/// the existing copper in it that a later rule holds (zone fills apart: they are filled again
+/// around the routes), and those of the later rules that can hold a new track or via and whose
+/// courtyards or areas meet it. A pad's own clearance is raised by such later rules near it
+/// the same way. On tinytapeout-demo: 0.16 mm in the QFN-80's courtyard and 0.18 mm at its
+/// pads, a later rule, is 0.18 mm in the courtyard and at the pads (D96).
+///
+/// Never looser than the DRC but for what the verification is for: a rule that holds new
+/// copper and is no area (by kind without both tracks and vias, by containment, between two
+/// different scopes) and tightens the clearance, a track long enough to reach into two areas
+/// far apart, and copper that touches an area's outline without reaching into it.
+fn custom_rules(
+    p: &Project,
+    items: &[CopperItem],
+    layers: &[String],
+    notes: &mut Vec<Diagnostic>,
+) -> Result<Custom, RouteError> {
+    /// What a rule with a clearance is to guide.
+    struct Seen {
+        value: i64,
+        /// Whether it can hold a new track or via.
+        new: bool,
+        /// The boxes of the courtyards or areas its scope names (`None`: it has no such term).
+        boxes: Option<Vec<Bounds>>,
+        /// As a rule area: its layers and outlines.
+        area: Option<(LayerSet, Vec<Vec<GPoint>>)>,
+    }
+    let rules = &p.board().custom_rules;
+    let mut out = Custom { areas: Vec::new(), own: vec![None; items.len()] };
+    if rules.iter().all(|c| c.clearance.is_none() && c.disallow.is_empty()) {
+        return Ok(out);
+    }
     let all = LayerSet::first(layers.len());
-    let mut areas = Vec::new();
+    let ring_box = |r: &[GPoint]| bounds(r.iter().map(|q| (q.x, q.y)));
+    let mut seen: Vec<Option<Seen>> = Vec::with_capacity(rules.len());
     let mut left: Vec<&str> = Vec::new();
-    for c in p.board().custom_rules.iter().rev() {
-        let Some(value) = c.clearance.filter(|_| c.disallow.is_empty()) else {
+    for c in rules {
+        let Some(value) = c.clearance else {
             if !c.disallow.is_empty() {
                 left.push(&c.name);
             }
+            seen.push(None);
             continue;
         };
         let s = &c.scope;
+        let kind = |s: &RuleScope, k: ItemKind| s.kinds.is_empty() || s.kinds.contains(&k);
+        // A scope naming footprints holds their pads and drawings only.
+        let holds_new = |s: &RuleScope| s.footprint.is_none() && (kind(s, ItemKind::Track) || kind(s, ItemKind::Via));
         let one_term = s.in_courtyard.is_some() != s.touches_area.is_some();
-        let plain = s.kinds.is_empty() && s.footprint.is_none() && s.in_area.is_none();
-        if !(one_term && plain && c.with.as_ref().is_none_or(|w| w == s)) {
-            left.push(&c.name);
-            continue;
-        }
-        let set = match &s.layer {
-            Some(l) => layer_set(layers, std::slice::from_ref(l)),
-            None => all,
+        let is_area = c.disallow.is_empty()
+            && one_term
+            && kind(s, ItemKind::Track)
+            && kind(s, ItemKind::Via)
+            && s.footprint.is_none()
+            && s.in_area.is_none()
+            && c.with.as_ref().is_none_or(|w| w == s);
+        // A rule between a scope and itself needs both items in it, as guide's area does: it
+        // raises nothing where one item is.
+        let new = match &c.with {
+            None => holds_new(s),
+            Some(w) => !is_area && (holds_new(s) || holds_new(w)),
         };
+        if !c.disallow.is_empty() || (!is_area && new) {
+            left.push(&c.name);
+        }
         let pl = geo::clearance::placement(p, s);
-        for ring in pl.courtyards.into_iter().chain(pl.touched).flatten().filter(|r| r.0.len() >= 3) {
-            let pts: Vec<GPoint> = ring.0.iter().map(|q| GPoint::new(q.x, q.y)).collect();
-            for shape in ring_shapes(&pts).map_err(|e| geom_err(&format!("rule `{}`", c.name), e))? {
-                areas.push(RuleArea {
+        let rings = |rs: &Option<Vec<_>>| -> Option<Vec<Vec<GPoint>>> {
+            rs.as_ref().map(|rs: &Vec<polyclip::Ring>| {
+                rs.iter().map(|r| r.0.iter().map(|q| GPoint::new(q.x, q.y)).collect()).collect()
+            })
+        };
+        // A positional term is necessary for the scope: the first one's outlines bound it.
+        let term = [&pl.courtyards, &pl.areas, &pl.touched].into_iter().find_map(rings);
+        let boxes = match &c.with {
+            None => term.as_ref().map(|rs| rs.iter().filter_map(|r| ring_box(r)).collect()),
+            Some(_) => None,
+        };
+        let area = is_area.then(|| {
+            let set = match &s.layer {
+                Some(l) => layer_set(layers, std::slice::from_ref(l)),
+                None => all,
+            };
+            (set, term.unwrap_or_default().into_iter().filter(|r| r.len() >= 3).collect())
+        });
+        seen.push(Some(Seen { value: value.0.max(0), new, boxes, area }));
+    }
+    // The largest clearance of the rules after `k` that can hold new copper within `margin` of
+    // a box.
+    let later = |k: usize, at: &Bounds, margin: i64| -> i64 {
+        seen[k + 1..]
+            .iter()
+            .flatten()
+            .filter(|r| r.new && r.boxes.as_ref().is_none_or(|bs| bs.iter().any(|b| near(b, at, margin))))
+            .map(|r| r.value)
+            .max()
+            .unwrap_or(0)
+    };
+    // Existing copper: the last rule holding each item, as the DRC has it.
+    let last = geo::clearance::rule_matches(p, items, |r| r.clearance);
+    let boxes: Vec<Option<Bounds>> = items
+        .iter()
+        .zip(&last)
+        .map(|(it, held)| {
+            held.filter(|_| !matches!(it.item, ItemRef::Zone(..)))
+                .and_then(|_| bounds(it.shape.iter().flat_map(|pg| pg.outer.0.iter().map(|q| (q.x, q.y)))))
+        })
+        .collect();
+    for (i, it) in items.iter().enumerate() {
+        if let (ItemRef::Pad(..) | ItemRef::Graphic(..) | ItemRef::FpGraphic(..), Some((k, v)), Some(b)) =
+            (&it.item, last[i], &boxes[i])
+        {
+            out.own[i] = Some(v.0.max(0).max(later(k, b, RULE_NEAR)));
+        }
+    }
+    for (k, c) in rules.iter().enumerate().rev() {
+        let Some(Seen { value, area: Some((set, rings)), .. }) = &seen[k] else { continue };
+        for ring in rings {
+            let Some(b) = ring_box(ring) else { continue };
+            let mut clearance = (*value).max(later(k, &b, 0));
+            for (i, it) in items.iter().enumerate() {
+                let (Some((k2, v2)), Some(ib)) = (last[i], &boxes[i]) else { continue };
+                if k2 > k
+                    && v2.0 > clearance
+                    && near(ib, &b, 0)
+                    && layer_set(layers, &it.layers).iter().any(|l| set.contains(l))
+                {
+                    clearance = v2.0;
+                }
+            }
+            for shape in ring_shapes(ring).map_err(|e| geom_err(&format!("rule `{}`", c.name), e))? {
+                out.areas.push(RuleArea {
                     shape,
-                    layers: set,
-                    overrides: Overrides { track_width: None, clearance: Some(value.0.max(0)) },
+                    layers: *set,
+                    overrides: Overrides { track_width: None, clearance: Some(clearance) },
                 });
             }
         }
     }
     if !left.is_empty() {
-        left.reverse();
         let mut d = Diagnostic::warning(
             "route.guide_custom_rules",
             format!(
-                "custom rule(s) {} cannot be given to guide (it takes a clearance inside an area or a courtyard, \
-                 none by kind, footprint or containment, between two scopes, or `disallow`): copper that breaks \
-                 one is taken out after routing",
+                "custom rule(s) {} cannot be given to guide (it takes a clearance for the tracks and vias in an \
+                 area or a courtyard and one of a footprint's pads, none for new copper by kind or containment, \
+                 between two scopes, or `disallow`): copper that breaks one is taken out after routing",
                 left.join(", ")
             ),
         )
@@ -252,7 +396,7 @@ fn rule_areas(p: &Project, layers: &[String], notes: &mut Vec<Diagnostic>) -> Re
         }
         notes.push(d);
     }
-    Ok(areas)
+    Ok(out)
 }
 
 /// Builds guide's design from the project. `items` are the board's copper items, zone fills
@@ -318,7 +462,8 @@ pub(crate) fn adapt(
             spec.pairs.push((a, b, g.min(between).0.max(0)));
         }
     }
-    spec.areas = rule_areas(p, &layers, &mut notes)?;
+    let custom = custom_rules(p, items, &layers, &mut notes)?;
+    spec.areas = custom.areas;
     let hole_clearance = spec.hole_clearance;
     let rules = Rules::new(spec).map_err(|e| geom_err("design rules", e))?;
 
@@ -337,15 +482,27 @@ pub(crate) fn adapt(
     // Pad stack number -> its pad's position; the copper drawings of net ties, by position in
     // the filled zones, with their nets.
     let mut stack_at: BTreeMap<usize, usize> = BTreeMap::new();
+    // By pad stack's position, the clearance its first shape has of a custom rule.
+    let mut stack_own: BTreeMap<usize, Option<i64>> = BTreeMap::new();
     let mut tie_copper: Vec<(usize, Vec<String>)> = Vec::new();
     let mut zone_at: BTreeMap<u64, usize> = BTreeMap::new();
-    for it in items {
+    for (i, it) in items.iter().enumerate() {
         let set = layer_set(&layers, &it.layers);
+        // The clearance of its own: that of the last custom rule holding it, else its local one.
+        let own = custom.own[i].or(it.local.clearance.map(|c| c.0.max(0)));
         match &it.item {
             ItemRef::Pad(refdes, number) => {
                 let shapes = item_shapes(p, it).map_err(|e| geom_err(&format!("pad {}", it.item), e))?;
                 if let Some(&at) = it.local.stack.and_then(|k| stack_at.get(&k)) {
-                    gb.pads[at].stack.extend(shapes.into_iter().map(|s| (set, s)));
+                    // One pad, one clearance: the larger, and without a rule for every shape
+                    // the local one.
+                    let pad = &mut gb.pads[at];
+                    pad.clearance = match (stack_own[&at], custom.own[i]) {
+                        (Some(a), Some(b)) => pad.clearance.max(Some(a.max(b))),
+                        (None, None) => pad.clearance,
+                        _ => it.local.clearance.map(|c| c.0.max(0)),
+                    };
+                    pad.stack.extend(shapes.into_iter().map(|s| (set, s)));
                     continue;
                 }
                 let first = holed.insert((refdes.clone(), number.clone(), it.anchor.x.0, it.anchor.y.0));
@@ -358,12 +515,13 @@ pub(crate) fn adapt(
                     layers: set,
                     hole,
                     net: id(&it.net),
-                    clearance: it.local.clearance.map(|c| c.0.max(0)),
+                    clearance: own,
                     stack: shapes.map(|s| (set, s)).collect(),
                 });
                 pad_names.push(it.item.to_string());
                 if let Some(k) = it.local.stack {
                     stack_at.insert(k, at);
+                    stack_own.insert(at, custom.own[i]);
                 }
                 let th = it.local.thermal;
                 zones.set_pad(
@@ -431,12 +589,7 @@ pub(crate) fn adapt(
                     if tie {
                         tie_copper.push((gb.zones.len(), it.local.tie_nets.clone()));
                     }
-                    gb.zones.push(gdrc::Zone {
-                        shape,
-                        layer: LayerId(layer as u8),
-                        net,
-                        clearance: it.local.clearance.map(|c| c.0.max(0)),
-                    });
+                    gb.zones.push(gdrc::Zone { shape, layer: LayerId(layer as u8), net, clearance: own });
                     copper_names.push(it.item.to_string());
                 }
             }
@@ -1893,7 +2046,9 @@ mod tests {
     }
 
     /// Custom clearance rules: one that is an area's goes over as a rule area (the last rule in
-    /// board order first), the others are named.
+    /// board order first), the others are named. An area has the larger clearance of a later
+    /// rule that can hold new copper in it, as the DRC would take that rule for the pair: `neck`
+    /// has the 0.3 mm of `vias`, and `top` the 0.15 mm of `inside`.
     #[test]
     fn area_rules_are_carried_over_and_the_others_named() {
         use crate::model::board::{CustomRule, ItemKind, RuleScope};
@@ -1927,8 +2082,8 @@ mod tests {
         assert_eq!(
             ad.design.rules.spec().areas,
             [
-                RuleArea { shape: square.clone(), layers: LayerSet::EMPTY.with(LayerId(0)), overrides: over(120_000) },
-                RuleArea { shape: square, layers: both, overrides: over(100_000) },
+                RuleArea { shape: square.clone(), layers: LayerSet::EMPTY.with(LayerId(0)), overrides: over(150_000) },
+                RuleArea { shape: square, layers: both, overrides: over(300_000) },
             ]
         );
         // The rule area forbids nothing: it is no keep-out of guide's.
@@ -1938,6 +2093,104 @@ mod tests {
         let named = |n: &str| ObjectRef::Named { kind: "rule".into(), name: n.into() };
         assert_eq!(note.subjects, [named("vias"), named("inside"), named("no_vias")]);
         assert!(note.hint.is_some());
+    }
+
+    /// A row of pads 0.2 mm apart on a board with a clearance of 0.25 mm: no track leaves the
+    /// three in the middle. With the two rules such a part has in KiCad, 0.16 mm for what is in
+    /// its courtyard on the front and is no zone, and after it 0.18 mm for its pads, the
+    /// courtyard is an area of guide's at 0.18 mm, the larger of the two as the DRC takes the
+    /// later rule between a track and a pad, the pads have 0.18 mm of their own, no rule is
+    /// left to name, and every net is routed with nothing for the verification to take out.
+    /// The native router, which resolves the same rules itself, routes them too.
+    #[test]
+    fn a_courtyard_rule_and_a_rule_for_the_pads_of_the_footprint() {
+        use crate::model::board::{CustomRule, ItemKind, RuleScope};
+        let mut text = String::from(
+            r#"(kicad_pcb (version 20221018) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user) (47 "F.CrtYd" user))
+  (net 0 "") (net 1 "N1") (net 2 "N2") (net 3 "N3") (net 4 "N4") (net 5 "N5")
+  (footprint "Package_DFN_QFN:QFN-5" (layer "F.Cu") (at 110 62)
+    (property "Reference" "U1") (property "Value" "U")
+    (fp_line (start -1.25 -0.65) (end 1.25 -0.65) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
+    (fp_line (start 1.25 -0.65) (end 1.25 0.65) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
+    (fp_line (start 1.25 0.65) (end -1.25 0.65) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
+    (fp_line (start -1.25 0.65) (end -1.25 -0.65) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
+"#,
+        );
+        for k in 0..5 {
+            let x = -0.8 + 0.4 * f64::from(k);
+            text += &format!(
+                "    (pad \"{n}\" smd rect (at {x:.1} 0) (size 0.2 0.8) (layers \"F.Cu\") (net {n} \"N{n}\"))\n",
+                n = k + 1
+            );
+        }
+        text += ")\n  (footprint \"J:J\" (layer \"F.Cu\") (at 110 55)\n    (property \"Reference\" \"J1\") (property \"Value\" \"J\")\n";
+        for k in 0..5 {
+            text += &format!(
+                "    (pad \"{n}\" smd rect (at {x} 0) (size 1 1) (layers \"F.Cu\") (net {n} \"N{n}\"))\n",
+                n = k + 1,
+                x = -4 + 2 * k
+            );
+        }
+        text += ")\n  (gr_rect (start 100 50) (end 120 70) (stroke (width 0.1)) (fill none) (layer \"Edge.Cuts\"))\n)";
+        let mut p = Project::new("t");
+        import(&mut p, &text, &BoardImportOptions { file_name: "t.kicad_pcb".into(), ..Default::default() })
+            .expect("import");
+        let rules = &mut p.board_mut().rules;
+        (rules.clearance, rules.track_width) = (Nm(250_000), Nm(200_000));
+        let nets = ["N1", "N2", "N3", "N4", "N5"];
+        let all = || Scope::All;
+        let opts = RouteOptions::default();
+
+        // Without the rules: the pads in the middle are shut in.
+        let r = route(&p, &all(), &opts, &Hooks::none()).expect("route");
+        assert_eq!(r.stats.connections, 5);
+        assert!(r.stats.failed >= 3, "{:?}", r.stats);
+
+        let kinds = vec![ItemKind::Pad, ItemKind::Track, ItemKind::Via, ItemKind::Graphic];
+        let yard =
+            RuleScope { kinds, layer: Some("F.Cu".into()), in_courtyard: Some("QFN-5*".into()), ..Default::default() };
+        let pads = RuleScope { kinds: vec![ItemKind::Pad], footprint: Some("QFN-5*".into()), ..Default::default() };
+        p.board_mut().custom_rules = vec![
+            CustomRule { clearance: Some(Nm(160_000)), ..CustomRule::new("neck", yard) },
+            CustomRule { clearance: Some(Nm(180_000)), ..CustomRule::new("neck pads", pads) },
+        ];
+        let ad = adapted(&p, &nets);
+        // U1 is at (10, 8) from the lower-left corner, Y up.
+        let yard = Shape::polygon(&[at(8.75, 7.35), at(11.25, 7.35), at(11.25, 8.65), at(8.75, 8.65)], &[]).unwrap();
+        let [area] = &ad.design.rules.spec().areas[..] else { panic!("{:?}", ad.design.rules.spec().areas) };
+        assert_eq!(area.shape.bbox(), yard.bbox());
+        assert_eq!(area.layers, LayerSet::EMPTY.with(LayerId(0)));
+        assert_eq!(area.overrides, Overrides { track_width: None, clearance: Some(180_000) });
+        for (name, pad) in ad.pads.iter().zip(&ad.design.board.pads) {
+            assert_eq!(pad.clearance, name.starts_with("U1.").then_some(180_000), "{name}");
+        }
+        assert_eq!(ad.notes, []);
+
+        let r = route(&p, &all(), &opts, &Hooks::none()).expect("route");
+        assert_eq!((r.stats.connections, r.stats.failed, r.stats.drc_removed), (5, 0, 0), "{:?}", r.connections);
+        // What it routed passes the DRC under the rules, and only under them: a track is nearer
+        // a pad of another net than the board's 0.25 mm.
+        let mut routed = p.clone();
+        for t in &r.tracks {
+            let id = routed.alloc_id();
+            routed.board_mut().tracks.push(Track { id, ..t.clone() });
+        }
+        let errors = |p: &Project| {
+            crate::drc::check_copper(p)
+                .into_iter()
+                .filter(|d| d.severity == crate::diag::Severity::Error && d.code != "drc.unrouted")
+                .filter(|d| d.subjects.iter().any(|s| matches!(s, ObjectRef::Item { kind, .. } if kind == "track")))
+                .count()
+        };
+        assert_eq!(errors(&routed), 0);
+        routed.board_mut().custom_rules.clear();
+        assert!(errors(&routed) > 0);
+
+        // The native router under the same rules.
+        let native = super::super::route(&p, &all(), &opts, &Hooks::none()).expect("native");
+        assert_eq!((native.stats.connections, native.stats.failed), (5, 0), "{:?}", native.connections);
     }
 
     /// A pad stack is one pad of guide's with its other shapes on their layers and its hole, and
