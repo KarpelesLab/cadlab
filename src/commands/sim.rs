@@ -188,8 +188,8 @@ pub struct SimEstimate {
     pub max_steps: u64,
     /// Cell updates of the whole simulation at `expected_steps`.
     pub cell_updates: u64,
-    /// That in minutes on one thread at 50 million cells per second, the rate of a release build
-    /// with lossy copper and dispersive dielectrics (session 6): a rough figure, several times
+    /// That in minutes on one thread at a nominal 50 million cells per second, the order of a
+    /// release build with lossy copper and dispersive dielectrics: a rough figure, several times
     /// longer on a loaded machine.
     /// The wall-clock time is about this over the threads the solver gives the grid (`threads`).
     pub thread_minutes: f64,
@@ -246,8 +246,9 @@ fn is_zero(v: &usize) -> bool {
     *v == 0
 }
 
-/// Cell updates per second of one thread: a release build with Debye dielectrics and the surface
-/// impedance (docs/TESTING.md, session 6). A nominal figure, so the estimate stays deterministic.
+/// Cell updates per second of one thread: the order of a release build with Debye dielectrics and
+/// lossy copper (ems on session 6's region: 100 million per second on three threads, D98). A
+/// nominal figure, so the estimate stays deterministic.
 const CELLS_PER_SECOND: f64 = 50e6;
 
 /// The values `part_values` may set, with their units.

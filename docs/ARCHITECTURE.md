@@ -29,9 +29,9 @@ M1 added `value` (exact electrical quantities), `landpattern` (IPC-7351B footpri
 reader for KiCad files), `netlist::import` (D27) and `kicad_import` (`.kicad_pcb` and project rules, D32; the user's `.kicad_mod` / `.kicad_sym` libraries, D41). M8
 added `electrical` (impedance: closed forms and a 2D boundary element field solver; IPC-2152 current), `lengths` (differential pairs, length groups), `spice` (SPICE netlist export) and `lint` (design lint beyond
 ERC), see [ELECTRICAL.md](ELECTRICAL.md); later `openems` (export of a board region to the openEMS full-wave
-solver), `fdtd` (`sim.sparams`: a 3D FDTD run of the same region, on the `ems` crate's solver through
-`fdtd::ems` by default, cargo feature `ems`, D86 to D90, D94 and D98, or on the built-in solver of
-`fdtd::engine`, D59, which is also the default of a build without that feature) and `touchstone` (Touchstone S-parameter
+solver), `fdtd` (`sim.sparams`: a 3D FDTD run of the same region on the `ems` crate's solver, a dependency of every
+build: `fdtd` extracts the region, places the ports and reads the waves, `fdtd::ems` builds ems's model and runs
+it; D86 to D90, D94, D98 and D100, which removed cadlab's own engine of D59) and `touchstone` (Touchstone S-parameter
 files). M9 added `models3d` (3D model files decoded through the
 oxideav-mesh3d crates and placed on footprints, D36) and `body3d` (package bodies generated from footprint
 package specs, shared by the 3D view and the STEP export, D47). Modules to come: `erc` (M2),

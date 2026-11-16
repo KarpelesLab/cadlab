@@ -3681,4 +3681,114 @@ a check that can skip without saying so in the place meant to run it is not a ch
 *Not done:* IPC-2581 by any other program; an IDX reader (none is available, D37); FreeCAD on IDF.
 
 
+### D100. `sim.sparams` runs on ems alone: ems and csx in every build, the cargo feature `ems` and the built-in FDTD engine removed, `solver` no longer a parameter (2026-11-17)
+D98 measured what D94 had left open and ended on a decision that was not a measurement: the built-in engine was
+the only solver of a build without the cargo feature `ems`, and removing it meant one of three things. The
+first is taken: **ems is always there.** `ems = "0.0.12"` (with csx 0.0.3 through it, as `ems::csx`; both MIT,
+from crates.io, no further dependencies, MSRV 1.95 as cadlab's) is a dependency of every build, the feature and
+every `cfg(feature = "ems")` are gone, and the engine is removed. No openEMS, CSXCAD or other GPL code was read;
+nothing was changed in ems.
+**Removed** (5500 lines deleted, 4800 net; 3400 of the deleted in `src`, the rest tests): `fdtd::engine` (2253 lines: the Yee update on
+the graded mesh, Debye poles, the surface impedance on conductor loops, CPML, lumped elements, probes, its
+running DFT and its thread pool), `fdtd::conformal` (575: its Dey–Mittra cells), the surface-impedance fit of
+`fdtd::fit` (`surface_fit`, `surface_impedance`; ems fits its own), the voxelizer and the engine's run in
+`fdtd` (`build`, `prepare`, the second half of `sparams`), `parts::place` (elements on voxelized copper), the
+`Solver` enum, `Options::solver`, and the error `sim.solver_unavailable`.
+**Kept**, being what the model is built from whoever solves it: `fdtd::extract` (the region, the mesh refined
+for narrow diagonal tracks, the cell guard, the candidates for lumped parts), `place_ports`, `Waves` (S = B A⁻¹
+and the Touchstone result), `notes`, `planned`, the Debye fit of `fdtd::fit` (the openEMS export writes the same
+terms), `parts::candidates` and `parts::boxes`, all of `openems`, `touchstone`. What the adapter took from the
+engine moved to `fdtd`: `Gaussian` (the pulse's length, for the plan), `Hooks`, `LumpedPort`, `Probe`; `EPS0`
+and `C0` are `openems`'s. Of `fdtd::conformal` one function is left, `narrow` (which slanted tracks are too
+narrow for the mesh), as `fdtd::slanted`. The library's public `fdtd::engine` and `fdtd::conformal` are gone
+with no replacement: a library user who drove the engine directly uses ems.
+**`solver`.** The parameter is removed from `sim.sparams` outright: with one solver it chose nothing, and a
+value kept only to be refused (`builtin`) or to be ignored (`ems`) would be a parameter that lies. The command's
+arguments are `deny_unknown_fields`, so a request that still names `solver`, with either value, gets
+`args.invalid` naming the field and listing the arguments there are, as any unknown argument does. The *record*
+stays and says more: the output's `solver` and the Touchstone file's first comment line are `ems 0.0.12`, the
+crate and the version this build depends on (`fdtd::SOLVER`; `Cargo.toml` asks for exactly that version, a
+0.0.x requirement, and a unit test holds the constant to the manifest). The text result says "with ems 0.0.12:".
+**Old inputs.** Nothing saved holds the parameter: `sim.sparams` is a query, the history stores project
+snapshots and not requests, and no project file, golden file or snapshot names `solver` or `builtin` (checked
+by grep; `tests/snapshots/cli__commands.snap` lists the command by its summary, unchanged). The output type's
+`solver` is now a string with a default, so a stored result with `"solver": "builtin"` or without the field
+still deserializes, and its text names what it holds. A Touchstone file is read by `touchstone` whatever its
+comments say; one that says `(solver: builtin)`, or names no solver (before D94), is the removed engine's. The
+MCP tool schema and the CLI flags are generated from the command, so `--solver` and the `solver` property are
+gone from both; the command's input schema in `describe` is 10 644 bytes of the 11 000 its test allows.
+**Tests.** Every board-level test that ran on both solvers runs on ems alone, at the tolerance it had
+(`sim_sparams_command`, `sim_sparams_models_parts`, `cut_cells_do_not_change_a_parts_columns`,
+`sim_sparams_conformal_option`, `narrow_diagonal_track_refines_the_mesh`, and the `#[ignore]` validations
+`sim_sparams_microstrip_validation`, `lossless_line_near_the_pml_is_passive`, `sim_sparams_mask_validation`,
+`sim_sparams_parts_validation`, `routed_45_degree_line`, `rf_path_full_wave`); their references were never the
+other solver (the 2D field solver, D52's loss model, circuit theory, passivity, the straight line, the ideal
+chain). The openEMS oracle compares openEMS with `sim.sparams` once per case where it did so per solver. Where a
+test's only reference was the built-in solver's result, the reference is now a recorded figure:
+- `ems_runs_the_region` held ems to the engine on a coarse lossy microstrip (|S21| within 0.01 and |S11| within
+  0.015 between microstrip ports, |S21| within 0.05 between lumped ports) and asserted the two outputs' mesh and
+  ports equal. The engine's |S11| and |S21| at the eleven frequencies of both runs are constants in the test
+  (`RECORDED_MSL_S11`, `RECORDED_MSL_S21`, `RECORDED_LUMPED_S21`), taken from `sim.sparams` with
+  `solver: builtin` at commit 3aa423f, the last with the engine, in a debug build on Linux x86-64, to four
+  digits; the test also holds the mesh to the line counts the figures were taken on. ems reads within 0.0020,
+  0.0034 and 0.0026 of them; the tolerances are 0.01, 0.015 and 0.01 (the lumped one was 0.05, set when the two
+  read 0.030 apart at 9 GHz). The equality of mesh and ports is dropped: both came from the same code.
+- The engine's unit-level fixtures had ems counterparts that only printed (`measure_lumped_fixture`,
+  `measure_cavities`: ems directly on csx models of the same strip-in-a-box and the same cavities). They assert
+  now, at the tolerances the engine was held to: `lumped_fixture_matches_circuit_theory` (not ignored; series
+  R within 0.003 in |S21| and 0.015 in |S11|, reactive series elements 0.02, the shunt capacitor 0.02, the
+  notch 0.03, and a shunt 50 Ω, new, 0.003) and `cavities_match_their_modes` (`#[ignore]`; PEC resonances
+  0.4 %, Q from σ 3 %, the plates' Q 1 %, the Debye filling's resonance 0.3 % and Q 1 %). Measured with 0.0.12:
+  0.0009 / 0.011, 0.016, 0.007, 0.009, 0.0019; −0.05 and −0.08 %, +0.04 %, +0.08 / −0.14 / −0.22 %, −0.01 %,
+  −0.74 / −0.65 / −0.67 %. References: circuit theory and the analytic modes.
+Dropped, because they compared the two solvers or measured the engine and nothing else: the engine-level tests
+of `tests/fdtd.rs` (its microstrip probes against the field solver, cavities, energy conservation, the Courant
+limit, its thread independence, its surface impedance and Debye terms against D52), of `tests/fdtd_conformal.rs`
+(its cut cells on diagonal strips, cylinders, a round patch, a strip resonator; energy on cut cells) and of
+`tests/fdtd_parts.rs` (its elements on the box fixture), the unit tests of `fdtd::conformal` and of the surface
+fit, `measure_lossy_microstrip` and `measure_via` (two solvers side by side; the openEMS oracle holds both cases
+to an outside reference), `rf_path_full_wave_ems` (folded into `rf_path_full_wave`, which takes
+`CADLAB_S6_THREADS` and prints the time), and `CADLAB_MEM_SOLVER` of `measure_memory`. The other `measure_*`
+tests print ems alone. No golden file and no snapshot changed.
+**What is lost.**
+- *The second result on the same model.* Two solvers in one process, on the same mesh and timestep, answered
+  "which of the two is off" without installing anything: ems's extra conductor loss on diagonal copper (D87,
+  D89), its two points of laminate loss on a long line and its 1.4 to 1.7 times the steps to a deep end
+  criterion (D89, D90) were found that way. What
+  is left is the openEMS oracle (CI only), the recorded line above, the result's own passivity and reciprocity
+  checks, and a second mesh. A regression in ems that keeps a result passive and inside the validations'
+  tolerances would now be seen only against openEMS, at that job's tolerances (15 % + 0.025 dB on the lines,
+  0.25 dB on the via).
+- *A build without the solver dependency.* `--no-default-features` no longer drops ems and csx: 21 s of a
+  release build, and two more crates for a library user who wants the board model only. There is no build of
+  cadlab without a full-wave solver, and none where `sim.sparams` is refused for lack of one.
+- *Memory.* ems takes 1.3 to 1.8 times what the engine took (D98: 91 to 97 MB against 57 MB on 580 000 cells,
+  58 to 62 MB against 34 to 35 MB on the via transition), and by ems's account that is not about to change.
+  The lower figure is no longer available by choosing a solver.
+- *The engine's own measurements* in ELECTRICAL.md (conformal cells on cylinders and patches, the surface
+  impedance on a strip resonator) are in the history, not in the document, which describes ems.
+*Why now:* D98's two measurable reasons to keep the engine were gone (one thread within 1.1 times, session 6
+faster at equal threads), the oracle job had run twice with ems as the default, and a second engine kept only
+as a reference costs its 2800 lines, their tests in every CI run and a `solver` axis in every board-level
+test, for a comparison whose results have not moved since ems 0.0.10 (D94, D98: the same bytes).
+**Verification** (Linux x86-64, six threads on a shared machine, ems 0.0.12 from crates.io). `cargo fmt --all
+--check`; `cargo clippy --all-targets --all-features -- -D warnings`, and the library with
+`--no-default-features` (`--all-targets --no-default-features` does not build, before and after this change:
+`tests/render_board3d.rs` needs `png`); `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`;
+`cargo +1.95 check` with all features and with none; the test targets `fdtd`, `fdtd_ems`, `fdtd_parts`,
+`fdtd_conformal`, `openems`, `agent_session6`, `agent_ergonomics`, `cli`, `mcp` and the `fdtd` unit tests in a
+debug build; and in release every `#[ignore]` validation named above: `sim_sparams_microstrip_validation`
+(|S21| −1.3 to +5.3 % of D52, Z₀ +1.0 to +2.9 %, εeff +0.7 to +1.0 %), `lossless_line_near_the_pml_is_passive`
+(0.9991 to 1.0007), `sim_sparams_mask_validation` (Z₀ +1.1 %, εeff −0.3 %), `sim_sparams_parts_validation`
+(0.007, 0.009, 0.008), `routed_45_degree_line` (164.2° straight; 154.7° and 157.7° bent with conformal cells,
+104.1° and 143.5° as staircases; the 0.3 mm track on 2.46 million cells 141.1°, 156 s),
+`cavities_match_their_modes`, and `rf_path_full_wave` (|S11| 0.5726, |S21| 0.7988, D98's figures; 14 529 steps
+per port, 33.9 s). All pass. The full `cargo test --all-features` was not run here (the merger's), `cargo deny`
+is not installed here and openEMS is not either: those are CI's, below.
+@@CI@@
+*Not established:* what ems's memory or time is on Windows or macOS (D98); times on an unshared machine with
+more cores; whether a future ems release keeps the recorded line (the test will say); the via transition on
+0.2 mm cells, not run again (D90).
+
+
 ## Open questions

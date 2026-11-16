@@ -332,7 +332,7 @@ The first step of full-wave analysis (S-parameters of vias, transitions, connect
 a region of the board exported as an [openEMS](https://openems.de) FDTD simulation. openEMS is an external
 tool (GPL): cadlab writes its documented input (the CSXCAD XML geometry format and its Python interface, as
 used in openEMS's tutorials), never links, bundles or reads its code. Code: `src/openems/` (DECISIONS D54,
-D68, D74). The export writes the same model as the built-in solver (`sim.sparams`): Djordjevic–Sarkar dielectrics
+D68, D74). The export writes the model `sim.sparams` simulates: Djordjevic–Sarkar dielectrics
 as the same Debye terms, lossy copper (as openEMS conducting sheets), solder mask, board parts as lumped elements.
 
 ```
@@ -416,8 +416,8 @@ margin).
 
 openEMS's microstrip port measures a zero-thickness strip: with `copper: solid` its probes read nonsense
 (εeff 3.6–6.8 for a 3.0 line, Z₀ with a large imaginary part, seen with the oracle), so an `msl` port on solid
-copper is warned (`openems.msl_solid_copper`: export with `copper: sheet`, or use lumped ports). The
-built-in solver measures both.
+copper is warned (`openems.msl_solid_copper`: export with `copper: sheet`, or use lumped ports).
+`sim.sparams` measures both.
 
 **Not modeled in the export:** silkscreen, the mask's own margin around pads (openings are the pad copper),
 roughness beyond f₀ (folded into the sheets' conductivity there), conductor loss in via barrels (perfect
@@ -463,7 +463,13 @@ copper) run in the same job, at the pinned revision:
 
 The test asserts |S21| within 0.25 dB from 0.5 GHz for the via (it measures 0.03), |S21| > −3 dB and |S11| < −6 dB
 at 1 GHz, and for the parts within 0.03 of `sim.sparams` and of theory from 0.5 to 4.5 GHz (it measures 0.009 and
-0.011). `lossy_microstrip_oracle` keeps `pml_outside: false` in both solvers, so its numbers above stay comparable.
+0.011). `lossy_microstrip_oracle` keeps `pml_outside: false` in openEMS and in `sim.sparams`, so its numbers above
+stay comparable. The `sim.sparams` columns of this section's tables were read when it ran on cadlab's own engine
+(D68, D74; removed by D100); on ems, its solver now, the job reads the lines within 36.0 % (sheets) and 41.2 %
+(`solid`) of openEMS at the lowest frequencies, inside the test's absolute term, and the via transition within
+0.07 dB (run 43964289403, D98; |S21| at 1.05 / 3.03 / 6 GHz on the sheet line −0.075 / −0.203 / −0.396 dB against
+openEMS's −0.097 / −0.220 / −0.422, and on the via at 0.54 / 1.03 / 2.02 / 3.01 / 4.00 GHz −0.045 / −0.083 /
+−0.134 / −0.185 / −0.390 dB, D90).
 
 **What makes openEMS diverge** (D74, black-box runs of openEMS's CLI, energy against time). Run length matters: a
 Mur case bounded at 40 000 steps went to NaN by 113 000, so the steps are given. On the 4-layer via board, whose
@@ -493,14 +499,15 @@ PML diverged with a vacuum-only PML too (not explained, and not a configuration 
 
 ## Full-wave solver: FDTD (`sim.sparams`)
 
-The S-parameters of a board region computed in cadlab itself: a 3D finite-difference time-domain (FDTD)
-solver, `src/fdtd/` (DECISIONS D59). It takes exactly the region, stack, copper, holes, ports and graded mesh
-of `export.openems` (same arguments; the openEMS export stays available for larger or cross-checked runs),
-simulates once per port and writes a Touchstone file. Two solvers run that region: the `ems` crate's, the
-default since D94 (see "ems, the default solver" below), and cadlab's own, `solver: builtin`, which is what a build
-without the cargo feature `ems` runs. The region, the mesh, the ports, the options, the diagnostics and the
-checks of this section are the same for both; the method described here is the built-in solver's, and the result
-names the solver that ran (`solver` in the output, `(solver: ems)` in the Touchstone file's first line).
+The S-parameters of a board region computed in cadlab's own process: a 3D finite-difference time-domain (FDTD)
+run, `src/fdtd/`. It takes exactly the region, stack, copper, holes, ports and graded mesh of `export.openems`
+(same arguments; the openEMS export stays available for larger or cross-checked runs), simulates once per port
+and writes a Touchstone file. The solver is the [`ems`](https://crates.io/crates/ems) crate's: a clean-room,
+pure-Rust FDTD solver (MIT, with its geometry crate `csx`; no further dependencies), used through its Rust API
+from crates.io and a dependency of every build (DECISIONS D86, D94, D100). cadlab builds the model, places the
+ports and reads the waves; ems does the time stepping. There is no solver to choose: until D100 cadlab also had
+an FDTD engine of its own (D59) behind `solver: builtin`, and the parameter went with it. The result names what
+ran, `solver: "ems 0.0.12"` in the output and `(solver: ems 0.0.12)` in the Touchstone file's first line.
 
 ```
 cadlab sim sparams --f-max 10GHz --around track#12 --copper sheet \
@@ -508,110 +515,94 @@ cadlab sim sparams --f-max 10GHz --around track#12 --copper sheet \
 cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
 ```
 
-**Method** (written from the textbooks, no code of openEMS, Meep, gprMax or any other solver used):
+**The model** (code: `fdtd::extract`, `fdtd::place_ports`, `fdtd::ems`, `fdtd::Waves`; no code of openEMS,
+CSXCAD, Meep, gprMax or any other solver was read). The geometry ems gets is the property list of
+`export.openems` (`openems::xml::properties`: the export's file is that list written out), with one difference:
+lossy `solid` copper stays metal volumes, where the export writes two conducting sheets per layer.
 
-- Yee's staggered grid (K. S. Yee, IEEE Trans. AP-14, 1966) on the graded rectilinear mesh, in integral form
-  (curls as circulations over primal and dual cell faces; A. Taflove and S. C. Hagness, *Computational
-  Electrodynamics*, 3rd ed., ch. 3). Fields in single precision, coefficients from double precision.
-- Materials: dielectrics are the stackup's, inside the board outline (air outside); non-plated holes are air.
-  Each is causal and dispersive: the Djordjevic–Sarkar model (see "Losses") through its εr and tan δ at the
-  stackup's `ref_freq`, or, for a dielectric without one, at the pulse's center f₀ (tan δ 0.02 when unset),
-  so a constant-tan-δ laminate is exact at f₀ and causal around it. It is fitted over the band of the result
+- Mesh: the export's graded rectilinear mesh (below), handed over in millimetres, every coordinate through one
+  conversion so a primitive's corner on a mesh line is that line. ems's fields are single precision.
+- Dielectrics are the stackup's, inside the board outline (air outside); non-plated holes are air. Each is
+  causal and dispersive: the Djordjevic–Sarkar model (see "Losses") through its εr and tan δ at the stackup's
+  `ref_freq`, or, for a dielectric without one, at the pulse's center f₀ (tan δ 0.02 when unset), so a
+  constant-tan-δ laminate is exact at f₀ and causal around it. cadlab fits it over the band of the result
   (`f_min`, or 1 % of `f_max`, to `f_max`) as ε∞ + σ/(jωε₀) + Σₚ Δεₚ/(1 + jωτₚ) on relaxation times shared by
   every material (three per two decades from a third of the band's bottom to three times its top, at least
   six), the weights by non-negative least squares on ε′ and ε″ in relative terms (C. L. Lawson, R. J. Hanson,
-  *Solving Least Squares Problems*, 1974) with ε∞ ≥ 1: non-negative Debye terms are passive, so the update
-  stays stable (εr within 0.1 %, ε″ within 0.6 % of the model over the band). The time stepping is the
-  auxiliary differential equation of each pole (Taflove ch. 9), τ dJ/dt + J = ε₀Δε dE/dt, discretized at the
-  half step (J⁺ = k J + β (E⁺ − E), k = (2τ − Δt)/(2τ + Δt), β = 2ε₀Δε/(2τ + Δt)) and folded into the edge's
-  coefficients. Each E edge averages ε∞, σ and every Δεₚ of the four cells around it (area-weighted), which
-  the shared relaxation times make exact for a mix of materials. Lossless dielectrics stay plain.
-- Copper: the E edges lying in the copper volume (`copper: solid`, between the mesh lines of both copper
-  surfaces) or on the sheet (`sheet`), x and y edges by their midpoint, z edges by their node, are conductor
-  edges; plated holes and vias are metal cylinders (plus the node column nearest their center, so a barrel
-  thinner than the cells still connects its layers). With a conductivity (`conductivity`, default 58 MS/m;
-  `perfect_copper` for lossless copper) every conductor surface gets a surface impedance boundary condition
-  (J. G. Maloney, G. S. Smith, IEEE Trans. AP-40, 1992; J. H. Beggs, R. J. Luebbers, K. S. Yee, K. S. Kunz,
-  IEEE Trans. AP-40, 1992; Taflove ch. 10): the tangential E on a surface edge is Zs ∗ K instead of zero, K the
-  surface current density: the current through the edge's dual loop (the circulation of H over its faces
-  outside the conductor) spread over the copper surface that loop encloses (the half cells on either side
-  along the face where the conductor continues). E enters the H update of those faces, so the power
-  dissipated is Re Zs · I² / w: the current crowding at a trace's edges and corners is carried on the copper
-  there (a sidewall 35 µm high and the corners held about 40 % of a 1 mm microstrip's conductor loss in the
-  field solver; spreading the edge current over the whole dual cell lost it, 40 % too little loss, converging
-  only as the cell size^(1/3)). Inside a sheet (open on both sides) each side is its own loop; at a sheet's
-  edge the current wraps around and one loop takes it. Zs(ω) = Rs K + j Rs (D52's skin effect, the roughness
-  factor K of `roughness` or `huray_radius`/`huray_ratio` on the resistance) is fitted over the band as
-  r₀ + Σₚ rₚ s/(s + aₚ) (non-negative sections, two per decade from a decade below to a decade above the band:
-  passive) and convolved recursively (bilinear: Vₚ⁺ = kₚ Vₚ + βₚ (I⁺ − I)). Smooth copper is within 1 % in R
-  and X; with roughness R stays within 2.5 % while X takes the causal value of a resistance rising faster
-  than √f (up to twice the smooth reactance D52 adds, a fraction of a percent of the line's inductance).
-- Diagonal and curved copper (`conformal`, default true; D73): the cells a slanted polygon edge crosses use the
-  conformal update of S. Dey and R. Mittra (IEEE Microwave Guided Wave Lett. 7, 1997): Faraday's law on a cut
-  face integrates over its open part, μ A H′ = −Σ l E, with A the open area and l the open lengths of its edges,
-  taken from exact intersections with the polygons; Ampère's law is unchanged. That form conserves an energy
-  (Σ ε l A* E²/2 + Σ μ l* A H²/2), so only its largest eigenvalue can limit the timestep. Instead of lowering
-  the timestep for slivers, the area in the update is raised where a face's own frequency would pass a quarter
-  of 4/Δt² (the idea of B. Benkler, N. Chavannes and N. Kuster, IEEE Trans. AP-54, 2006, with our own bound):
-  Δt² λmax was at most 3.56 in the cases below (4 is the leapfrog limit, an uncut cubic grid at 0.95 Courant has
-  3.61). Axis-aligned copper keeps its edges exactly, with the thirds rule, and copper within the absorbing
-  layers stays staircased (the CPML's update takes whole lengths). With a surface impedance, a cut edge carries
-  the covered fraction κ of its dual loop's circulation, its field acting over the covered part (dissipation
-  Zs κ² (∮H)² l / w: positive for any κ), and w is measured: the copper across the edge's dual cell for in-plane
-  edges, the outline's length nearest to it for z edges. Without that a staircase's surface is 4/π too long on a
-  curved wall, and the current on a diagonal strip's edges is missed. A lumped element takes its whole edge even
-  if the outline cuts it, and parts are placed on the copper as voxelized (the same columns with or without
-  conformal cells, `columns` in the output) with cut edges between a pad's center and the element made whole.
-  `conformal_edges` in the output counts the cut edges.
+  *Solving Least Squares Problems*, 1974) with ε∞ ≥ 1 (`fdtd::fit`): non-negative Debye terms are passive, so
+  the update stays stable (εr within 0.1 %, ε″ within 0.6 % of the model over the band). ems gets a
+  `DebyeMaterial` with ε∞, the conductivity and the poles. An edge in the laminate's surface gets the poles by
+  the share of its dual face the laminate fills, as it gets the static ε (`PoleWeighting::Averaged`; ems's
+  default is openEMS's rule, the whole poles for such an edge, which read two points more loss on a 60 mm
+  microstrip: D89, D90). Lossless dielectrics stay plain materials.
+- Perfect copper (`perfect_copper`): `Metal`, as volumes between the mesh lines of both copper surfaces
+  (`copper: solid`) or as sheets on the mesh plane (`sheet`). Plated holes and vias are metal cylinders plus the
+  node column nearest their center, so a barrel thinner than the cells still connects its layers (the column
+  is a wire: no loss of its own).
+- Lossy copper (`conductivity`, default 58 MS/m): `solid` copper is the net's metal volumes named a conductor
+  (`CompileOptions::with_lossy_metal`), a surface impedance on every face of the copper, sidewalls included (a
+  sidewall 35 µm high and the corners hold about 40 % of a 1 mm microstrip's conductor loss in the field
+  solver); `sheet` copper is a `ConductingSheet` per net and layer (the conductivity, the layer's copper
+  thickness) integrated as a rational two-port of its two faces (`SheetModel::SurfaceImpedance`). Both are
+  rational fits of the skin effect over the frequencies of the result. `roughness`, or `huray_radius` with
+  `huray_ratio`, is Hammerstad–Jensen's or Huray's factor at every frequency of that fit
+  (`Conductor::with_roughness`, `with_sheet_roughness`), not folded into the conductivity at f₀ as the export
+  does.
+- Diagonal and curved copper (`conformal`, default true; D73, D87, D89): cells are cut where copper is oblique
+  to the mesh (diagonal tracks, round pads, barrels), for sheets on mesh planes and for solid copper
+  (`ConformalOutlines::Slanted`); copper along the mesh keeps the staircase its mesh lines were placed for,
+  with the thirds rule. What a small cut face does, and whether a slanted track or a barrel about a cell wide
+  keeps whole edges, is ems's to decide (`ConformalOptions::keep_stable`, `CompileOptions::conformal_bridges`:
+  it keeps a small face's own current where the cells around it are stable at the timestep, keeps whole the
+  edges that carry a track about a cell wide, the edge that continues a lumped element's column into its pad
+  and a sheet's edges under a barrel, and integrates the open area of the faces a barrel, a pad or a corner
+  crosses). By construction, the covered part of an edge that a slanted outline of *solid* lossy copper cuts is
+  a perfect conductor, and the whole edges beside it carry its share of the surface. `conformal_edges` in the
+  output counts the cut edges; `conformal: false` makes every edge all copper or none.
 - Solder mask (`mask`, `mask_copper`, `mask_er`, `mask_loss_tangent`, as in the export): a dielectric layer
   on both outer layers, over the laminate and over the copper, open at the pads; Djordjevic–Sarkar at f₀ like
   an unreferenced laminate; its surfaces are mesh lines (a 25 µm mask makes 25 µm cells, so a smaller
   timestep).
-- Boundaries: a convolutional PML (J. A. Roden and S. D. Gedney, Microwave Opt. Technol. Lett. 27, 2000;
-  Taflove ch. 7) in the outer `pml_cells` cells (default 8) of every side, inside the region like openEMS's:
-  polynomial grading m = 3, σ_max = 0.8 (m + 1) / (η₀ Δ), κ = 1, a CFS α falling from 2π ε₀ f₀ (0.28 S/m
-  at 5 GHz, in Taflove's 0.05–0.3 S/m) to 0 into the layer as (1 − ρ)²; the electric walls behind it close the domain.
-  The CFS α is what absorbs the evanescent near field of a line close to the layer: at a tenth of that value
-  (D59–D63) a microstrip 4 h from the side PML drew energy from it (a lossless line read up to −0.06 Np/m
-  around 1.8 GHz, the −9.5 % of the lossy line below; D68). Copper running into the layer is absorbed
-  (a line through the region's edge is a matched continuation).
-- Ports: lumped ports are resistive voltage sources of the reference impedance z0 (M. Piket-May, A. Taflove,
-  J. Baron, IEEE Trans. MTT-42, 1994; Taflove ch. 15): columns of z edges from the reference copper's surface
-  to the signal copper's, across the port's width, each column `z0 · columns` in series with the source, the
-  resistance folded into the edges' conductivity. Their voltage (mean of the columns) and current (exact
-  element current, V + z0 I = V_s) are sampled at the half step. Microstrip ports feed the same source on the
-  line at a fifth of their length and measure at its middle (the reference plane, `reference_plane` in the
-  output): voltage from the line's middle to the reference surface, current from the circulation of H around
-  the strip on both sides of the plane, interpolated to it. Their feed and reference planes get mesh lines.
+- Boundaries: a convolutional PML in the outer `pml_cells` cells (default 8) of every side, inside the region
+  like openEMS's (or beyond it, `pml_outside`), with a complex frequency shift α of up to 2π ε₀ f₀
+  (0.28 S/m at 5 GHz). The shift is what absorbs the evanescent near field of a line close to the layer: with
+  a tenth of that value a microstrip 4 h from the side layer drew energy from it (a lossless line read up to
+  −0.06 Np/m around 1.8 GHz; D68). Copper running into the layer is absorbed (a line through the region's edge
+  is a matched continuation).
+- Ports: a lumped port is ems's `LumpedPort`, a resistor of the reference impedance z0 with a Thevenin source,
+  on columns of z edges from the reference copper's surface to the signal copper's across the port's width;
+  its voltage is the mean over the columns (`average_voltage`) and its current the element's. A microstrip
+  port feeds the same source on the line at a fifth of its length and measures at its middle (the reference
+  plane, `reference_plane` in the output): a voltage probe from the line's middle to the reference surface
+  and two current probes, the circulation of H around the strip on the dual planes on both sides of the plane,
+  interpolated to it (not ems's three-probe `MslPort`, which needs a zero-thickness strip). The feed and
+  reference planes get mesh lines.
 - Board parts (D65; `parts`, default true): every two-pin resistor, capacitor and inductor with both pads in
   the region is a lumped series R–L–C element from its values: a resistor's `resistance`, a capacitor's
   `capacitance`, an inductor's `inductance`, plus `esr` and `esl` when given (a component property of the
-  same name wins over the part's parameter; a 0 Ω resistor is a short, made of conductor edges). The element
-  lies on the pads' copper layer along x or y (the axis joining the pad centers), in the mesh edges between
-  the two pads' copper (the gap: edges that are not copper, from the last node of one pad to the first of
-  the other), over the nodes where the pads face each other across that axis and, with `solid` copper, on
-  both copper surfaces. The columns are in parallel and each column's edges in series, sharing R, L and 1/C
-  in proportion to their lengths (Piket-May, Taflove and Baron; Taflove ch. 15, extended to reactive
-  elements). Each edge carries the element's current I and charge q as state, advanced with its E by the
-  trapezoidal rule: E l = R I + L dI/dt + q/C at the half step and (I⁺ + I)/2 over the dual face in Ampère's
-  law, so E⁺ and I⁺ come from one 2 × 2 elimination per edge (semi-implicit: stable at the Courant limit for
-  any values, and passive). The element's edges are not dispersive (the Debye terms' permittivity at f₀) and
-  its stored energy (L I²/2, q²/2C) counts in the end criterion. Parts left out, with a warning
-  (`sim.part_not_modeled`): no value, more or fewer than two pads, a pad outside the region, pads on two
-  layers, pads not facing along x or y, or no mesh cell between the pads' copper (their pads stay open);
-  DNP parts are left open with a note. `parts` in the output lists the parts modeled with their values.
-- Excitation: a Gaussian pulse covering f_min .. f_max at −20 dB (f₀ = (f_min + f_max)/2, τ = √ln10 / (π f_c),
-  starting 3.5 τ before its peak); one run per port, the other ports terminated by their resistances.
-- S-parameters: running DFTs of every port's voltage and current at their sampling times give the power waves
-  a = (V + z0 I) / 2√z0, b = (V − z0 I) / 2√z0 of each port in each run; S = B A⁻¹ over the runs, so a
-  termination that is not matched (a microstrip port's source on a line of another impedance) does not
-  bias the result. Written as Touchstone 1.1 (RI, the ports' z0, 2.0 when they differ), 7 significant digits.
-- Timestep: 0.95 of the Courant limit of the smallest cells, 1 / (c √(Σ 1/Δ²)); each run stops when the
-  energy (fields, and the Debye polarizations' P²/(2ε₀Δε), P = ε₀Δε E − τJ) has decayed by `end_criteria`
-  (60 dB) below its peak after the pulse, or at `timesteps` (100000, `sim.not_converged` warning). 40 dB (the
-  default before D63) leaves a tail of about 1 % in amplitude, whose truncation biased |S| by a few hundredths
-  of a dB below f_max / 10 (|S₂₁| above 0 dB on short lossy lines); 60 dB costs about a quarter more steps. Progress is reported every 32 steps (timestep, energy in dB) and the run can
-  be cancelled.
+  same name wins over the part's parameter; a 0 Ω resistor is a short, metal). The element is a box on the
+  pads' copper layer along x or y (the axis joining the pad centers), between the two pads' facing edges, over
+  the width where the pads face each other and the copper's thickness (`fdtd::parts`; the export writes the
+  same box): a `LumpedElement`, a resistance alone or a series element with its reactance. `columns` in the
+  output counts the columns of mesh edges the box takes in, the same with or without conformal cells. Parts
+  left out, with a warning (`sim.part_not_modeled`): no value, more or fewer than two pads, a pad outside the
+  region, pads on two layers, pads not facing along x or y, or no mesh cell between the pads' copper (their
+  pads stay open); DNP parts are left open with a note. `parts` in the output lists the parts modeled with
+  their values.
+- Excitation: a Gaussian pulse covering f_min .. f_max at −20 dB (f₀ = (f_min + f_max)/2); one run per port,
+  the other ports terminated by their resistances. The model is compiled once (`ems::CompiledModel`; 0.45 s
+  for 67 000 cells) and every port's run is a new engine from it driving that port's source; a run gives its
+  simulation up for its results, so the probes' series are held once (D98).
+- S-parameters: the spectra of every port's voltage and current give the power waves a = (V + z0 I) / 2√z0,
+  b = (V − z0 I) / 2√z0 of each port in each run; S = B A⁻¹ over the runs, so a termination that is not
+  matched (a microstrip port's source on a line of another impedance) does not bias the result. Written as
+  Touchstone 1.1 (RI, the ports' z0, 2.0 when they differ), 7 significant digits.
+- Timestep: 0.95 of ems's limit for the mesh and its cut cells (`plan` reports it); each run stops when the
+  energy of the fields has decayed by `end_criteria` (60 dB) below its peak, checked every 32 steps, or at
+  `timesteps` (100000, `sim.not_converged` warning). 40 dB (the default before D63) leaves a tail of about 1 %
+  in amplitude, whose truncation biased |S| by a few hundredths of a dB below f_max / 10 (|S₂₁| above 0 dB on
+  short lossy lines); 60 dB costs about a quarter more steps. Progress is reported with the timestep and the
+  energy in dB, and the run can be cancelled.
 - Mesh: the export's, with the thirds rule on by default (`thirds`): at each axis-aligned copper edge, a mesh
   line a third of a fine cell inside the copper and one two thirds outside instead of one on the edge (a
   perfect conductor ending on a mesh line behaves about a third of a cell wider: without the rule a microstrip
@@ -624,24 +615,24 @@ cadlab touchstone summary out/sim/<name>.s2p --frequencies 1GHz,5GHz
   reported as `sim.mesh_refined`; with an explicit `max_cell`, or `conformal: false`, the mesh stays and
   `sim.slanted_copper_unresolved` warns with conformal on. This mesh is `sim.sparams`'s: to cross-check with
   `export.openems`, give both the same `max_cell`.
-- Determinism and threads: with the `parallel` feature the planes of the grid are split between threads (one
-  per 131072 nodes, a pool of the solver's own); every update reads only the other field, reductions are
-  summed per plane in order, so results are bit-identical for any thread count. The Debye edges and the
-  surface faces are lists in index order split per plane (each entry written once); the surface loops first
-  compute their fields from H in chunks, then each face sums its loops' corrections in a fixed order.
+- Determinism and threads: the result is the same bytes for any thread count (`ems_runs_the_region`,
+  `measure_threads`, `measure_threads_conformal`). Without `threads`, ems's own rule (a thread per five x
+  planes and 4096 cells) within cadlab's pool, which `RAYON_NUM_THREADS` caps; one thread in a build without
+  the `parallel` feature.
 
 **Guards.** `max_cells` (default 4 million cells, `sim.too_many_cells` with what to shrink); `timesteps` per
-run; `threads` sets the worker threads (default: from the grid and the machine; the result does not depend on it). The cost is cells × timesteps × ports; a release build updates about 80 million plain cells per second per
-thread, and about 50 million with Debye dielectrics and the surface impedance (a 154 000-cell run in session 6: 91 s;
-the same run took 569 s with the machine at a load of 100) (the timestep follows the smallest cell: a 35 µm copper layer in `solid`
-copper forces small steps; `copper: sheet` avoids it). The mesh keeps `min_cell` between metal lines: clusters of
-lines merge to one each, and a line that lands closer than `min_cell` to the line before it goes (before D70 two
-neighbouring clusters could leave a 5 µm sliver in a 58 µm minimum, and that one cell set the timestep).
+run; `threads` sets the worker threads (default: from the grid and the machine; the result does not depend on
+it). The cost is cells × timesteps × ports ("Measured" below has times; the timestep follows the smallest cell:
+a 35 µm copper layer in `solid` copper forces small steps; `copper: sheet` avoids it). The mesh keeps `min_cell`
+between metal lines: clusters of lines merge to one each, and a line that lands closer than `min_cell` to the
+line before it goes (before D70 two neighbouring clusters could leave a 5 µm sliver in a 58 µm minimum, and
+that one cell set the timestep).
 
 **Plan first.** `plan: true` sets the run up and reports without running it (nothing is written; quick): the mesh
-(line counts, smallest cells per axis), ports, the parts that become lumped elements, every warning below, and
-`estimate`: runs, timesteps of the pulse alone, a rough count for a low-Q structure (1.5 pulses; a resonant one
-rings longer, up to `timesteps`), cell updates, and minutes on one thread at a nominal 50 million cells per second.
+(line counts, smallest cells per axis), ports, the parts that become lumped elements, every warning below, ems's
+own timestep and what it says of the compiled model, and `estimate`: runs, timesteps of the pulse alone, a rough
+count for a low-Q structure (1.5 pulses; a resonant one rings longer, up to `timesteps`), cell updates, and
+minutes on one thread at a nominal 50 million cells per second.
 `sim.sparams` is a query and an MCP call blocks until it ends, so this is how to find out a region is too large
 before spending the time.
 
@@ -652,7 +643,7 @@ and mismatch loss; transmissions at a requested frequency add `available_loss_db
 what the network dissipates or radiates, with the reflection taken out (|S₂₁| between two 50 Ω terminations mixes
 them). `checks` gives the largest Σᵢ|Sᵢⱼ|² and |Sᵢⱼ − Sⱼᵢ| over the band, with warnings above 1.02
 (`sim.not_passive`) and 0.03 (`sim.not_reciprocal`). The Touchstone file starts with comment lines naming the
-region, ports and part values, so it explains itself away from the project.
+solver, the region, ports and part values, so it explains itself away from the project.
 
 **Part values per simulation.** `part_values` (`{"C3": {"capacitance": "1pF"}, "L1": {"esr": "0.3ohm"}}`) replaces
 values for one run without changing the design, to try a matching network; designators must exist
@@ -670,334 +661,107 @@ lumped parts inside the absorbing layer; `openems.port_in_pml` says how much mor
 
 A run stopped inside the excitation pulse warns `sim.stopped_in_pulse` (its numbers mean nothing). Errors: the export's (`openems.*`), `sim.no_ports`, `sim.port_too_thin` (a lumped
 port spanning no cell), `sim.port_too_short` (a microstrip port whose feed and reference plane share a mesh
-line), `sim.port_at_edge`, `sim.unstable`, `cancelled`. Notes: `sim.mesh_refined`, `sim.slanted_copper_unresolved`.
+line), `sim.port_at_edge`, `sim.unstable`, `sim.ems_failed`, `cancelled`. Notes: `sim.mesh_refined`,
+`sim.slanted_copper_unresolved`. An old request that still names `solver` is refused as any unknown argument is
+(`args.invalid`, with the list of the arguments there are).
 
-**Accuracy** (tests in `tests/fdtd.rs`; the `#[ignore]` ones run in release, `cargo test --release --test fdtd
--- --ignored`):
+| Code | |
+|---|---|
+| `sim.ems_<code>` (warning) | ems's own warnings, typed: its code with `_` for `.` (`sim.ems_mesh_resolution`, `sim.ems_lumped_edges`, `sim.ems_conformal_stability`, …, `sim.ems_other` for a wording ems has no code for), one diagnostic per code and property with the count, and as subjects the net and layer, the component or the port's pad behind the property ems names. At most twelve, then `sim.ems_warnings_omitted`. Left out, being what cadlab made on purpose: the mesh (`mesh.in_pml`, `mesh.pml_grading`, `mesh.grading`, `mesh.time_step`: copper and laminate run into the absorbing layer, the cells are graded and thin), the probes on dual planes (`box.snapped`), the barrels' node columns (`metal.lossy_thin`) and the covered parts of cut edges of lossy copper (`metal.lossy_cut`) |
+| `sim.ems_failed`, `sim.unstable` (errors) | ems refused the model; the energy went to NaN, or below zero (the invariant of a stable scheme is not negative: ems ends such a run as diverged) |
+
+**Accuracy.** Each row is a test with a reference that is not `sim.sparams` itself; the `#[ignore]` ones run
+in release (`cargo test --release --test <file> -- --ignored --nocapture`). Figures are ems 0.0.12's unless a row
+says otherwise (0.0.10's stand for 0.0.11 and 0.0.12, whose Touchstone files are 0.0.10's byte for byte on the
+nine cases compared: D94, D98).
 
 | Case | Reference | Agreement |
 |---|---|---|
-| zero-thickness microstrip W = 1 mm on 0.5 mm of εr 4, probes on the line, thirds rule, 4 cells across and in the substrate | 2D field solver (D49): Z₀ 50.81 Ω, εeff 3.071 | Z₀ +0.5–0.7 %, εeff +0.1–0.7 % (1–3 GHz) |
-| the same, 8 cells across and in the substrate | field solver | Z₀ +0.1–0.4 %, εeff +0.2–0.3 % |
-| the same without the thirds rule, 8 / 16 cells across | field solver | Z₀ −5.4 % / −3.4 %, εeff +1.0 % / +0.6 % |
-| the same with a constant σ for tan δ 0.02 (engine level): attenuation at f₀ = 5 GHz | perturbation model (D52), αd = 1.636 Np/m | +0.5 % |
-| microstrip W = 1 mm, H = 0.5 mm, 35 µm copper (strip and plane), conductivity 580 kS/m (a loss large enough to measure on 6 mm), 3–8 GHz: the attenuation the surface impedance adds (perfect-conductor run subtracted) | D52 field solver R (current method, corners refined) | 8 cells across: −5.7 to +0.7 %; 4 cells: −3.2 to +3.3 % |
-| parallel-plate cavity, copper plates (0.5 mm of εr 4.4), TM₁₁₀ at 1.4, 6.9 and 14 GHz | Q = h/δ (the plates' loss only) | +0.0 %, −0.9 %, −1.0 % |
-| the same at 6.9 GHz, Hammerstad–Jensen 1 µm RMS / Huray a = 0.5 µm, SR 2 | Q = h/(δ K) | −0.7 % / −1.0 % |
-| cavity filled with Djordjevic–Sarkar εr 4, tan δ 0.02 at 1 GHz (Debye fit over 0.1–10 GHz or 0.5–20 GHz), TM₁₁₀ at 2.4, 9.0 and 14.8 GHz | resonance f √εr(f) = f_vacuum; Q = 1/tan δ(f) | resonance within 0.1 %; Q −0.3 to −0.7 % |
-| microstrip on that laminate (35 µm perfect conductors), 1–5 GHz | field solver with the same model (D52 dispersion): εeff 3.021 → 2.966 | εeff +0.6 to +1.1 % (the line's own +0.5 % bias, above); α within −4 to +6 %, mean −1 % (3–6 GHz) |
-| `sim.sparams`, the full model: a routed 64 mm line (the same section on that laminate, 35 µm solid copper at 58 MS/m, microstrip ports 4 mm), Z₀ and εeff from the S-parameters (ABCD of the 60 mm between the reference planes), 1–3 GHz | field solver | Z₀ +1.1 to +3.0 %, εeff +0.6 to +1.1 % |
-| the same: matched line | | |S₁₁| < −28 dB from 0.5 to 9.5 GHz |
-| the same: |S₂₁| (total loss: conductor with skin effect, dispersive dielectric) | D52, 0.136 dB at 0.6 GHz to 1.657 dB at 9 GHz | −2.3 % (1.1–1.6 GHz) to +5.0 % (9 GHz) (before D68's CPML shift: −9.5 % at 1.6 GHz) |
-| the same line lossless (perfect copper, tan δ 0), the side PML 4 h from the strip | passivity, \|S₁₁\|² + \|S₂₁\|² ≤ 1 | ≤ 1.001 from 0.5 to 4 GHz (1.007 at 1.8 GHz before D68) |
-| the same line, sheet copper, 25 µm solder mask of εr 3.8 | field solver with the conformal mask: εeff 3.162 (bare line 3.071) | εeff −0.3 %, Z₀ +1.1 %; the mask's change of εeff −23 % (the bare line's +0.4 % bias) |
-| 20 × 12 mm PEC cavity, εr 4.4, 0.5 mm cells: TM₁₁₀ and TM₂₁₀ | analytic c/(2√εr) √((m/a)² + (n/b)²) | −0.05 %, −0.08 % (numerical dispersion) |
-| the same with σ for tan δ 0.01 at TM₁₁₀: energy decay | Q = 1 / tan δ = 100 | 99.99 |
-| lossless graded mesh (ratio 1.4) with a dielectric and a strip, 6000 steps after the pulse | energy conservation | within −0.7 % / +0.05 % (the staggered E/H sampling) |
-| uniform cubic grid at 0.99 and 1.03 of the Courant limit | stability | stable / diverges |
-| one thread against three, without and with the surface impedance, Debye terms and roughness | | bit-identical spectra |
-| conformal (`tests/fdtd_conformal.rs`): 45° zero-thickness strip W = 1 mm, H = 0.5 mm, εr 4, 2–8 GHz, xy cell 500 µm | field solver | staircase Z₀ +20 to +22 %, εeff +27 to +29 %; conformal Z₀ +5.5 to +7.3 %, εeff +6.6 to +8.9 % |
-| the same, 250 µm (4 cells across W) | field solver | staircase Z₀ −2.2 to −4.0 %, εeff +11.5 to +12.9 %; conformal Z₀ +2.0 to +3.7 %, εeff −2.8 to −1.1 % |
-| the same, 125 µm (8 cells across W) | field solver | staircase Z₀ −2.3 to −4.1 %, εeff +5.8 to +7.2 %; conformal Z₀ −0.2 to +1.5 %, εeff −0.4 to +1.0 % |
-| cylinder with PEC wall, a = 10 mm: TM₀₁₀, TM₁₁₀, TM₀₂₀ at a/Δ = 10, 20, 40, 80 | x_mn c / (2π a) | staircase −2.4…−3.0, −1.4…−1.5, −0.8, −0.37 %; conformal −0.25…−0.87, −0.18…−0.30, −0.11…−0.13, −0.07 % (numerical dispersion included) |
-| the same, wall of 580 kS/m, plates lossless, TM₀₁₀ at a/Δ = 10, 20, 40 | Q = a/δ = 1621 | staircase −19, −20.5, −20.9 % (the limit 1 − π/4); conformal −4.3, −3.3, −2.2 % |
-| open-ended 45° strip resonator, 24 mm, W = 1 mm, 35 µm copper at 580 kS/m, 250 µm cells: conductor Q (radiation taken out with a perfect-copper run) | β/(2α) of D52, 38.4 | staircase +40.9 %, conformal −5.2 % |
-| round patch a = 5 mm on 0.5 mm of εr 4, open, TM₁₁ at a/Δ = 5, 10, 20 | no exact value: Wolff and Knoppik's 8.485 GHz (Electron. Lett. 1974, about 2.5 %), and the finer meshes | staircase 7.339, 7.925, 8.254 GHz (8.337 at a/Δ = 40); conformal 7.779, 8.424, 8.438 GHz |
-| `sim.sparams`: 8 mm, 45° run of 14.1 mm, 8 mm, sheet copper, W = 1 mm, H = 0.5 mm: arg S₂₁ at 10 GHz, \|S₁₁\| | the straight line of that length, 164.2° and −35.7 dB (the bends' own effect aside) | default mesh (0.75 mm): staircase 104.1°, −16.4 dB; conformal (refined to 0.5 mm) 154.8°, −23.1 dB; 0.25 mm cells: staircase 143.5°, −18.2 dB; conformal 157.5°, −28.0 dB |
-| the same, W = 0.3 mm, H = 0.17 mm, εr 4.3 | straight 154.8° | default mesh: staircase and conformal without refinement are open circuits (−72 dB); default with refinement (0.15 mm, 2.46 M cells): 141.0°, −22.7 dB; staircase on those cells 113.4° |
-| 31 × 31 × 7 lossless box with a diagonal strip and a disc, cut cells: 300 000 steps after the pulse | energy conservation; Δt² λmax < 4 | −1.9 to +0.03 % (no growth); Δt² λmax 3.26 |
-| the same strip with CPML, ports, Debye dielectric, surface impedance, shunt R–L–C and a series R on a cut edge | decays to −60 dB; 1 thread against 3 | converged; bit-identical spectra |
-| lumped elements (`tests/fdtd_parts.rs`), engine level: a 0.4 mm strip 0.2 mm over ground in a closed 3 mm box between 50 Ω lumped ports, 0.5–4 GHz; series R 10 / 50 / 200 Ω | S₂₁ = 2Z₀/(2Z₀ + Z), S₁₁ = Z/(2Z₀ + Z) | \|S₂₁\| within 0.001, \|S₁₁\| within 0.011 (the strip's own inductance) |
+| Lumped elements between 50 Ω ports on a 0.4 mm strip 0.2 mm over ground in a closed 3 mm box, 0.5–4 GHz (`lumped_fixture_matches_circuit_theory`, ems directly): series R 10 / 50 / 200 Ω | S₂₁ = 2Z₀/(2Z₀ + Z), S₁₁ = Z/(2Z₀ + Z) | \|S₂₁\| within 0.0009, \|S₁₁\| within 0.011 (the strip's own inductance) |
 | the same: series 1 pF (high-pass), 5 nH (low-pass), 10 Ω + 4 nH + 1 pF (band-pass at 2.5 GHz) | same | \|S₂₁\| within 0.016 |
-| the same: shunt 2 pF (low-pass) and a shunt 5 Ω + 2 nH + 2 pF (notch to 2R/(2R + Z₀) = 0.167 at 2.52 GHz) | S₂₁ = 2/(2 + Y Z₀) | \|S₂₁\| within 0.007 / 0.009 (0.1663 at the notch) |
-| `sim.sparams`: a 0603 part (pads 0.9 × 1 mm, 0.7 mm gap) in a 50 Ω microstrip (1 mm on 0.5 mm of εr 4), microstrip ports, 0.5–6 GHz: 50 Ω resistor; 1 pF capacitor; 1 pF with 1 nH ESL and 1 Ω ESR | ideal series element between 50 Ω | \|S₂₁\| within +0.008 (R), +0.015 (C), +0.011 (RLC); the pads' own gap capacitance and steps account for the rest |
+| the same: shunt 2 pF, a shunt 5 Ω + 2 nH + 2 pF (notch to 2R/(2R + Z₀) = 0.167 at 2.52 GHz), shunt 50 Ω | S₂₁ = 2Z/(2Z + Z₀) | \|S₂₁\| within 0.007 / 0.009 (0.1663 at the notch) / 0.002 |
+| 20 × 12 mm PEC cavity, εr 4.4, 0.5 mm cells: TM₁₁₀ and TM₂₁₀ (`cavities_match_their_modes`, ems directly) | analytic c/(2√εr) √((m/a)² + (n/b)²) | −0.05 %, −0.08 % (numerical dispersion) |
+| the same with σ for tan δ 0.01 at TM₁₁₀: energy decay | Q = 1 / tan δ = 100 | 100.04 |
+| parallel-plate cavity, copper plates (58 MS/m, conducting sheets) 0.5 mm apart, εr 4.4, TM₁₁₀ at 1.4, 6.9 and 13.9 GHz | Q = h/δ (the plates' loss only) | +0.08 %, −0.14 %, −0.22 % |
+| cavity filled with Djordjevic–Sarkar εr 4, tan δ 0.02 at 1 GHz (the Debye fit of `fdtd::fit` over 0.1–10 GHz or 0.5–20 GHz), TM₁₁₀ at 2.4, 9.0 and 14.8 GHz | resonance f √εr(f) = f_vacuum; Q = 1/tan δ(f) | resonance −0.01 %; Q −0.74, −0.65, −0.67 % |
+| `sim.sparams`: lossless microstrip, W = 1 mm on 0.5 mm of εr 4, sheet copper, 20 mm between the reference planes of microstrip ports, 1.1–3.6 GHz (`measure_microstrip`; ems 0.0.10) | 2D field solver (D49): Z₀ 50.81 Ω, εeff 3.071 | Z₀ −0.2 to −1.2 %, εeff +0.31 to +0.59 % |
+| `sim.sparams`: stripline, W = 0.25 mm between planes 0.3 mm away on either side, εr 4, sheet copper, 1.1–3.1 GHz (`measure_stripline`; ems 0.0.10) | field solver: 55.28 Ω, εeff 4 | Z₀ −0.7 to −1.8 %, εeff +0.44 to +0.45 % |
+| `sim.sparams`, the full model (`sim_sparams_microstrip_validation`): a routed 64 mm line, W = 1 mm on 0.5 mm of Djordjevic–Sarkar εr 4 / tan δ 0.02 at 1 GHz, 35 µm solid copper at 58 MS/m, microstrip ports 4 mm; Z₀ and εeff from the S-parameters (ABCD of the 60 mm between the reference planes), 1–3.1 GHz | field solver with the copper thickness and the same laminate model | Z₀ +1.0 to +2.9 %, εeff +0.7 to +1.0 % |
+| the same: matched line | | \|S₁₁\| at most 0.029 (−31 dB) from 0.6 to 9 GHz |
+| the same: \|S₂₁\| (total loss: conductor with skin effect, dispersive dielectric) | D52, 0.136 dB at 0.6 GHz to 1.657 dB at 9 GHz | −1.3 % (1.1 GHz) to +5.3 % (9 GHz) |
+| the same line with perfect solid copper, 24 mm: the dielectric loss alone, 0.56–6 GHz (`measure_dielectric_loss`; ems 0.0.10) | D52 | −2.5 to +7.1 % (and +15 % at 1.05 GHz, 0.009 dB): within the ±0.02 dB of one run at this mesh |
+| the same line lossless (perfect copper, tan δ 0), the side PML 4 h from the strip (`lossless_line_near_the_pml_is_passive`) | passivity, \|S₁₁\|² + \|S₂₁\|² ≤ 1 | 0.9991 to 1.0007 from 0.6 to 3.8 GHz |
+| the same line, 24 mm, sheet copper, 25 µm solder mask of εr 3.8 (`sim_sparams_mask_validation`) | field solver with the conformal mask: Z₀ 50.07 Ω, εeff 3.162 (bare line 3.071) | Z₀ +1.1 %, εeff −0.3 %; the mask's change of εeff −23 % (the bare line reads +0.4 % high) |
+| `sim.sparams`: a 0603 part (pads 0.9 × 1 mm, 0.7 mm gap) in a 50 Ω microstrip (1 mm on 0.5 mm of εr 4), microstrip ports, 0.5–6 GHz (`sim_sparams_parts_validation`): 50 Ω resistor; 1 pF capacitor; 1 pF with 1 nH ESL and 1 Ω ESR | ideal series element between 50 Ω | \|S₂₁\| within +0.007 (R), +0.009 (C), +0.008 (RLC); the pads' own gap capacitance and steps account for the rest |
+| `sim.sparams` (`routed_45_degree_line`): 8 mm, 45° run of 14.1 mm, 8 mm, perfect sheet copper, W = 1 mm, H = 0.5 mm, εr 4: arg S₂₁ at 10 GHz, \|S₁₁\| | the straight line of that length, 164.2° and −35.5 dB (the bends' own effect aside) | default mesh (0.75 mm): staircase 104.1°, −16.4 dB; conformal (refined to 0.49 mm) 154.7°, −23.4 dB; 0.25 mm cells: staircase 143.5°, −18.2 dB; conformal 157.7°, −27.7 dB |
+| the same, W = 0.3 mm, H = 0.17 mm, εr 4.3 | straight 154.8° (as the removed engine read it, D73) | default mesh: staircase and conformal without refinement are open circuits (−72 dB, D73); with the refinement (0.15 mm, 2.46 M cells, 156 s on six threads): 141.1°, −22.7 dB |
+| `sim.sparams`: a via of one cell (0.3 mm drill, 0.6 mm pads on 0.3 mm cells), four layers, perfect sheet copper (`ems_runs_a_via_of_one_cell`, `measure_via_convergence`; ems 0.0.8 on) | the staircase on the same mesh, and a finer mesh | \|S₂₁\| at 4 GHz −0.390 dB with conformal cells, −0.440 dB as a staircase; on 0.2 mm cells ems's own measurement (its DESIGN.md, 5.13.3) is −0.297 and −0.368 dB |
+| `sim.sparams`: session 6's 2.4 GHz matching network (U1.30 to J1.1, shunt C3, series L1, lossy sheet copper, diagonal tracks 1.1 cells wide, 1–6 GHz, to −50 dB; `rf_path_full_wave`) | the ideal chain of the same parts | at 2.44 GHz \|S₁₁\| 0.5726, \|S₂₁\| 0.7988, within the test's 0.15 and 0.1 of the chain; largest Σ\|S\|² 0.982 |
+| `sim.sparams` against openEMS on the export of the same region (CI job "openEMS oracle", `tests/openems.rs`; run 43964289403, ems 0.0.12) | openEMS | the lossy lines within 36.0 % (sheets) and 41.2 % (`solid`) at the lowest frequencies, where the absolute term of the test's 15 % + 0.025 dB carries them; the via transition within 0.07 dB |
+| one thread against three or four, lossless and with lossy sheets, lossy `solid` copper, Debye terms and conformal cells (`ems_runs_the_region`, `measure_threads`, `measure_threads_conformal`) | | the same bytes |
+| the coarse lossy line of `ems_runs_the_region`, between microstrip ports to 5 GHz and between lumped ports to 10 GHz | the recorded result of cadlab's removed engine on the same region and mesh (commit 3aa423f) | \|S₂₁\| within 0.0020 and \|S₁₁\| within 0.0034; lumped ports \|S₂₁\| within 0.0026 |
 
-The cavities (closed, single mode) are the precise checks of the loss models; the line runs check that they
-combine into D52's total, with the open region's own measurement error. Until D68 that error was mostly the PML:
-with too small a frequency shift the side PML drew energy from the line's near field (the lossless line above
-gained 0.7 % in power), which read as −9.5 % of the loss at 1.6 GHz.
+The cavities and the closed box (single mode, nothing radiated) are the precise checks of ems's loss models and
+elements as cadlab uses them; the line runs check that they combine into D52's total, with the open region's own
+measurement error.
+
+**Measured** (`tests/fdtd_ems.rs`, the `measure_*` tests, and `rf_path_full_wave`; release builds, one run per
+process, three threads, on a shared machine: D98, where the same table has the removed engine's column). The
+peak is the whole process's, 22 MB of it before the run.
+
+| Case | Cells | Time; peak memory |
+|---|---|---|
+| Bent line (8 mm, 14.1 mm at 45°, 8 mm), lossy sheets, 0.25 mm cells, to −70 dB | 578 680 | 28.1, 26.0 s; 91, 92 MB (on one thread 60.3, 64.2 s; 86 MB) |
+| The same, lossy `solid` copper | 679 320 | 37.8, 37.0 s; 113, 111 MB |
+| Bent line on the default mesh (0.49 mm), to −70 dB: sheets; `solid` | 135 660; 184 110 | 8.3, 7.9 s; 49 MB. 13.0, 12.0 s; 49, 50 MB |
+| The openEMS oracle's lossy line (24 mm, 6 GHz), to −70 dB: sheets between microstrip ports; `solid` copper between lumped ports | 67 200; 85 320 | 15.0, 14.3 s; 42, 41 MB. 28.2, 28.3 s; 49, 48 MB |
+| Via transition of the oracle (4 layers, lossy solid copper, absorbing cells beyond the region, 4 GHz): to −40 dB; to −60 dB, the default | 130 626 | 35.6, 37.5 s; 60, 59 MB. 54.0, 51.6 s; 58, 62 MB |
+| Via on a region of 25 194 cells, to −30 dB: three threads; one | 25 194 | 16.1, 14.8 s; 47, 48 MB. 37.8, 38.0 s; 48 MB |
+| Session 6's matching network (lossy sheets, graded mesh, to −50 dB), 14 529 steps per port | 152 280 | 42.9, 44.6, 42.7 s |
 
 **Limits.** Parts are two-pin R, L, C only, ideal series elements at their values (no package model beyond
 `esr` / `esl`, no self-resonance of inductors, no ferrite beads, ICs or connectors: those pads are bare
 copper; terminate them with ports), placed across their pads' gap along x or y. Conformal cells correct the
-outline, not the field's singularity at a sheet's edge, whose error stays first order; one cell's two open sides
-(a strip narrower than a cell across it) share one H, so a slanted strip needs about two cells across (error at
-two cells across still +6–9 %, at four 2–4 %). Its loss treatment was measured on solid copper and on walls, at one
-mesh for the strip, not on `sheet` copper; dielectric boundaries (the board's outline, non-plated holes) still
-staircase, and the stability bound is a check on the geometries tested (`Simulation::curl_curl_radius`), not a
-proof for all (`sim.unstable` catches a divergence). The surface impedance assumes a skin depth well
-below the copper's thickness and its features (as D52; no DC floor below the skin-effect range), and its
-reactance with roughness is the causal one rather than D52's smooth internal inductance. `sheet` copper has
-no thickness: its edge current is bounded only by the mesh, so its conductor loss depends on the cells at the
-strip edges (+3 % at 8 and +10 % at 16 cells across a 1 mm strip against a 35 µm one); use `solid` copper for
-loss. A thin mask makes thin cells, hence a smaller timestep. Accuracy depends on the mesh as for any FDTD: keep `cells_per_wavelength` ≥ 20
-and several cells across the narrowest copper and dielectric (`max_cell` refines everything; the thirds rule
-the edges). Runs are long on large regions: cut the region to the structure (`around` a via or connector,
-`margin`), use `sheet` copper, and keep `f_max` to what is needed.
+outline, not the field's singularity at a sheet's edge, whose error stays first order, and a slanted strip needs
+about two cells across (the mesh is refined for it). Dielectric boundaries (the board's outline, non-plated
+holes) still staircase. The surface impedance assumes a skin depth well below the copper's thickness and its
+features (as D52; no DC floor below the skin-effect range). `sheet` copper has no thickness: its edge current is
+bounded only by the mesh, so its conductor loss depends on the cells at the strip edges; use `solid` copper for
+loss. A thin mask makes thin cells, hence a smaller timestep. Accuracy depends on the mesh as for any FDTD: keep
+`cells_per_wavelength` ≥ 20 and several cells across the narrowest copper and dielectric (`max_cell` refines
+everything; the thirds rule the edges). Runs are long on large regions: cut the region to the structure
+(`around` a via or connector, `margin`), use `sheet` copper, and keep `f_max` to what is needed.
 
-## Full-wave: ems, the default solver (`sim.sparams`, `solver: ems`)
+**What is open:**
 
-`sim.sparams` runs its region on the FDTD solver of the [`ems`](https://crates.io/crates/ems) crate unless told
-otherwise (D94; before, cadlab's own solver was the default and ems the option). ems is a clean-room, pure-Rust
-solver (MIT, with its geometry crate `csx`; no further dependencies) meant to replace openEMS; cadlab uses it
-through its Rust API, from crates.io, behind the cargo feature `ems` (a default feature: 21 s of a release build).
-`solver: builtin` runs cadlab's own solver on the same region: a second result on the same model, which needs
-nothing installed either. A build without the feature has the built-in solver only: it is that build's default,
-and `solver: ems` is refused there with `sim.solver_unavailable`. Code: `src/fdtd/ems.rs` (DECISIONS D86, D87,
-D89, D90, D94, D98).
+- *A second result.* Until D100 the same model could be run on cadlab's own engine in the same process, and a
+  difference between the two beyond their known agreement was worth looking at. What stands in for it: the
+  openEMS oracle (CI only, nothing to install locally but openEMS itself), the checks of a result
+  (`sim.not_passive`, `sim.not_reciprocal`), a second mesh (`max_cell`), and `export.openems` of the same region.
+- *Memory.* ems took 1.3 to 1.8 times the removed engine's (D98: 91 MB against 57 MB on 580 000 cells). By ems's
+  notes: while it builds a port's engine, two `f64` vectors over the grid for the stability estimate of its
+  conformal cells and the sheets' edges in their installed form beside the final one (the peak on the regions
+  with slanted copper); while it runs, the coefficients where the mesh is graded in the plane, the compiled
+  model next to the engine, a list of the Debye poles, and a value per step for each probe (30 probes and 49 000
+  steps on the via transition: 12 MB).
+- *Threads on a machine of one's own.* Every time above was taken in a pool of three threads on a shared
+  machine. Without `threads` ems takes up to a thread per core of what the pool has: what that gives in time on
+  more cores was not measured.
+- *A build without the solver* does not exist: ems and csx are in every build (21 s of a release build).
 
-```
-cadlab sim sparams --f-max 6GHz --around track#12 --copper sheet \
-  --ports '[{"at": "track#12", "kind": "msl", "length": "4mm"}, {"at": "track#12", "end": "end", "kind": "msl", "length": "4mm"}]'
-cadlab sim sparams --solver builtin --name check ...   # the same region on cadlab's own solver
-```
-
-**One region, two solvers.** The region, its graded mesh (thirds rule, refinement for narrow diagonal tracks),
-the ports on the mesh, the parts that become lumped elements, `max_cells`, `plan`, the diagnostics before the
-run and the assembly S = B A⁻¹ into Touchstone are the same code for both (`fdtd::extract`, `fdtd::place_ports`,
-`fdtd::Waves`). The geometry ems gets is the property list of `export.openems` (`openems::xml::properties`:
-the export's file is that list written out), with one difference since ems 0.0.7: lossy `solid` copper stays
-metal volumes, where the export writes two conducting sheets per layer.
-
-| cadlab | ems / csx |
-|---|---|
-| Mesh lines (nm) | `RectilinearGrid` in mm, every coordinate through one conversion so a primitive's corner on a mesh line is that line |
-| Lossless dielectric, solder mask openings, non-plated holes | `Material` (`Box`, `LinPoly`, `Cylinder`), the export's priorities |
-| Djordjevic–Sarkar dielectric, solder mask | `DebyeMaterial`: ε∞, the conductivity as κ, and the Δε on the relaxation times of `fdtd::fit` (the built-in solver's fit). An edge in the laminate's surface gets the poles by the share of its dual face the laminate fills (`PoleWeighting::Averaged`, ems 0.0.10), as it gets the static ε and as the built-in solver does; ems's default is openEMS's rule, the whole poles for such an edge, which read two points more loss on a 60 mm microstrip (D89, D90) |
-| Perfect copper (`perfect_copper`) | `Metal`: volumes (`solid`), or sheets on the mesh plane (`sheet`) |
-| Lossy `solid` copper | the net's `Metal` volumes, named a conductor with `CompileOptions::with_lossy_metal`: a surface impedance on every face of the copper, sidewalls included, a rational fit of the skin effect over the frequencies of the result |
-| Lossy `sheet` copper | a `ConductingSheet` per net and layer (conductivity, the layer's copper thickness) with `SheetModel::SurfaceImpedance`: the sheet's two faces as a rational two-port, a tenth of the unknowns of ems's ladder |
-| `roughness` | Hammerstad–Jensen or Huray as `Conductor::with_roughness` and `with_sheet_roughness`: the factor at every frequency of the fit, as in the built-in solver (not folded into the conductivity at f₀ as the export does) |
-| Vias, plated holes | `Metal` `Cylinder`s plus the barrel's node column (a wire: no loss of its own) |
-| Board parts | `LumpedElement` across the pads' gap (a resistance alone; a series element with a reactance; 0 Ω as metal) |
-| Lumped port | ems's `LumpedPort`: a resistor of z0 with a Thevenin source; its voltage the mean over the port's columns (`average_voltage`, the built-in solver's definition) and its element current |
-| Microstrip port | the same source at the feed plane, a `Voltage` probe from the strip to the reference and two `Current` probes on the dual planes around the reference plane, interpolated to it: the built-in solver's measurement, not ems's three-probe `MslPort` (which needs a zero-thickness strip) |
-| Absorbing layer | CPML of `pml_cells` cells on every face, m = 3, κ = 1, α from 2π ε₀ f₀ to 0 |
-| Pulse, end criterion, timestep | `Waveform::gaussian(f₀, f_c)`, the energy decay of `end_criteria` (checked every 32 steps; the energy of the fields, without what lossy copper holds inside its surface model, since ems 0.0.10), `timesteps`, 0.95 of the Courant limit |
-| `conformal` | `CompileOptions::with_conformal`, with `ConformalOutlines::Slanted` for sheets on mesh planes and for solid copper: cells are cut where copper is oblique to the mesh (diagonal tracks, round pads, barrels); copper along the mesh keeps the staircase its mesh lines were placed for, as in the built-in solver. ems's defaults do the rest (`ConformalOptions::keep_stable`, `CompileOptions::conformal_bridges`; below) |
-| `threads` | ems's own rule (a thread per five x planes and 4096 cells) within cadlab's pool, or the number given |
-
-The model is compiled once (`ems::CompiledModel`; 0.45 s for 67 000 cells) and every port's run is a new engine
-from it driving that port's source (`simulation_driving`). Progress (timestep, energy in dB) and cancellation go
-through ems's run callback; `plan` compiles the model and reports ems's own timestep.
-
-**What cadlab no longer decides for ems** (D89). With ems 0.0.7 the adapter made three choices, each a
-workaround of something measured (D87); ems does all three itself since 0.0.8, on any model, and the adapter
-compiles the model once with ems's defaults:
-
-- *Small cut faces.* ems took the current of a cut face of less than half its area from the faces around it,
-  safe on any mesh and 13° short on a bent track two cells wide; cadlab lowered that threshold to 0.05, 0.1 or
-  0.2 while ems's stability estimate stayed under 0.9 (three compiles). ems now keeps such a face's own current
-  where both cells it belongs to are stable at the timestep by a cell-wise bound (`keep_stable`), which on a
-  board's mesh (layers much thinner than the cells are wide) is most of them: 154.7° on D73's bent line at two
-  cells across the track, where cadlab's threshold gave 153.6° and the built-in solver reads 154.8°.
-- *Diagonal tracks about a cell wide.* A cut edge is its open part in series with its covered part, so a slanted
-  track without a row of whole edges along it came out in pieces, and cadlab ran such a region as a staircase.
-  ems keeps whole the edges that carry such a track (`conformal_bridges`), the edge that continues a lumped
-  element's column into its pad, and a sheet's edges under a barrel: session 6's matching network (tracks 1.1
-  cells wide) reads |S₂₁| 0.798 with conformal cells, the built-in solver's value, where it read 0.574 (and
-  0.791 as a staircase). `sim.slanted_copper_unresolved` still warns of such a track, for both solvers.
-- *Plated holes about a cell wide.* ems's conformal cells read the four-layer via transition (0.3 mm drill,
-  0.6 mm pads, 0.3 mm cells) further from a finer mesh than a staircase, and cadlab ran a region with such a hole
-  as a staircase. ems now integrates the open area of the faces a barrel, a pad or a corner crosses: −0.390 dB at
-  4 GHz with perfect sheet copper where it read −0.579 dB (the built-in solver's conformal cells −0.375 dB, the
-  two staircases −0.426 and −0.440 dB).
-
-`sim.ems_staircase` is gone with them: `conformal` means the same in both solvers again.
-
-**Diagnostics of this path:**
-
-| Code | |
-|---|---|
-| `sim.ems_<code>` (warning) | ems's own warnings, typed: its code with `_` for `.` (`sim.ems_mesh_resolution`, `sim.ems_lumped_edges`, `sim.ems_conformal_stability`, …, `sim.ems_other` for a wording ems has no code for), one diagnostic per code and property with the count, and as subjects the net and layer, the component or the port's pad behind the property ems names. At most twelve, then `sim.ems_warnings_omitted`. Left out, being what cadlab made on purpose: the mesh (`mesh.in_pml`, `mesh.pml_grading`, `mesh.grading`, `mesh.time_step`: copper and laminate run into the absorbing layer, the cells are graded and thin), the probes on dual planes (`box.snapped`), the barrels' node columns (`metal.lossy_thin`) and the covered parts of cut edges of lossy copper (`metal.lossy_cut`, below) |
-| `sim.ems_failed`, `sim.unstable` (errors) | ems refused the model; the energy went to NaN, or below zero (the invariant of a stable scheme is not negative: a run that ends there grew, D89; ems ends such a run as diverged itself since 0.0.10) |
-
-**What ems 0.0.7 changed** (D87). Its lossy conductors and its conformal outlines had been written separately
-and had not been run together. On D73's bent line: the rational sheet model panicked on the first slanted
-outline; lossy solid copper with conformal cells grew without bound in a closed box (an S-parameter run ends
-before it shows) and lost 17 to 21 % more than the built-in solver on the diagonal. Both are fixed in ems, with
-tests there (a strip resonator in any direction: Q within 9 % for sheets, 6 % for solid copper at four cells
-per width). What remains by construction: the covered part of an edge that a slanted outline of *solid* lossy
-copper cuts is a perfect conductor, and the whole edges beside it carry its share of the surface.
-
-**Measured** (`tests/fdtd_ems.rs`, the `measure_*` tests, and `rf_path_full_wave_ems` of
-`tests/agent_session6.rs`, release builds; ems 0.0.10, measured on its source before the release and the 60 mm
-line again on the released crate; csx 0.0.2). ems 0.0.11 (D94) gives 0.0.10's Touchstone files byte for byte on
-the nine cases compared (below), and ems 0.0.12 (D98) gives 0.0.11's, so the results of the table stand; their
-times and memory are in "What ems 0.0.11 changed" and "What ems 0.0.12 changed", and the rows they moved by more
-than the noise say so. The rows with perfect copper and no Debye laminate were run again and read as with 0.0.9
-(the 0.2 mm via mesh was not run again). Both solvers on the same mesh and timestep. Times are wall time on a
-shared machine, three threads allowed (four in the thread row); they vary by a fifth between runs, and a run
-inside a long test can read a third slower than the same run alone. The built-in solver takes one thread per
-131 072 nodes (one, below that), ems up to the allowed number from 20 x planes. Memory is the process's peak
-above its level before the run, which under-reports a run that follows a larger one in the same process: an order of
-magnitude, except where a row says one run per process (`measure_memory`: the whole process's peak, 22 MB of it
-before the run). Where two runs are subtracted (the conductor's part: lossy minus perfect copper) both end at
-−70 dB: at −50 dB the difference at the band's end carried the truncation of each run (D89).
-
-| Case | Cells, timestep | Built-in: steps per port, time, memory | ems: steps per port, time, memory | Result |
-|---|---|---|---|---|
-| Lossless microstrip, W = 1 mm on 0.5 mm of εr 4, sheet copper, 20 mm between the reference planes of microstrip ports, 10 GHz | 67 200, 0.195 ps | 5088, 8.7 s, 5 MB | 5217, 2.1 s, 35 MB | \|S11\| within 0.0004, \|S21\| within 0.0004 of each other (0.5–9.5 GHz). Against the 2D field solver (50.81 Ω, εeff 3.071), 1.1–3.6 GHz: Z₀ −0.2 to −1.2 % in both (equal to 0.04 %), εeff +0.30 to +0.60 % / +0.31 to +0.59 % |
-| Stripline, W = 0.25 mm between planes 0.3 mm away on either side, εr 4, sheet copper, the planes stitched beside the ports | 239 760, 0.101 ps | 8864, 42.3 s, 15 MB | 9089, 9.7 s, 115 MB | \|S11\| within 0.0004, \|S21\| within 0.0002. Against the field solver (55.28 Ω, εeff 4), 1.1–3.1 GHz: Z₀ −0.7 to −1.8 % in both, εeff +0.42 to +0.44 % / +0.44 to +0.45 % |
-| Lossy microstrip of the openEMS oracle (Djordjevic–Sarkar εr 4 / tan δ 0.02 at 1 GHz, 58 MS/m, 6 GHz), sheet copper, microstrip ports; to −70 dB | 67 200, 0.195 ps | 21 632, 45 s, 9 MB | 21 889, 17 s, 32 MB | \|S21\| within 0.005 dB, 0.006 dB with perfect copper (0.027 and 0.025 dB with ems 0.0.9, whose laminate lost more in the edges of its surface: D90). At 1.05 / 3.03 / 6 GHz: built-in −0.073 / −0.201 / −0.400 dB, ems −0.075 / −0.203 / −0.396 dB (openEMS in CI, to −50 dB: −0.097 / −0.220 / −0.422). Conductor part (perfect copper subtracted) at 1.05 / 3.03 / 5.5 / 6 GHz: 0.0148 / 0.0248 / 0.0337 / 0.0352 against 0.0153 / 0.0256 / 0.0348 / 0.0364 dB, ems 3 to 4 % above at every frequency. Z₀ 50.8 Ω in both. The same steps (ems 0.0.9: 27 937) |
-| The same, solid copper, lumped ports; to −70 dB | 85 320, 0.099 ps | 42 400, 107 s | 42 721, 35 s, 34 MB | \|S21\| within 0.010 dB (−0.527 against −0.517 dB at 6 GHz, the same 0.010 dB with perfect copper: the laminate; 0.006 dB with ems 0.0.9's rule for it), \|S11\| within 0.0044. Conductor part at 1.05 / 3.03 / 6 GHz: built-in 0.0178 / 0.0301 / 0.0434 dB, ems 0.0179 / 0.0302 / 0.0433 dB (openEMS 0.017 / 0.031). The same steps (ems 0.0.9: 72 769, 1.7 times). Z₀ 49.86 against 49.90 Ω |
-| The same with rough copper (Hammerstad–Jensen, 1 µm RMS: a factor of 1.2 at 1 GHz, 1.7 at 6 GHz) | 85 320, 0.099 ps | 42 496, 107 s | 42 849, 35 s, 34 MB | Conductor part at 1.05 / 3.03 / 6 GHz: built-in 0.0215 / 0.0448 / 0.0720 dB, ems 0.0216 / 0.0451 / 0.0727 dB, within 0.0007 dB at every frequency; 1.21, 1.49 and 1.66 times the smooth copper's |
-| The same line, perfect solid copper: the dielectric loss alone against D52 (the field solver with the same laminate model), 0.56–6 GHz | 86 400, 0.099 ps | 11 360, 27.4 s | 12 065, 9.5 s, 33 MB | built-in −5.3 to +9.0 %, ems −2.5 to +7.1 % (and +15 % at 1.05 GHz, 0.009 dB): each within the ±0.02 dB of one run at this mesh; \|S21\| within 0.006 dB, \|S11\| within 0.0006 of each other |
-| Via transition of the oracle (4 layers, lumped ports, lossy solid copper, absorbing cells beyond the region, 4 GHz; 0.3 mm drill and 0.6 mm pads on 0.3 mm cells; to −40 dB) | 130 626, 0.055 ps | 31 040, 126 s, 34 MB | 32 961, 53 s, 136 MB (memory: one run per process, `measure_memory`) | Conformal cells in both: \|S21\| at 0.54 / 1.03 / 2.02 / 3.01 / 4.00 GHz built-in −0.046 / −0.085 / −0.137 / −0.193 / −0.408 dB, ems −0.045 / −0.083 / −0.134 / −0.185 / −0.390 dB, within 0.018 dB (0.012 dB with ems 0.0.9; openEMS in CI, a staircase: −0.035 / −0.063 / −0.145 / −0.183 / −0.457); \|S11\| −30.1 / −25.9 / −27.0 / −28.3 / −14.7 against −30.0 / −25.7 / −26.6 / −29.2 / −15.0 dB, within 0.007. Both as staircases (`conformal: false`): −0.452 against −0.449 dB at 4 GHz, within 0.003 dB at every frequency. Perfect copper: −0.356 against −0.343 dB, within 0.013 dB (0.007). With ems 0.0.7's conformal cells: −0.598 dB at 4 GHz. To −60 dB, `sim.sparams`'s default: 49 920 steps and 204 s against 48 993 / 49 025 and 75 s (ems 0.0.9: 69 313 steps, 169 s), the same result to 0.001 dB |
-| The same, perfect sheet copper, \|S21\| at 4 GHz (`measure_via_convergence`; ems 0.0.8) | 101 598; 2 661 520 on 0.2 mm cells | 12 096, 38 s; 34 688, 836 s | 12 865, 24 s | staircases −0.426 (built-in) and −0.440 dB (ems); conformal cells −0.375 (built-in) and −0.390 dB (ems; −0.579 dB with ems 0.0.7). On 0.2 mm cells the built-in solver's staircase reads −0.348 dB (D87); ems's own measurement there (its DESIGN.md, 5.13.3) is −0.297 dB with conformal cells and −0.368 dB as a staircase. Not run again here |
-| A 0603 part in a 50 Ω microstrip (the oracle's setup), 0.5–4.5 GHz: series 50 Ω; 1 pF; 1 pF + 1 nH + 1 Ω (resonant at 5 GHz) | 69 312, 0.169 ps | 6688–13 184, 11–22 s | 7105–11 521, 2.5–3.6 s | \|S21\| against 2 Z₀ / (2 Z₀ + Z): built-in 0.0048 / 0.0103 / 0.0079, ems 0.0048 / 0.0099 / 0.0077; within 0.0011 of each other |
-| Lumped elements between 50 Ω ports in a closed box (the fixture of `tests/fdtd_parts.rs` as a csx model, ems alone), 0.5–4 GHz | 1500 | (0.001 / 0.011; 0.016; 0.007 / 0.009) | | series R 10 / 50 / 200 Ω: \|S21\| within 0.0009, \|S11\| within 0.011; series 1 pF, 5 nH, 10 Ω + 4 nH + 1 pF: within 0.016; shunt 2 pF: 0.007; shunt 5 Ω + 2 nH + 2 pF: 0.009 (0.1663 at the notch, theory 0.1672); shunt 50 Ω: 0.002 |
-| Cavities of `tests/fdtd.rs` as csx models, ems alone: 20 × 12 mm PEC box, εr 4.4, TM₁₁₀ / TM₂₁₀ | 960 | (−0.05 %, −0.08 %) | | −0.05 %, −0.08 % |
-| The same with σ for tan δ 0.01: Q = 100 | | (99.99) | | 100.04 |
-| Copper plates (58 MS/m, as conducting sheets in ems, its ladder) 0.5 mm apart, TM₁₁₀ at 1.4 / 6.9 / 13.9 GHz: Q = h/δ | 2880 | (+0.0, −0.9, −1.0 %) | | +0.08, −0.14, −0.22 % |
-| Djordjevic–Sarkar filling as Debye terms, TM₁₁₀ at 2.4 / 9.0 / 14.8 GHz: resonance; Q = 1 / tan δ(f) | 960 | (within 0.1 %; −0.3 to −0.7 %) | | −0.01 %; −0.74, −0.65, −0.67 % |
-| 45° line of D73 (8 mm, 14.1 mm at 45°, 8 mm; W = 1 mm, H = 0.5 mm, εr 4, perfect sheet copper), 10 GHz; the straight line of that length | 28 512, 0.169 ps | 6752, 6.0 s | 6881, 1.5 s | arg S₂₁ 163.8° / 163.8°, \|S11\| −36.9 / −36.6 dB |
-| The same, bent, mesh refined to 0.49 mm (two cells across the track) | 135 660 | 6816, 18.8 s | 6945, 4.9 s, 60 MB | built-in 154.8°, −23.1 dB; ems 154.7°, −23.4 dB (ems 0.0.7 with cadlab's threshold for small faces: 153.6°, −21.4 dB; with its own: 141.6°); \|S11\| within 0.0036, \|S21\| within 0.005 dB |
-| The same, 0.25 mm cells (four across) | 578 680 | 6784, 31 to 40 s | 6913, 20 to 25 s, 247 MB | built-in 157.5°, −28.0 dB; ems 157.7°, −27.7 dB (the staircase: 143.0°); \|S11\| within 0.0018, \|S21\| within 0.0003 |
-| The same, 0.25 mm cells, perfect `solid` copper | 679 320 | 65 s | 46 s | 157.6°, −24.9 dB against 157.0°, −24.9 dB |
-| The bent line with lossy copper (`measure_diagonal_copper`; end criterion 70 dB), 0.25 mm cells: sheet; solid | 578 680; 679 320 | 7616, 33 to 47 s (51 s inside the long test), 58 MB; 13 408, 67 s on three threads, 71 MB | 7809, 30 to 38 s, 160 MB (0.0.10: 57 to 65 s); 13 665, 45 s, 185 MB (0.0.10: 60 to 77 s) | sheet: built-in 156.9°, ems 157.0°; conductor part of \|S21\| at 3.07 / 5.05 / 7.03 GHz built-in 0.037 / 0.048 / 0.058 dB, ems 0.038 / 0.049 / 0.058 dB. Solid: built-in 157.1°, ems 156.5°; 0.0332 / 0.0432 / 0.0517 against 0.0329 / 0.0431 / 0.0515 dB (0.2 to 0.9 % low; 11 to 13 % high with ems 0.0.9). Largest Σ\|S\|² 0.9980 / 0.9977 and 0.9984 / 0.9983. The built-in solver's steps in both (ems 0.0.9: 22 593 and 57 697). With sheets ems 0.0.10 took 1.8 times the built-in solver's time here (34.1, 40.1, 34.8 s against 58.6, 62.7, 64.8 s; D90); 0.0.11 takes 0.8 to 0.9 times (three runs each, one per process, alternating, three threads each: 40.9, 47.1, 32.7 s against 37.7, 37.5, 29.5 s; on one thread 74 s against 79 s; D94) |
-| The same on the default mesh (0.49 mm): sheet; solid | 135 660; 184 110 | 7648, 24 s; 13 440, 51 s | 7777, 8 s, 15 MB; 13 729, 12 s, 23 MB | sheet: built-in 154.2°, ems 154.1°; 0.035 / 0.045 / 0.055 against 0.036 / 0.047 / 0.057 dB (4 % high). Solid: built-in 152.9°, ems 151.4° (149.0° with ems 0.0.7); 0.0320 / 0.0420 / 0.0513 against 0.0313 / 0.0415 / 0.0505 dB (1 to 2 % low; 10 to 14 % high with ems 0.0.9) |
-| Session 6's 2.4 GHz matching network (U1.30 to J1.1, shunt C3, series L1, lossy sheet copper, 1–6 GHz; to −50 dB) | 152 280, 0.099 ps | 14 048, 76 to 79 s on its one thread, 47 to 53 s on three | 14 529, 58 to 67 s on three threads (0.0.10: 105 s) | at 2.44 GHz \|S11\| 0.5733 / 0.5726 (−4.83 / −4.84 dB), \|S21\| 0.7983 / 0.7988 (−1.96 / −1.95 dB); largest Σ\|S\|² 0.983 / 0.982. Conformal cells in both: its diagonal tracks are 1.1 cells wide (`sim.slanted_copper_unresolved`), and ems keeps the edges that carry them whole (ems 0.0.7: 0.790 / 0.574 with its conformal cells, 0.581 / 0.791 as the staircase cadlab ran) |
-| One thread against four (`measure_threads`, to −50 dB): the lossy sheet line above; the lossy solid line between lumped ports | 67 200; 85 320 | 11.9 / 10.7 s; 28.6 / 24.0 s, identical data | 12.6 / 4.5 s; 26.5 / 9.0 s, identical data | both independent of the thread count; lossless: built-in 9.4 / 10.1 s, ems 5.1 / 2.1 s. ems on one, two and three threads (`measure_threads_conformal`, and `ems_runs_the_region`), the same bytes each time: the via transition with lossy solid copper and conformal cells on a region of 25 194 cells 44 to 46 / 24 / 18 s with ems 0.0.11 (0.0.10: 50 / 30 / 24 s; 0.0.9: 102 / 57 / 38 s; the built-in solver, on its one thread: 34 to 35 s); the bent line with lossy sheets on 81 120 cells 12.0 / 10.9 / 10.2 s (11.4 s) |
-
-In words: on perfect conductors, lossless and Debye dielectrics and lumped elements the two solvers are the same
-solver to three or four digits, and ems is two to five times faster. Lossy copper along the mesh agrees to
-0.0002 dB in the conductor's part of |S₂₁| for `solid` copper (cadlab's default) and to 4 % for sheets on the
-oracle's line, the band's end included; roughness is a factor over the band, equal to the built-in solver's to
-0.0007 dB. The copper of about a cell agrees too, with conformal cells in both solvers: the via transition to
-0.018 dB in |S₂₁| and 0.007 in |S₁₁|, the bent line at two cells across the track to 0.1° for sheets and 1.5° for
-`solid` copper, session 6's matching network to 0.001 in |S₁₁| and |S₂₁|.
-
-**What ems 0.0.10 changed** (D90), each one of the three things D89 measured against it:
-
-- *The long line of `solid` copper* (`sim_sparams_microstrip_validation`, 60 mm between microstrip ports,
-  10 GHz, |S₂₁| against D52 within 3 % to 2.5 GHz and 6 % above). ems 0.0.9 read −1.4 to +7.2 %, over at 8.0, 8.5
-  and 9.0 GHz. The two points over the built-in solver were the laminate, not the copper: openEMS's rule, which
-  ems followed, gives an edge in the laminate's surface the whole Debye poles, where half of its dual face is
-  air. With `PoleWeighting::Averaged` (the share of the dual face, as for the static ε and as in the built-in
-  solver) ems reads −1.3 to +5.3 % (+4.9 / +4.5 / +5.3 % at 8.0 / 8.5 / 9.0 GHz), the built-in solver −2.3 to
-  +4.9 % (+4.8 / +4.3 / +4.9 %), and the test holds both to 6 % again. Z₀ and εeff agree to 0.1 %. The same
-  change moved ems 0.02 dB away from openEMS on the oracle's sheet line and to within 0.005 dB of the built-in
-  solver there: openEMS has the rule ems had.
-- *Slanted `solid` copper.* ems's conductor loss on the bent line was 10 to 14 % above the built-in solver's; it
-  is 0.2 to 2.2 % below it (0.25 mm cells: 0.0329 / 0.0431 / 0.0515 against 0.0332 / 0.0432 / 0.0517 dB at
-  3 / 5 / 7 GHz). Sheets: 0 to 5 % above, as before.
-- *Steps to a deep end criterion with lossy copper.* ems's end criterion counted the magnetic energy inside its
-  conductor models, which decays with the conductor's own time constant; it now counts the fields. To −70 dB
-  the two solvers take the same steps within 3 % on every case of the table (the bent line 7809 against 7616
-  with sheets and 13 665 against 13 408 with `solid` copper, where 0.0.9 took 22 593 and 57 697; the oracle's
-  lines 21 889 against 21 632 and 42 721 against 42 400), and the via transition to −60 dB, `sim.sparams`'s
-  default, 49 000 against 49 920: 75 s against 204 s.
-- *Debye laminates on one thread.* The via transition on a region of 25 194 cells: 50 s on one thread (102 s),
-  24 s on three (38 s); the built-in solver 35 s on its one thread.
-
-**What ems 0.0.11 changed** (D94): time only. The Touchstone files of 0.0.10 and 0.0.11 are the same bytes on
-the bent line (lossy sheets and lossy `solid` copper, 0.25 mm cells and the default mesh), the oracle's two lines,
-the via transition to −40 and −60 dB and the small via region, and the same on one, two and three threads. Its
-sheets' surface edges ran on one thread wherever conformal cells had merged or interpolated a small face; they
-run in its threads there too. Release builds, one run per process (`measure_memory`), the two solvers
-alternating, both on three threads (`threads: 3`) unless said:
-
-| Case | Built-in | ems 0.0.11 | ems 0.0.10, the same way |
-|---|---|---|---|
-| Bent line, lossy sheets, 0.25 mm cells, to −70 dB: D90's one case over the limit | 40.9, 47.1, 32.7 s | 37.7, 37.5, 29.5 s | 56.7 s |
-| The same, each solver's own thread count in a pool of three (what a run without `threads` gets) | 38.6, 46.2, 34.0 s | 37.7, 31.8, 32.9 s | |
-| The same on one thread | 73.7 s | 78.5 s | 92 s (D90) |
-| Bent line, lossy `solid` copper, 0.25 mm cells, to −70 dB | 67.4, 66.9 s | 45.3, 45.6 s | 59.9 s |
-| Bent line on the default mesh, to −70 dB: sheets; `solid` | 17.8, 17.4 s; 33.3, 34.8 s | 7.5, 7.6 s; 11.9, 12.4 s | 7.5 s; 11.9 s |
-| The oracle's line, to −70 dB: sheets between microstrip ports; `solid` copper between lumped ports | 34.7, 34.2 s; 66.6, 66.9 s | 14.6, 14.6 s; 30.7, 30.5 s | 15.2 s; 32.2 s |
-| Via transition: to −40 dB; to −60 dB (the default) | 79.8, 80.9 s; 126.7, 129.1 s | 41.9, 42.0 s; 60.6, 60.6 s | 47.7 s; 69.9 s |
-| Via on a region of 25 194 cells, to −30 dB: own thread counts (the built-in solver one, ems three); one thread each | 34.2, 34.3, 34.1 s; 34.3, 35.0, 34.3 s | 17.7, 20.0, 17.8 s; 46.1, 44.9, 43.7 s | 21.9 s on three |
-| Session 6's matching network (lossy sheets, graded mesh, to −50 dB): three threads each | 47.7, 46.8, 53.4 s | 62.7, 60.8, 58.3 s | 102.8 s (against 54.8 s) |
-| The same, own thread counts in a pool of three (the built-in solver one: 152 280 cells are under two of its shares) | 78.8, 77.7, 75.8 s | 66.5, 63.7, 58.5 s | 105 s against 83 s (D90) |
-
-The built-in solver's times with `threads: 3` are shorter than the table's above on the small regions, where its
-own rule gives it one thread (one per 131 072 nodes); D90's times were taken with that rule. ems is the slower
-solver in two rows: session 6 with three threads each, 1.1 to 1.3 times (1.9 times with 0.0.10), where a run
-without `threads` is 0.8 times; and the small via region on one thread, 1.3 times.
-
-**What ems 0.0.12 changed** (D98): memory and time, no result. The Touchstone files of 0.0.11 and 0.0.12 are the
-same bytes on the bent line (lossy sheets and lossy `solid` copper, 0.25 mm cells and the default mesh), the
-oracle's two lines, the via transition to −40 and −60 dB and the small via region, and the same on one and three
-threads (the bent line with lossy sheets on both meshes) and on one, two and three (the small via region). ems
-0.0.12 holds its update coefficients as their distinct rows where the cells repeat, takes csx's material arrays
-one direction at a time, builds a round of its conformal cells as the values it changes, keeps a charge per pole
-of a Debye laminate where it kept a current and an index beside it, and the times of a probe's samples as their
-rule (ems's design notes, §4.1, wave 27). The adapter changed in one place: a port's run gives its simulation
-up for its results (`Simulation::run_into_results`), so the probes' series are held once. Release builds, one
-run per process (`measure_memory`), the two solvers alternating, two runs each, both on three threads
-(`threads: 3`) unless said; the peak is the whole process's, 22 MB of it before the run; ems 0.0.11 run once
-the same day:
-
-| Case | Built-in: time; peak | ems 0.0.12: time; peak | ems 0.0.11: time; peak |
-|---|---|---|---|
-| Bent line, lossy sheets, 0.25 mm cells, to −70 dB | 37.3, 35.2 s; 57 MB | 28.1, 26.0 s; 91, 92 MB | 33.1 s; 159 MB |
-| The same, each solver's own thread count in a pool of three | 35.1, 35.0 s; 58, 57 MB | 27.6, 29.0 s; 97, 91 MB | |
-| The same on one thread | 74.3, 73.5 s; 58, 59 MB | 60.3, 64.2 s; 86 MB | 78.5 s (D94) |
-| Bent line, lossy `solid` copper, 0.25 mm cells, to −70 dB | 77.9, 78.2 s; 72 MB | 37.8, 37.0 s; 113, 111 MB | 46.9 s; 185 MB |
-| Bent line on the default mesh, to −70 dB, sheets | 19.8, 18.2 s; 34 MB | 8.3, 7.9 s; 49 MB | 8.4 s; 54 MB |
-| The same, `solid` copper | 45.0, 37.0 s; 39, 38 MB | 13.0, 12.0 s; 49, 50 MB | 12.8 s; 66 MB |
-| The oracle's line, to −70 dB, sheets between microstrip ports | 44.8, 37.5 s; 29 MB | 15.0, 14.3 s; 42, 41 MB | 17.2 s; 60 MB |
-| The same, `solid` copper between lumped ports | 94.6, 93.3 s; 31 MB | 28.2, 28.3 s; 49, 48 MB | 33.3 s; 74 MB |
-| Via transition to −40 dB | 87.0, 110.2 s; 34 MB | 35.6, 37.5 s; 60, 59 MB | 43.9 s; 134 MB |
-| Via transition to −60 dB (the default) | 153.2, 173.7 s; 35 MB | 54.0, 51.6 s; 58, 62 MB | 60.8 s; 148 MB |
-| Via on a region of 25 194 cells, to −30 dB, own thread counts (the built-in solver one, ems three) | 34.5, 33.8 s; 30, 29 MB | 15.9, 15.3 s; 49 MB | 20.9 s; 87 MB |
-| The same, one thread each | 34.7, 34.0 s; 30 MB | 37.8, 38.0 s; 48 MB | 43.3, 44.2 s; 88 MB |
-| The same, three threads each | 44.9, 34.4 s; 30 MB | 16.1, 14.8 s; 47, 48 MB | |
-| Session 6's matching network (lossy sheets, graded mesh, to −50 dB): three threads each | 51.4, 59.6, 51.4 s | 42.9, 44.6, 42.7 s | 62.7, 60.8, 58.3 s (against 47.7, 46.8, 53.4 s, D94) |
-| The same, own thread counts in a pool of three (the built-in solver one) | 76.7, 75.8, 76.2 s | 45.2, 42.4, 42.8 s | 66.5, 63.7, 58.5 s (against 78.8, 77.7, 75.8 s, D94) |
-
-The machine was busier than for D94's table, and the built-in solver's times with `threads: 3` on the regions
-under 262 144 nodes, where its own rule gives it one thread, show it: the oracle's `solid` line 93 to 95 s (67 s
-in D94), the via transition 87 to 110 s (80 s). ems's times are those of D94 or under them. Memory does not depend
-on the load: ems takes 1.3 to 1.8 times the built-in solver's (1.6 to 4.4 with 0.0.11). The released crate's
-source is what was measured, byte for byte; the first row and the one-thread via row were run again on it (30.0 s
-against the built-in solver's 50.7 s with a build running beside it; 37.0 s against 34.8 s), with the same bytes,
-and the `#[ignore]` validations pass on both solvers with it (D98). The openEMS oracle job passed with it (CI run
-43964289403 on `ci/ems-012`): the lines within 36.0 % (sheets) and 41.2 % (`solid`) of openEMS for ems and 40.6
-and 42.6 % for the built-in solver, the via transition within 0.07 and 0.05 dB.
-
-**What is left:**
-
-- *Memory.* ems takes 1.3 to 1.8 times the built-in solver's (the process's peak, one run per process, 22 MB of
-  each before the run; the table above): 1.6 to 1.7 times on the bent line on 0.25 mm cells with sheets and 1.6
-  with `solid` copper, 1.4 and 1.3 on the default mesh, 1.4 and 1.6 on the oracle's lines, 1.7 to 1.8 on the via
-  transition, 1.6 on its small region. What it holds beyond the built-in solver, by ems's notes: while it builds a
-  port's engine, two `f64` vectors over the grid for the stability estimate of its conformal cells and the sheets'
-  edges in their installed form beside the final one (the peak on the regions with slanted copper); while it runs,
-  the coefficients where the mesh is graded in the plane, the compiled model next to the engine, a list of the
-  Debye poles, and a value per step for each probe (30 probes and 49 000 steps on the via transition: 12 MB).
-- *One thread.* On a region of 25 000 cells with a Debye laminate ems takes 1.1 times the built-in solver's
-  time on one thread (36 to 38 s against 34 to 35 s; 1.3 times with 0.0.11). A run without `threads` gives it
-  three there on this machine, and takes 15 to 16 s. On the bent line on 0.25 mm cells it is the faster one on
-  one thread too (60 to 64 s against 74 s).
-- *Threads on a machine of one's own.* Every time here was taken in a pool of three threads on a shared
-  machine. Without `threads` ems takes up to a thread per core of what the pool has (a thread per five x planes
-  and 4096 cells), the built-in solver one per 131 072 nodes: on more cores ems takes more of the machine than
-  the built-in solver did, and what that gives in time was not measured.
-
-Session 6 at equal threads, the third thing D94 left, is gone: with three threads each ems takes 43 to 45 s
-where the built-in solver takes 51 to 60 s (0.7 to 0.9 times; 1.1 to 1.3 times with 0.0.11), and a run without
-`threads` 42 to 45 s against 76 to 77 s. The laminate's Debye poles on that graded mesh, six on each of 207 000
-edges, were most of ems's run; for each of them it reads three fifths and writes half of what it did.
-
-**ems 0.0.8 and lossy `solid` copper.** 0.0.8 grew on lossy `solid` copper with slanted outlines on a fine mesh:
-the bent line at 0.25 mm cells ended after 7553 of 10 900 steps with a negative energy, as converged, with Σ|S|²
-1.12 (`sim.not_passive` was all that said so). The cells that keep their small faces counted the copper's
-surface edges as perfect conductors; they carry the surface impedance's voltage. 0.0.9 gives those edges the
-capacitance the faces beside them need, and since 0.0.10 ems ends a run whose energy goes negative as diverged,
-which cadlab reports as `sim.unstable` (the adapter's own check of the sign is gone).
-
-**Which to use.** ems is the default since D94: all five of D89's criteria are met (every validation tolerance of
-the built-in solver's tests, no case materially worse in accuracy, run time within 1.5 times on every case of the
-table, the same bytes on any thread count, no panic or instability), and with ems 0.0.12 (D98) it is the faster
-solver on every case measured but one, the small via region on one thread (1.1 times the built-in solver's time);
-with three threads each it takes 0.3 to 0.9 times the built-in solver's time. Leave `solver` out.
-`solver: builtin` is cadlab's own solver on the same model, kept and tested to the same tolerances: use it as the
-second result (the two agree on lines, parts, vias, lossy and diagonal copper to the tolerances above, so a
-difference between them beyond those is worth looking at), or where memory is short (ems takes 1.3 to 1.8 times as
-much: 91 MB against 57 MB on 580 000 cells). A result names its solver, in the output's `solver` and in the first
-line of the Touchstone file; a file written before D94 without `(solver: ...)` is the built-in solver's.
+**The engine that was removed** (D100). From D59 to D98 `sim.sparams` ran on an FDTD engine written in cadlab
+(`fdtd::engine`, with its own conformal cells and surface impedance), and from D86 on ems as well, first as an
+option and since D94 as the default. D86 to D98 hold the comparisons, and the last table with both columns is
+D98's. In short, on the same mesh and timestep: on perfect conductors, lossless and Debye dielectrics and lumped
+elements the two agreed to three or four digits; lossy copper along the mesh to 0.0002 dB in the conductor's part
+of |S₂₁| for `solid` copper and to 4 % for sheets on the oracle's line, roughness to 0.0007 dB; copper of about
+a cell, with conformal cells in both, to 0.018 dB in |S₂₁| on the via transition, to 0.1° (sheets) and 1.5°
+(`solid` copper) on the bent line at two cells across the track, and to 0.001 in |S₁₁| and |S₂₁| on session 6's
+matching network. ems took 0.3 to 0.9 times the engine's time with three threads each, 1.1 times on one thread
+on a small region with a Debye laminate, and 1.3 to 1.8 times its memory. The engine's own validations (its
+update on cut cells against cylinder and patch resonances, energy conservation, the Courant limit, its surface
+impedance in resonators) went with it; they are in the history before D100. A Touchstone file whose first line
+says `(solver: builtin)`, or names no solver (before D94), is that engine's.
 
 ## Touchstone files (`touchstone.summary`)
 

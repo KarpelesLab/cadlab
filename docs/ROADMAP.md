@@ -531,10 +531,13 @@ Research-sized items beyond the milestones above; none blocks a release.
       0.25 mm cells 91 MB for 159 MB, the built-in solver 57 MB), a Debye laminate on one thread 1.1 times its
       time on a small region (1.3), session 6 at equal threads 43 to 45 s against 51 to 60 s (0.7 to 0.9 times;
       1.1 to 1.3). The openEMS oracle job passed with ems as the default (0.0.11 on master) and with 0.0.12
-- [ ] Remove the built-in engine. Not yet (D98): what is left of D94's reasons is that it is the only solver of
-      a build without the cargo feature `ems`, which is a decision to take (ems in every build, or no full-wave
-      solver in a build without it), and that it is the second result on the same model. ems's memory stays
-      above the built-in solver's, 1.3 to 1.8 times
+- [x] Remove the built-in engine (D100; the first of D98's three ways): ems and csx are dependencies of every
+      build, the cargo feature `ems` is gone, and so are `fdtd::engine`, its conformal cells and its surface
+      impedance fit (5500 lines with their tests). `sim.sparams` has no `solver` parameter, and the result names
+      `ems 0.0.12`. Given up: the second result on the same model in the same process, a build without the
+      solver dependency, and the engine's lower memory (ems takes 1.3 to 1.8 times as much, D98). Kept: the
+      region, mesh, ports, parts and waves, the openEMS export and its oracle, every validation against an
+      analytic reference (now on ems alone), and the engine's result on one coarse line as recorded figures
 
 ---
 

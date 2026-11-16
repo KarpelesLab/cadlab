@@ -4,9 +4,9 @@
 //!
 //! The region, its geometry and its graded mesh come from the openEMS export
 //! ([`crate::openems`]): the same stack, copper, holes, ports and mesh lines, so both describe
-//! the same simulation. This module extracts the region ([`extract`]), places the ports and
-//! probes on the mesh ([`place_ports`]), hands the model to ems ([`ems`](self::ems)), runs once
-//! per port and assembles the S-parameters into a Touchstone file ([`Waves`]).
+//! the same simulation. This module extracts the region (`extract`), places the ports and
+//! probes on the mesh (`place_ports`), hands the model to ems (the `ems` submodule), runs once
+//! per port and assembles the S-parameters into a Touchstone file (`Waves`).
 //!
 //! - Copper: metal volumes (`solid`) or sheets (`sheet`); plated holes and vias are metal
 //!   cylinders. With a conductivity, a surface impedance on the copper gives the skin-effect loss
@@ -19,8 +19,7 @@
 //!   copper to the signal copper; microstrip ports feed the same source on the line and measure
 //!   voltage and current on it at their reference plane.
 //! - Board parts: two-pin resistors, capacitors and inductors in the region are series R–L–C
-//!   lumped elements from their part values, across the gap between their pads
-//!   ([`parts`](self::parts)).
+//!   lumped elements from their part values, across the gap between their pads ([`LumpedPart`]).
 //! - Absorbing boundaries: CPML in the outer `pml_cells` cells of every side.
 //! - S = B A⁻¹ from the incident and reflected power waves of every port in every run, so
 //!   terminations that are not exactly matched do not bias the result.
