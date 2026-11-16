@@ -266,9 +266,19 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       twelve corpus boards in two runs where guide 0.0.4 leaves 647 and 604 (nrfmicro 11 to 8, cynthion 34 to
       23, lumenpnp-mobo 12 to 6); 227 against the native router's 93 on eleven boards, ahead on two, behind on
       seven. route_bench counts a via in a pad by the pad's copper. The default stays the native router (D93)
-- [ ] `router: guide` level with the native router on the corpus: needs, in guide, a way out of fine-pitch pads
-      a track of the net's width does not leave, rip-up that settles, a cheaper plan for a run on a routed
-      board, and the time (D93, "Gaps"; D91, "What got in the way"; D88, "What still blocks it")
+- [x] guide 0.0.6 adopted in the adapter: after a run its deadline stopped the second run takes every net the
+      board has open, and `Routed::failed` leaves nets out only after a run that ended; the first run has 0.45
+      of the budget where it had half; `join` off and the second run measured again and kept. Measured at 60 s
+      (ROUTER.md, "Native router and guide 0.0.6, D95"): 353 and 359 connections open on the twelve corpus
+      boards in two runs where guide 0.0.5 leaves 572 and 568 (glasgow-revD1 344 to 177, glasgow-revC3 69 to
+      37, buspirate5-rev10 16 to 6, corne-cherry 54 to 46; lumenpnp-mobo 7 to 13), with a quarter to two fifths
+      more vias and track on corne-cherry and glasgow-revC3; against the native router's 294, ahead on three
+      boards (glasgow-revD1 177 against 201), level on three, behind on six, 176 against 93 on the eleven
+      without glasgow-revD1. The default stays the native router (D95)
+- [ ] `router: guide` level with the native router on the corpus: needs, in guide, routes that keep a pad's
+      way to the host's fill, a way out of the fine-pitch pads still shut in, rip-up that settles, a cheaper
+      plan for a run on a routed board, and the time (D95, "Gaps"; D93, "Gaps"; D91, "What got in the way";
+      D88, "What still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
