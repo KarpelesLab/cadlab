@@ -1,5 +1,5 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95 and D96; docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96 and D97; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -16,7 +16,9 @@
 //! guide plans on cadlab's fills (`Zones::fills`), not on a fill of its own, and is asked for
 //! none at the end (`RouteOptions::fills`) and for no joining of what its own fill leaves apart
 //! (`RouteOptions::join`): zone filling stays cadlab's, and what cadlab's fill leaves apart goes
-//! to a second run. What guide's API cannot express is passed the stricter way and named in
+//! to a second run. The first run has the nets with zones among its nets, open or not
+//! ([`first_nets`]), and guide joins the pads its routes cut off those fills again itself
+//! (`RouteOptions::pour_cuts`, D97). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -57,20 +59,20 @@ const PLANE_COVERAGE: f64 = 0.0;
 
 /// The share of the time budget guide's first run may take: the rest is for the verification,
 /// the refill, a second run on the routed board and the report. guide itself ends its routing
-/// at three quarters of what it is given and cleans up in the rest (0.0.5). Measured again
-/// with guide 0.0.7, whose second run plans for 3 to 4 s where 0.0.6 took 8 to 15: the
-/// twelve corpus boards at 60 s, connections open summed over three orders of the nets, are
-/// 920 with 0.35, 901 with 0.4, 890 with 0.45, 971 with half, 955 with 0.55, 1019 with 0.6,
-/// 1159 with 0.65, 1189 with 0.7, and 1620 with one run at nine tenths. Two things pull
-/// apart. glasgow-revD1's first run gains nothing after some 20 s while its second makes
-/// connections for as long as it has: 427, 432, 454, 550, 552, 640, 783, 821 along that
-/// row. The eleven other boards want the first run longer: 493, 469, 436, 421, 403, 379,
-/// 376, 368 (cynthion 90 to 40, tinytapeout-demo 58 to 41). 0.45 is the least sum and is
-/// kept; without glasgow-revD1 it would be 0.65 or more. With guide 0.0.6: a third 397
-/// (one order), two fifths 366 and 369, 0.45 356 and 350, half 411 and 419, three fifths
-/// 499; with 0.0.5 two fifths to three fifths were level and half was kept, with 0.0.4 four
-/// fifths left 714 and half 589 (D91, D93, D95, D96).
-const FIRST_SHARE: f64 = 0.45;
+/// at 0.92 of what it is given, with no zones to join, and cleans up in the rest. Measured
+/// with guide 0.0.8 (D97) on the twelve corpus boards at 60 s, connections open summed over
+/// three orders of the nets: 917 with 0.45 and 783 with 0.7, and in a run of the release's
+/// source before it, 863 with 0.45, 786 with 0.6, 781 with 0.7 and 821 with 0.8. Until
+/// 0.0.7 two things pulled apart and the share was 0.45 (D95, D96): glasgow-revD1's first run
+/// made nothing more after some 20 s while a second run on the routed board made 150
+/// connections, and the eleven other boards wanted the first run longer (with 0.0.7 here,
+/// 975 with 0.45 and 1190 with 0.7, of which glasgow-revD1 537 and 821, and the eleven 438
+/// and 369). In guide 0.0.8 a net that found no way in its corridor is searched for with
+/// nothing moved and keeps what that reaches before any net crosses another's routes, which
+/// is what the second run did on a board where nothing moves: glasgow-revD1's first run has
+/// at 27 s nearly what its two runs had, and the board is the same with either share (465
+/// and 422 over the three orders), so the eleven others decide: 452 with 0.45, 361 with 0.7.
+const FIRST_SHARE: f64 = 0.7;
 
 /// How many times what the first run needed after it (the verification and the refill) is
 /// kept for after a second run, whose board has more copper.
@@ -976,6 +978,16 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // routes in a quarter of a second takes a second (guide 0.0.6, D95; with 0.0.5 a run with
     // a work budget was stopped by it too, D93, which 0.0.6 no longer does).
     gopts.join = false;
+    // What its routes cut off the fills it planned on, guide joins again itself before it
+    // ends (guide 0.0.8, its default): cadlab's second run then has less to do, on a board
+    // where nothing moves. The eleven corpus boards without glasgow-revD1 have 358
+    // connections open with it over three orders at 60 s and 381 without (corne-cherry 106
+    // and 118, tinytapeout-demo 22 and 28).
+    gopts.pour_cuts = true;
+    // The ways out of a row of fine pitch planned for the whole row (guide 0.0.8, off by
+    // default) stay off: 367 with them for 358 (corne-cherry 99 for 106, glasgow-revC3 127
+    // for 113, buspirate5-rev10 14 for 11). D97.
+    gopts.row_fanout = false;
     // The smallest via the rules allow, for a pad trapped in its footprint: the native
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
     let (dia, drill) = super::smallest_via(&p.board().rules);
@@ -1224,6 +1236,22 @@ fn gave_up_on(ad: &Adapted, r: &pcb::Routed) -> BTreeSet<String> {
     }
 }
 
+/// The nets guide's first run may route: those of the board's open connections, `open`, and
+/// the nets with zones in scope, open or not. cadlab's fill of a pour joins pads that the
+/// routes of other nets then cut off, and a net that the fill joins whole has no open
+/// connection before routing: left out of the first run, its pads are found off their pour
+/// on the board filled again, when guide is asked for all their stubs at once on a board
+/// where nothing moves. lumenpnp-mobo's ground is such a net (its F.Cu pour joins every pad
+/// of it, and guide plans a net that has a plane on an inner layer on that plane alone):
+/// the second run was asked for some 220 stubs to the plane, and 5 to 10 pads of the LQFP
+/// and the drivers were shut in by then. Asked in the first run, guide makes them while the
+/// board is free: 0, 1 and 0 connections open over three orders of the nets at 60 s for 9,
+/// 10 and 6, with 713 vias for 748 (D97).
+fn first_nets(p: &Project, open: &BTreeSet<String>, wanted: &dyn Fn(&str) -> bool) -> BTreeSet<String> {
+    let zoned = p.board().zones.iter().filter_map(|z| z.net.clone()).filter(|n| wanted(n));
+    open.iter().cloned().chain(zoned).collect()
+}
+
 /// What guide says of a run, for the progress sink.
 fn said(r: &pcb::Routed) -> String {
     let gs = &r.stats;
@@ -1264,6 +1292,10 @@ fn said(r: &pcb::Routed) -> String {
 /// is left open says so. A run with a budget of either kind is not the run without one: guide
 /// then routes for the most connections soonest.
 ///
+/// **The first run's nets** are those of the board's open connections in scope and the nets
+/// with zones in scope ([`first_nets`]): a net that cadlab's fill joins whole is cut by the
+/// routes of the others.
+///
 /// **A second run.** guide plans on cadlab's fills of the zones, as they are before routing;
 /// routes change them. After the run the zones are filled again around the new copper, and
 /// guide is given the routed board and its fills once more: for the nets with zones that the
@@ -1302,7 +1334,7 @@ pub(crate) fn route(
     // The plan: the board's open connections in scope, as the ratsnest has them.
     let planned: Vec<RatLine> = geo::ratsnest_from(&items, &isl).into_iter().filter(|l| wanted(&l.net)).collect();
     let nets: BTreeSet<String> = planned.iter().map(|l| l.net.clone()).collect();
-    let ad = adapt(p, &items, &nets, opts)?;
+    let ad = adapt(p, &items, &first_nets(p, &nets, &wanted), opts)?;
     let mut stats = RouteStats { grid: opts.grid.unwrap_or(ad.pitch), completion: 100.0, ..Default::default() };
     if planned.is_empty() {
         (hooks.progress)(1, Some(1), "done");
@@ -2017,8 +2049,23 @@ mod tests {
         assert!(gave_up_on(&ad, &r).is_empty());
     }
 
+    /// The first run has the nets with zones in scope beside those with open connections.
+    #[test]
+    fn the_first_run_has_the_nets_with_zones_too() {
+        let p = project();
+        let open: BTreeSet<String> = ["SIG".to_string()].into();
+        let all = first_nets(&p, &open, &|_| true);
+        assert_eq!(all.iter().map(String::as_str).collect::<Vec<_>>(), ["GND", "SIG"]);
+        // Not a net out of scope.
+        assert_eq!(first_nets(&p, &open, &|n| n == "SIG"), open);
+        // A run for everything still routes and counts what the board has open.
+        let r = route(&p, &Scope::All, &RouteOptions::default(), &Hooks::none()).expect("route");
+        assert_eq!(r.stats.failed, 0, "{:?}", r.connections);
+    }
+
     /// What guide is told beside the board: no fill of its own at the end and no joining of zones'
-    /// pieces on it, no via in a pad, and
+    /// pieces on it, the pads its routes cut off the fills joined again, no rows planned, no
+    /// via in a pad, and
     /// for the escapes of trapped pads the smallest via the rules allow, the native fanout's.
     #[test]
     fn guide_gets_no_fill_and_the_smallest_via_for_escapes() {
@@ -2027,6 +2074,7 @@ mod tests {
         p.board_mut().rules.min_annular_ring = Nm(100_000);
         let g = options(&p, &RouteOptions::default(), &[0, 1]);
         assert!(!g.fills && !g.join && !g.vias_in_pads && g.keep_partial);
+        assert!(g.pour_cuts && !g.row_fanout);
         assert_eq!(g.fanout_via, Some(ViaSize { diameter: 400_000, drill: 200_000 }));
         assert_eq!((g.seed, g.layers, g.work_budget), (None, None, None));
         let opts = RouteOptions { seed: 7, layers: vec!["B.Cu".into()], ..Default::default() };
