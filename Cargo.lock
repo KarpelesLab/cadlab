@@ -346,9 +346,9 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "csx"
-version = "0.0.2"
+version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d0dffc04cc80f24e77e13b730febb44a4aafb29d8eaedd165081c8e77550f61"
+checksum = "98f5884c07c146b73586eb7d3c86fc86c7cab3d6d3ff988fa3c71e2786acf979"
 
 [[package]]
 name = "dyn-clone"
@@ -364,9 +364,9 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "ems"
-version = "0.0.11"
+version = "0.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a46d6717356aff9cf9be238ac23c7439e3221016be4d78ed12bf12c7b4ab64c"
+checksum = "751f9ac5d6f9218c262247cb420bd652d5e3e5f3282eef4ef3d6f0895a1e2e75"
 dependencies = [
  "csx",
 ]

@@ -34,7 +34,7 @@ models3d = [
 ]
 
 # The ems FDTD solver (crates.io `ems`, with its geometry crate `csx`; both MIT, no further
-# dependencies): the default solver of `sim.sparams` (DECISIONS D86, D94). Without it the default
+# dependencies): the default solver of `sim.sparams` (DECISIONS D86, D94, D98). Without it the default
 # is the built-in solver and `solver: ems` is refused with `sim.solver_unavailable`.
 ems = ["dep:ems"]
 
@@ -70,8 +70,8 @@ oxideav-gltf = { version = "0.0.4", optional = true }
 oxideav-usdz = { version = "0.0.5", optional = true }
 oxideav-step = { version = "0.0.1", optional = true, features = ["registry"] }
 oxideav-vrml = { version = "0.0.1", optional = true, features = ["registry"] }
-# `sim.sparams`'s default solver (D86, D94); its `xml` feature (openEMS files) is not needed.
-ems = { version = "0.0.11", default-features = false, optional = true }
+# `sim.sparams`'s default solver (D86, D94, D98); its `xml` feature (openEMS files) is not needed.
+ems = { version = "0.0.12", default-features = false, optional = true }
 # Fab archives (D75): the user's own fstool, zip writer and reader only.
 fstool = { version = "0.5.2", default-features = false, features = ["archive", "gzip"] }
 
