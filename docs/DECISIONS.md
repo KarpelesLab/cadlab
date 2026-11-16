@@ -3785,7 +3785,11 @@ debug build; and in release every `#[ignore]` validation named above: `sim_spara
 `cavities_match_their_modes`, and `rf_path_full_wave` (|S11| 0.5726, |S21| 0.7988, D98's figures; 14 529 steps
 per port, 33.9 s). All pass. The full `cargo test --all-features` was not run here (the merger's), `cargo deny`
 is not installed here and openEMS is not either: those are CI's, below.
-@@CI@@
+CI on the branch `ci/ems-always` (https://github.com/KarpelesLab/cadlab/actions/runs/43979594388, the two
+commits of this change before this paragraph): all eleven jobs passed, among them the tests on Linux, Windows and
+macOS (the recorded line holds on all three), MSRV 1.95, cargo-deny, and the openEMS oracle, nine tests: the
+lossy lines within 36.0 % (sheets) and 40.2 % (`solid`) of `sim.sparams` at the lowest frequencies, inside the
+test's absolute term, Z₀ within 4.3 and 1.9 %, the via transition within 0.07 dB.
 *Not established:* what ems's memory or time is on Windows or macOS (D98); times on an unshared machine with
 more cores; whether a future ems release keeps the recorded line (the test will say); the via transition on
 0.2 mm cells, not run again (D90).
