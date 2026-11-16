@@ -3396,5 +3396,51 @@ second run's plan, had changed, and the measurement says the reason left is one 
 boards with guide 0.0.7 through the adapter (guide's record has them, all complete); budgets other than 60 s;
 a work budget; cadlab's oracles; KiCad's DRC on a board guide routed under the rules.
 
+### D99. Exchange oracles in CI: FreeCAD from its pinned AppImage, the IDX schema fetched from prostep ivip; the IPC-2581 schema cannot be had (2026-11-17)
+D81 left M9 with an open item: FreeCAD on the STEP files and `xmllint` on IPC-2581 and IDX were optional oracles
+that no automatic run included. CI has a job `exchange` for them now, and two of the three run in it.
+- **A job of its own**, informative (`continue-on-error`) like `oracles`, `openems` and `corpus`. It depends on a
+  download from a publisher's server that drops connections, and that should not take the KiCad tests of the
+  `oracles` job with it; it needs neither KiCad nor a display, and is done in three minutes.
+- **FreeCAD from the project's AppImage, version pinned.** Ubuntu 24.04 has no `freecad` package (`apt-get
+  install freecad`: "has no installation candidate"). The job takes
+  `FreeCAD_1.1.4-Linux-x86_64-py311.AppImage` from FreeCAD's GitHub release, checks its SHA-256, unpacks it with
+  `--appimage-extract` (no FUSE on the runner) and gives the tests `squashfs-root/usr/bin/freecadcmd`
+  (`CADLAB_ORACLE_FREECAD`). It runs without a display and without `AppRun`. A PPA or the snap would follow
+  their own releases; the AppImage is the same bytes every run. FreeCAD is LGPL and is run as a separate process,
+  as every oracle is (D7).
+- **The IDX schema is fetched, not vendored.** Its files carry "Copyright (C) prostep ivip Association
+  2006-2019, all rights reserved"; the recommendation is free to use and to duplicate "for use in the context of
+  creating software" (D37), which is not a licence to publish the schema in an MIT repository. The job downloads
+  `PSI5_IDXv4.5_release.zip` from `www.prostep.org` (SHA-256 pinned), takes the schema directory out of the inner
+  `PSI5_IDXv4.5_Schema.zip` and points `CADLAB_IDX_XSD` at it. The archive is kept in the job's cache, keyed by
+  the checksum: the runner's own copy, published nowhere, so that a run does not depend on the server, which
+  refused about every other connection when this was written. The cached path is under `runner.temp`:
+  `actions/cache` saves nothing for a path with `..` in it ("Relative pathing '.' and '..' is not allowed", a
+  warning in the post step), which is what `${{ github.workspace }}/../...` gives. The `openems` and `corpus`
+  jobs' caches are written that way and the repository holds no cache of theirs; not changed here.
+- **The IPC-2581 schema is not in the job, and that part of the item stays open.** `https://webstds.ipc.org/2581/`
+  and `IPC-2581C.xsd` under it answer 403 from a GitHub runner, from the development machine and from a third
+  network (2026-11-17); the IPC-2581 Consortium's validation page gives that address as where the official schema
+  files are. With no access there is no file, no checksum to pin and no terms to read. Copies on other sites were
+  not used: whether IPC allows them is unknown, and CI must not rest on one. Nothing in the repository records
+  that cadlab's IPC-2581 was ever validated against the schema; the roadmap says so now.
+- **A listed oracle cannot skip.** `oracle::optional` and the schema variables skipped quietly when the tool or
+  file was missing, which is right on a developer's machine and wrong in a job that installs them.
+  `CADLAB_ORACLES_REQUIRED` lists variables (`CADLAB_ORACLE_FREECAD,CADLAB_ORACLE_XMLLINT,CADLAB_IDX_XSD` in the
+  job); a test whose variable is listed panics where it would skip. A schema variable that points at nothing
+  panics always. The tests write an `oracle:` line when the other program has done its reading, and the job
+  checks the log for those lines and for a `skipping:` line naming one of the three.
+- **One more check:** `step_packages_freecad_oracle` gives FreeCAD the board with one part per generated package
+  family (MELF, SOIC, LQFP, QFN, DIP, BGA, SOT-223, SOD-123, SMA, DPAK), which only cadlab's Part 21 reader had
+  read.
+Runs (2026-11-16, the job alone on a branch `ci/exchange-oracles`; the first with every step passing is
+https://github.com/KarpelesLab/cadlab/actions/runs/43932259429, the job as committed is
+https://github.com/KarpelesLab/cadlab/actions/runs/43934428784): FreeCAD 1.1.4 read 24, 297 and 11 valid closed solids on the three boards, the board volumes equal to
+the ones computed from the outline; the three IDX messages are valid. No defect in the outputs.
+*Why:* an exit that says "leaves cadlab" should rest on a program other than cadlab reading the file (D81), and
+a check that can skip without saying so in the place meant to run it is not a check.
+*Not done:* IPC-2581 by any other program; an IDX reader (none is available, D37); FreeCAD on IDF.
+
 
 ## Open questions

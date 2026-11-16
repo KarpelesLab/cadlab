@@ -79,19 +79,51 @@ pub mod oracle {
         }
     }
 
+    /// Environment variable naming what must not skip: a comma-separated list of the variables
+    /// of optional oracles and schemas (`CADLAB_ORACLE_FREECAD,CADLAB_IDX_XSD`). A CI job that
+    /// installs an optional tool lists it here, so a broken install fails the test instead of
+    /// skipping it.
+    pub const REQUIRED_VAR: &str = "CADLAB_ORACLES_REQUIRED";
+
+    /// Whether `var` is listed in [`REQUIRED_VAR`].
+    pub fn required(var: &str) -> bool {
+        std::env::var(REQUIRED_VAR).is_ok_and(|l| l.split(',').any(|v| v.trim() == var))
+    }
+
     /// Like [`require`] for optional oracles: `None` (with a message) when oracle tests are
-    /// disabled or the tool is not installed, instead of panicking.
+    /// disabled or the tool is not installed, instead of panicking. A tool listed in
+    /// [`REQUIRED_VAR`] panics when missing, also when oracle tests are disabled.
     pub fn optional(o: Oracle) -> Option<PathBuf> {
+        let (name, var) = o.program();
         if !enabled() {
+            assert!(!required(var), "{REQUIRED_VAR} lists {var} but {ENABLE_VAR}=1 is not set");
             eprintln!("skipping: oracle tests disabled (set {ENABLE_VAR}=1)");
             return None;
         }
-        let (name, var) = o.program();
         let found = std::env::var_os(var).map(PathBuf::from).or_else(|| find_in_path(name));
-        if found.is_none() {
-            eprintln!("skipping: optional oracle `{name}` not found (set {var})");
+        match &found {
+            Some(p) => eprintln!("oracle: `{name}` at {}", p.display()),
+            None if required(var) => {
+                panic!("{REQUIRED_VAR} lists {var} but oracle `{name}` was not found (install it or set {var})")
+            }
+            None => eprintln!("skipping: optional oracle `{name}` not found (set {var})"),
         }
         found
+    }
+
+    /// A file or directory the user supplies for an optional check (a schema that is not
+    /// shipped), from the variable `var`: `None` (with a message naming `what`) when the
+    /// variable is not set. A variable listed in [`REQUIRED_VAR`] panics when not set, and a
+    /// path that does not exist always panics.
+    pub fn optional_path(var: &str, what: &str) -> Option<PathBuf> {
+        let Some(path) = std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from) else {
+            assert!(!required(var), "{REQUIRED_VAR} lists {var} but it is not set (point it at {what})");
+            eprintln!("skipping: set {var} to {what}");
+            return None;
+        };
+        assert!(path.exists(), "{var}={} does not exist ({what})", path.display());
+        eprintln!("oracle: {var} at {}", path.display());
+        Some(path)
     }
 
     fn find_in_path(name: &str) -> Option<PathBuf> {

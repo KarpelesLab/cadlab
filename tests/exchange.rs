@@ -336,16 +336,14 @@ fn ipc2581_structure() {
 /// `CADLAB_IPC2581_XSD` at a local copy.
 #[test]
 fn ipc2581_schema_oracle() {
-    let Some(xsd) = std::env::var_os("CADLAB_IPC2581_XSD") else {
-        eprintln!("skipping: set CADLAB_IPC2581_XSD to a local IPC-2581C.xsd");
-        return;
-    };
+    let Some(xsd) = oracle::optional_path("CADLAB_IPC2581_XSD", "a local IPC-2581C.xsd") else { return };
     let Some(xmllint) = oracle::optional(Oracle::Xmllint) else { return };
     let (d, _r, s) = board();
     let f = fabout::ipc2581::document(s.project.as_ref().unwrap(), &options());
     let path = d.path().join(&f.name);
     std::fs::write(&path, &f.content).unwrap();
     oracle::run(&xmllint, &["--noout", "--schema", &xsd.to_string_lossy(), &path.to_string_lossy()]);
+    eprintln!("oracle: xmllint validated {} against {}", f.name, xsd.display());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -483,24 +481,22 @@ fn board_volume(p: &cadlab::model::Project, vias: bool) -> f64 {
     area * p.board().stackup.thickness.0 as f64 / 1e18
 }
 
-#[test]
-fn step_freecad_oracle() {
-    let Some(freecad) = oracle::optional(Oracle::FreeCad) else { return };
-    let (d, _r, s) = board();
-    let p = s.project.as_ref().unwrap();
-    let out = mcad::step::export(p, &mcad_options()).unwrap();
-    let path = d.path().join("tiny.step");
+/// FreeCAD reads the STEP file `out` (written to `dir`): the shape and every solid must be valid
+/// and closed, the solids being the board and then every generated package solid. Returns the
+/// volumes (mm³).
+fn freecad_solids(freecad: &Path, dir: &Path, out: &mcad::step::StepOut) -> Vec<f64> {
+    let path = dir.join("board.step");
     std::fs::write(&path, &out.content).unwrap();
-    let script = d.path().join("check.py");
+    let script = dir.join("check.py");
     std::fs::write(
         &script,
         format!(
-            "import Part\ns = Part.read(r'{}')\nprint('VALID', s.isValid())\nfor so in s.Solids:\n    print('SOLID', so.isValid(), so.isClosed(), '%.6f' % so.Volume)\n",
+            "import FreeCAD, Part\nprint('FREECAD', '.'.join(FreeCAD.Version()[:3]))\ns = Part.read(r'{}')\nprint('VALID', s.isValid())\nfor so in s.Solids:\n    print('SOLID', so.isValid(), so.isClosed(), '%.6f' % so.Volume)\n",
             path.display()
         ),
     )
     .unwrap();
-    let stdout = oracle::run(&freecad, &["-c", &format!("exec(open(r'{}').read())", script.display())]);
+    let stdout = oracle::run(freecad, &["-c", &format!("exec(open(r'{}').read())", script.display())]);
     assert!(stdout.contains("VALID True"), "{stdout}");
     let solids: Vec<f64> = stdout
         .lines()
@@ -512,9 +508,33 @@ fn step_freecad_oracle() {
         .collect();
     // The board, then the generated package solids (one set per footprint part).
     assert_eq!(solids.len(), 1 + out.generated_solids, "{stdout}");
+    assert!(solids[1..].iter().all(|&v| v > 0.0), "{stdout}");
+    let version = stdout.lines().find_map(|l| l.strip_prefix("FREECAD ")).unwrap_or("?");
+    eprintln!("oracle: FreeCAD {version} read {} valid closed solids, board volume {:.3} mm3", solids.len(), solids[0]);
+    solids
+}
+
+#[test]
+fn step_freecad_oracle() {
+    let Some(freecad) = oracle::optional(Oracle::FreeCad) else { return };
+    let (d, _r, s) = board();
+    let p = s.project.as_ref().unwrap();
+    let out = mcad::step::export(p, &mcad_options()).unwrap();
+    let solids = freecad_solids(&freecad, d.path(), &out);
     let expected = board_volume(p, false);
     assert!((solids[0] - expected).abs() < 1e-3, "board volume {} vs {expected}", solids[0]);
-    assert!(solids[1..].iter().all(|&v| v > 0.0), "{stdout}");
+}
+
+/// The same on the board with one part per generated package family (`step_generated_bodies`).
+#[test]
+fn step_packages_freecad_oracle() {
+    let Some(freecad) = oracle::optional(Oracle::FreeCad) else { return };
+    let (d, _r, s) = package_board();
+    let p = s.project.as_ref().unwrap();
+    let out = mcad::step::export(p, &mcad_options()).unwrap();
+    let solids = freecad_solids(&freecad, d.path(), &out);
+    let expected = board_volume(p, false);
+    assert!((solids[0] - expected).abs() < 1e-3, "board volume {} vs {expected}", solids[0]);
 }
 
 /// A board with one part per generated package family: MELF cylinders, chamfered molded
@@ -977,12 +997,8 @@ fn idx_structure() {
 /// here; point `CADLAB_IDX_XSD` at the directory holding its `foundation.xsd`.
 #[test]
 fn idx_schema_oracle() {
-    let Some(dir) = std::env::var_os("CADLAB_IDX_XSD") else {
-        eprintln!("skipping: set CADLAB_IDX_XSD to the directory of the IDX schema files");
-        return;
-    };
+    let Some(dir) = oracle::optional_path("CADLAB_IDX_XSD", "the directory of the IDX schema files") else { return };
     let Some(xmllint) = oracle::optional(Oracle::Xmllint) else { return };
-    let dir = std::path::PathBuf::from(dir);
     let (d, messages) = idx_messages();
     // The process instruction types live in a schema `foundation.xsd` does not import: a
     // wrapper imports both.
@@ -1005,6 +1021,7 @@ fn idx_schema_oracle() {
         let path = d.path().join(name);
         std::fs::write(&path, text).unwrap();
         oracle::run(&xmllint, &["--noout", "--schema", &xsd.to_string_lossy(), &path.to_string_lossy()]);
+        eprintln!("oracle: xmllint validated {name} against the IDX schema in {}", dir.display());
     }
 }
 

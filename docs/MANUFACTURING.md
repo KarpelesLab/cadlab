@@ -66,7 +66,7 @@ also part of `export.all`). One XML file, namespace `http://webstds.ipc.org/2581
 Left out: `HistoryRecord` and `Avl` (both require dates; the AVL would repeat the BOM's MPNs), `PadStackDef`
 (pads are written per layer instead), material `Spec`s (the project has requirements, not materials), mask and
 paste drawings (copper drawings are copper features), the solder mask minimum web, slot outlines. The schema (`IPC-2581C.xsd`) is published by IPC at
-`webstds.ipc.org` (not reachable without access at the time of writing) and is not shipped: its distribution terms
+`webstds.ipc.org` (which answers 403, again on 2026-11-17 from CI; D99) and is not shipped: its distribution terms
 are IPC's. Element order follows the published revision C structure and `kicad-cli pcb export ipc2581` output
 (observed, as an oracle). Tests parse the file back and check structure, references and counts against the
 board; `CADLAB_IPC2581_XSD=/path/IPC-2581C.xsd` with `CADLAB_ORACLES=1` validates with `xmllint` (docs/TESTING.md).

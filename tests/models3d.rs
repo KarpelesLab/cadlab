@@ -522,6 +522,7 @@ fn step_model_freecad_oracle() {
     let vols: Vec<f64> =
         stdout.lines().filter_map(|l| l.strip_prefix("SOLID True True ")).map(|v| v.trim().parse().unwrap()).collect();
     assert!(vols.iter().any(|v| (v - 54.0).abs() < 1e-6), "the 3 x 3 x 6 mm model solid: {stdout}");
+    eprintln!("oracle: FreeCAD read {} valid closed solids, the model's among them", vols.len());
 }
 
 // ---------------------------------------------------------------------------------------------

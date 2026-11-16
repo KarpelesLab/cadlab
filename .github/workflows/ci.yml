@@ -158,6 +158,86 @@ jobs:
             target/tmp/openems_parts/*.xml
           if-no-files-found: ignore
 
+  exchange:
+    name: Exchange oracles (FreeCAD reads STEP, xmllint validates IDX)
+    runs-on: ubuntu-24.04
+    # Informative, like the other oracle jobs, and apart from them: the IDX schema is fetched
+    # from its publisher (not vendored: all rights reserved), so an outage there fails only
+    # this job (docs/TESTING.md, "Exchange outputs"; DECISIONS D99).
+    continue-on-error: true
+    timeout-minutes: 30
+    env:
+      # prostep ivip's free PSI 5 release: recommendation, guidelines and the schema archive.
+      IDX_RELEASE_URL: https://www.prostep.org/fileadmin/prod-download/PSI5_IDXv4.5_release.zip
+      IDX_RELEASE_SHA256: a284c4d562753f28fa9c2646ed285a0d7c3bab788ee9732b431ba3ff6574ad7a
+      FREECAD_VERSION: 1.1.4
+      FREECAD_SHA256: f6dc6ba676e5ac96a565ebc8d657232f94c6158e85b4352141bd1a46f6b43434
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: exchange
+      - name: Install xmllint
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libxml2-utils unzip
+          xmllint --version
+      # Ubuntu 24.04 has no FreeCAD package: the project's own AppImage at a pinned release,
+      # unpacked (no FUSE on the runner) and run without a display.
+      - name: Install FreeCAD
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --max-time 600 \
+            --output "$RUNNER_TEMP/FreeCAD.AppImage" \
+            "https://github.com/FreeCAD/FreeCAD/releases/download/$FREECAD_VERSION/FreeCAD_$FREECAD_VERSION-Linux-x86_64-py311.AppImage"
+          echo "$FREECAD_SHA256  $RUNNER_TEMP/FreeCAD.AppImage" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/FreeCAD.AppImage"
+          cd "$RUNNER_TEMP"
+          ./FreeCAD.AppImage --appimage-extract > /dev/null
+          rm FreeCAD.AppImage
+          "$RUNNER_TEMP/squashfs-root/usr/bin/freecadcmd" --version
+      # The runner's own copy of the publisher's archive, so a run does not depend on the
+      # publisher being up; nothing of it is in the repository or in an uploaded artifact.
+      - name: Cache the IDX release
+        id: cache-idx
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/exchange-schemas/idx-release.zip
+          key: idx-release-${{ env.IDX_RELEASE_SHA256 }}
+      - name: Fetch the IDX release
+        if: steps.cache-idx.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/exchange-schemas"
+          # The publisher's server drops about every other connection: retry on any error.
+          curl --fail --silent --show-error --location --retry 8 --retry-all-errors --retry-delay 5 \
+            --max-time 300 --output "$RUNNER_TEMP/exchange-schemas/idx-release.zip" "$IDX_RELEASE_URL"
+          echo "$IDX_RELEASE_SHA256  $RUNNER_TEMP/exchange-schemas/idx-release.zip" | sha256sum --check
+      - name: Unpack the IDX schema
+        run: |
+          cd "$RUNNER_TEMP/exchange-schemas"
+          echo "$IDX_RELEASE_SHA256  idx-release.zip" | sha256sum --check
+          unzip -q -o -j idx-release.zip 'PSI5_IDXv4.5_release/PSI5_IDXv4.5_Schema.zip'
+          unzip -q -o -j PSI5_IDXv4.5_Schema.zip 'PSI5_IDXv4.5_Schema/PSI5_IDXv4.5_Schema/*' -d idx
+          test -f idx/foundation.xsd
+      - name: Exchange oracle tests
+        env:
+          CADLAB_ORACLES: "1"
+          # Everything this job installs must be found: a test that would skip fails instead.
+          # Not CADLAB_IPC2581_XSD: IPC's server refuses the schema (403), so
+          # `ipc2581_schema_oracle` skips here (DECISIONS D99).
+          CADLAB_ORACLES_REQUIRED: CADLAB_ORACLE_FREECAD,CADLAB_ORACLE_XMLLINT,CADLAB_IDX_XSD
+          CADLAB_ORACLE_XMLLINT: /usr/bin/xmllint
+        run: |
+          export CADLAB_ORACLE_FREECAD="$RUNNER_TEMP/squashfs-root/usr/bin/freecadcmd"
+          export CADLAB_IDX_XSD="$RUNNER_TEMP/exchange-schemas/idx"
+          set -o pipefail
+          # One thread: the oracles' lines in the log are whole.
+          cargo test --all-features --test exchange --test models3d -- --nocapture --test-threads 1 2>&1 | tee exchange.log
+          # The log must show each oracle at work, and none of this job's tests skipping.
+          grep -c '^oracle: FreeCAD.* read' exchange.log
+          grep -c '^oracle: xmllint validated .*\.idx' exchange.log
+          ! grep 'skipping: .*\(freecadcmd\|xmllint\|CADLAB_IDX_XSD\)' exchange.log
+
   corpus:
     name: Open-source corpus (KiCad 10, gerbv)
     runs-on: ubuntu-24.04

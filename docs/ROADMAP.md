@@ -422,11 +422,17 @@ moved part exported as an IDX change and MCAD's move applied; `tests/render_boar
 `deterministic_with_bodies_where_parts_are`; `tests/models3d.rs`, `render_uses_models_instead_of_bodies` and
 `step_writes_models_as_faceted_breps`; `tests/agent_session3.rs` renders the 3D view of a designed board and
 exports its STEP).
-- [ ] Open (found by the audit of 2026-11-13, D81): no other program reads these files in any automatic run. The
-      checks above are cadlab's own readers. FreeCAD reading the STEP files and `xmllint` validating IPC-2581 and
-      IDX against the published schemas are optional oracles (`CADLAB_ORACLE_FREECAD`, `CADLAB_IPC2581_XSD`,
-      `CADLAB_IDX_XSD`) that skip when the tool or schema is missing, and CI installs neither; they were last run
-      by hand (TESTING.md, "Exchange outputs"). To close: FreeCAD and the two schemas in the `oracles` job.
+- [x] Found open by the audit of 2026-11-13 (D81): no other program read these files in any automatic run.
+      Since 2026-11-16 CI's `exchange` job has FreeCAD 1.1.4 read the STEP files (the small board, the board with
+      one part per package family, a board with an attached model: valid closed solids, the board's volume as
+      computed) and `xmllint` validate the IDX baseline, change and response against prostep ivip's V4.5 schema;
+      the job names both in `CADLAB_ORACLES_REQUIRED`, so a missing tool or schema fails the tests there
+      (TESTING.md, "Exchange outputs"; D99).
+- [ ] Open: nothing but cadlab's own reader has read its IPC-2581. `ipc2581_schema_oracle` needs IPC's
+      `IPC-2581C.xsd`, and IPC's server refuses it (403 for `https://webstds.ipc.org/2581/`, from CI and from
+      elsewhere, 2026-11-17), so the schema can be neither fetched in CI nor its terms read, and no run by hand is
+      recorded. To close: a lawful copy of the schema (then `CADLAB_IPC2581_XSD` in the `exchange` job and in its
+      `CADLAB_ORACLES_REQUIRED`), or another program that reads IPC-2581 in the job.
 
 ## Stretch goals (XL)
 

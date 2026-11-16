@@ -386,16 +386,53 @@ files back: a minimal XML reader (references to dictionaries and layers resolve,
 every `id` is unique, every IDREF resolves, and holes, keep-out bounds, body heights and transforms match the
 board), a Part 21 reader (every `#ref` defined, every B-rep shell closed: each edge used once in each direction)
 and an IDF section reader. Three optional oracles skip when the tool or schema is missing even with
-`CADLAB_ORACLES=1`:
+`CADLAB_ORACLES=1`, unless `CADLAB_ORACLES_REQUIRED` names them (below):
 `CADLAB_ORACLE_FREECAD` (`freecadcmd`, e.g. `/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd`) must
 read the STEP file as valid closed solids, the board volume matching the outline minus cutouts and holes, and
-every generated body solid with a positive volume; `CADLAB_IPC2581_XSD` (a local copy of IPC's `IPC-2581C.xsd`, not shipped) validates the XML with
-`xmllint --schema`; `CADLAB_IDX_XSD` (the directory of the IDX schema files from prostep ivip's free
-`PSI5_IDXv4.5_release.zip`, not shipped) validates the IDX baseline, change and response messages the same way (verified with the V4.5 schema,
-2026-10-04, change and response messages 2026-10-14). `CADLAB_STEP_KEEP=<dir>` keeps the STEP file of
-`step_generated_bodies` (one part per package family) for a viewer. No ODB++ or IDX reader is available as an oracle: KiCad exports ODB++ but not IDX, and cadlab
-writes no ODB++ (DECISIONS D37). Example:
+every generated body solid with a positive volume, on the small board (`step_freecad_oracle`) and on the board
+with one part per generated package family (`step_packages_freecad_oracle`); `CADLAB_IPC2581_XSD` (a local copy
+of IPC's `IPC-2581C.xsd`, not shipped) validates the XML with `xmllint --schema` (`ipc2581_schema_oracle`);
+`CADLAB_IDX_XSD` (the directory of the IDX schema files, the inner `PSI5_IDXv4.5_Schema.zip` of prostep ivip's
+free `PSI5_IDXv4.5_release.zip`, not shipped) validates the IDX baseline, change and response messages the same
+way (`idx_schema_oracle`; verified with the V4.5 schema, 2026-10-04, change and response messages 2026-10-14).
+`CADLAB_STEP_KEEP=<dir>` keeps the STEP file of `step_generated_bodies` (one part per package family) for a
+viewer. No ODB++ or IDX reader is available as an oracle: KiCad exports ODB++ but not IDX, and cadlab writes no
+ODB++ (DECISIONS D37). Example:
 `CADLAB_ORACLES=1 CADLAB_ORACLE_FREECAD=/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd cargo test --test exchange`.
+
+`CADLAB_ORACLES_REQUIRED` is a comma-separated list of those variables (`CADLAB_ORACLE_FREECAD`,
+`CADLAB_ORACLE_XMLLINT`, `CADLAB_IDX_XSD`, `CADLAB_IPC2581_XSD`, and any other optional oracle's): a test whose
+tool or schema is listed fails where it would skip, also when `CADLAB_ORACLES=1` is missing. Each of these tests
+writes an `oracle:` line when the other program has read the file (`oracle: FreeCAD 1.1.4 read 297 valid closed
+solids, ...`, `oracle: xmllint validated baseline.idx against ...`).
+
+**In CI** (job `exchange`, "Exchange oracles", informative like the other oracle jobs; D99): FreeCAD and the IDX
+schema, with `CADLAB_ORACLES_REQUIRED=CADLAB_ORACLE_FREECAD,CADLAB_ORACLE_XMLLINT,CADLAB_IDX_XSD`, running
+`--test exchange --test models3d` on one thread; after the tests the job looks for the `oracle:` lines of FreeCAD
+and of `xmllint` in the log and fails on a `skipping:` line that names one of the three.
+- *FreeCAD:* Ubuntu 24.04 has no `freecad` package. The job downloads the FreeCAD project's own AppImage from
+  its GitHub release at a pinned version (1.1.4, `FreeCAD_1.1.4-Linux-x86_64-py311.AppImage`, 820 MB, SHA-256
+  checked), unpacks it with `--appimage-extract` (the runner has no FUSE) and runs
+  `squashfs-root/usr/bin/freecadcmd`, which needs no display and none of `AppRun`'s environment for `import Part`.
+  About 20 s.
+- *`xmllint`:* Ubuntu's `libxml2-utils`.
+- *IDX schema:* `https://www.prostep.org/fileadmin/prod-download/PSI5_IDXv4.5_release.zip` (16 MB, SHA-256
+  checked), fetched from the publisher and kept in the job's cache under that checksum (a path under
+  `runner.temp`: `actions/cache` saves nothing for a path with `..` in it); the schema files say
+  "Copyright (C) prostep ivip Association 2006-2019, all rights reserved", so they are in neither the repository
+  nor an uploaded artifact (D37). The server drops about every other connection (seen from two networks,
+  2026-11-17), hence the retries and the cache.
+- *IPC-2581 schema: not in CI, `ipc2581_schema_oracle` skips there.* IPC's server answers 403 to
+  `https://webstds.ipc.org/2581/` and to `IPC-2581C.xsd` under it, from a GitHub runner and from two other
+  networks (2026-11-17); the IPC-2581 Consortium's page on validation names that address as the only official
+  source. Its terms could not be read, and a copy from elsewhere would be a redistribution nobody has shown to be
+  allowed. cadlab's IPC-2581 has so far been read only by cadlab's own reader: no run of the schema validation is
+  recorded.
+
+First run of the job, 2026-11-16 (FreeCAD 1.1.4): 24 valid closed solids on the small board (volume 580.431 mm³
+as computed from the outline), 297 on the package board (7013.997 mm³), the attached model's 54 mm³ solid among
+11 in `step_model_freecad_oracle`; baseline, change and response IDX valid against the V4.5 schema. No defect
+found.
 
 3D models (`tests/models3d.rs`, D36) use small boxes the tests write themselves as STL, OBJ and glTF (no
 third-party models). The 3D view is checked with pixel probes where the model stands (above and under the board)
@@ -415,6 +452,9 @@ closed solid of the box's volume (`--test models3d`).
   outputs uploaded as an artifact. The job is `continue-on-error` while the PPA install proves stable; the PPA
   follows 10.0.x patch releases, so results are reproducible per KiCad minor version only. Target: a container
   with pinned versions of each oracle.
+- Optional oracles (FreeCAD, `xmllint` with a schema, openEMS) skip when missing even with the flag; a job that
+  installs one names it in `CADLAB_ORACLES_REQUIRED`, and then it fails when missing ("Exchange outputs"). The
+  `exchange` job does so for FreeCAD and the IDX schema.
 
 ## Benchmarks in CI
 
@@ -460,6 +500,8 @@ for an exit:
 | M4 | `tests/demo_board.rs`, `demo_board_passes_drc_and_exports_for_both_fabs`, `documented_commands_write_the_same_bundles` | always |
 | M4 | `tests/demo_board.rs`, `kicad_drc_clean_demo_board` | `CADLAB_ORACLES=1` (CI's `oracles` job) |
 | M4 | the fabs' online checks of the two archives | by hand (MANUFACTURING.md, "Demo board") |
+| M9 | `tests/exchange.rs`, `step_freecad_oracle`, `step_packages_freecad_oracle`, `idx_schema_oracle`; `tests/models3d.rs`, `step_model_freecad_oracle` | CI's `exchange` job (FreeCAD 1.1.4, IDX V4.5 schema) |
+| M9 | `tests/exchange.rs`, `ipc2581_schema_oracle` | by hand with a copy of `IPC-2581C.xsd`; no run recorded (D99) |
 
 Also for M4, without KiCad: `tests/demo_board.rs` `reference_designators_are_legible` (below, "Silkscreen").
 
