@@ -608,7 +608,7 @@ fn peak_kb() -> u64 {
 /// within the pool, `RAYON_NUM_THREADS`). Prints the process's peak before the run (the board and
 /// the registry) and after it, and the run's time: a time taken alone, which the runs of a longer
 /// test are not on a shared machine. `CADLAB_MEM_KEEP` is where to copy the Touchstone file (D94:
-/// ems 0.0.11's against 0.0.10's, byte for byte).
+/// ems 0.0.11's against 0.0.10's, byte for byte; D98: 0.0.12's against 0.0.11's).
 #[test]
 #[ignore]
 fn measure_memory() {

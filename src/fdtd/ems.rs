@@ -1,6 +1,6 @@
 //! `sim.sparams` on ems, its default solver (`solver: ems`): the board region run by the [`ems`]
-//! crate's FDTD solver instead of [`super::engine`] (DECISIONS D86, D87, D89, D90, D94; cargo feature
-//! `ems`).
+//! crate's FDTD solver instead of [`super::engine`] (DECISIONS D86, D87, D89, D90, D94, D98; cargo
+//! feature `ems`).
 //!
 //! The region, its mesh, its ports and its parts are the ones the built-in solver gets
 //! ([`super::extract`], [`super::place_ports`]); the geometry is the property list of the openEMS
@@ -414,15 +414,17 @@ pub(crate) fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SPa
     drop(model);
     for j in 0..np {
         let source = added.lumped[j].properties().and_then(|p| p.excitation.as_ref()).map(|e| e.0.as_str());
-        let mut sim = compiled.simulation_driving(source.as_slice()).map_err(solver_error)?;
+        let sim = compiled.simulation_driving(source.as_slice()).map_err(solver_error)?;
         if j == 0 {
             warnings(&sim.diagnostics(), &subjects, &mut diags);
             conformal_edges = cut_edges(&sim);
         }
         timestep = sim.engine().dt();
         let mut cancelled = false;
+        // The run takes the simulation: its results hold the probes' series, not a copy of them
+        // beside the engine (ems 0.0.12, D98).
         let res = sim
-            .run_with(|pr| {
+            .run_into_results(|pr| {
                 (hooks.progress)(
                     pr.steps,
                     Some(o.region.timesteps),
