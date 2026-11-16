@@ -1,5 +1,5 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91 and D93; docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93 and D95; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -57,12 +57,17 @@ const PLANE_COVERAGE: f64 = 0.0;
 /// The share of the time budget guide's first run may take: the rest is for the verification,
 /// the refill, a second run on the routed board and the report. guide itself ends its routing
 /// at three quarters of what it is given and cleans up in the rest (0.0.5). Measured again
-/// with that, the twelve corpus boards at 60 s: two fifths 572 connections open, half 571 and
-/// 573, three fifths 577, two thirds 593, three quarters 636, and with no second run 681. A
-/// second run on a large board spends 8 to 13 s on its plan before it routes, so it needs
-/// some 20 s (lumenpnp-mobo 7 and 51, glasgow-revD1 350 and 399 with half and without one).
-/// With guide 0.0.4 four fifths left 714 and half 589 (D91, D93).
-const FIRST_SHARE: f64 = 0.5;
+/// with guide 0.0.6, the twelve corpus boards at 60 s, the second run taking every open net:
+/// a third 397 connections open, two fifths 366 and 369, 0.45 356 and 350, half 411 and 419,
+/// three fifths 499, and with no second run 598. Nine boards are the same from two fifths to
+/// half within what two runs differ by, and two decide: glasgow-revD1, whose first run has
+/// as many open at 30 s as at 27 s (327) while its second, which plans for 10 s before it
+/// routes, makes some ten connections a second (171 with 0.45, 232 and 238 with half, 321
+/// with three fifths), and cynthion, whose second run plans for 12 to 15 s and has too
+/// little left below 0.45 (34 and 36 with two fifths, 20 and 26 with 0.45, 22 and 24 with
+/// half). With guide 0.0.5 two fifths to three fifths were level at 571 to 577 and half was
+/// kept, with 0.0.4 four fifths left 714 and half 589 (D91, D93, D95).
+const FIRST_SHARE: f64 = 0.45;
 
 /// How many times what the first run needed after it (the verification and the refill) is
 /// kept for after a second run, whose board has more copper.
@@ -814,9 +819,9 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     gopts.fills = false;
     // Nor does it join the pieces its own fill leaves a zone's net in: cadlab fills again around
     // the routes and gives guide what that fill leaves apart, in a second run. Left on, the
-    // twelve corpus boards have as many connections open at 60 s (564 and 586 against 567 to
-    // 573), and a run with a work budget on a board with zones says the budget was spent after
-    // a few thousand nodes (guide 0.0.5; D93).
+    // twelve corpus boards have 432 connections open at 60 s against 420, and a board that
+    // routes in a quarter of a second takes a second (guide 0.0.6, D95; with 0.0.5 a run with
+    // a work budget was stopped by it too, D93, which 0.0.6 no longer does).
     gopts.join = false;
     // The smallest via the rules allow, for a pad trapped in its footprint: the native
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
@@ -1049,22 +1054,20 @@ fn verify(
     }
 }
 
-/// The nets a run of guide tried and could not finish. A run that ended names them
-/// (`Routed::unrouted`). After one that was stopped they are the nets with a connection whose
-/// cause is a search that failed, not the stop. `Routed::tried` is not that list: it has every
-/// net that had its turn, and so the nets that were without a way when the run stopped because
-/// another net's route took it. Those are worth a second run: without them in it the twelve
-/// corpus boards had 651 connections open at 60 s where they have 564 to 586 (D93).
+/// The nets a second run on the routed board is not for: after a run that ended, the open
+/// nets whose own search found no way (`Routed::failed`), since that run had its time and
+/// the board has no more room for them. After a run that a budget stopped, none. guide's list
+/// is then the same nets as those with a connection whose cause is a search that failed,
+/// which were left out before (420 and 421 connections open on the twelve corpus boards at
+/// 60 s, one rule and the other, the first run with half the budget), but a search that
+/// failed in a run that was cut is not the last word on the routed board: with those nets in
+/// the second run too, 401 to 419 (tinytapeout-demo 39 to 41 against 46, cynthion 21 to 24
+/// against 25), and the second run, which ended on its own with 9 to 26 s unused on five
+/// boards, has the time for them (D95).
 fn gave_up_on(ad: &Adapted, r: &pcb::Routed) -> BTreeSet<String> {
-    let name = |n: NetId| ad.nets.get(n.index()).cloned();
     match r.stopped {
-        None => r.unrouted.iter().filter_map(|n| name(*n)).collect(),
-        Some(_) => r
-            .open
-            .iter()
-            .filter(|o| !matches!(o.cause, Cause::Stopped | Cause::Unknown))
-            .filter_map(|o| name(o.net))
-            .collect(),
+        None => r.failed.iter().filter_map(|n| ad.nets.get(n.index()).cloned()).collect(),
+        Some(_) => BTreeSet::new(),
     }
 }
 
@@ -1073,12 +1076,14 @@ fn said(r: &pcb::Routed) -> String {
     let gs = &r.stats;
     let of = |kind: CopperKind| r.via_kinds.iter().filter(|k| **k == kind).count();
     format!(
-        "guide: {} of {} nets, {} got to, {} of {} connections on its board, {} left open, {} rip-ups, {} nets \
-         to the finer pass, {} escape vias, {} stub vias to zones, {} nets with zones in pieces, {} of {} pairs \
-         side by side, {} of {} lengths met, {} nodes{}",
+        "guide: {} of {} nets, {} got to, {} with no way of their own, {} moved aside, {} of {} connections on \
+         its board, {} left open, {} rip-ups, {} nets to the finer pass, {} escape vias, {} stub vias to zones, \
+         {} nets with zones in pieces, {} of {} pairs side by side, {} of {} lengths met, {} nodes{}",
         gs.routed,
         gs.nets,
         r.tried.len(),
+        r.failed.len(),
+        gs.shoved,
         gs.islands.1,
         gs.islands.0,
         r.open.len(),
@@ -1109,8 +1114,8 @@ fn said(r: &pcb::Routed) -> String {
 /// **A second run.** guide plans on cadlab's fills of the zones, as they are before routing;
 /// routes change them. After the run the zones are filled again around the new copper, and
 /// guide is given the routed board and its fills once more: for the nets with zones that the
-/// board still has open, and after a run that its deadline stopped for every net it has open,
-/// in both cases without the nets guide tried and could not finish. It is kept when it leaves
+/// board still has open, less those whose own search found no way (`Routed::failed`), and
+/// after a run that its deadline stopped for every net it has open. It is kept when it leaves
 /// fewer connections open. Not after a run that the work budget stopped: nothing is left of
 /// it.
 pub(crate) fn route(
@@ -1193,8 +1198,9 @@ pub(crate) fn route(
     // What a run needs after it, as the first did: the verification and the refill.
     let after = ran.elapsed();
 
-    // A second run: the nets with zones that cadlab's fill around the routes leaves open, and
-    // after a run that its deadline stopped every net left open; never a net guide gave up on.
+    // A second run: the nets with zones that cadlab's fill around the routes leaves open, less
+    // those a run that ended found no way for, and after a run that its deadline stopped every
+    // net left open.
     let poured: BTreeSet<&str> = p.board().zones.iter().filter_map(|z| z.net.as_deref()).collect();
     let open = |items: &[CopperItem], isl: &[usize]| -> Vec<RatLine> {
         geo::ratsnest_from(items, isl).into_iter().filter(|l| wanted(&l.net)).collect()
@@ -1840,6 +1846,22 @@ mod tests {
         assert_eq!(seeded(7), seeded(7));
         assert_eq!(seeded(7).stats.failed, 0);
         assert_eq!(seeded(0), full);
+    }
+
+    /// Which nets a second run leaves out: those guide says its own search found no way for
+    /// (`Routed::failed`) after a run that ended, and none after a run that a budget stopped.
+    #[test]
+    fn a_second_run_leaves_out_the_nets_a_run_that_ended_found_no_way_for() {
+        let p = project();
+        let ad = adapted(&p, &["SIG", "DP", "DM"]);
+        let gopts = options(&p, &RouteOptions::default(), &[0, 1]);
+        let mut r = call(&ad, &gopts, None, &Hooks::none()).expect("route");
+        assert!(r.stopped.is_none() && r.failed.is_empty() && gave_up_on(&ad, &r).is_empty(), "{:?}", r.failed);
+        let sig = ad.nets.iter().position(|n| n == "SIG").expect("SIG");
+        r.failed = vec![NetId(sig as u32)];
+        assert_eq!(gave_up_on(&ad, &r).into_iter().collect::<Vec<_>>(), ["SIG"]);
+        r.stopped = Some(Stopped::Deadline);
+        assert!(gave_up_on(&ad, &r).is_empty());
     }
 
     /// What guide is told beside the board: no fill of its own at the end and no joining of zones'
