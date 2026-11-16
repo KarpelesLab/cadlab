@@ -3396,6 +3396,116 @@ second run's plan, had changed, and the measurement says the reason left is one 
 boards with guide 0.0.7 through the adapter (guide's record has them, all complete); budgets other than 60 s;
 a work budget; cadlab's oracles; KiCad's DRC on a board guide routed under the rules.
 
+### D98. ems 0.0.12: the three things D94 left open on ems's side measured again; memory 1.3 to 1.8 times the built-in solver's, the Debye laminate on one thread 1.1 times, session 6 at equal threads faster; the built-in engine stays until the build without `ems` is decided (2026-11-17)
+D94 switched `sim.sparams` to ems and left the built-in engine in place, with three things open on ems's side
+(memory 1.6 to 4.4 times the built-in solver's, a Debye laminate on one thread 1.3 times its time on a small
+region, session 6 at equal threads 1.1 to 1.3 times) and two things to see first (the openEMS oracle job with
+ems as the default, and a release with it). ems 0.0.12 was written against the three, with csx 0.0.3 for one of
+them. This change adopts it (`ems = "0.0.12"`), measures every case of D90's table again with both solvers, and
+says where the removal stands. The table is in ELECTRICAL.md, "What ems 0.0.12 changed". Measured on ems's
+source before the release, through a path that was not committed; the released crate's `src` is that source byte
+for byte, and the bent line with lossy sheets and the small via region on one thread were run again on it, with
+the same bytes (the built-in solver's 50.7 s, a build running beside it, against 30.0 s; 34.8 s against 37.0 s).
+No openEMS, CSXCAD or other GPL code was read. The limit and the tolerances are D89's and D90's, unmoved.
+**What changed in ems** (its design notes, §4.1 and §6, wave 27; no result changes, by its own tests and by the
+files below): the update coefficients are held as their distinct rows where the cells repeat (they were twelve
+arrays, 48 bytes per node; on a mesh uniform in the plane most rows repeat); csx's material
+arrays are taken one direction at a time (111 bytes per node at the peak of a compile, and a second
+discretisation for the mask of lossy metal); a round of the conformal cells is the list of the values it sets,
+and its stability estimate runs on six `f64` per node for ten; a laminate of Debye poles holds a charge per pole
+and two constants per pole of each distinct edge (24 bytes a pole on a graded mesh for 84, and its loop reads
+24 bytes a pole and writes 8 where it read 40 and wrote 16); the surface impedance reads the coefficients where
+they are and lets its request lists go; a probe's sample times are the rule they follow; nothing is allocated on
+threads that end (glibc keeps such memory with the thread's arena, and the second port's engine took new).
+**Adopted in the adapter** (`fdtd::ems`): a port's run is `Simulation::run_into_results`, which takes the
+simulation and moves the probes' series into the results. `run_with` copies them, and the engine was alive
+beside the copy until the port's spectra were formed. Nothing else: the compile options, the model and the
+reading of the waves are D90's.
+**How it was measured.** As D94: release builds, one run per process (`measure_memory`: the process's peak and a
+time taken alone), the two solvers alternating, two runs each, on a shared machine with three threads to use,
+both solvers with `threads: 3` unless said; session 6 through `rf_path_full_wave_ems`, three runs each way. ems
+0.0.11 was run once the same day on every case for its peak and its Touchstone file. The machine was busier than
+for D94: the built-in solver's times with three threads on its small regions are up to two fifths over D94's
+(the oracle's `solid` line 93 to 95 s for 67 s), ems's are D94's or under.
+**The three open points.**
+- *Memory* (the process's peak, 22 MB of each before the run; built-in against ems 0.0.12, with 0.0.11 in
+  brackets): the bent line on 0.25 mm cells 57 MB against 91 to 97 MB with sheets (159) and 72 against 111 to
+  113 with `solid` copper (185); on the default mesh 34 against 49 (54) and 38 to 39 against 49 to 50 (66); the
+  oracle's lines 29 against 41 to 42 with sheets (60) and 31 against 48 to 49 with `solid` copper (74); the via
+  transition 34 to 35 against 58 to 62 (134 to −40 dB, 148 to −60 dB); its small region 29 to 30 against 47 to 49
+  (87). 1.3 to 1.8 times, where it was 1.6 to 4.4. Not at the built-in solver's level, and by ems's account of
+  what is left (two `f64` vectors over the grid while a port's engine is built with conformal cells, the
+  coefficients on a mesh graded in the plane, a value per step and probe) not about to be.
+- *One thread with a Debye laminate* (the via on 25 194 cells, to −30 dB): 34.7, 34.0 s against 37.8, 38.0 s,
+  1.1 times (36.2 s on ems's source two hours earlier; 43.3, 44.2 s with 0.0.11 the same day, 1.3 times). With
+  three threads each 44.9, 34.4 s against 16.1, 14.8 s, and as a run without `threads` goes (the built-in solver
+  one thread, ems three) 34.5, 33.8 s against 15.9, 15.3 s.
+- *Session 6 at equal threads* (three each): 51.4, 59.6, 51.4 s against 42.9, 44.6, 42.7 s, 0.7 to 0.9 times
+  (D94: 47.7, 46.8, 53.4 against 62.7, 60.8, 58.3, 1.1 to 1.3 times). With each solver's own count, the built-in
+  solver's one thread and ems's three: 76.7, 75.8, 76.2 s against 45.2, 42.4, 42.8 s. The results are D94's
+  (|S₁₁| 0.5726 for 0.5733 and |S₂₁| 0.7988 for 0.7983 at 2.44 GHz).
+**D90's criteria again.**
+1. *Every validation tolerance.* The `#[ignore]` validations that take a solver were run on both solvers with
+   ems 0.0.12 from crates.io and pass at the built-in solver's tolerances: `sim_sparams_microstrip_validation`,
+   `lossless_line_near_the_pml_is_passive`, `sim_sparams_mask_validation`, `sim_sparams_parts_validation`,
+   `routed_45_degree_line` and session 6's `rf_path_full_wave`; so do the tests of `tests/fdtd_ems.rs`,
+   `tests/fdtd.rs`, `tests/fdtd_parts.rs`, `tests/fdtd_conformal.rs` and `tests/agent_session6.rs` that are not
+   ignored.
+2. *No case materially worse in accuracy.* Nothing to measure again: 0.0.12's Touchstone files are 0.0.11's
+   byte for byte on the nine cases compared (the bent line with lossy sheets and with lossy `solid` copper on
+   both meshes, the oracle's two lines, the via transition to −40 and −60 dB, the small via region), so D90's
+   numbers stand.
+3. *Run time within 1.5 times* (built-in against ems, seconds, three threads each): the bent line on 0.25 mm
+   cells 37.3, 35.2 against 28.1, 26.0 with sheets (D90's blocking case, 0.7 to 0.8 times; on one thread 74.3,
+   73.5 against 60.3, 64.2) and 77.9, 78.2 against 37.8, 37.0 with `solid` copper; on the default mesh 19.8, 18.2
+   against 8.3, 7.9 and 45.0, 37.0 against 13.0, 12.0; the oracle's lines 44.8, 37.5 against 15.0, 14.3 and 94.6,
+   93.3 against 28.2, 28.3; the via transition 87.0, 110.2 against 35.6, 37.5 to −40 dB and 153.2, 173.7 against
+   54.0, 51.6 to −60 dB. Met on every case; the one row where ems is the slower solver is the small via region
+   on one thread, 1.1 times.
+4. *Deterministic for any thread count.* The same bytes on one and three threads (the bent line with lossy
+   sheets on both meshes and with lossy `solid` copper on 0.25 mm cells) and on one, two and three (the small via
+   region).
+5. *No panics, no instabilities.* Every run above ended converged; `measure_diagonal_copper` (every copper
+   model on both meshes, each asserted to end and to stay passive) passes, Σ|S|² at most 1.0006 with perfect
+   copper and 0.998 with lossy copper.
+**The two things to see first.**
+- *The openEMS oracle job with ems as the default.* It ran on master with ems 0.0.11 as the default (run
+  43939785789) and on the branch `ci/ems-012` with 0.0.12 (run 43964289403), and passed both times, nine tests
+  each. With 0.0.12 the lines' largest relative difference from openEMS is 36.0 % (sheets) and 41.2 % (`solid`
+  copper) for ems and 40.6 and 42.6 % for the built-in solver, at the lowest frequencies, where the absolute
+  term of the test's 15 % + 0.025 dB carries them; the via transition is within 0.07 dB for ems and 0.05 dB for
+  the built-in solver. With 0.0.11: 36.0 and 40.2 %, 40.6 and 41.6 %, 0.07 and 0.05 dB. The `solid` line moved
+  by a point for both solvers between the two runs, with cadlab's files the same bytes: that is openEMS's run,
+  not ems's.
+- *A release with it.* ems 0.0.12 and csx 0.0.3 are on crates.io (ems's tests on Linux, Windows and macOS, its
+  docs and its MSRV job green on the release), and cadlab depends on them from there. cadlab's own release
+  with it is the merger's.
+**Decision.** ems 0.0.12 is adopted, and the built-in engine is not removed by this change. Of what D94 named,
+the time on one thread and session 6 are no longer reasons to keep it, the oracle job has run with ems as the
+default, and memory is 1.3 to 1.8 times where it was 1.6 to 4.4: a cost that is stated, not a defect. What
+still holds it is D94's second reason, and it is a decision, not a measurement: the built-in engine is the only
+solver of a build without the cargo feature `ems`. Removing it means one of
+- *`ems` always there:* the feature goes and ems and csx become dependencies of every build (both MIT, no
+  further dependencies, 21 s of a release build, MSRV 1.95 as cadlab's). `sim.sparams` then has one solver in
+  every build and `solver` has nothing to choose.
+- *The feature stays, and a build without it has no full-wave solver:* `sim.sparams` answers
+  `sim.solver_unavailable` there, as `solver: ems` does now, and `export.openems` remains for such a build.
+- *The built-in engine stays for that build only:* nothing is removed, and its tests have to run in a build
+  that CI does not make.
+With either of the first two, what goes with the engine is the second result on the same model (the tests that
+hold each solver to the other, and the answer to "which of the two is off" that a second solver in the same
+process gives; the openEMS oracle stays, in CI only), `solver: builtin` in the command's schema, and
+`fdtd::conformal`, the built-in solver's own cut cells. What does not go: the region, the mesh, the ports and
+the waves (`fdtd::extract`, `place_ports`, `Waves`), which are both solvers', and the types the adapter takes
+from `fdtd::engine` (`Gaussian`, `Hooks`, `LumpedPort`, `Probe`, `EPS0`), which would move.
+**Tests.** No test changed: every board-level test names its solver and runs on both, and none holds a number
+that 0.0.12 moves. `measure_memory`'s doc names D98.
+*Not established:* times on an unshared machine with more cores (D94); what the built-in solver's runs with
+three threads on small regions cost on a quiet machine (here 93 to 95 s where D94 read 67 s); the memory of
+session 6's run, which its test does not report; the resident set on Windows or macOS (the figures follow
+glibc's allocator, which keeps what a program frees); the via transition on 0.2 mm cells, not run again; which
+solver is nearer a finer mesh on the via transition (D90).
+
 ### D99. Exchange oracles in CI: FreeCAD from its pinned AppImage, the IDX schema fetched from prostep ivip; the IPC-2581 schema cannot be had (2026-11-17)
 D81 left M9 with an open item: FreeCAD on the STEP files and `xmllint` on IPC-2581 and IDX were optional oracles
 that no automatic run included. CI has a job `exchange` for them now, and two of the three run in it.

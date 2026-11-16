@@ -513,11 +513,15 @@ Research-sized items beyond the milestones above; none blocks a release.
       run without `threads`. `solver: builtin` runs cadlab's own solver, which is also what a build without the
       cargo feature `ems` runs; the output and the Touchstone file name the solver; every validation test runs
       on both
-- [ ] Remove the built-in engine. Not yet (D94): it is the second result on the same model, the only solver of
-      a build without `ems`, and what ems is measured against. Open on ems's side: memory 1.6 to 4.4 times the
-      built-in solver's, a Debye laminate on one thread 1.3 times its time on a small region, session 6 at equal
-      threads 1.1 to 1.3 times. To see first: the openEMS oracle job with 0.0.11 as the default, and a release
-      with it
+- [x] ems 0.0.12 (D98), written against what D94 left open on ems's side, with 0.0.11's results byte for byte
+      on the nine cases compared: memory 1.3 to 1.8 times the built-in solver's (1.6 to 4.4; the bent line on
+      0.25 mm cells 91 MB for 159 MB, the built-in solver 57 MB), a Debye laminate on one thread 1.1 times its
+      time on a small region (1.3), session 6 at equal threads 43 to 45 s against 51 to 60 s (0.7 to 0.9 times;
+      1.1 to 1.3). The openEMS oracle job passed with ems as the default (0.0.11 on master) and with 0.0.12
+- [ ] Remove the built-in engine. Not yet (D98): what is left of D94's reasons is that it is the only solver of
+      a build without the cargo feature `ems`, which is a decision to take (ems in every build, or no full-wave
+      solver in a build without it), and that it is the second result on the same model. ems's memory stays
+      above the built-in solver's, 1.3 to 1.8 times
 
 ---
 
