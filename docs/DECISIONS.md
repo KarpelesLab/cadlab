@@ -3396,14 +3396,15 @@ second run's plan, had changed, and the measurement says the reason left is one 
 boards with guide 0.0.7 through the adapter (guide's record has them, all complete); budgets other than 60 s;
 a work budget; cadlab's oracles; KiCad's DRC on a board guide routed under the rules.
 
-### D97. guide 0.0.8 adopted: the first run has 0.7 of the budget and the nets with zones in it, the pads cut off their fills joined by guide, the rows planned left off; the default unchanged (2026-11-17)
+### D97. guide 0.0.8 and 0.0.9 adopted: the first run has 0.7 of the budget and the nets with zones in it, the pads cut off their fills joined by guide, the rows planned left off; the default unchanged (2026-11-17)
 guide 0.0.8 answers the first of D96's gaps another way than it was asked. A net that found no way in its corridor
 is searched for with nothing moved and keeps what that reaches, as a net routed in part, before any net crosses
 another's routes; a run joins the pads that its routes cut off the fills it planned on again, by stubs, once routing
 is over (`RouteOptions::pour_cuts`); two tracks out of two pads side by side in a rule area are necked by the area's
 clearance; and the ways out of a row of fine pitch can be planned row by row (`RouteOptions::row_fanout`, off by
-default) (guide's `docs/benchmarks.md`, "PCB routing with a second wait"). `guide = { version = "0.0.8",
-default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock` moves.
+default) (guide's `docs/benchmarks.md`, "PCB routing with a second wait"). guide 0.0.9, of the same day, is 0.0.8
+without the via on a via of D96's list. `guide = { version = "0.0.9", default-features = false, features = ["pcb"]
+}`; nothing else in `Cargo.lock` moves.
 **What the adapter takes from it** (`router::guide`; ROUTER.md, "guide as a backend"):
 - *The first run has 0.7 of the budget*, for 0.45 (`FIRST_SHARE`). D96's reason for 0.45 was one board:
   glasgow-revD1's first run made nothing more after some 20 s and a second run on the routed board made 150
@@ -3436,30 +3437,40 @@ default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock` mo
 - *The supply pins of tinytapeout-demo's QFN*, D96's item 5 in part: 0.0.8 necks two tracks side by side in an area
   by the area's clearance, so the courtyard given at 0.18 mm lets the pins of +3V3 and +1V1 leave beside their
   neighbours at 0.22 mm. 13, 20 and 20 to 21, 14 and 6 open with nothing changed in the adapter, 9, 8 and 5 after.
+- *A via on a via*, D96's item 6, was guide's and is gone with 0.0.9. A track that ends at a via is two of its net's
+  places at one point, and guide asked the first of the two which layers the net joins there: from the track's layer
+  the track's end, which joins none. A path found from its far end is laid the other way round, and was given a via
+  of its own on the one it went through: a second run on a board with the first run's stubs, as here. guide now asks
+  all the places at the point. In 21 runs of seven corpus boards the old question would have had another answer 12
+  times, mostly where the run's own via was (one via in the result); the verification took such a piece out twice in
+  D96's runs and once here (23 items of GNDR on corne-cherry, in an uncommitted build with the first run at 0.45).
+  Nothing changes in the adapter, and the verification stays.
 **Measured** (ROUTER.md, "Native router and guide 0.0.8, D97"; the corpus at 60 s, three orders of the nets, one
-thread a run and six runs at a time, guide 0.0.8 from crates.io; *0.0.7* is master `ecf0242`, D96's adapter, run
-again here; the native router run here, seed 1, three threads, one run at a time). Open connections on the twelve
-boards over the three orders: 0.0.7 354, 278 and 343; 0.0.8 behind D96's adapter 330, 302 and 285; 0.0.8 with the
-first run at 0.7 285, 261 and 237; after 276, 253 and 231 (again: 273, 255 and 235); the native router 294. The
-eleven without glasgow-revD1: 141, 142 and 155; 163, 145 and 144; 123, 125 and 113; 114, 117 and 107; native 93.
-Zero DRC errors other than unrouted on every run, no via in a pad of its net, no call over 58.8 s, nothing taken out
-by the verification in any run of the four rows.
+thread a run and six runs at a time, guide 0.0.8 and 0.0.9 from crates.io; *0.0.7* is master `ecf0242`, D96's
+adapter, run again here; *after* is guide 0.0.9 behind the adapter of this change; the native router run here, seed
+1, three threads, one run at a time). Open connections on the twelve boards over the three orders: 0.0.7 354, 278
+and 343; 0.0.8 behind D96's adapter 330, 302 and 285; 0.0.8 with the first run at 0.7 285, 261 and 237; 0.0.8 behind
+the adapter of this change 276, 253 and 231, and 273, 255 and 235 in a second run; after 273, 250 and 238 (again:
+272, 250 and 239); the native router 294. The eleven without glasgow-revD1: 141, 142 and 155; 163, 145 and 144; 123,
+125 and 113; 114, 117 and 107; 111, 114 and 114; native 93. Zero DRC errors other than unrouted on every run, no via
+in a pad of its net, no call over 58.8 s, nothing taken out by the verification in any of these runs.
 **What moves between two runs.** The same binary of 0.0.7 had 1096 and 851 open over three orders two hours apart on
 this machine, with a load of 8 to 14 from other work (glasgow-revD1 629 and 424), and 975 here; D96 recorded 890. A
 run that a deadline cuts moves with the machine, and glasgow-revD1 with 0.0.7 by a hundred in one order. With 0.0.8
-the same runs repeat nearly to the connection (760 and 763 in two runs of *after*, 781 and 780 in two of the
-uncommitted build before the zones): on the boards that the budget cuts, a pass that ends with fewer connections
-than its routes made at their best goes back to those, and the best is reached before the cut. What is said here is
-of runs of the same hour.
+the same runs repeat nearly to the connection (760 and 763 in two runs of 0.0.8 behind the new adapter, 761 and 761
+in two of *after*, 781 and 780 in two of the uncommitted build before the zones): on the boards that the budget
+cuts, a pass that ends with fewer connections than its routes made at their best goes back to those, and the best is
+reached before the cut. What is said here is of runs of the same hour.
 **Vias and track**, first order, guide after / native: lumenpnp-mobo 713 vias and 6544 mm / 347 and 5424 mm;
 tinytapeout-demo 605 vias and 5799 mm / 274 and 4913 mm; buspirate5-rev10 501 vias and 3816 mm / 313 and 3053 mm;
-cynthion 660 vias and 4064 mm / 476 and 3177 mm; glasgow-revC3 556 vias and 3940 mm / 415 and 3436 mm; corne-cherry
-826 vias and 8437 mm / 483 and 8276 mm; glasgow-revD1 1085 vias and 7954 mm / 1008 and 8784 mm; sweep-v2.2 42 vias
-and 2231 mm / 21 and 2161 mm; nrfmicro 60 vias and 495 mm / 46 and 454 mm. The table in ROUTER.md has all of it per
+cynthion 631 vias and 3911 mm / 476 and 3177 mm; glasgow-revC3 541 vias and 3919 mm / 415 and 3436 mm; corne-cherry
+825 vias and 8436 mm / 483 and 8276 mm; glasgow-revD1 1085 vias and 7954 mm / 1008 and 8784 mm; sweep-v2.2 42 vias
+and 2231 mm / 21 and 2161 mm; nrfmicro 62 vias and 499 mm / 46 and 454 mm. The table in ROUTER.md has all of it per
 board.
-**The generated boards** through the adapter of this change, one run each with the bench's 120 s: all eight complete
-with no DRC error (attiny-2l 0 vias in 0.02 s, soic24-2l 159 in 1.4 s, stm32-2l 72 in 1.7 s, stm32-4l 51 in 1.3 s,
-qfp-qfn-4l 172 in 5.4 s, fine-4l 105 in 3.9 s, bga144-4l 248 in 16.9 s, big-4l 1994 vias and 21 789 mm in 79 s).
+**The generated boards** through the adapter of this change with 0.0.9, one run each with the bench's 120 s: all
+eight complete with no DRC error, and the same routes with 0.0.8 (attiny-2l 0 vias in 0.02 s, soic24-2l 159 in 1.2
+s, stm32-2l 72 in 1.4 s, stm32-4l 51 in 1.1 s, qfp-qfn-4l 172 in 4.4 s, fine-4l 105 in 3.1 s, bga144-4l 248 in 13.6
+s, big-4l 1994 vias and 21 789 mm in 70 s).
 **Tried and not kept**, in uncommitted builds, each over the three orders at 60 s:
 - *Runs that move what the runs before placed*: after the two runs, guide's `eco::reroute_with` with the new copper
   within 1.5 mm of the ends of what is still open taken out and routed again, in another order of the nets each
@@ -3486,27 +3497,25 @@ qfp-qfn-4l 172 in 5.4 s, fine-4l 105 in 3.9 s, bga144-4l 248 in 16.9 s, big-4l 1
    nothing else: 16 of its 36 open are pads of GND and GNDR on pieces of pour that the routes of 150 nets cut off,
    on both layers, where a stub through a via reaches another piece that is cut off too. guide's stubs after routing
    join what still has a way; planning the ground as tracks (`plane_coverage`) did not gain.
-3. *Rip-up that settles, and the time left.* nrfmicro's first run ends on its own after 24 s with 4 to 7 open and 35
+3. *Rip-up that settles, and the time left.* nrfmicro's first run ends on its own after 25 s with 4 to 9 open and 34
    s of the budget unspent (the USB receptacle's D+ and D− pads, which the native router gives a crossover via, and
-   pins of the module shut in by other nets' routes); glasgow-revD1 makes 11 connections in the last 15 s of its
-   first run and 8 in its second.
+   pins of the module shut in by other nets' routes); glasgow-revD1 makes 11 connections in the last 15 s of
+   its first run and 8 in its second.
 4. *Searches on a wide board.* sweep-v2.2 has 6 or 7 open against 3: 43 nets on 2 layers, 27 M nodes in 41 s with no
    net moved, its ground at a search's node limit and its supply waiting when the run is cut.
 5. *Rule areas by kind and containment, with a track width that is routed by*, D96's items 3 to 5 as they were but
    for the necking: tinytapeout-demo has 9, 8 and 5 against 6, 5 or 6 of them pins of +3V3.
-6. *A via on a via*, D96's item 6: once in some forty runs of corne-cherry here (a second run of GNDR, 23 items
-   taken out), in an uncommitted build with the first run at 0.45; not in the runs measured.
-7. *Vias*: twice the native router's on lumenpnp-mobo, tinytapeout-demo and sweep-v2.2, 1.3 to 1.7 times on
+6. *Vias*: twice the native router's on lumenpnp-mobo, tinytapeout-demo and sweep-v2.2, 1.3 to 1.7 times on
    nrfmicro, glasgow-revC3, cynthion, buspirate5-rev10 and corne-cherry, 1.08 on glasgow-revD1.
 **Default: unchanged.** The condition is that guide be at least as good as the native router on every board. At the
 same 60 s, over the three orders against the native router's one run: level on three (buspirate-flash-sop,
 buspirate-rs232, lumenpnp-ringlight); ahead on three in every order (glasgow-revD1 162, 136 and 124 against 201;
-lumenpnp-mobo 0, 1 and 0 against 15; cynthion 19, 15 and 11 against 28); within what runs differ by on three
-(tinytapeout-demo 9, 8 and 5 against 6; buspirate5-rev10 2, 6 and 3 against 2; glasgow-revC3 38, 38 and 37 against
-36); behind on three in every order (nrfmicro 4, 7 and 7 against 0; sweep-v2.2 6, 7 and 6 against 3; corne-cherry
-36, 35 and 38 against 3). 276, 253 and 231 open against 294 on the twelve boards, ahead in every order; 114, 117 and
-107 against 93 on the eleven without glasgow-revD1, behind in every order by 21, 24 and 14, where corne-cherry alone
-is behind by 33, 32 and 35: the ten others together are ahead by 12, 8 and 21. `router: guide` stays the second
+lumenpnp-mobo 0, 1 and 0 against 15; cynthion 19, 14 and 19 against 28); within what runs differ by on three
+(tinytapeout-demo 9, 8 and 5 against 6; buspirate5-rev10 2, 6 and 3 against 2; glasgow-revC3 35, 36 and 34 against
+36); behind on three in every order (nrfmicro 4, 7 and 9 against 0; sweep-v2.2 6, 7 and 6 against 3; corne-cherry
+36, 35 and 38 against 3). 273, 250 and 238 open against 294 on the twelve boards, ahead in every order; 111, 114 and
+114 against 93 on the eleven without glasgow-revD1, behind in every order by 18, 21 and 21, where corne-cherry alone
+is behind by 33, 32 and 35: the ten others together are ahead by 15, 11 and 14. `router: guide` stays the second
 opinion.
 *Why:* the share was a host's guess at what the run knew, and the run now does first what made the guess necessary.
 The nets with zones were left out by a reading of "open" that is right for the count and wrong for a router, which

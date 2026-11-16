@@ -770,7 +770,7 @@ in its own repository, as polyclip is for polygons) has a PCB router, `guide::pc
 `route.all` and `route.nets` runs it in place of cadlab's own search, through `router::guide`, an adapter in the
 library (no command, no file in between: the board goes to guide's `pcb::Design` and its tracks and vias come back
 through guide's API). The default router is unchanged, and so is everything the native router does. The dependency
-is `guide = { version = "0.0.8", default-features = false, features = ["pcb"] }`: its only dependency is polyclip
+is `guide = { version = "0.0.9", default-features = false, features = ["pcb"] }`: its only dependency is polyclip
 0.0.6, the version cadlab uses, so the tree has one polyclip and nothing new besides guide itself. 0.0.3 was the
 release with run control and the host's board model (D88), 0.0.4 the one for a host with a budget that fills its
 zones itself (D91), 0.0.5 the one whose every phase keeps the deadline and that shares a budget out between
@@ -778,8 +778,8 @@ routing and what comes after (D93), 0.0.6 the one that plans the ways out of fin
 with a budget, moves a net aside before it takes one out, and names the nets its own search found no way for
 (D95), 0.0.7 the one whose plan of a run takes a third of the time (D96), 0.0.8 the one in which a net that
 found no way in its corridor keeps what it reaches with nothing moved before any net crosses another's routes,
-and that joins the pads its routes cut off the fills it planned on (D97); what this section says of 0.0.2 is
-in D85.
+and that joins the pads its routes cut off the fills it planned on, 0.0.9 that one without its via on a via
+(D97); what this section says of 0.0.2 is in D85.
 
 **What goes to guide** (`router::guide::adapt`):
 
@@ -1923,17 +1923,19 @@ What the numbers say:
 
 The default is unchanged (DECISIONS D96).
 
-**Native router and guide 0.0.8, D97** (guide 0.0.8 from crates.io; the corpus at the default 60 s time budget; the
-same machine, shared, with a load of 5 to 9 from other work; six runs of guide at a time on one thread each; the
-native router one run at a time on three threads, seed 1). The same count as above. Every row of guide was run in
-three orders of its nets, no seed and seeds 2 and 3, and the three counts are given in that order; the vias, length
-and time are those of the first.
+**Native router and guide 0.0.8, D97** (guide 0.0.8 and 0.0.9 from crates.io; the corpus at the default 60 s time
+budget; the same machine, shared, with a load of 5 to 9 from other work; six runs of guide at a time on one thread
+each; the native router one run at a time on three threads, seed 1). The same count as above. Every row of guide was
+run in three orders of its nets, no seed and seeds 2 and 3, and the three counts are given in that order; the vias,
+length and time are those of the first.
 
 - *0.0.7*: guide 0.0.7 behind the adapter of D96, master `ecf0242`, run again here.
 - *0.0.8*: guide 0.0.8 behind the same adapter (the first run with 0.45 of the budget).
 - *0.0.8, first run 0.7*: the same with the first run at 0.7 of the budget and nothing else.
-- *After*: guide 0.0.8 behind the adapter of this change: the first run at 0.7 of the budget and with the nets that
-  have zones among its nets, open or not; `pour_cuts` on and `row_fanout` off, as guide has them.
+- *After*: guide 0.0.9, which is 0.0.8 without the via on a via, behind the adapter of this change: the first run at
+  0.7 of the budget and with the nets that have zones among its nets, open or not; `pour_cuts` on and `row_fanout`
+  off, as guide has them. guide 0.0.8 behind the same adapter has 276, 253 and 231, and 273, 255 and 235 in a second
+  run.
 - Commands: `RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_TRACE=1
   CADLAB_BENCH_BUDGET_MS=60000 [CADLAB_BENCH_SEED=2|3] route_bench --corpus <board>`; `RAYON_NUM_THREADS=3
   CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_BUDGET_MS=60000 route_bench --corpus <board>` for the native router. The two
@@ -1942,32 +1944,32 @@ and time are those of the first.
 
 | board | layers | native: open, vias, length, time | guide 0.0.7: open (three orders); vias, length, time | guide 0.0.8: open | guide 0.0.8, first run 0.7: open | guide after: open (three orders); vias, length, time |
 |---|---|---|---|---|---|---|
-| buspirate-flash-sop | 2 | 0, 4, 460.2 mm, 0.5 s | 0, 0, 0; 7, 496.9 mm, 0.8 s | 0, 0, 0 | 0, 0, 0 | 0, 0, 0; 7, 496.9 mm, 0.9 s |
+| buspirate-flash-sop | 2 | 0, 4, 460.2 mm, 0.5 s | 0, 0, 0; 7, 496.9 mm, 0.8 s | 0, 0, 0 | 0, 0, 0 | 0, 0, 0; 7, 496.9 mm, 0.8 s |
 | buspirate-rs232 | 2 | 0, 10, 280.9 mm, 0.5 s | 0, 0, 0; 6, 356.2 mm, 0.7 s | 0, 0, 0 | 0, 0, 0 | 0, 0, 0; 6, 356.2 mm, 0.7 s |
 | lumenpnp-ringlight | 2 | 0, 2, 180.4 mm, 0.4 s | 0, 0, 0; 1, 208.7 mm, 0.3 s | 0, 0, 0 | 0, 0, 0 | 0, 0, 0; 1, 209.6 mm, 0.3 s |
-| nrfmicro | 2 | 0, 46, 453.6 mm, 11.0 s | 8, 5, 5; 48, 496.5 mm, 25.3 s cut | 4, 7, 7 | 4, 7, 7 | 4, 7, 7; 60, 495.0 mm, 25.5 s |
-| sweep-v2.2 | 2 | 3, 21, 2160.9 mm, 53.3 s | 6, 7, 6; 42, 2231.0 mm, 54.8 s cut | 6, 8, 6 | 6, 7, 6 | 6, 7, 6; 42, 2231.0 mm, 55.9 s cut |
-| corne-cherry | 2 | 3, 483, 8275.6 mm, 30.1 s | 45, 37, 42; 609, 7605.7 mm, 56.8 s cut | 41, 36, 43 | 36, 35, 38 | 36, 35, 38; 826, 8436.7 mm, 47.0 s cut |
-| tinytapeout-demo | 4 | 6, 274, 4913.3 mm, 60.0 s | 13, 20, 20; 572, 5530.5 mm, 40.1 s cut | 21, 14, 6 | 9, 8, 5 | 9, 8, 5; 605, 5799.4 mm, 49.3 s cut |
-| buspirate5-rev10 | 4 | 2, 313, 3053.2 mm, 29.7 s | 5, 9, 7; 436, 3536.4 mm, 45.2 s cut | 9, 6, 7 | 2, 6, 3 | 2, 6, 3; 501, 3815.8 mm, 40.5 s |
-| lumenpnp-mobo | 4 | 15, 347, 5423.7 mm, 62.4 s cut | 10, 5, 7; 734, 6330.2 mm, 38.9 s cut | 10, 10, 6 | 9, 10, 6 | 0, 1, 0; 713, 6544.4 mm, 32.2 s |
-| cynthion | 4 | 28, 476, 3177.0 mm, 61.3 s cut | 20, 22, 28; 593, 3682.1 mm, 42.8 s cut | 26, 23, 28 | 19, 14, 11 | 19, 15, 11; 660, 4064.3 mm, 57.4 s cut |
-| glasgow-revC3 | 4 | 36, 415, 3436.4 mm, 60.6 s cut | 34, 37, 40; 581, 4063.2 mm, 56.8 s cut | 46, 41, 41 | 38, 38, 37 | 38, 38, 37; 556, 3940.5 mm, 57.9 s cut |
-| glasgow-revD1 | 6 | 201, 1008, 8784.5 mm, 62.5 s cut | 213, 136, 188; 1098, 7532.8 mm, 58.7 s cut | 167, 157, 141 | 162, 136, 124 | 162, 136, 124; 1085, 7953.6 mm, 57.9 s cut |
-| all twelve | | 294 | 354, 278, 343 | 330, 302, 285 | 285, 261, 237 | 276, 253, 231 |
-| the eleven without glasgow-revD1 | | 93 | 141, 142, 155 | 163, 145, 144 | 123, 125, 113 | 114, 117, 107 |
+| nrfmicro | 2 | 0, 46, 453.6 mm, 11.0 s | 8, 5, 5; 48, 496.5 mm, 25.3 s cut | 4, 7, 7 | 4, 7, 7 | 4, 7, 9; 62, 499.4 mm, 25.6 s |
+| sweep-v2.2 | 2 | 3, 21, 2160.9 mm, 53.3 s | 6, 7, 6; 42, 2231.0 mm, 54.8 s cut | 6, 8, 6 | 6, 7, 6 | 6, 7, 6; 42, 2231.0 mm, 56.1 s cut |
+| corne-cherry | 2 | 3, 483, 8275.6 mm, 30.1 s | 45, 37, 42; 609, 7605.7 mm, 56.8 s cut | 41, 36, 43 | 36, 35, 38 | 36, 35, 38; 825, 8435.7 mm, 46.6 s cut |
+| tinytapeout-demo | 4 | 6, 274, 4913.3 mm, 60.0 s | 13, 20, 20; 572, 5530.5 mm, 40.1 s cut | 21, 14, 6 | 9, 8, 5 | 9, 8, 5; 605, 5799.4 mm, 48.8 s cut |
+| buspirate5-rev10 | 4 | 2, 313, 3053.2 mm, 29.7 s | 5, 9, 7; 436, 3536.4 mm, 45.2 s cut | 9, 6, 7 | 2, 6, 3 | 2, 6, 3; 501, 3815.8 mm, 36.6 s |
+| lumenpnp-mobo | 4 | 15, 347, 5423.7 mm, 62.4 s cut | 10, 5, 7; 734, 6330.2 mm, 38.9 s cut | 10, 10, 6 | 9, 10, 6 | 0, 1, 0; 713, 6544.4 mm, 30.5 s |
+| cynthion | 4 | 28, 476, 3177.0 mm, 61.3 s cut | 20, 22, 28; 593, 3682.1 mm, 42.8 s cut | 26, 23, 28 | 19, 14, 11 | 19, 14, 19; 631, 3910.6 mm, 57.4 s cut |
+| glasgow-revC3 | 4 | 36, 415, 3436.4 mm, 60.6 s cut | 34, 37, 40; 581, 4063.2 mm, 56.8 s cut | 46, 41, 41 | 38, 38, 37 | 35, 36, 34; 541, 3918.7 mm, 57.0 s cut |
+| glasgow-revD1 | 6 | 201, 1008, 8784.5 mm, 62.5 s cut | 213, 136, 188; 1098, 7532.8 mm, 58.7 s cut | 167, 157, 141 | 162, 136, 124 | 162, 136, 124; 1085, 7953.6 mm, 58.0 s cut |
+| all twelve | | 294 | 354, 278, 343 | 330, 302, 285 | 285, 261, 237 | 273, 250, 238 |
+| the eleven without glasgow-revD1 | | 93 | 141, 142, 155 | 163, 145, 144 | 123, 125, 113 | 111, 114, 114 |
 
 Zero DRC errors other than unrouted on every run, no via in a pad of its net, and no call of guide over 58.8 s. The
-verification took nothing out in any run of the four rows.
+verification took nothing out in any of these runs, those of 0.0.8 behind the new adapter included.
 
 What the numbers say:
 
 - *What two runs differ by.* The row of 0.0.7 is the adapter D96 recorded at 315, 275 and 300: glasgow-revD1 has
   213, 136 and 188 here where it had 168, 136 and 150, and the same binary had 214, 252 and 163, and 155, 141 and
   128, in two runs of this session two hours apart. A run that its deadline cuts depends on what else the machine
-  does. *After* a second time: 273, 255 and 235 for 276, 253 and 231. With 0.0.8 the boards that the budget cuts
-  repeat nearly to the connection: a pass that ends with fewer connections than its routes made at their best goes
-  back to those, and the best is reached before the cut.
+  does. *After* a second time: 272, 250 and 239 for 273, 250 and 238. With 0.0.8 and 0.0.9 the boards that the
+  budget cuts repeat nearly to the connection: a pass that ends with fewer connections than its routes made at their
+  best goes back to those, and the best is reached before the cut.
 - *guide 0.0.8 itself, behind the same adapter*: 354, 278 and 343 to 330, 302 and 285. Nothing in sum, and not the
   same runs: glasgow-revD1's first run has 182 of 1948 connections open at 27 s where 0.0.7's has 325, and its
   second makes 15 where it made 111. tinytapeout-demo 13, 20 and 20 to 21, 14 and 6, 53 to 41: the supply pins of
@@ -1978,29 +1980,32 @@ What the numbers say:
   and 113: cynthion 26, 23 and 28 to 19, 14 and 11, corne-cherry 41, 36 and 43 to 36, 35 and 38, buspirate5-rev10 9,
   6 and 7 to 2, 6 and 3. In the uncommitted build of 0.0.8's source, over the three orders: 0.45 863, 0.6 786, 0.7
   781, 0.8 821; `row_fanout` on, 367 on the eleven boards for 358; `pour_cuts` off, 381.
-- *The nets with zones in the first run*: 285, 261 and 237 to 276, 253 and 231, all of it lumenpnp-mobo, 9, 10 and 6
-  to 0, 1 and 0. Its ground had no open connection before routing, as cadlab's fill of the F.Cu pour joins all its
-  pads, so the first run was not asked for it; the routes cut the pour, and the second run was asked for some 220
-  stubs to the plane on a board where nothing moves. In the first run guide makes them while the board is free: 813
-  of 813 connections in 21 s for 524 of 524 in 33 s, 713 vias for 748. With 0.45 and these nets: 908 over the three
-  orders for 760.
+- *The nets with zones in the first run*, with 0.0.8: 285, 261 and 237 to 276, 253 and 231, all of it lumenpnp-mobo,
+  9, 10 and 6 to 0, 1 and 0. Its ground had no open connection before routing, as cadlab's fill of the F.Cu pour
+  joins all its pads, so the first run was not asked for it; the routes cut the pour, and the second run was asked
+  for some 220 stubs to the plane on a board where nothing moves. In the first run guide makes them while the board
+  is free: 813 of 813 connections in 21 s for 524 of 524 in 33 s, 713 vias for 748. With 0.45 and these nets: 908
+  over the three orders for 760.
+- *guide 0.0.9*: 276, 253 and 231 to 273, 250 and 238. A path laid from its far end through a via of its own net,
+  where a track of the net ends, is no longer given a via of its own on it (a via on a via, which the verification
+  took out with its piece twice in D96's runs).
 - *Vias and track.* Beside the native router guide has twice the vias on lumenpnp-mobo (713 against 347),
   tinytapeout-demo (605 against 274) and sweep-v2.2 (42 against 21), 1.3 to 1.7 times on nrfmicro, glasgow-revC3,
-  cynthion, buspirate5-rev10 and corne-cherry (826 against 483), and 1.08 times on glasgow-revD1; less track on
-  glasgow-revD1 (7954 against 8784 mm, with 39 fewer connections open), 2 to 28 % more on the others.
-- *What is open, by guide's cause*, of the 276 of the first order: 183 that the budget ended before, 70 pads shut
-  in, 14 "found no way", 6 at a search's node limit, 3 pads the refilled pour does not reach.
+  cynthion, buspirate5-rev10 and corne-cherry (825 against 483), and 1.08 times on glasgow-revD1; less track on
+  glasgow-revD1 (7954 against 8784 mm, with 39 fewer connections open), 2 to 25 % more on the others.
+- *What is open, by guide's cause*, of the 273 of the first order: 175 that the budget ended before, 68 pads shut
+  in, 18 "found no way", 10 at a search's node limit, 2 pads the refilled pour does not reach.
 - *Against the native router at the same 60 s*, three orders against its one run: level on the three small boards;
   ahead in every order on glasgow-revD1 (162, 136 and 124 against 201), lumenpnp-mobo (0, 1 and 0 against 15) and
-  cynthion (19, 15 and 11 against 28); within what runs differ by on tinytapeout-demo (9, 8 and 5 against 6),
-  buspirate5-rev10 (2, 6 and 3 against 2) and glasgow-revC3 (38, 38 and 37 against 36); behind in every order on
-  nrfmicro (4, 7 and 7 against 0), sweep-v2.2 (6, 7 and 6 against 3) and corne-cherry (36, 35 and 38 against 3).
-  276, 253 and 231 against 294 on the twelve boards, 114, 117 and 107 against 93 on the eleven without
+  cynthion (19, 14 and 19 against 28); within what runs differ by on tinytapeout-demo (9, 8 and 5 against 6),
+  buspirate5-rev10 (2, 6 and 3 against 2) and glasgow-revC3 (35, 36 and 34 against 36); behind in every order on
+  nrfmicro (4, 7 and 9 against 0), sweep-v2.2 (6, 7 and 6 against 3) and corne-cherry (36, 35 and 38 against 3).
+  273, 250 and 238 against 294 on the twelve boards, 111, 114 and 114 against 93 on the eleven without
   glasgow-revD1.
-- *The generated boards* through the adapter of this change, one run each with the default budget of 120 s: all
-  eight complete with no DRC error (attiny-2l 0 vias in 0.02 s, soic24-2l 159 in 1.4 s, stm32-2l 72 in 1.7 s,
-  stm32-4l 51 in 1.3 s, qfp-qfn-4l 172 in 5.4 s, fine-4l 105 in 3.9 s, bga144-4l 248 in 16.9 s, big-4l 1994 vias and
-  21 789 mm in 79 s).
+- *The generated boards* through the adapter of this change with 0.0.9, one run each with the default budget of 120
+  s: all eight complete with no DRC error, and the same routes with 0.0.8 (attiny-2l 0 vias in 0.02 s, soic24-2l 159
+  in 1.2 s, stm32-2l 72 in 1.4 s, stm32-4l 51 in 1.1 s, qfp-qfn-4l 172 in 4.4 s, fine-4l 105 in 3.1 s, bga144-4l 248
+  in 13.6 s, big-4l 1994 vias and 21 789 mm in 70 s).
 
 The default is unchanged (DECISIONS D97).
 
