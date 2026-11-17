@@ -23,7 +23,7 @@ vendored, never a runtime dependency, and none of their code copied (cadlab is M
 | Oracle | Checks |
 |---|---|
 | **KiCad** (`kicad-cli`) | export board to `.kicad_pcb` → KiCad DRC vs cadlab DRC; KiCad Gerber export vs ours; ERC on exported schematic; netlist equivalence |
-| **freerouting** | same DSN routed by both → compare completion, via count, length, runtime (router benchmarks) |
+| **freerouting** (CI job `freerouting`, informative) | the exported DSN routed by freerouting and its session imported: DRC-clean and complete on two boards (`tests/specctra.rs`); completion, via count, length and runtime beside cadlab's routers on the generated boards and on the open-source corpus (`route_bench`, ROUTER.md "freerouting on the corpus", D102) |
 | **gerbv** (and/or other Gerber viewers) | our Gerbers parse cleanly and rasterize to the expected image |
 | **Clipper2** | differential testing of the polygon library |
 | **ngspice** | SPICE netlist export parses and simulates: `ngspice -b` on the divider golden file gives v(out) = 2.5 V (`tests/electrical.rs`, M8) |
@@ -264,7 +264,9 @@ outcomes by rule, per-layer Gerber areas and differences, drill counts, routing 
 intermediate file is kept under `$CARGO_TARGET_TMPDIR/corpus/<project>/` (copy of the checkout, netlist, both
 DRC reports, cadlab's DRC as JSON, the imported project, the re-export, Gerbers and renders). CI runs it in the
 `corpus` job (KiCad 10 from the PPA, gerbv, release build, routing with a 30 s budget), caching the corpus
-by the manifest's hash; the job is informative (`continue-on-error`) like the oracle job. Locally (about four
+by the manifest's hash (under `runner.temp`, shared with the `corpus-route` and `freerouting` jobs; until D102
+the path had `..` in it, which `actions/cache` refuses, and nothing was cached); the job is informative
+(`continue-on-error`) like the oracle job. Locally (about four
 minutes, six with routing):
 
 ```sh
@@ -368,16 +370,47 @@ stops at 199 `silk_overlap` findings, so 23 of cadlab's 109 cannot be checked th
 - DRC clearance deficits between KiCad's 0.5 µm tolerance and cadlab's 2 µm are KiCad's alone: the router
   keeps clearances to 1 µm, and tightening it changes routes beyond the benchmark's limits (D60).
 
-### freerouting oracle (`tests/specctra.rs`)
+### freerouting oracle (`tests/specctra.rs`, `route_bench`)
 
-Two boards are exported with `export.dsn`, routed by freerouting headless (`-mp 20 -mt 1`, a separate `java`
-process) and imported with `route.import_ses`; cadlab DRC must then report no error, unrouted connections
-included. This checks the DSN geometry end to end (a wrong back-side transform shows up as shorts and opens) and
-the exact unit conversion of the session. `CADLAB_ORACLE_FREEROUTING` points at the jar (run with `java -jar`)
-or a launcher; `CADLAB_SPECCTRA_KEEP=<dir>` keeps the DSN, SES and a render. Tested with freerouting 2.1.0, which
-sometimes drops wiring from its session while reporting a complete route; those runs are retried (details in
-ROUTER.md). Not in the CI oracle job, which installs no Java. Example:
-`CADLAB_ORACLES=1 CADLAB_ORACLE_FREEROUTING=$HOME/freerouting.jar cargo test --test specctra -- --nocapture`.
+freerouting is GPL-3.0: its released jar is run as a separate process, pinned by version and SHA-256 where it is
+downloaded, and nothing of it is read, linked or vendored (D7, D102).
+
+**DSN and session end to end** (`freerouting_oracle`): two boards are exported with `export.dsn`, routed by
+freerouting headless (`-mp 20 -mt 1 -da`, a separate `java` process) and imported with `route.import_ses`;
+cadlab DRC must then report no error, unrouted connections included. This checks the DSN geometry (a wrong
+back-side transform shows up as shorts and opens) and the exact unit conversion of the session.
+`CADLAB_ORACLE_FREEROUTING` points at the jar or a launcher; a jar runs with `CADLAB_ORACLE_JAVA`, else
+`$JAVA_HOME/bin/java`, else `java`. `CADLAB_SPECCTRA_KEEP=<dir>` keeps the DSN, SES and a render. Tested with
+freerouting 2.1.0, which sometimes drops wiring from its session while reporting a complete route (those runs
+are retried, details in ROUTER.md), and with 2.5.0 on Java 25 (2026-11-17), which necks tracks down at pads
+narrower than the class width: 0.125 mm on the STM32 board, under the board's 0.15 mm minimum, which the DSN has
+no place for. Those `drc.track_width` findings are printed and allowed; every other error fails. A second test,
+`dsn_planes`, needs no freerouting: pours written as planes (`export.dsn {planes: true}`) read back as written.
+Example:
+`CADLAB_ORACLES=1 CADLAB_ORACLE_JAVA=/usr/lib/jvm/openjdk-bin-25/bin/java
+CADLAB_ORACLE_FREEROUTING=$HOME/freerouting-2.5.0.jar cargo test --test specctra -- --nocapture`.
+
+**On the corpus** (`examples/route_bench.rs`, `CADLAB_BENCH_ROUTER=freerouting`): each of the twelve boards with
+its routing removed is exported, routed by freerouting under its own time limit and imported, and the result is
+counted as the native router's and guide's are: open connections by cadlab's DRC with the pours filled again,
+DRC errors, vias, track length, wall time. The settings, what the DSN does not carry and the table are in
+ROUTER.md, "freerouting on the corpus". A board that gives no session fails the run.
+
+```sh
+scripts/fetch-corpus.sh
+export CADLAB_ORACLE_FREEROUTING=$HOME/freerouting-2.5.0.jar CADLAB_ORACLE_JAVA=/path/to/java-25/bin/java
+cargo build --release --example route_bench
+# 60 s, as the tables of the native router and guide; CADLAB_BENCH_FR_PLANES=1 writes the pours as planes
+CADLAB_BENCH_ROUTER=freerouting CADLAB_BENCH_FR_THREADS=4 target/release/examples/route_bench --corpus
+# 30 minutes: CADLAB_BENCH_BUDGET_MS=1800000 (CADLAB_BENCH_FR_TIMEOUT=none for no limit of its own)
+```
+
+**In CI** (job `freerouting`, informative, about an hour, D102): Temurin 25 from `actions/setup-java`,
+`freerouting-2.5.0.jar` from the project's GitHub release with its SHA-256 checked (kept in the job's cache),
+then `freerouting_oracle` (the log must show both boards routed), freerouting at 60 s on the corpus with both
+DSN variants, and the native router and guide at the same 60 s on the same runner. The four tables are in the job
+summary and in the `freerouting-corpus` artifact with the logs. Time budgets on a shared runner: the numbers
+differ from run to run, and the job fails only when freerouting gives no session for a board.
 
 ### Exchange outputs (`tests/exchange.rs`)
 
@@ -452,6 +485,8 @@ closed solid of the box's volume (`--test models3d`).
   outputs uploaded as an artifact. The job is `continue-on-error` while the PPA install proves stable; the PPA
   follows 10.0.x patch releases, so results are reproducible per KiCad minor version only. Target: a container
   with pinned versions of each oracle.
+- freerouting needs Java, which the `oracles` job does not install: the `freerouting` job runs
+  `tests/specctra.rs` with `CADLAB_ORACLES=1` and the pinned jar (above).
 - Optional oracles (FreeCAD, `xmllint` with a schema, openEMS) skip when missing even with the flag; a job that
   installs one names it in `CADLAB_ORACLES_REQUIRED`, and then it fails when missing ("Exchange outputs"). The
   `exchange` job does so for FreeCAD and the IDX schema.

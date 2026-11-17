@@ -33,7 +33,8 @@
 //! the processors its JVM sees and its `-mt` (default 1), `CADLAB_BENCH_FR_PASSES` its `-mp`
 //! (default: its own), `CADLAB_BENCH_FR_PLANES=1` writes the pours as planes
 //! (`export.dsn {planes: true}`), `CADLAB_BENCH_FR_ARGS` adds arguments and `CADLAB_BENCH_KEEP=<dir>`
-//! keeps the DSN, the session, freerouting's log and its result manifest per board. The run fails
+//! keeps the DSN, the session, freerouting's log and its result manifest per board
+//! (`CADLAB_BENCH_FR_REUSE=1` then counts the kept sessions again without running it). The run fails
 //! when a board has no result (docs/ROUTER.md, "freerouting on the corpus"; D102).
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets. `CADLAB_BENCH_ORIGINAL=1` lists the connections
@@ -320,6 +321,8 @@ struct Freerouting {
     extra: Vec<String>,
     /// Where the DSN, the session and freerouting's log are kept (`CADLAB_BENCH_KEEP`).
     keep: Option<PathBuf>,
+    /// Count the kept sessions again instead of running freerouting (`CADLAB_BENCH_FR_REUSE=1`).
+    reuse: bool,
 }
 
 impl Freerouting {
@@ -346,6 +349,7 @@ impl Freerouting {
                 .map(|v| v.split_whitespace().map(String::from).collect())
                 .unwrap_or_default(),
             keep: var("CADLAB_BENCH_KEEP").map(PathBuf::from),
+            reuse: var("CADLAB_BENCH_FR_REUSE").is_some_and(|v| v != "0"),
         }
     }
 
@@ -401,18 +405,62 @@ impl Freerouting {
     }
 }
 
-/// DRC errors a router cannot be held to through a DSN, because the design file has no place
-/// for what they check (docs/ROUTER.md, "Specctra DSN/SES", limits): they are counted apart.
-fn not_in_dsn(code: &str) -> bool {
-    NOT_IN_DSN.contains(&code)
+/// Whether a DRC error of the routed board is one a router cannot be held to through a DSN,
+/// because the design file has no place for what it checks (docs/ROUTER.md, "Specctra DSN/SES",
+/// limits); such errors are counted apart, under the returned name.
+///
+/// - By code: the minimum track width (the DSN gives each class its width, and a router that
+///   necks a track down at a narrow pad has no lower bound to keep), the clearances of drilled
+///   holes to copper and to each other, the copper-to-edge clearance, a keep-out's exception for
+///   some nets.
+/// - A clearance error whose gap is at least the clearance the DSN gives the two nets (the
+///   larger of their classes'): the rule broken is one of a pad, a footprint or a custom rule,
+///   which the DSN does not have. An error whose gap cannot be read counts as carried.
+/// - A short or a clearance error with a copper drawing of the board or of a footprint: the
+///   DSN has the pads of a footprint and no other copper of it, and no drawing of the board.
+fn not_in_dsn(d: &cadlab::Diagnostic, dsn: &cadlab::specctra::dsn::Dsn) -> Option<String> {
+    use cadlab::ObjectRef;
+    const BY_CODE: &[&str] =
+        &["drc.track_width", "drc.hole_clearance", "drc.hole_to_hole", "drc.copper_to_edge", "drc.keepout_net"];
+    let code = d.code.as_ref();
+    if BY_CODE.contains(&code) {
+        return Some(code.to_string());
+    }
+    // `graphic#12` is a drawing of the board, `copper:JP1/0` one of a footprint.
+    if (code == "drc.short" || code == "drc.clearance")
+        && (d.message.contains("graphic#") || d.message.contains("copper:"))
+    {
+        return Some(format!("{code} with a copper drawing"));
+    }
+    if code == "drc.clearance" {
+        let default = dsn.rule.clearance.map_or(0, |c| c.0);
+        let of = |net: &str| {
+            dsn.classes.iter().find(|c| c.nets.iter().any(|n| n == net)).and_then(|c| c.rule.clearance).map(|c| c.0)
+        };
+        let nets: Vec<&str> = d
+            .subjects
+            .iter()
+            .filter_map(|s| match s {
+                ObjectRef::Net(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        let carried = nets.iter().filter_map(|n| of(n)).chain([default]).max().unwrap_or(default);
+        // "... are 0.313119mm apart on F.Cu, clearance is 0.5mm"
+        let gap = d
+            .message
+            .split(" are ")
+            .nth(1)
+            .and_then(|r| r.split("mm apart").next())
+            .and_then(|g| g.trim().parse::<f64>().ok())
+            .map(|mm| (mm * 1e6).round() as i64)?;
+        // The DRC's own tolerance is under a micrometre.
+        if gap + 1_000 >= carried {
+            return Some("drc.clearance of a pad's, a footprint's or a custom rule".to_string());
+        }
+    }
+    None
 }
-
-/// See [`not_in_dsn`]: the minimum track width (the DSN gives each class its width, and a router
-/// that necks a track down at a narrow pad has no lower bound to keep), the clearances of
-/// drilled holes to copper and to each other, the copper-to-edge clearance, and a keep-out's
-/// exception for some nets.
-const NOT_IN_DSN: &[&str] =
-    &["drc.track_width", "drc.hole_clearance", "drc.hole_to_hole", "drc.copper_to_edge", "drc.keepout_net"];
 
 /// Routes one corpus board (its routing already removed) with freerouting and prints its row;
 /// `false` when there is no result to count (no session, or one that cannot be imported).
@@ -430,7 +478,6 @@ fn freerouting_row(fr: &Freerouting, name: &str, layers: u8, p: &Project, verbos
     };
     let unrouted = |p: &Project| cadlab::drc::check(p).iter().filter(|d| d.code == "drc.unrouted").count();
     let connections = unrouted(p);
-    let before = routebench::drc_codes(p);
     let x = export(p, name, &Options { planes: fr.planes, ..Options::default() });
     for w in &x.warnings {
         eprintln!("  {name}: DSN: {w}");
@@ -439,9 +486,24 @@ fn freerouting_row(fr: &Freerouting, name: &str, layers: u8, p: &Project, verbos
         eprintln!("  {name}: DSN: keep-out `{k}` written without its exception for {}", nets.join(", "));
     }
     let (dsn, ses) = (dir.join(format!("{name}.dsn")), dir.join(format!("{name}.ses")));
-    std::fs::write(&dsn, x.dsn.write()).expect("writing the DSN");
-    let _ = std::fs::remove_file(&ses);
-    let (time, log, killed) = fr.run(&dir, &dsn, &ses);
+    // `CADLAB_BENCH_FR_REUSE=1` with `CADLAB_BENCH_KEEP`: the kept session is counted again
+    // without running freerouting (its wall time from the kept `time.txt`).
+    let kept = fr.reuse.then(|| std::fs::read_to_string(dir.join("time.txt")).ok()).flatten();
+    let (time, log, killed) = match kept.and_then(|t| t.trim().parse::<f64>().ok()).filter(|_| ses.is_file()) {
+        Some(secs) => (
+            Duration::from_secs_f64(secs),
+            std::fs::read_to_string(dir.join("freerouting.log")).unwrap_or_default(),
+            false,
+        ),
+        None => {
+            std::fs::write(&dsn, x.dsn.write()).expect("writing the DSN");
+            let _ = std::fs::remove_file(&ses);
+            let _ = std::fs::remove_file(dir.join("result.json"));
+            let r = fr.run(&dir, &dsn, &ses);
+            let _ = std::fs::write(dir.join("time.txt"), format!("{:.3}\n", r.0.as_secs_f64()));
+            r
+        }
+    };
     if verbose {
         for l in log.lines() {
             eprintln!("  freerouting: {l}");
@@ -486,24 +548,33 @@ fn freerouting_row(fr: &Freerouting, name: &str, layers: u8, p: &Project, verbos
     }
     let open = unrouted(&q);
     let length: f64 = q.board().tracks.iter().map(|t| cadlab::board::track_length(t).0 as f64).sum::<f64>() / 1e6;
-    let mut by_code = routebench::drc_codes(&q);
-    for (code, n) in &before {
-        if let Some(m) = by_code.get_mut(code) {
-            *m = m.saturating_sub(*n);
+    // The errors the routing adds: those of the routed board that the board did not have,
+    // those the DSN could not have told the router apart from the others.
+    let had: std::collections::BTreeSet<String> = drc_messages(p).into_iter().collect();
+    let (mut carried, mut unseen): (BTreeMap<String, usize>, BTreeMap<String, usize>) = Default::default();
+    for d in cadlab::drc::check(&q) {
+        let m = format!("{}: {}", d.code, d.message);
+        if d.severity != cadlab::Severity::Error || d.code == "drc.unrouted" || had.contains(&m) {
+            continue;
+        }
+        let class = not_in_dsn(&d, &x.dsn);
+        if verbose {
+            let at = d
+                .location
+                .map_or(String::new(), |a| format!(" at {:.3} {:.3}", a.x.0 as f64 / 1e6, a.y.0 as f64 / 1e6));
+            eprintln!("  DRC{}: {m}{at}", if class.is_some() { " (not in the DSN)" } else { "" });
+        }
+        match class {
+            Some(c) => *unseen.entry(c).or_default() += 1,
+            None => *carried.entry(d.code.to_string()).or_default() += 1,
         }
     }
-    by_code.retain(|_, n| *n > 0);
-    let list = |unseen: bool| {
-        let c: Vec<String> =
-            by_code.iter().filter(|(c, _)| not_in_dsn(c) == unseen).map(|(c, n)| format!("{n}× {c}")).collect();
-        let n: usize = by_code.iter().filter(|(c, _)| not_in_dsn(c) == unseen).map(|(_, n)| n).sum();
+    let list = |codes: &BTreeMap<String, usize>| {
+        let c: Vec<String> = codes.iter().map(|(c, n)| format!("{n}× {c}")).collect();
+        let n: usize = codes.values().sum();
         if c.is_empty() { n.to_string() } else { format!("{n} ({})", c.join(", ")) }
     };
     if verbose {
-        let had: std::collections::BTreeSet<String> = drc_messages(p).into_iter().collect();
-        for m in drc_messages(&q).into_iter().filter(|m| !had.contains(m)) {
-            eprintln!("  DRC: {m}");
-        }
         for l in cadlab::board::ratsnest(&q) {
             eprintln!("  open: {} {} -> {} ({:.2} mm)", l.net, l.from, l.to, l.length.0 as f64 / 1e6);
         }
@@ -526,8 +597,8 @@ fn freerouting_row(fr: &Freerouting, name: &str, layers: u8, p: &Project, verbos
         if connections == 0 { 100.0 } else { 100.0 * (connections.saturating_sub(open)) as f64 / connections as f64 },
         q.board().vias.len(),
         if killed { "killed" } else { state.as_str() },
-        list(false),
-        list(true),
+        list(&carried),
+        list(&unseen),
     );
     true
 }
