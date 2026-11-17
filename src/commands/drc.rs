@@ -270,6 +270,23 @@ impl Command for Run {
             let list: Vec<String> = o.by_code.iter().map(|c| format!("{} {}", c.code, c.count)).collect();
             s += &format!("\n  by code: {}", list.join(", "));
         }
+        // Thermal relief: the count and the one command that repairs.
+        let thermal: usize = o
+            .by_code
+            .iter()
+            .filter(|c| {
+                ["solid_pad", "starved_thermal", "thermal_nominal"]
+                    .iter()
+                    .any(|t| c.code.strip_prefix("drc.").or(c.code.strip_prefix("fab.")) == Some(*t))
+            })
+            .map(|c| c.count)
+            .sum();
+        if thermal > 0 {
+            s += &format!(
+                "\n  thermal relief: {thermal} pad(s) in pours without relief or short of spokes; `zone.relieve` \
+                 repairs them and says what it could not do"
+            );
+        }
         if o.not_listed > 0 {
             s += &format!(
                 "\n  listed {} finding(s), {} more not listed (`offset`/`limit`, or narrow with `codes`/`severity`)",

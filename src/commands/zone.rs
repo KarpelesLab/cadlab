@@ -569,7 +569,10 @@ pub(crate) fn census_warnings(p: &Project, c: &Census) -> Vec<Diagnostic> {
                     c.relieved[0]
                 ),
             )
-            .with_hint("`zone.thermals` lists them; drc.run reports each with what to do (drc.starved_thermal)"),
+            .with_hint(
+                "`zone.relieve` takes each alone (a narrower relief, a short track into the pour) and says what it \
+                 could not do; `zone.thermals` lists them, drc.run reports each (drc.starved_thermal)",
+            ),
         );
     }
     out

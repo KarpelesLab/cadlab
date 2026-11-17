@@ -282,11 +282,14 @@ impl Ctx<'_> {
     fn thermals(&self, out: &mut Vec<Diagnostic>) {
         let q = self.process;
         let own = &self.p.board().rules;
+        // The fab's own thermal relief minimums where it publishes them, else its minimum
+        // track and space; never fewer spokes than the board's own rule asks.
+        let t = self.profile.thermal_relief.clone().unwrap_or_default();
         let rules = Rules {
-            min_track_width: q.min_track.unwrap_or(Nm::ZERO),
-            clearance: q.min_space.unwrap_or(Nm::ZERO),
+            min_track_width: t.min_spoke.or(q.min_track).unwrap_or(Nm::ZERO),
+            clearance: t.min_gap.or(q.min_space).unwrap_or(Nm::ZERO),
             min_clearance: Nm::ZERO,
-            min_thermal_spokes: own.min_thermal_spokes,
+            min_thermal_spokes: own.min_thermal_spokes.max(t.min_spokes.unwrap_or(0)),
             thermal_max_contact: own.thermal_max_contact,
             ..Rules::default()
         };

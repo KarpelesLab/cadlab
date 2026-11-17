@@ -155,6 +155,17 @@ pub struct Routed {
     /// Differential pairs, routed first as coupled traces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pairs: Vec<PairReport>,
+    /// Pads in pours that the board as routed leaves short of thermal spokes (tracks and vias
+    /// of other nets beside a pad take the room of its spokes); `zone.relieve` repairs.
+    #[serde(default, skip_serializing_if = "pads_ok")]
+    pub starved_pads: usize,
+    /// Solder pads joined to a pour without thermal relief; `zone.relieve` repairs.
+    #[serde(default, skip_serializing_if = "pads_ok")]
+    pub solid_pads: usize,
+}
+
+fn pads_ok(n: &usize) -> bool {
+    *n == 0
 }
 
 fn summary(o: &Routed) -> String {
@@ -180,6 +191,14 @@ fn summary(o: &Routed) -> String {
         if let Some(h) = c.hints.first() {
             out.push_str(&format!(" (hint: {h})"));
         }
+    }
+    if o.starved_pads + o.solid_pads > 0 {
+        out.push_str(&format!(
+            "
+thermal relief: {} pad(s) in pours short of spokes, {} solder pad(s) without relief: `zone.relieve` \
+             repairs them (`zone.thermals` lists them)",
+            o.starved_pads, o.solid_pads
+        ));
     }
     out
 }
@@ -442,8 +461,14 @@ fn run_router(
     for d in result.notes.iter().cloned() {
         ctx.report(d);
     }
-    let mut out =
-        Routed { stats: result.stats, connections: result.connections, rerouted: result.rerouted, pairs: result.pairs };
+    let mut out = Routed {
+        stats: result.stats,
+        connections: result.connections,
+        rerouted: result.rerouted,
+        pairs: result.pairs,
+        starved_pads: 0,
+        solid_pads: 0,
+    };
     // Push-and-shove of the leftovers is the native router's: guide has none.
     if leftovers == Leftovers::Shove && !guide {
         shove_leftovers(ctx, &mut out, &opts, start)?;
@@ -496,6 +521,19 @@ fn run_router(
                 out.stats.work
             )),
         );
+    }
+    // The pads in pours as the board is left: routing beside a pad takes the room of its
+    // spokes, and the agent should not have to ask (D112).
+    let p = ctx.project()?;
+    if !p.board().zones.is_empty() {
+        let rules = &p.board().rules;
+        let js = crate::board::thermal::joints(p, &crate::board::copper_items(p));
+        let census = crate::board::thermal::census(p, &js, rules.thermal_max_contact);
+        out.starved_pads = census.starved;
+        out.solid_pads = census.solid();
+        for d in super::zone::census_warnings(p, &census) {
+            ctx.report(d);
+        }
     }
     Ok(out)
 }

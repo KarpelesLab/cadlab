@@ -70,11 +70,9 @@ jobs:
           key: oracles
       - name: Install KiCad 10, gerbv and ngspice
         run: |
-          sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
-          sudo apt-get update
-          # No recommends: the symbol/footprint/3D libraries are not needed (and are large).
-          sudo apt-get install --yes --no-install-recommends kicad gerbv ngspice xvfb xauth
-          kicad-cli version
+          # Retries until the PPA answers and checks the version (Launchpad's 503s left Ubuntu's
+          # KiCad 7 installed, D112).
+          scripts/ci-install-kicad.sh gerbv ngspice xvfb xauth
           gerbv --version
           ngspice --version
       - name: Oracle tests
@@ -337,11 +335,7 @@ jobs:
           key: corpus
       - name: Install KiCad 10 and gerbv
         run: |
-          sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
-          sudo apt-get update
-          # No recommends: the symbol/footprint/3D libraries are not needed (and are large).
-          sudo apt-get install --yes --no-install-recommends kicad gerbv xvfb xauth
-          kicad-cli version
+          scripts/ci-install-kicad.sh gerbv xvfb xauth
           gerbv --version
       # The projects are fetched at their pinned commits (never vendored); the cache key is the
       # manifest, so changing a pin refetches. The directory is under the runner's temporary

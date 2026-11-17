@@ -59,6 +59,10 @@ pub struct FabProfile {
     /// Free-form notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Thermal relief of pads in pours: the fab's own minimums, or the record that it
+    /// publishes none (the minimum track and space then stand in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_relief: Option<ThermalRelief>,
     /// PCB processes offered, preferred first.
     #[serde(rename = "process")]
     pub processes: Vec<Process>,
@@ -68,6 +72,33 @@ pub struct FabProfile {
     /// Assembly service, when offered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assembly: Option<Assembly>,
+}
+
+/// What a fab says about thermal relief (the spokes joining a pad to a pour and the gap around
+/// it), for every process of the profile. Values left out are not published by the fab: a
+/// spoke is then held to the process's minimum track width, a gap to its minimum space, and
+/// the spoke count to the board's own rule. `published = false` records that the pages in
+/// `pages` were read and give no value of their own.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ThermalRelief {
+    /// Whether the fab publishes any thermal relief value of its own.
+    pub published: bool,
+    /// Minimum spoke width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_spoke: Option<Nm>,
+    /// Minimum gap between pad and pour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_gap: Option<Nm>,
+    /// Minimum number of spokes per pad.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_spokes: Option<u8>,
+    /// What the fab says, in its words or summarized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Pages read for it (the page a value comes from first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<String>,
 }
 
 /// A PCB process (e.g. standard 1–2 layer FR-4). Limits left out are not checked.

@@ -572,3 +572,45 @@ fn bottom_side_parts() {
     let js = joints(&s);
     assert!(joint(&js, "C1.2", "B.Cu").spokes >= 2 && joint(&js, "U1.4", "B.Cu").share() > 90);
 }
+
+/// The normal flow of an agent (zone with the fewest arguments, route, DRC, fab check, export)
+/// shows what routing left of the thermal relief without being asked: the count and the one
+/// command that repairs, in the router's own report, in the DRC summary and in the fab check
+/// (D112).
+#[test]
+fn normal_flow_says_what_routing_left() {
+    let (d, r, mut s) = setup();
+    exec(&r, &mut s, "zone.add", json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
+    // What a router may leave: tracks of another net around three sides of a pin in the pour.
+    let at = joint(&joints(&s), "J1.1", "B.Cu").at;
+    let (x, y) = (at.x.0, at.y.0);
+    let nm = |v: i64| format!("{v}nm");
+    let k = 1_300_000;
+    let u = [(x - k, y - 3_000_000), (x - k, y + k), (x + k, y + k), (x + k, y - 3_000_000)];
+    let pts: Vec<Value> = u.iter().map(|(a, b)| json!([nm(*a), nm(*b)])).collect();
+    exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "VOUT", "points": pts}));
+    // The router's report.
+    let o = exec(&r, &mut s, "route.nets", json!({"nets": ["VIN"], "budget_ms": 5000, "layers": ["F.Cu"]}));
+    assert_eq!(o["output"]["starved_pads"], 1, "{}", o["output"]);
+    assert!(o["summary"].as_str().unwrap().contains("`zone.relieve`"), "{}", o["summary"]);
+    let starved = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "zone.starved_pads").unwrap();
+    assert!(starved["hint"].as_str().unwrap().contains("zone.relieve"));
+    // The DRC and the fab check.
+    let o = exec(&r, &mut s, "drc.run", json!({}));
+    assert!(o["summary"].as_str().unwrap().contains("thermal relief: 1 pad(s)"), "{}", o["summary"]);
+    assert!(o["summary"].as_str().unwrap().contains("`zone.relieve`"));
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    assert_eq!(o["output"]["thermal"], 1, "{}", o["output"]);
+    assert!(o["summary"].as_str().unwrap().contains("`zone.relieve`"), "{}", o["summary"]);
+    // The repair: a track of the net beside the one spoke that fits; then nothing is said.
+    let o = exec(&r, &mut s, "zone.relieve", json!({}));
+    assert_eq!(o["output"]["after"]["starved"], 0, "{}", o["summary"]);
+    assert_eq!(o["output"]["tracks"].as_array().map_or(0, Vec::len), 1, "{}", o["output"]);
+    let o = exec(&r, &mut s, "drc.run", json!({}));
+    assert!(!o["summary"].as_str().unwrap().contains("thermal relief"), "{}", o["summary"]);
+    assert!(findings(&o, "drc.starved_thermal").is_empty());
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    assert_eq!(o["output"]["thermal"], Value::Null, "{}", o["output"]);
+    let o = exec(&r, &mut s, "export.gerber", json!({"dir": d.path().join("out")}));
+    assert!(o["output"].is_object());
+}

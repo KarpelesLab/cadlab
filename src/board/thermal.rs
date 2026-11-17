@@ -1282,7 +1282,9 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
         }
         let solid = zones::fill_zones_uncached(p, &base);
         // Per net and layer, the pads to reach.
-        let mut jobs: BTreeMap<(String, String), Vec<(&CopperItem, (String, String), u8)>> = BTreeMap::new();
+        // (pad item, pad, spokes missing)
+        type Job<'a> = (&'a CopperItem, (String, String), u8);
+        let mut jobs: BTreeMap<(String, String), Vec<Job<'_>>> = BTreeMap::new();
         for (k, v) in &short {
             for s in v {
                 let Some(it) = items.iter().find(|it| {

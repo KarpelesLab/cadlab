@@ -221,6 +221,10 @@ pub struct CheckReport {
     pub errors: usize,
     /// Warnings.
     pub warnings: usize,
+    /// Warnings about thermal relief among them (`fab.solid_pad`, `fab.starved_thermal`,
+    /// `fab.thermal_nominal`, `fab.thermal_size`): pads that will be hard to solder.
+    #[serde(default, skip_serializing_if = "thermal_ok")]
+    pub thermal: usize,
     /// Profile values marked unverified.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified: Vec<String>,
@@ -409,6 +413,16 @@ impl Command for Check {
             choices: report.choices.clone(),
             errors: report.count(Severity::Error),
             warnings: report.count(Severity::Warning),
+            thermal: report
+                .diagnostics
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        d.code.as_ref(),
+                        "fab.solid_pad" | "fab.starved_thermal" | "fab.thermal_nominal" | "fab.thermal_size"
+                    )
+                })
+                .count(),
             unverified: p.unverified(),
             substituted: substituted(&parts.picks),
             substitutes: parts.substitutes,
@@ -426,6 +440,13 @@ impl Command for Check {
         } else {
             format!("{} ({process}): {} error(s), {} warning(s)", o.fab, o.errors, o.warnings)
         };
+        if o.thermal > 0 {
+            s += &format!(
+                "\n  thermal relief: {} finding(s), pads that will be hard to solder; `zone.relieve` repairs them and \
+                 says what it could not do",
+                o.thermal
+            );
+        }
         for (part, mpn) in &o.substituted {
             s += &format!("\n  {part}: substituted by {mpn} (fab-lock.json)");
         }
@@ -435,6 +456,10 @@ impl Command for Check {
         }
         s
     }
+}
+
+fn thermal_ok(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One fab in a comparison.
