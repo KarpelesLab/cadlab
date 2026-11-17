@@ -49,6 +49,17 @@ const COMPARED: &[(&str, &str, &str, Mode)] = &[
     ("Edge.Cuts", "-Edge_Cuts.gbr", "-Edge_Cuts.gm1", Mode::Profile),
 ];
 
+/// Differences that are meant: (case, layer, largest area in mm², the box they lie in as
+/// x0, x1, y0, y1 in mm, why).
+const KNOWN: &[(&str, &str, f64, (f64, f64, f64, f64), &str)] = &[(
+    "features",
+    "B.Cu",
+    0.08,
+    (11.3, 11.8, 2.6, 3.1),
+    "J1.1 near the board edge: one of its four spokes along the axes does not survive, cadlab places it on \
+     the diagonal beyond the pad's corner, KiCad drops it (DECISIONS D112)",
+)];
+
 #[test]
 fn kicad_and_cadlab_gerbers_agree() {
     let Some(cli) = oracle::require(Oracle::KicadCli) else { return };
@@ -72,6 +83,16 @@ fn kicad_and_cadlab_gerbers_agree() {
             })
             .collect();
         for r in gerber_compare::compare_layers(&gerbv, p, &win, &dir, &specs, true) {
+            let known = KNOWN.iter().find(|(c, l, area, b, _)| {
+                *c == case.name
+                    && *l == r.layer
+                    && r.core <= *area
+                    && r.bbox_mm.is_some_and(|(x0, x1, y0, y1)| x0 >= b.0 && x1 <= b.1 && y0 >= b.2 && y1 <= b.3)
+            });
+            if let Some((_, _, _, _, why)) = known {
+                eprintln!("  {}: {:.3} mm² differ, as meant: {why}", r.layer, r.core);
+                continue;
+            }
             for msg in r.problems() {
                 problems.push(format!("{}: {msg} (renders in {})", case.name, dir.display()));
             }
