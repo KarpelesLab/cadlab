@@ -456,7 +456,7 @@ fn not_in_dsn(d: &cadlab::Diagnostic, dsn: &cadlab::specctra::dsn::Dsn) -> Optio
             .map(|mm| (mm * 1e6).round() as i64)?;
         // The DRC's own tolerance is under a micrometre.
         if gap + 1_000 >= carried {
-            return Some("drc.clearance of a pad's, a footprint's or a custom rule".to_string());
+            return Some("drc.clearance by a local or custom rule".to_string());
         }
     }
     None
@@ -485,6 +485,7 @@ fn freerouting_row(fr: &Freerouting, name: &str, layers: u8, p: &Project, verbos
     for (k, nets) in &x.net_exceptions {
         eprintln!("  {name}: DSN: keep-out `{k}` written without its exception for {}", nets.join(", "));
     }
+    eprintln!("  {name}: DSN: not written: {}", unwritten(p));
     let (dsn, ses) = (dir.join(format!("{name}.dsn")), dir.join(format!("{name}.ses")));
     // `CADLAB_BENCH_FR_REUSE=1` with `CADLAB_BENCH_KEEP`: the kept session is counted again
     // without running freerouting (its wall time from the kept `time.txt`).
@@ -601,6 +602,38 @@ fn freerouting_row(fr: &Freerouting, name: &str, layers: u8, p: &Project, verbos
         list(&unseen),
     );
     true
+}
+
+/// What of a board's rules and copper a DSN has no place for, counted: custom rules by what
+/// they set, pads with a clearance of their own (or their footprint's), copper drawings of the
+/// board and of footprints, and the board's minimums.
+fn unwritten(p: &Project) -> String {
+    use cadlab::model::footprint::GraphicLayer;
+    let b = p.board();
+    let rules = &b.custom_rules;
+    let (mut pads, mut drawings) = (0, 0);
+    for refdes in b.footprints.keys() {
+        let Some(fp) = cadlab::board::footprint_for(p, refdes) else { continue };
+        pads += fp.pads.iter().filter(|pad| pad.overrides.clearance.or(fp.overrides.clearance).is_some()).count();
+        drawings += fp.graphics.iter().filter(|g| g.layer == GraphicLayer::Copper).count();
+    }
+    let mm = |n: cadlab::Nm| n.0 as f64 / 1e6;
+    format!(
+        "{} custom rule(s) ({} with a clearance, {} with a track width, {} forbidding items), {} pad(s) with a \
+         clearance of their own, {} copper drawing(s) of the board and {} of footprints, minimum track width {} mm, \
+         copper to hole {} mm, hole to hole {} mm, copper to edge {} mm",
+        rules.len(),
+        rules.iter().filter(|r| r.clearance.is_some()).count(),
+        rules.iter().filter(|r| r.track_width.is_some()).count(),
+        rules.iter().filter(|r| !r.disallow.is_empty()).count(),
+        pads,
+        b.graphics.iter().filter(|g| b.is_copper(&g.layer)).count(),
+        drawings,
+        mm(b.rules.min_track_width),
+        mm(b.rules.hole_clearance),
+        mm(b.rules.hole_to_hole),
+        mm(b.rules.copper_to_edge),
+    )
 }
 
 /// What freerouting says of its own run, from the manifest it writes (`--router.result_json`):

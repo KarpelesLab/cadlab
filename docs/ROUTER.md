@@ -747,7 +747,10 @@ board are reported (`ses.placement_mismatch`). The result gives counts and the u
 `java -jar`): the ATtiny85 board (parts on both sides, rotated, holes, cutout, keep-out, a locked track) and the
 STM32 board auto-placed on four layers are routed by freerouting 2.1 and imported; cadlab DRC must have no error
 and no unrouted connection. freerouting 2.1 occasionally reports a complete route but leaves some wiring out of
-its session (a net or a few connections missing from `network_out`); such runs are retried, up to 5 times. Also
+its session (a net or a few connections missing from `network_out`); such runs are retried, up to 5 times.
+freerouting 2.5.0 (2026-11-17, Java 25) routes both completely at the first attempt, with two tracks of the STM32
+board at 0.125 mm, under the board's minimum of 0.15 mm, which a DSN does not carry: the test reports and allows
+`drc.track_width` and nothing else. Also
 tested without the oracle: a golden DSN, the reader round trip (equal data, every pin at its pad center through
 `place_point`, nets complete), and a hand-written session (`tests/fixtures/ldo.ses`).
 
@@ -996,9 +999,12 @@ Metrics: connections (pads − 1 per net) and completion from `route.status`, vi
 *sharp corners* (two segments of a net meeting at 90° or less with nothing else there), wall-clock time, and DRC
 errors other than unrouted connections (they must be 0). `cargo run --release --example route_bench [names...]`
 prints the table; `cargo test --release --test route_bench -- --ignored --nocapture` also asserts zero DRC errors.
-With `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar` (and `JAVA_HOME` for the Java it needs) every board but
+With `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar` (and `CADLAB_ORACLE_JAVA` or `JAVA_HOME` for the Java it
+needs: 25 for freerouting 2.5) every board but
 `big-4l` is also routed by freerouting (external process on the exported DSN, `-mp 20 -mt 1`; the time includes
-the JVM start and file exchange) and imported through `route.import_ses`, then measured the same way.
+the JVM start and file exchange) and imported through `route.import_ses`, then measured the same way. In the
+corpus mode `CADLAB_BENCH_ROUTER=freerouting` does the same for the corpus boards, under freerouting's own time
+limit ("freerouting on the corpus", at the end of this file).
 `CADLAB_ROUTE_RENDER=<dir>` renders cadlab's results; `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search,
 `CADLAB_BENCH_ROUTER=guide` the guide backend (here and in the corpus mode, under the same budgets; without
 `CADLAB_BENCH_SEED` it gets no seed, its own default), and `CADLAB_BENCH_SEED=<n>` the seed.
