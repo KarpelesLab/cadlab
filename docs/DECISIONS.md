@@ -3986,5 +3986,210 @@ there is); freerouting with more processors than 4; other settings of it than fa
 neck-down off; whether the via on glasgow-revD1's ring pad is its reading of the slit polygon; a cache hit on
 `master` (caches are per branch: the first run after the merge saves it).
 
+### D103. ems beside openEMS, measured: time, memory and accuracy against references that are neither solver; ems 0.0.13 and 0.0.14 (2026-11-17)
+D100 left `sim.sparams` on ems alone, and the openEMS oracle job as the one place where a second solver reads
+the same model. That job said one thing, that the two agree (the lossy lines within 36.0 and 40.2 % at the
+lowest frequencies, inside the test's absolute term; the via within 0.07 dB). It did not say which is faster,
+which takes less memory, or which is nearer the truth where they differ. This change makes it say so, and then
+closes in ems what the measurement showed. No openEMS, CSXCAD or other GPL code was read: openEMS is run as a
+program, and what is read of it is its console output and its result files.
+**The measurement** (`solver_comparison`, `tests/openems.rs`, `#[ignore]`; the `openems` job runs it after the
+oracle tests). The oracle's five cases, on the options the oracle tests use: the lossy line with sheet copper
+between microstrip ports (`line_msl`) and with `solid` copper between lumped ports (`line_lumped`), the via
+transition (`via`), a series 50 Ω and a series 1 pF on a microstrip (`series_r`, `series_c`). Per case and
+solver, on the same runner: the whole run's time, the time stepping's share of it, steps, time step, cells, the
+process's peak resident memory and what it was before the run. Every run is a process of its own, one at a time:
+a process's peak is the largest run it ever made, and a time taken beside another test's run is not the
+solver's. ems runs through `comparison_ems_run`, the test binary started again with the case in the environment
+(`sim.sparams` with `threads`; the time stepping from the command's progress reports, a port's first to its
+last); openEMS through the exported driver under a wrapper that imports what the driver imports, notes the peak,
+runs the driver and notes it again (the engine's time, steps and cells from the lines openEMS prints at the end
+of a run). Threads are stated: one, and the runner's count (four logical CPUs), for both; the driver takes
+`CADLAB_OPENEMS_THREADS` for it (`numThreads` of `Run`; without the variable openEMS chooses, as before, and the
+golden driver has the two lines). Accuracy is each solver's distance from a reference that is neither:
+- *the lines:* the loss without the mismatch, −10 log₁₀(|S21|² / (1 − |S11|²)), against D52 on the length
+  between the reference planes (the 2D field solver's matrices of the 35 µm strip, Djordjevic–Sarkar, the skin
+  effect: `electrical::loss::at`, no FDTD in it), and Z₀ from the ABCD matrix against the field solver's;
+- *the parts:* |S21| against circuit theory, twice: the ideal 2 Z₀ / (2 Z₀ + Z) the oracle test uses, and the
+  part between its lines as the field solver has them (50.8 Ω and εeff 3.07 for 5.15 mm on each side, in 50 Ω);
+- *the via:* there is none. The two are held to each other, and to each solver's run on a finer mesh where the
+  job is asked for one (`CADLAB_CMP_FINE`, the workflow's `openems_fine` input).
+Nothing is asserted there but that every run ends and converges: the tolerances are the oracle tests'. The table
+is the job's summary and `openems_comparison/comparison.md` in its artifact, written after every case, with
+openEMS's console output beside it.
+**The job's cache.** `OPENEMS_PREFIX` was `${{ github.workspace }}/../openEMS`, and `actions/cache` saves
+nothing for a path with `..` in it (D99 saw the warning): openEMS was built on every run, three minutes. The
+prefix is `$RUNNER_TEMP/openEMS` now (set in a step: the `runner` context is not there for a job's `env`), the
+key has a new suffix. Run 44002157976 built and saved it ("Cache saved with key: openems-…-ubuntu-24.04-temp",
+71 MB); run 44006837399 restored it and skipped the build, and so did the runs after it. The `corpus` job's
+cache has the same fault and is another change's.
+**What it found, with ems 0.0.12** (run 44013970406, an AMD EPYC 9V45 runner with four logical CPUs; runs
+44002157976 and 44006837399 on an Intel Xeon 6975P-C read the same results and other times: a runner is one of
+several machines, so two runs compare by their ratios, not by their seconds):
+
+| Case | Whole run on one thread, ems / openEMS | Each at its fastest (threads) | Peak memory | Of it the run |
+|---|---|---|---|---|
+| `line_msl`, 67 200 cells | 14.7 / 21.1 s (1.4×) | 7.7 (4) / 21.1 (1) s (2.8×) | 46 / 75 MB | 22 / 24 MB |
+| `line_lumped`, 85 320 | 27.3 / 65.7 s (2.4×) | 14.4 (4) / 65.7 (1) s (4.6×) | 51 / 78 MB | 28 / 27 MB |
+| `via`, 130 626 | 101.2 / 204.4 s (2.0×) | 56.8 (4) / 204.4 (1) s (3.6×) | 65 / 109 MB | 42 / 58 MB |
+| `series_r`, 69 312 | 7.9 / 12.6 s (1.6×) | 4.7 (4) / 12.6 (1) s (2.7×) | 37 / 71 MB | 13 / 20 MB |
+| `series_c`, 69 312 | 7.5 / 13.0 s (1.7×) | 4.7 (4) / 13.0 (1) s (2.8×) | 36 / 71 MB | 13 / 20 MB |
+| `via_same`, 130 626 | 99.9 / 150.3 s (1.5×) | 59.3 (4) / 150.3 (1) s (2.5×) | 65 / 91 MB | 42 / 40 MB |
+
+(On the Xeon runner 1.8 to 2.9 times on one thread and 2.2 to 5.7 times at each solver's fastest.) openEMS's
+time is its engine's but for a second or two (its setup is 0.6 to 2.0 s of a run); ems's setup was 1.3 to 3.1 s,
+a tenth to a sixth of its short runs. On this runner openEMS on four threads is slower than on one on every case
+(four logical CPUs; on the Xeon it gained on the parts and the via): its fastest is one thread, ems's is four.
+The 51 MB of openEMS before a run are Python with numpy and its own modules; ems's 23 MB are the test binary and
+the board.
+- *ems is faster on every case and thread count*, 1.4 to 2.4 times on one thread: it takes fewer steps on the
+  lines and the parts (6145 for 8820, 12 065 for 22 221, 7105 for 8037 and 8460, to the same −50 dB; on the via
+  32 961 for 27 216 to 29 197) and, but for the sheet line (62 for 63 million), more cell updates a second (80
+  to 157 million for 50 to 106).
+- *ems takes less memory as a process on every case.* Of the run itself it takes less on four cases and as much
+  on two: the lossy `solid` line (28 for 27 MB) and the via on the same mesh (42 for 40 MB).
+- *Loss of the lines, from 0.5 GHz: ems is the nearer one.* 0.019 dB from D52 at the most on the sheet line
+  (4.3 % RMS, +2.6 % in the mean) where openEMS is 0.027 dB (15.8 %, +13.1 %); 0.040 dB (5.9 %, +4.6 %) for
+  0.086 dB (17.0 %, +15.1 %) on the solid line. **The 36 to 40 % of the oracle job are openEMS's**: at 0.56 GHz
+  D52 has 0.0426 and 0.0511 dB, ems 0.0422 and 0.0486 dB, openEMS 0.0576 and 0.0681 dB, a third over. Nothing to
+  fix in ems there.
+- *Z₀ of the lines:* 0.3 % from the field solver for ems and 4.0 % for openEMS with sheets and microstrip ports;
+  5.5 and 5.4 % on the solid line between lumped ports, whose own discontinuity is in both.
+- *Where openEMS is the nearer one.* At 0.06 GHz, 1 % of `f_max` and below what the oracle test holds: ems is
+  0.008 and 0.009 dB from D52 (and reads a gain of 0.001 dB on the sheet line), openEMS 0.005 and 0.004 dB. ems
+  has ended at −50 dB after 6145 steps by then; to −70 dB it reads 0.0063 dB for D52's 0.0072. And the parts
+  against the ideal: 0.0029 for the resistor where ems is 0.0048, 0.0089 for the capacitor where ems is 0.0099.
+- *The parts between their lines.* The ideal takes the board's lines for 50 Ω. The 1 mm strip is the field
+  solver's 50.8 Ω, and a 50 Ω part between 5.15 mm of it on each side reads up to 0.004 above the ideal at
+  4.5 GHz, as much as the two solvers differ by. Against that cascade (line, part, line, in 50 Ω: circuit theory
+  on the field solver's Z₀ and εeff) ems is within 0.0015 for the resistor where openEMS is 0.0054, and 0.0064
+  for the capacitor where openEMS is 0.0058. On a finer mesh (0.25 mm) openEMS moves towards the ideal (0.0029 →
+  0.0015) and ems away from it (0.0048 → 0.0071), each within 0.0025 of its own coarse run and the two 0.0067
+  apart: the pads' gap and the element's own extent are in neither reference, and which solver a measured 0603
+  would agree with is not established.
+- *The via.* The oracle's case names no `thirds`, which `sim.sparams` has on by default and `export.openems`
+  off: its two solvers have run on two meshes since D74 (130 626 cells; 64 × 53 × 55 lines for openEMS, of which
+  16 on x and on y are its absorbing cells beyond the region). The comparison has a sixth case, `via_same`, with
+  the rule stated for both: 0.047 dB apart from 0.5 GHz in one run and 0.112 dB in the two after it (openEMS's
+  steps, next point; 0.067 dB on the two meshes). Against a finer mesh of each (`max_cell` 0.4 mm, 874 000
+  cells; one refinement, not a convergence study) ems on the default mesh is the nearer one both times, in both
+  runs: 0.088 dB from its own finer mesh where openEMS is 0.131 and 0.200 dB from it, 0.021 dB from openEMS's
+  where openEMS itself is 0.064 and 0.133 dB. The two finer meshes are 0.067 dB apart, so the truth of this via
+  is not settled by them. The oracle test's case is left as it is (its tolerance was set on it).
+- *openEMS's result is not the same from run to run; ems's is.* openEMS looks at its end criterion when it
+  prints a progress line, every four seconds or so of wall time, so the number of steps it runs follows the
+  machine's speed. The solid line ran 22 221 steps per port on four runs and, on a slower runner, 22 221 and 27
+  265 on one thread and 22 960 and 19 475 on four, with another Touchstone file each time (the oracle's 40.2 %
+  read 41.6 % there; D98 had seen that point move and put it on openEMS's run); the via on the same mesh 29 197
+  and 28 518 steps or 28 518 twice, and with them the 0.047 or 0.112 dB above. ems looks every 32 steps: its
+  files are the same bytes on one and four threads on every case, and its data the same lines on every runner.
+**What was closed in ems.** Profiles of those runs (callgrind, one thread, 400 steps per port) put 49 to 66 % of
+a short run in one function, the stability estimate of conformal PEC: 300 products of the curl-curl operator
+over the whole grid in `f64`, once per port's engine, whatever the number of cut cells (twelve to 918 here).
+- **0.0.13** (ems PR 13, wave 28 of its design notes). The estimate is made only where it can tell something.
+  The largest eigenvalue it approaches from below is at most the largest of the cells' own (the element bound
+  ems already used to keep small cut faces), and that is one pass over the cells: where every cell, cut or not,
+  is within the limit and the round has no merged or interpolated face, the round is accepted as the estimate
+  would have had it, the report's figure is the bound and says so (`ConformalReport::proven`); a cell is first
+  tried by the row sums of its six-by-six matrix. Of the engines of one compiled model only the first checks.
+  All five regions pass by the bound. And the CPML's rows on z faces, as long as the layer is thick, run in
+  loops of their length. Setup of a run with two ports: 1.8 to 7.4 s → 0.3 to 1.6 s on the development machine;
+  instructions of 400 steps per port of the 50 Ω part 37.6 → 10.4·10⁹.
+- **0.0.14** (ems PR 14, wave 29). The time steps: an edge of a Debye laminate with two to eight poles in loops
+  of its length (a third fewer instructions for the laminate's correction on the via, a seventh of its step),
+  and a z-face CPML layer a plane of rows at a time, each row computed on copies of its values (27 → 17
+  instructions per value). Per step on one thread, in instructions: the lossy line 30.5 → 24.2·10⁶, the 50 Ω
+  part 14.6 → 10.5·10⁶.
+Result bits: nothing changes. cadlab's Touchstone data are the same lines as with 0.0.12 on the five oracle
+cases, the bent line with lossy sheets and with lossy `solid` copper on both meshes and the small via region,
+with 0.0.13 and with 0.0.14, each from crates.io; the first comment line differs, which names the solver's
+version. ems's own tests hold the engines of a compiled model to a fresh compile bit for bit, with rounds
+accepted and rejected (`conformal_checked_once`), and the bound to the estimate
+(`the_cell_bound_over_the_grid_is_above_the_ estimate`).
+**After.** The before and after of a release are from one machine, because a runner is not: the same 0.0.12 was
+1.4 to 2.4 times openEMS's speed on one CPU and 1.8 to 2.9 on another. On the development machine
+(an AMD Threadripper 9970X, quiet for these runs; the three versions in turn, one run each, each from
+crates.io), the whole `sim.sparams` run:
+
+| Case | One thread, 0.0.12 / 0.0.13 / 0.0.14 | Four threads | Of it setup, one thread |
+|---|---|---|---|
+| `line_msl` | 11.4 / 10.0 / 9.1 s | 3.9 / 2.9 / 2.6 s | 1.0 / 0.1 / 0.1 s |
+| `line_lumped` | 22.1 / 19.9 / 17.9 s | 6.9 / 5.7 / 5.0 s | 1.3 / 0.2 / 0.2 s |
+| `via` | 83.9 / 78.6 / 65.0 s | 28.7 / 26.8 / 24.2 s | 2.4 / 0.7 / 0.7 s |
+| `series_r` | 6.2 / 4.7 / 4.2 s | 2.4 / 1.4 / 1.3 s | 1.0 / 0.1 / 0.1 s |
+| `series_c` | 6.2 / 4.7 / 4.2 s | 2.5 / 1.4 / 1.3 s | 1.0 / 0.1 / 0.1 s |
+
+0.0.14 takes 0.68 to 0.81 of 0.0.12's time on one thread and 0.54 to 0.84 on four; the process's peak is what it
+was on these (33 to 62 MB). The cases of D98's table that are not the oracle's, 0.0.12 → 0.0.14: the small via
+region on one thread, the one row where D98 had ems behind cadlab's own engine, 36.8, 39.4 → 29.1, 29.2 s
+(three threads 15.6 → 12.6, 13.3 s); the bent line on 0.25 mm cells on three threads 21.7 → 15.3 s with lossy
+sheets and 29.2 → 21.4 s with `solid` copper, 91 → 87 and 111 → 107 MB. On the runners, beside openEMS in the
+same job: with 0.0.13 (run 44020626931, an Intel Xeon Platinum 8370C) ems is 1.3 to 2.8 times as fast on one
+thread and 2.0 to 5.2 times at each solver's fastest (`line_msl` 23.6 for 38.2 s, `line_lumped` 49.1 for
+136.1 s, `via` 191.9 for 337.4 s, `series_r` 10.3 for 21.3 s, `series_c` 10.4 for 22.4 s, `via_same` 190.0 for
+240.9 s), with the memory and the accuracy rows of the table above but for openEMS's own movement. With 0.0.14
+the job ran on the Xeon 6975P-C of the first two runs (run 44030782504 beside run 44006837399), so that these
+compare:
+
+| Case | ems on one thread, 0.0.12 → 0.0.14 | ems on four | openEMS, one thread / its fastest (0.0.14's run) | ems's lead on one thread | At each solver's fastest |
+|---|---|---|---|---|---|
+| `line_msl` | 17.1 → 13.9 s | 9.1 → 6.8 s | 32.0 / 32.0 s | 1.9 → 2.3× | 3.6 → 4.7× |
+| `line_lumped` | 34.3 → 29.6 s | 17.4 → 13.7 s | 96.2 / 96.2 s | 2.9 → 3.2× | 5.7 → 7.0× |
+| `via` | 135.3 → 118.1 s | 72.5 → 67.0 s | 252.0 / 231.2 s | 1.9 → 2.1× | 3.3 → 3.5× |
+| `series_r` | 9.7 → 6.8 s | 5.6 → 3.4 s | 17.1 / 12.9 s | 1.8 → 2.5× | 2.2 → 3.8× |
+| `series_c` | 9.7 → 6.9 s | 5.6 → 3.4 s | 17.9 / 13.5 s | 1.9 → 2.6× | 2.3 → 4.0× |
+| `via_same` | 118.3 s | 67.1 s | 180.9 / 177.8 s | 1.5× | 2.7× |
+
+(openEMS's own times on one thread are within 4 % of each other in the two runs.) Peak memory with 0.0.14, ems
+for openEMS: 45 for 75, 52 for 78, 65 for 109, 35 for 72, 35 for 71 and 66 for 92 MB; of it the run 22 for 24,
+29 for 27, 42 for 58, 12 for 20, 12 for 20 and 43 for 41 MB. The accuracy rows are the ones above: ems's data
+are the same lines, and of openEMS's the solid line reads as in the first three runs and the via on the same
+mesh as in the fourth.
+**Tried and not kept.** In ems: the first value of a CPML row on the face z = 0, which has no neighbour below,
+taken into the row with a zero in its place (the copy cost more than the odd length: 2.34 for 2.27·10⁹
+instructions, 170 for 190 Mcells/s); the CPML's uniform rows called instead of inlined (no difference). In the
+comparison: a single figure for "accuracy" (the lowest frequency of the lines and the two references of the
+parts point the other way from the rest, so each has its row).
+**What ems is not ahead in, after this.**
+- *The memory of the run itself* on the lossy `solid` line and on the via on the same mesh: as much as openEMS's
+  (28 for 27 MB and 42 for 40 MB with 0.0.12, 29 for 27 and 43 for 41 with 0.0.14, a megabyte either way between
+  runs; as a process ems takes two thirds). By ems's own account (a counting allocator in the test binary: 22
+  and 35 MB live while running, 3 MB more at the peak of the setup since the estimate is gone) it is state, not
+  a peak: a Debye pole is a charge and two constants in `f64` per pole and edge (24 bytes, six poles), the
+  rational sheet 450 bytes per sheet edge. Narrowing them changes results; not done.
+- *The lowest frequency of a run to −50 dB* (above).
+- *The parts against the ideal 50 Ω lines* (above; against the lines as they are, see the row).
+- *The time step.* ems takes the Courant limit of the smallest cells at the vacuum speed, times cadlab's 0.95;
+  openEMS's criterion on the operator with its materials gives a step 2 to 16 % longer on four of the cases
+  (0.1982 for 0.1949 ps, 0.1966 for 0.1689 ps on the parts) and a shorter one on the via (0.0460 for 0.0545 ps
+  on the same mesh). The stability figures above read 0.66 to 0.74 for these regions at that step, so the scheme
+  would carry one 1.35 to 1.5 times as long. That is the largest thing left in time, and it is not taken here: a
+  longer step changes every result, and the faces ems keeps on cut cells depend on it.
+**Docs.** ELECTRICAL.md's openEMS tables are read again on ems (they were the removed engine's, with a note),
+with D52 beside the lines and the two points above; TESTING.md's openEMS row has the comparison. The roadmap's
+full-wave items are unchanged but for the versions.
+**Verification.** ems: `scripts/check.sh` (fmt, clippy and the tests with all features and with none, docs,
+`cargo +1.95 check`) passed on the development machine before each merge; both release PRs had Test & lint on
+Linux, Windows and macOS, Docs and MSRV green, and master's CI was green, before `gh pr merge`; 0.0.13 and
+0.0.14 are on crates.io. cadlab (ems 0.0.14 from crates.io, Linux x86-64): `cargo fmt --all --check`; `cargo
+clippy --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+--all-features`; `cargo +1.95 check --all-targets --all-features`; the test targets `fdtd`, `fdtd_ems`,
+`fdtd_parts`, `fdtd_conformal`, `openems`, `agent_session6`, `agent_ergonomics`, `cli`, `mcp` and the `fdtd`
+unit tests in a debug build (also with 0.0.13); in release the `#[ignore]` validations
+`sim_sparams_microstrip_validation` (|S21| −1.3 to +5.3 % of D52, D100's figures),
+`lossless_line_near_the_pml_is_passive` (0.9991 to 1.0007), `sim_sparams_mask_validation`,
+`sim_sparams_parts_validation`, `routed_45_degree_line`, `cavities_match_their_modes` and `rf_path_full_wave`
+(|S11| 0.5726, 14 529 steps per port, 30.3 s); the ten Touchstone comparisons with 0.0.12; `solver_comparison`
+without openEMS. All pass. The golden driver `tests/golden/openems/via.py` has the thread option's lines; no
+snapshot changed. Not run here: the full `cargo test --all-features` (the merger's) and `cargo deny`. With
+openEMS, on the branch `ci/ems-013` (the `openems` job alone, the other jobs cut from that branch's workflow):
+runs 44002157976, 44006837399, 44013970406 (0.0.12), 44020626931 (0.0.13) and 44030782504 (0.0.14), each with
+the nine oracle tests and the comparison passing.
+*Not established:* which of the two solvers a measured via or a measured 0603 would agree with (no reference
+that is neither; one refinement each); times on an unshared machine, or on a runner with more cores (four
+logical CPUs, where openEMS does not gain from threads); memory on Windows or macOS; openEMS at another revision
+than the pinned one; whether the 4 % of loss ems reads over D52 on the solid line above 3 GHz is the lumped
+ports' or the model's.
+
 
 ## Open questions

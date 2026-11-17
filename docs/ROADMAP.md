@@ -574,6 +574,15 @@ Research-sized items beyond the milestones above; none blocks a release.
       solver dependency, and the engine's lower memory (ems takes 1.3 to 1.8 times as much, D98). Kept: the
       region, mesh, ports, parts and waves, the openEMS export and its oracle, every validation against an
       analytic reference (now on ems alone), and the engine's result on one coarse line as recorded figures
+- [x] ems beside openEMS, measured (D103): the openEMS oracle job runs both solvers on its cases, one process
+      per run on stated threads, and keeps the table: time, steps, cells, peak memory, and each solver's
+      distance from D52, the field solver or circuit theory. With ems 0.0.12 ems took 0.35 to 0.7 of openEMS's
+      time on one thread and 0.2 to 0.45 at each solver's fastest, less memory as a process on every case, and
+      was the nearer one in the lines' loss (the 36 to 40 % of the oracle job at 0.56 GHz are openEMS's);
+      openEMS was the nearer one at 1 % of `f_max` and for the parts against ideal lines. ems 0.0.13 and 0.0.14
+      close what its profiles showed (the stability estimate of conformal PEC, the CPML's short rows, a Debye
+      edge's loops) with the Touchstone data unchanged. Left: ems's time step, shorter than the scheme would
+      carry, and the memory of a run with a Debye laminate, as much as openEMS's
 
 ---
 

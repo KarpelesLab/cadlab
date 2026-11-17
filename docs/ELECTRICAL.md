@@ -431,22 +431,29 @@ driver on a lossy microstrip
 58 MS/m copper, 6 GHz, thirds rule) against `sim.sparams` on the same options, twice: sheet copper between
 microstrip ports 4 mm long, and solid copper between lumped ports at the track's ends:
 
-| Quantity (0.5–6 GHz) | openEMS | `sim.sparams` |
-|---|---|---|
-| sheet / msl: Z₀ from the ABCD matrix (to 3.6 GHz) | 50.3–52.8 Ω | 50.8–51.0 Ω (2D field solver 50.8 Ω) |
-| sheet / msl: \|S21\| at 1.05 / 3.03 / 6 GHz | −0.097 / −0.220 / −0.422 dB | −0.076 / −0.203 / −0.375 dB |
-| sheet / msl: conductor part (lossy minus perfect copper) at 1.05 / 3.03 GHz | 0.015 / 0.024 dB | 0.014 / 0.025 dB |
-| solid / lumped: Z₀ (to 2.6 GHz) | 50.6–52.7 Ω | 49.5–52.8 Ω |
-| solid / lumped: \|S21\| at 1.05 / 3.03 / 6 GHz | −0.116 / −0.270 / −0.559 dB | −0.088 / −0.263 / −0.522 dB |
-| solid / lumped: conductor part at 1.05 / 3.03 GHz | 0.017 / 0.031 dB | 0.018 / 0.030 dB |
-| \|S11\| | ≤ 0.073 | |
+| Quantity (0.5–6 GHz) | openEMS | `sim.sparams` (ems) | Reference |
+|---|---|---|---|
+| sheet / msl: Z₀ from the ABCD matrix (to 3.6 GHz) | 50.3–52.8 Ω | 50.6–51.0 Ω | 2D field solver 50.8 Ω |
+| sheet / msl: \|S21\| at 1.05 / 3.03 / 6 GHz | −0.097 / −0.220 / −0.422 dB | −0.083 / −0.206 / −0.378 dB | |
+| sheet / msl: the line's loss without its mismatch at 0.56 / 1.05 / 3.03 / 6 GHz | 0.058 / 0.097 / 0.215 / 0.402 dB | 0.042 / 0.082 / 0.205 / 0.374 dB | D52 on 20 mm: 0.043 / 0.075 / 0.197 / 0.375 dB |
+| solid / lumped: Z₀ (to 2.6 GHz) | 50.6–52.7 Ω | 49.6–52.8 Ω | |
+| solid / lumped: \|S21\| at 1.05 / 3.03 / 6 GHz | −0.116 / −0.270 / −0.559 dB | −0.092 / −0.264 / −0.518 dB | |
+| solid / lumped: the line's loss without its mismatch at 0.56 / 1.05 / 3.03 / 6 GHz | 0.068 / 0.116 / 0.262 / 0.536 dB | 0.049 / 0.092 / 0.252 / 0.490 dB | D52 on 24 mm: 0.051 / 0.090 / 0.236 / 0.450 dB |
+| openEMS \|S11\| | ≤ 0.073 | | |
 
-The conductor loss agrees within a few percent; openEMS's dielectric loss is 5–9 % higher (its εeff, 3.24–3.30
-from its port's own probes, is above the 2D solver's 3.07 at 1 GHz, which `sim.sparams` matches within 0.7 %:
-more of the field in the laminate), and each run carries ±0.02 dB of noise at this coarse mesh and 50 dB end
-criterion (a lossless line reads −0.019 to +0.016 dB). The test asserts |S21| within 15 % + 0.025 dB, Z₀ within
-5 % of `sim.sparams` (and of the 2D solver with the microstrip ports), |S11| < 0.1 (`tests/openems.rs`; the
-tables go to `target/tmp/openems_oracle/summary.md` and the CI job's summary).
+(The loss without the mismatch is −10 log₁₀(\|S21\|² / (1 − \|S11\|²)); D52 is the line's own model, the 2D
+field solver's matrices of the 35 µm strip with the Djordjevic–Sarkar laminate and the skin effect, no FDTD in
+it. The lumped ports at the ends of the solid line are not in that model, so its row is the weaker reference.)
+The test asserts \|S21\| within 15 % + 0.025 dB, Z₀ within 5 % of `sim.sparams` (and of the 2D solver with the
+microstrip ports), \|S11\| < 0.1 (`tests/openems.rs`; the tables go to `target/tmp/openems_oracle/summary.md`
+and the CI job's summary). The two solvers are furthest apart at the lowest frequencies, 36.0 % (sheets) and
+40.2 % (`solid`) at 0.56 GHz, inside the test's absolute term: there openEMS reads a third more loss than D52
+(0.058 for 0.043 dB, 0.068 for 0.051 dB) and ems is within 5 % of it (D103). From 0.5 GHz ems is within 0.019 dB
+of D52 on the sheet line (4.3 % RMS, +2.6 % in the mean) and openEMS within 0.027 dB (15.8 % RMS, +13.1 %); on
+the solid line 0.040 dB (5.9 %, +4.6 %) against 0.086 dB (17.0 %, +15.1 %). At 0.06 GHz, 1 % of `f_max` and
+below what the test holds, it is the other way round: ems is 0.008 and 0.009 dB from D52 (it reads a gain of
+0.001 dB on the sheet line) and openEMS 0.005 and 0.004 dB. That is the end criterion: ems reaches −50 dB after
+6145 steps where openEMS runs 8820, and to −70 dB ems reads 0.0063 dB for D52's 0.0072.
 
 The golden via transition (`via_transition_export`, the region of the 4-layer board at 4 GHz, lumped ports) and
 board parts (`lumped_parts_oracle`, a 0603 on a 1 mm microstrip between 3 mm microstrip ports, thirds rule, sheet
@@ -454,23 +461,69 @@ copper) run in the same job, at the pinned revision:
 
 | Via transition | 0.54 GHz | 1.03 GHz | 2.02 GHz | 3.01 GHz | 4.00 GHz |
 |---|---|---|---|---|---|
-| \|S21\| openEMS / `sim.sparams` (dB) | −0.035 / −0.049 | −0.063 / −0.091 | −0.145 / −0.144 | −0.183 / −0.207 | −0.457 / −0.452 |
-| \|S11\| openEMS / `sim.sparams` (dB) | −31.2 / −29.2 | −26.6 / −25.0 | −28.8 / −26.7 | −26.9 / −26.3 | −15.3 / −13.9 |
+| \|S21\| openEMS / `sim.sparams` (dB) | −0.035 / −0.045 | −0.063 / −0.083 | −0.145 / −0.134 | −0.183 / −0.185 | −0.457 / −0.390 |
+| \|S11\| openEMS / `sim.sparams` (dB) | −31.2 / −30.0 | −26.6 / −25.7 | −28.8 / −26.6 | −26.9 / −29.2 | −15.3 / −15.0 |
 
-| \|S21\| openEMS / `sim.sparams` / theory | 0.56 GHz | 1.05 GHz | 2.04 GHz | 3.03 GHz | 4.02 GHz |
+| \|S21\| openEMS / `sim.sparams` / ideal | 0.56 GHz | 1.05 GHz | 2.04 GHz | 3.03 GHz | 4.02 GHz |
 |---|---|---|---|---|---|
 | series 50 Ω | 0.666 / 0.667 / 0.667 | 0.666 / 0.667 / 0.667 | 0.665 / 0.668 / 0.667 | 0.664 / 0.670 / 0.667 | 0.665 / 0.672 / 0.667 |
-| series 1 pF | 0.331 / 0.337 / 0.329 | 0.551 / 0.555 / 0.551 | 0.788 / 0.798 / 0.788 | 0.889 / 0.894 / 0.885 | 0.939 / 0.938 / 0.930 |
+| series 1 pF | 0.331 / 0.336 / 0.329 | 0.551 / 0.554 / 0.551 | 0.788 / 0.798 / 0.788 | 0.889 / 0.894 / 0.885 | 0.939 / 0.938 / 0.930 |
 
-The test asserts |S21| within 0.25 dB from 0.5 GHz for the via (it measures 0.03), |S21| > −3 dB and |S11| < −6 dB
-at 1 GHz, and for the parts within 0.03 of `sim.sparams` and of theory from 0.5 to 4.5 GHz (it measures 0.009 and
-0.011). `lossy_microstrip_oracle` keeps `pml_outside: false` in openEMS and in `sim.sparams`, so its numbers above
-stay comparable. The `sim.sparams` columns of this section's tables were read when it ran on cadlab's own engine
-(D68, D74; removed by D100); on ems, its solver now, the job reads the lines within 36.0 % (sheets) and 41.2 %
-(`solid`) of openEMS at the lowest frequencies, inside the test's absolute term, and the via transition within
-0.07 dB (run 43964289403, D98; |S21| at 1.05 / 3.03 / 6 GHz on the sheet line −0.075 / −0.203 / −0.396 dB against
-openEMS's −0.097 / −0.220 / −0.422, and on the via at 0.54 / 1.03 / 2.02 / 3.01 / 4.00 GHz −0.045 / −0.083 /
-−0.134 / −0.185 / −0.390 dB, D90).
+The test asserts \|S21\| within 0.25 dB from 0.5 GHz for the via (it measures 0.07), \|S21\| > −3 dB and
+\|S11\| < −6 dB at 1 GHz, and for the parts within 0.03 of `sim.sparams` and of the ideal from 0.5 to 4.5 GHz
+(it measures 0.009 and 0.009). `lossy_microstrip_oracle` keeps `pml_outside: false` in openEMS and in
+`sim.sparams`, so its numbers above stay comparable. Every `sim.sparams` figure of this section is ems's (0.0.12
+to 0.0.14, whose Touchstone data are the same on these cases, D103); until D100 the columns were read on
+cadlab's own engine (D68, D74). Two things the tables do not say by themselves (D103):
+
+- *The via transition's two solvers run on two meshes.* The case names no `thirds`, which `sim.sparams` has on by
+  default and the export off: 130 626 cells for ems, and for openEMS the 64 × 53 × 55 lines that the export
+  without the rule gives. With the rule stated for both (`via_same` in the comparison below) they are within
+  0.047 dB of each other from 0.5 GHz. There is no reference for a via; against each solver on a finer mesh
+  (`max_cell` 0.4 mm, 874 000 cells) ems on the default mesh is the nearer one both times (0.088 dB from its own
+  finer mesh, where openEMS is 0.131 dB from it; 0.021 dB from openEMS's finer mesh, where openEMS itself is
+  0.064 dB), and the two finer meshes are 0.067 dB apart. Not a convergence study: one refinement.
+- *The ideal is not the part on its board.* S21 = 2 Z₀ / (2 Z₀ + Z) takes the lines for 50 Ω; the 1 mm strip is
+  the field solver's 50.8 Ω, and a 50 Ω part between 5.15 mm of it on each side reads up to 0.004 above the ideal
+  at 4.5 GHz, as much as the solvers differ by. Against the ideal openEMS is the nearer one (0.0029 for the
+  resistor where ems is 0.0048, 0.0089 for the capacitor where ems is 0.0099); against the part between its
+  lines (the cascade line, part, line in 50 Ω, with the field solver's Z₀ and εeff) ems is within 0.0015 for the
+  resistor, where openEMS is 0.0054, and 0.0064 for the capacitor, where openEMS is 0.0058. On a finer mesh
+  (0.25 mm) openEMS moves towards the ideal (0.0015) and ems away from it (0.0071), each staying within 0.0025 of
+  its own coarse run; which of the two a real 0603 would agree with is not established here: the pads' gap and
+  the element's own extent are in neither reference.
+
+**ems beside openEMS** (D103). After the oracle tests the job runs both solvers on the same cases, one process
+per run and one at a time, on one thread and on the runner's four (`solver_comparison`; `sim.sparams` with
+`threads`, the driver with `CADLAB_OPENEMS_THREADS`), and keeps the table (`openems_comparison/comparison.md` in
+the job's artifact, and its summary): the whole run's time and the time stepping's share, steps, time step,
+cells, the process's peak memory and what it was before the run, and each solver's distance from the references
+above. With ems 0.0.14 (run 44030782504, an Intel Xeon 6975P-C runner, four logical CPUs):
+
+| Case | Cells | Steps per port, ems / openEMS | Whole run on one thread, ems / openEMS | Each at its fastest (threads) | Peak memory | Of it the run |
+|---|---|---|---|---|---|---|
+| lossy line, sheets, microstrip ports | 67 200 | 6145 / 8820 | 13.9 / 32.0 s | 6.8 (4) / 32.0 (1) s | 45 / 75 MB | 22 / 24 MB |
+| lossy line, `solid`, lumped ports | 85 320 | 12 065 / 22 221 | 29.6 / 96.2 s | 13.7 (4) / 96.2 (1) s | 52 / 78 MB | 29 / 27 MB |
+| via transition (two meshes, above) | 130 626 | 32 961 / 27 216 | 118.1 / 252.0 s | 67.0 (4) / 231.2 (4) s | 65 / 109 MB | 42 / 58 MB |
+| via transition, `thirds` for both | 130 626 | 32 961 / 28 518 | 118.3 / 180.9 s | 67.1 (4) / 177.8 (4) s | 66 / 92 MB | 43 / 41 MB |
+| series 50 Ω | 69 312 | 7105 / 8037 | 6.8 / 17.1 s | 3.4 (4) / 12.9 (4) s | 35 / 72 MB | 12 / 20 MB |
+| series 1 pF | 69 312 | 7105 / 8460 | 6.9 / 17.9 s | 3.4 (4) / 13.5 (4) s | 35 / 71 MB | 12 / 20 MB |
+
+ems is 1.5 to 3.2 times as fast on one thread and 2.7 to 7.0 times at each solver's fastest (on the five cases
+measured with ems 0.0.12 on the same CPU, run 44006837399: 1.8 to 2.9 and 2.2 to 5.7 times then, 2.1 to 3.2 and
+3.5 to 7.0 now; on other runners' CPUs the ratios are others, 1.4 to 2.4 times with 0.0.12 on an AMD EPYC
+9V45). openEMS's whole run is its engine but for a second or two; the 51 MB it has before a run are
+Python with numpy and its modules, ems's 23 MB the test binary with the board. Where openEMS is ahead or level:
+the memory of the run itself on the `solid` line and on the via on one mesh (a Debye pole is 24 bytes per pole
+and edge in ems, `f64`); the lowest frequency of a run to −50 dB; the parts against ideal lines; and its time
+step, 2 to 16 % longer than ems's on the lines and the parts (ems takes the Courant limit of the smallest cells
+in vacuum times `courant`, and takes fewer steps all the same but on the via). One more difference is not in a
+column: openEMS looks at its end criterion when it prints a progress line, every few seconds of wall time, so
+its number of steps and with it its result follow the machine (the `solid` line ran 22 221 steps per port on
+four runs and 22 221, 27 265, 22 960 and 19 475 on a slower runner, reading 41.6 % for the 40.2 % above; the
+via on one mesh 0.047 or 0.112 dB from ems). ems looks every 32 steps, and its Touchstone data are the same
+lines on one thread and on four, on the runners' three CPUs and on the development machine.
+
 
 **What makes openEMS diverge** (D74, black-box runs of openEMS's CLI, energy against time). Run length matters: a
 Mur case bounded at 40 000 steps went to NaN by 113 000, so the steps are given. On the 4-layer via board, whose
@@ -508,7 +561,7 @@ pure-Rust FDTD solver (MIT, with its geometry crate `csx`; no further dependenci
 from crates.io and a dependency of every build (DECISIONS D86, D94, D100). cadlab builds the model, places the
 ports and reads the waves; ems does the time stepping. There is no solver to choose: until D100 cadlab also had
 an FDTD engine of its own (D59) behind `solver: builtin`, and the parameter went with it. The result names what
-ran, `solver: "ems 0.0.12"` in the output and `(solver: ems 0.0.12)` in the Touchstone file's first line.
+ran, `solver: "ems 0.0.14"` in the output and `(solver: ems 0.0.14)` in the Touchstone file's first line.
 
 ```
 cadlab sim sparams --f-max 10GHz --around track#12 --copper sheet \
@@ -674,7 +727,8 @@ line), `sim.port_at_edge`, `sim.unstable`, `sim.ems_failed`, `cancelled`. Notes:
 **Accuracy.** Each row is a test with a reference that is not `sim.sparams` itself; the `#[ignore]` ones run
 in release (`cargo test --release --test <file> -- --ignored --nocapture`). Figures are ems 0.0.12's unless a row
 says otherwise (0.0.10's stand for 0.0.11 and 0.0.12, whose Touchstone files are 0.0.10's byte for byte on the
-nine cases compared: D94, D98).
+nine cases compared: D94, D98; and 0.0.12's for 0.0.13 and 0.0.14, whose Touchstone data are 0.0.12's on the ten
+cases compared, the first comment line naming the version: D103).
 
 | Case | Reference | Agreement |
 |---|---|---|
@@ -698,7 +752,7 @@ nine cases compared: D94, D98).
 | the same, W = 0.3 mm, H = 0.17 mm, εr 4.3 | straight 154.8° (as the removed engine read it, D73) | default mesh: staircase and conformal without refinement are open circuits (−72 dB, D73); with the refinement (0.15 mm, 2.46 M cells, 156 s on six threads): 141.1°, −22.7 dB |
 | `sim.sparams`: a via of one cell (0.3 mm drill, 0.6 mm pads on 0.3 mm cells), four layers, perfect sheet copper (`ems_runs_a_via_of_one_cell`, `measure_via_convergence`; ems 0.0.8 on) | the staircase on the same mesh, and a finer mesh | \|S₂₁\| at 4 GHz −0.390 dB with conformal cells, −0.440 dB as a staircase; on 0.2 mm cells ems's own measurement (its DESIGN.md, 5.13.3) is −0.297 and −0.368 dB |
 | `sim.sparams`: session 6's 2.4 GHz matching network (U1.30 to J1.1, shunt C3, series L1, lossy sheet copper, diagonal tracks 1.1 cells wide, 1–6 GHz, to −50 dB; `rf_path_full_wave`) | the ideal chain of the same parts | at 2.44 GHz \|S₁₁\| 0.5726, \|S₂₁\| 0.7988, within the test's 0.15 and 0.1 of the chain; largest Σ\|S\|² 0.982 |
-| `sim.sparams` against openEMS on the export of the same region (CI job "openEMS oracle", `tests/openems.rs`; run 43964289403, ems 0.0.12) | openEMS | the lossy lines within 36.0 % (sheets) and 41.2 % (`solid`) at the lowest frequencies, where the absolute term of the test's 15 % + 0.025 dB carries them; the via transition within 0.07 dB |
+| `sim.sparams` against openEMS on the export of the same region (CI job "openEMS oracle", `tests/openems.rs`; D103) | openEMS, and for each of the two D52, the 2D field solver or circuit theory (`solver_comparison`) | the lossy lines within 36.0 % (sheets) and 40.2 % (`solid`) of each other at 0.56 GHz, where the absolute term of the test's 15 % + 0.025 dB carries them and where openEMS is a third over D52; from 0.5 GHz ems within 0.019 and 0.040 dB of D52 (openEMS 0.027 and 0.086 dB); Z₀ of the sheet line 0.3 % from the field solver (openEMS 4.0 %); the via transition within 0.07 dB, 0.047 dB on the same mesh; the parts within 0.0048 and 0.0099 of the ideal (openEMS 0.0029 and 0.0089) |
 | one thread against three or four, lossless and with lossy sheets, lossy `solid` copper, Debye terms and conformal cells (`ems_runs_the_region`, `measure_threads`, `measure_threads_conformal`) | | the same bytes |
 | the coarse lossy line of `ems_runs_the_region`, between microstrip ports to 5 GHz and between lumped ports to 10 GHz | the recorded result of cadlab's removed engine on the same region and mesh (commit 3aa423f) | \|S₂₁\| within 0.0020 and \|S₁₁\| within 0.0034; lumped ports \|S₂₁\| within 0.0026 |
 
