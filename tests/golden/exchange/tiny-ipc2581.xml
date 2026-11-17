@@ -913,52 +913,8 @@
                   </Cutout>
                   <Cutout>
                     <PolyBegin x="3.62067" y="5.173894"/>
-                    <PolyStepSegment x="4.27" y="5.823223"/>
-                    <PolyStepSegment x="4.91933" y="5.173894"/>
-                    <PolyStepSegment x="4.853912" y="5.126365"/>
-                    <PolyStepSegment x="4.846086" y="5.12068"/>
-                    <PolyStepSegment x="4.846084" y="5.120678"/>
-                    <PolyStepSegment x="4.846077" y="5.120674"/>
-                    <PolyStepSegment x="4.846076" y="5.120673"/>
-                    <PolyStepSegment x="4.837748" y="5.115776"/>
-                    <PolyStepSegment x="4.76687" y="5.074089"/>
-                    <PolyStepSegment x="4.75853" y="5.069184"/>
-                    <PolyStepSegment x="4.758527" y="5.069182"/>
-                    <PolyStepSegment x="4.758524" y="5.069181"/>
-                    <PolyStepSegment x="4.758523" y="5.06918"/>
-                    <PolyStepSegment x="4.749756" y="5.065106"/>
-                    <PolyStepSegment x="4.675184" y="5.030455"/>
-                    <PolyStepSegment x="4.666418" y="5.026382"/>
-                    <PolyStepSegment x="4.666414" y="5.02638"/>
-                    <PolyStepSegment x="4.66641" y="5.026379"/>
-                    <PolyStepSegment x="4.657286" y="5.023168"/>
-                    <PolyStepSegment x="4.579719" y="4.995876"/>
-                    <PolyStepSegment x="4.570595" y="4.992667"/>
-                    <PolyStepSegment x="4.570591" y="4.992665"/>
-                    <PolyStepSegment x="4.570585" y="4.992664"/>
-                    <PolyStepSegment x="4.561202" y="4.990351"/>
-                    <PolyStepSegment x="4.481363" y="4.970672"/>
-                    <PolyStepSegment x="4.471974" y="4.968357"/>
-                    <PolyStepSegment x="4.471967" y="4.968356"/>
-                    <PolyStepSegment x="4.462397" y="4.966959"/>
-                    <PolyStepSegment x="4.381032" y="4.955079"/>
-                    <PolyStepSegment x="4.381025" y="4.955078"/>
-                    <PolyStepSegment x="4.371457" y="4.95368"/>
-                    <PolyStepSegment x="4.371454" y="4.95368"/>
-                    <PolyStepSegment x="4.361797" y="4.953213"/>
-                    <PolyStepSegment x="4.361794" y="4.953213"/>
-                    <PolyStepSegment x="4.279666" y="4.94924"/>
-                    <PolyStepSegment x="4.279659" y="4.94924"/>
-                    <PolyStepSegment x="4.270003" y="4.948772"/>
-                    <PolyStepSegment x="4.269997" y="4.948772"/>
-                    <PolyStepSegment x="4.260341" y="4.94924"/>
-                    <PolyStepSegment x="4.260334" y="4.94924"/>
-                    <PolyStepSegment x="4.178206" y="4.953213"/>
-                    <PolyStepSegment x="4.178203" y="4.953213"/>
-                    <PolyStepSegment x="4.168546" y="4.95368"/>
-                    <PolyStepSegment x="4.168543" y="4.95368"/>
-                    <PolyStepSegment x="4.158975" y="4.955078"/>
-                    <PolyStepSegment x="4.158968" y="4.955079"/>
+                    <PolyStepSegment x="4.145" y="5.698223"/>
+                    <PolyStepSegment x="4.145" y="4.957118"/>
                     <PolyStepSegment x="4.077603" y="4.966959"/>
                     <PolyStepSegment x="4.068033" y="4.968356"/>
                     <PolyStepSegment x="4.068026" y="4.968357"/>
@@ -986,6 +942,38 @@
                     <PolyStepSegment x="3.693914" y="5.12068"/>
                     <PolyStepSegment x="3.686088" y="5.126365"/>
                     <PolyStepSegment x="3.62067" y="5.173894"/>
+                  </Cutout>
+                  <Cutout>
+                    <PolyBegin x="4.395" y="4.957118"/>
+                    <PolyStepSegment x="4.395" y="5.698223"/>
+                    <PolyStepSegment x="4.91933" y="5.173894"/>
+                    <PolyStepSegment x="4.853912" y="5.126365"/>
+                    <PolyStepSegment x="4.846086" y="5.12068"/>
+                    <PolyStepSegment x="4.846084" y="5.120678"/>
+                    <PolyStepSegment x="4.846077" y="5.120674"/>
+                    <PolyStepSegment x="4.846076" y="5.120673"/>
+                    <PolyStepSegment x="4.837748" y="5.115776"/>
+                    <PolyStepSegment x="4.76687" y="5.074089"/>
+                    <PolyStepSegment x="4.75853" y="5.069184"/>
+                    <PolyStepSegment x="4.758527" y="5.069182"/>
+                    <PolyStepSegment x="4.758524" y="5.069181"/>
+                    <PolyStepSegment x="4.758523" y="5.06918"/>
+                    <PolyStepSegment x="4.749756" y="5.065106"/>
+                    <PolyStepSegment x="4.675184" y="5.030455"/>
+                    <PolyStepSegment x="4.666418" y="5.026382"/>
+                    <PolyStepSegment x="4.666414" y="5.02638"/>
+                    <PolyStepSegment x="4.66641" y="5.026379"/>
+                    <PolyStepSegment x="4.657286" y="5.023168"/>
+                    <PolyStepSegment x="4.579719" y="4.995876"/>
+                    <PolyStepSegment x="4.570595" y="4.992667"/>
+                    <PolyStepSegment x="4.570591" y="4.992665"/>
+                    <PolyStepSegment x="4.570585" y="4.992664"/>
+                    <PolyStepSegment x="4.561202" y="4.990351"/>
+                    <PolyStepSegment x="4.481363" y="4.970672"/>
+                    <PolyStepSegment x="4.471974" y="4.968357"/>
+                    <PolyStepSegment x="4.471967" y="4.968356"/>
+                    <PolyStepSegment x="4.462397" y="4.966959"/>
+                    <PolyStepSegment x="4.395" y="4.957118"/>
                   </Cutout>
                   <Cutout>
                     <PolyBegin x="4.935505" y="5.1868"/>
