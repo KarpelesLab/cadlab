@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/KarpelesLab/cadlab/compare/v0.0.4...v0.0.5) - 2026-11-17
+
+### Other
+
+- D100's CI run: eleven jobs pass on ci/ems-always, the openEMS oracle against sim.sparams on ems alone (D100)
+- sim.sparams on ems alone: the full-wave section describes one solver, its model and its accuracy against analytic references, with the removed engine's comparison as a record; what is lost (the second result on the same model, a build without the solver, its lower memory); ROADMAP's last stretch item ticked (D100)
+- sim.sparams runs on ems alone: the cargo feature `ems` and the built-in FDTD engine are removed, `solver` is no longer a parameter and the result names `ems 0.0.12`; the tests keep their analytic references, and the engine's own results stay as recorded figures (D100)
+- guide 0.0.9 through the adapter at 60 s over three orders of the nets as the last row, 0.0.8 behind the same adapter beside it, the via on a via found in guide and gone, the generated boards again (D97)
+- guide 0.0.9 (D97)
+- guide 0.0.8 through the adapter at 60 s over three orders of the nets, 0.0.7, 0.0.8 behind the same adapter and with the longer first run beside it and the native router, the share measured again, the nets with zones in the first run, what was tried and not kept, what is left for guide, the default unchanged (D97)
+- guide 0.0.8 in the adapter: the first run has 0.7 of the budget and the nets with zones among its nets, open or not; pour_cuts on and row_fanout off by name (D97)
+- guide 0.0.8 (D97)
+- ems 0.0.12 measured on every case of D90's table against the built-in solver: memory 1.3 to 1.8 times its own, a Debye laminate on one thread 1.1 times, session 6 at equal threads 0.7 to 0.9 times; the openEMS oracle with ems as the default; what removing the built-in engine waits on (D98)
+- sim.sparams on ems: a port's run gives its simulation up for its results (D98)
+- ems 0.0.12 (D98)
+- exchange oracles job: FreeCAD 1.1.4 reads the STEP files, xmllint validates IDX against prostep ivip's schema; listed oracles fail instead of skipping; the IPC-2581 schema is refused by IPC's server and stays open (D99)
+- guide 0.0.7 through the adapter at 60 s over three orders of the nets, 0.0.6 and 0.0.7 before the rules beside it and the native router, the custom rules as areas and pads' own clearances, the share and the second run measured again, what is left for guide, the default unchanged (D96)
+- guide 0.0.7 in the adapter: a courtyard's or an area's clearance rule goes over when its kinds take in tracks and vias, raised to the later rules that hold copper in it; the last rule holding a pad is the pad's own clearance (D96)
+- guide 0.0.7 (D96)
+- guide 0.0.6 through the adapter at 60 s, before and after with vias and length beside the native router, the share, the second run and join measured again, lumenpnp-mobo looked into, what is left for guide, the default unchanged (D95)
+- guide 0.0.6 in the adapter: after a cut run the second run takes every open net, Routed::failed leaves nets out only after a run that ended, the first run has 0.45 of the budget (D95)
+- guide 0.0.6 (D95)
+- the work count that differed between 2 and 4 threads on glasgow-revC3 comes from polyclip 0.0.6's sweep status, not the router
+- a pour round taken back gives every island the fills before it again
+- ems 0.0.11 measured on every case of D90's table, criterion 3 met, sim.sparams on ems by default; what is open: memory, one thread, session 6 at equal threads (D94)
+- session 6's full-wave run on both solvers, each by name (D94)
+- ems 0.0.11 (D94)
+- ems is the default solver where the build has it, solver: builtin kept; the result names its solver (D94)
+- measure_memory on the rest of D90's table (the sheet line, the small via region, the bent line with solid copper and on the default mesh), its Touchstone file kept; session 6 on a given thread count (D94)
+- guide 0.0.5 through the adapter at 60 s, before and after, the half and the second run measured again, what is left for guide, the default unchanged (D93)
+- guide 0.0.5 in the adapter: no joining of zones' pieces, a stopped connection says whether its net had its turn, no wording of its own for "found no way" after a deadline (D93)
+- guide 0.0.5 (D93)
+- a via in a pad is one in the pad's copper, not in its box (D93)
+- ems 0.0.10 measured against the built-in solver, D89's three findings gone, the one case of run time left and why the default stays (D90)
+- the 60 mm line holds ems to the built-in solver's 6 % again; measure_memory, one run per process (D90)
+- sim.sparams --solver ems: ems 0.0.10; a laminate's poles averaged at its surface, a negative energy is ems's to end on (D90)
+- guide 0.0.4 through the adapter at 60 s, before and after, what got in the way, the default unchanged (D91)
+- guide's "found no way" after a run its deadline stopped says the pad was not looked at (D91)
+- guide 0.0.4 in the adapter: no fill at the end, the smallest via for escapes, half the time budget for a second run on the routed board (D91)
+- the smallest via the rules allow is one function, for the fanout and for guide's escapes (D91)
+- guide 0.0.4 (D91)
+- ems 0.0.9 measured against the built-in solver, the criteria for the default and why it stays (D89)
+- the built-in solver's board-level tests on both solvers; the openEMS oracle compares each (D89)
+- sim.sparams --solver ems: ems 0.0.9; small faces, narrow tracks and vias of a cell are ems's own, the adapter's workarounds go (D89)
+- guide 0.0.3 as a backend, both routers measured again, what still blocks it (D88)
+- guide under the same budgets, with a seed when one is given (D88)
+- guide 0.0.3 in the adapter: budgets, causes and the host's board model in place of workarounds (D88)
+- ems 0.0.7 as the second solver, the two solvers measured again, the default as measured (D87)
+- sim.sparams --solver ems: ems 0.0.7's lossy copper, conformal outlines, typed warnings and one compile (D87)
+- guide as a backend, both routers on the generated boards and the corpus, the default as measured (D85)
+- the backend choice, the seed, DRC errors by code, vias in pads (D85)
+- guide as a second backend behind router: guide, verified and counted as the native router (D85)
+- the exact outline of a pad that shares its number and position with another (D85)
+- ems against the built-in solver on its validation cases, measured; what ems needs before it replaces it (D86)
+- the ems crate as a second solver on the built-in solver's region, sim.sparams --solver ems (D86)
+
 ## [0.0.4](https://github.com/KarpelesLab/cadlab/compare/v0.0.3...v0.0.4) - 2026-11-13
 
 ### Other
