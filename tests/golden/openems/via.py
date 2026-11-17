@@ -8,6 +8,7 @@ numpy. Lengths are in mm, frequencies in Hz.
 
 Usage: python3 via.py               simulate, then write via.s2p
        python3 via.py --postprocess  only recompute via.s2p from earlier runs
+CADLAB_OPENEMS_THREADS=n in the environment runs the engine on n threads (openEMS chooses otherwise).
 """
 
 import os
@@ -31,6 +32,8 @@ FC = 5000000000
 BOUNDARY = ['PML_8'] * 6
 END_CRITERIA = 10 ** (-40 / 10)  # stop when the energy has decayed by 40 dB
 MAX_TIMESTEPS = 200000
+# Engine threads: openEMS's own choice, or the number in CADLAB_OPENEMS_THREADS.
+THREADS = int(os.environ.get('CADLAB_OPENEMS_THREADS', '0'))
 
 # Ports, numbered from 1 (start/stop in mm; z0 in ohms).
 PORTS = [
@@ -66,7 +69,7 @@ def simulate(excited, run):
         ports.append(port)
     if run:
         os.makedirs(path, exist_ok=True)
-        fdtd.Run(path, cleanup=True)
+        fdtd.Run(path, cleanup=True, **({'numThreads': THREADS} if THREADS > 0 else {}))
     return path, ports, fdtd
 
 

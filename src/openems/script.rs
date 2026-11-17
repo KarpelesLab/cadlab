@@ -54,6 +54,7 @@ numpy. Lengths are in mm, frequencies in Hz.
 
 Usage: python3 {py}               simulate, then write {ts}
        python3 {py} --postprocess  only recompute {ts} from earlier runs
+CADLAB_OPENEMS_THREADS=n in the environment runs the engine on n threads (openEMS chooses otherwise).
 """
 
 import os
@@ -77,6 +78,8 @@ FC = {fc}
 BOUNDARY = [{bc}] * 6
 END_CRITERIA = 10 ** (-{end_db} / 10)  # stop when the energy has decayed by {end_db} dB
 MAX_TIMESTEPS = {steps}
+# Engine threads: openEMS's own choice, or the number in CADLAB_OPENEMS_THREADS.
+THREADS = int(os.environ.get('CADLAB_OPENEMS_THREADS', '0'))
 
 "#,
         xml = format_args!("{}.xml", o.name),
@@ -148,7 +151,7 @@ def simulate(excited, run):
         ports.append(port)
     if run:
         os.makedirs(path, exist_ok=True)
-        fdtd.Run(path, cleanup=True)
+        fdtd.Run(path, cleanup=True, **({'numThreads': THREADS} if THREADS > 0 else {}))
     return path, ports, fdtd
 
 

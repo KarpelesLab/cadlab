@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      openems_fine:
+        description: "openEMS job: options (JSON) of a finer mesh for the via transition, run by both solvers as a reference; empty for none"
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -90,12 +95,15 @@ jobs:
     # Informative, like the other oracle jobs: openEMS is built from source (no Ubuntu package or
     # Linux wheel), pinned to an openEMS-Project commit and cached (docs/TESTING.md).
     continue-on-error: true
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       OPENEMS_PROJECT_REV: 1c6e5c11017a24a0a821aaaa18f7628ebc7540e2
-      OPENEMS_PREFIX: ${{ github.workspace }}/../openEMS
     steps:
       - uses: actions/checkout@v6
+      # Under `runner.temp`: `actions/cache` saves nothing for a path with `..` in it (D99, D103),
+      # and the `runner` context is not there for a job's `env`.
+      - name: Where openEMS is installed
+        run: echo "OPENEMS_PREFIX=$RUNNER_TEMP/openEMS" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -110,8 +118,8 @@ jobs:
         id: cache-openems
         uses: actions/cache@v4
         with:
-          path: ${{ env.OPENEMS_PREFIX }}
-          key: openems-${{ env.OPENEMS_PROJECT_REV }}-ubuntu-24.04
+          path: ${{ runner.temp }}/openEMS
+          key: openems-${{ env.OPENEMS_PROJECT_REV }}-ubuntu-24.04-temp
       - name: Build openEMS (headless, Python modules)
         if: steps.cache-openems.outputs.cache-hit != 'true'
         run: |
@@ -129,9 +137,25 @@ jobs:
           export LD_LIBRARY_PATH="$OPENEMS_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           "$CADLAB_ORACLE_PYTHON" -c "import CSXCAD, openEMS, numpy; print('openEMS Python modules ok')"
           cargo test --release --all-features --test openems -- --nocapture
+      # Both solvers on the same cases, one process per run and one at a time, on one thread and on
+      # the runner's count: time, steps, cells, peak memory, and each against D52 or circuit theory
+      # (D103). Informative: the tolerances are the tests' above.
+      - name: ems against openEMS (time, memory, accuracy)
+        env:
+          CADLAB_ORACLES: "1"
+          CADLAB_CMP_FINE: ${{ inputs.openems_fine }}
+        run: |
+          export CADLAB_ORACLE_OPENEMS="$OPENEMS_PREFIX/bin/openEMS"
+          export CADLAB_ORACLE_PYTHON="$OPENEMS_PREFIX/venv/bin/python3"
+          export LD_LIBRARY_PATH="$OPENEMS_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          nproc; grep -m1 'model name' /proc/cpuinfo; free -m
+          cargo test --release --all-features --test openems -- --ignored --nocapture --test-threads 1 solver_comparison
       - name: Summary
         if: always()
         run: |
+          if [ -f target/tmp/openems_comparison/comparison.md ]; then
+            { echo '### ems against openEMS: time, memory, accuracy'; cat target/tmp/openems_comparison/comparison.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f target/tmp/openems_oracle/summary.md ]; then
             { echo '### openEMS against sim.sparams (lossy microstrip)'; cat target/tmp/openems_oracle/summary.md; } >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -147,6 +171,10 @@ jobs:
         with:
           name: openems-oracle
           path: |
+            target/tmp/openems_comparison/*.md
+            target/tmp/openems_comparison/*.json
+            target/tmp/openems_comparison/*.log
+            target/tmp/openems_comparison/*.s2p
             target/tmp/openems_oracle/*.md
             target/tmp/openems_oracle/*.s2p
             target/tmp/openems_oracle/*.xml

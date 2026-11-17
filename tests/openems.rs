@@ -233,8 +233,7 @@ fn via_transition_export() {
     let python = std::env::var("CADLAB_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("openems_via");
     let _ = std::fs::remove_dir_all(&out);
-    let common = json!({"dir": out, "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm",
-        "pml_outside": true, "end_criteria": "40dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]});
+    let common = via_oracle_args(&out);
     let mut args = common.clone();
     args["name"] = json!("oracle");
     let o = exec(&r, &mut s, "export.openems", args);
@@ -413,6 +412,27 @@ fn mask_and_dispersion_export() {
 
 fn c(v: &cadlab::touchstone::Complex) -> C64 {
     C64::new(v.re, v.im)
+}
+
+/// The options the oracle's via transition runs on, in openEMS and in `sim.sparams`.
+fn via_oracle_args(out: &Path) -> Value {
+    json!({"dir": out, "f_max": "4GHz", "points": 9, "nets": ["RF"], "margin": "4mm",
+        "pml_outside": true, "end_criteria": "40dB", "ports": [{"at": "J1.1"}, {"at": "J2.1", "layer": "B.Cu"}]})
+}
+
+/// The options the oracle's lossy line runs on: `msl` is sheet copper between microstrip ports
+/// 4 mm long (openEMS's microstrip ports measure zero-thickness strips), else solid copper
+/// between lumped ports at the track's ends.
+fn line_oracle_args(out: &Path, track: &str, msl: bool) -> Value {
+    let ports = if msl {
+        json!([{"at": track, "kind": "msl", "length": "4mm"}, {"at": track, "end": "end", "kind": "msl", "length": "4mm"}])
+    } else {
+        json!([{"at": track}, {"at": track, "end": "end"}])
+    };
+    json!({"dir": out, "around": [track], "copper": if msl { "sheet" } else { "solid" }, "thirds": true,
+        "ports": ports, "pml_outside": false,
+        "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6,
+        "end_criteria": "50dB"})
 }
 
 /// ABCD of a 2-port from its S-parameters (reference `zr`): the line's Z₀ = √(B/C) and γl =
@@ -800,16 +820,9 @@ fn lossy_microstrip_oracle() {
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("openems_oracle");
     let _ = std::fs::remove_dir_all(&out);
     let track = format!("track#{id}");
-    // openEMS's microstrip ports measure zero-thickness strips: sheet copper with them.
     let cases = [
-        (
-            "msl",
-            "sheet copper, microstrip ports",
-            json!([{"at": track, "kind": "msl", "length": "4mm"}, {"at": track, "end": "end", "kind": "msl", "length": "4mm"}]),
-            "sheet",
-            3.6e9,
-        ),
-        ("lumped", "solid copper, lumped ports", json!([{"at": track}, {"at": track, "end": "end"}]), "solid", 2.6e9),
+        ("msl", "sheet copper, microstrip ports", true, 3.6e9),
+        ("lumped", "solid copper, lumped ports", false, 2.6e9),
     ];
     // The 2D field solver's Z₀ of the zero-thickness strip (εr at 1 GHz).
     let st = cadlab::electrical::fieldsolver::Structure {
@@ -828,11 +841,8 @@ fn lossy_microstrip_oracle() {
     let python = std::env::var("CADLAB_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
     let mut md = String::new();
     let mut fails = Vec::new();
-    for (name, title, ports, copper, z_until) in cases {
-        let common = json!({"dir": out, "around": [track], "copper": copper, "thirds": true, "ports": ports,
-            "pml_outside": false,
-            "f_max": "6GHz", "points": 13, "margin": "5mm", "air": "5mm", "max_cell": "0.5mm", "pml_cells": 6,
-            "end_criteria": "50dB"});
+    for (name, title, msl, z_until) in cases {
+        let common = line_oracle_args(&out, &track, msl);
         let mut args = common.clone();
         args["name"] = json!(name);
         exec(&r, &mut s, "export.openems", args);
@@ -899,4 +909,514 @@ fn lossy_microstrip_oracle() {
     std::fs::write(out.join("summary.md"), &md).unwrap();
     eprintln!("{md}");
     assert!(fails.is_empty(), "{fails:?}\n{md}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// ems against openEMS: time, memory and accuracy per case of the oracle's tables (D103).
+
+/// The cases of [`solver_comparison`]: the oracle's two lossy lines, its via transition and its
+/// two lumped parts.
+const CMP_CASES: [&str; 5] = ["line_msl", "line_lumped", "via", "series_r", "series_c"];
+
+/// A case's board and the options both solvers run it on (the oracle tests' own; `name` is the
+/// caller's).
+fn comparison_case(r: &Registry, case: &str, out: &Path) -> (tempfile::TempDir, Session, Value) {
+    match case {
+        "line_msl" | "line_lumped" => {
+            let (dir, s, id) = microstrip_board(r, 24);
+            let args = line_oracle_args(out, &format!("track#{id}"), case == "line_msl");
+            (dir, s, args)
+        }
+        "via" => {
+            let (dir, mut s) = new_project(r, "rf");
+            via_transition(r, &mut s);
+            (dir, s, via_oracle_args(out))
+        }
+        "series_r" | "series_c" => {
+            let (category, params) = if case == "series_r" {
+                ("resistor", json!({"resistance": "50"}))
+            } else {
+                ("capacitor", json!({"capacitance": "1pF"}))
+            };
+            let (dir, s, t) = part_board(r, category, params, 6);
+            let mut args = part_args(out, t);
+            args["pml_outside"] = json!(true);
+            (dir, s, args)
+        }
+        other => panic!("unknown comparison case {other:?}"),
+    }
+}
+
+/// `args` with the members of `extra` set.
+fn with(mut args: Value, extra: &Value) -> Value {
+    for (k, v) in extra.as_object().into_iter().flatten() {
+        args[k] = v.clone();
+    }
+    args
+}
+
+/// The peak resident memory of this process (kB): `VmHWM` (0 where `/proc` has none).
+fn peak_kb() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"));
+    line.and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// What a measured process reports: this prefix, then one JSON object, on a line of its output.
+const CMP_MARK: &str = "CADLAB_CMP ";
+
+/// One `sim.sparams` run in a process of its own, for [`solver_comparison`] (which starts this
+/// test with `CADLAB_CMP_CASE`, the output directory `CADLAB_CMP_DIR`, the file name
+/// `CADLAB_CMP_NAME`, `CADLAB_CMP_THREADS` and, for another mesh, options as JSON in
+/// `CADLAB_CMP_ARGS`): a process's peak memory is the largest run it ever made, and a time taken
+/// beside another test's run is not the solver's. Prints the command's time, the mesh, the steps
+/// and the process's peak before and after the run. Does nothing without `CADLAB_CMP_CASE`.
+#[test]
+#[ignore]
+fn comparison_ems_run() {
+    let Ok(case) = std::env::var("CADLAB_CMP_CASE") else { return };
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} is not set"));
+    let out = std::path::PathBuf::from(var("CADLAB_CMP_DIR"));
+    let r = Registry::with_builtins();
+    let (_dir, mut s, mut args) = comparison_case(&r, &case, &out);
+    if let Ok(extra) = std::env::var("CADLAB_CMP_ARGS") {
+        args = with(args, &serde_json::from_str(&extra).expect("CADLAB_CMP_ARGS is JSON"));
+    }
+    args["name"] = json!(var("CADLAB_CMP_NAME"));
+    args["threads"] = json!(var("CADLAB_CMP_THREADS").parse::<u32>().expect("CADLAB_CMP_THREADS"));
+    let before = peak_kb();
+    let t = std::time::Instant::now();
+    let o = exec(&r, &mut s, "sim.sparams", args);
+    let seconds = t.elapsed().as_secs_f64();
+    let x = &o["output"];
+    let runs = x["runs"].as_array().unwrap();
+    let report = json!({
+        "seconds": seconds,
+        "cells": x["mesh"]["cells"],
+        "steps": runs.iter().map(|r| r["steps"].clone()).collect::<Vec<_>>(),
+        "converged": runs.iter().all(|r| r["converged"] == true),
+        "timestep": x["timestep"],
+        "solver": x["solver"],
+        "before_kb": before,
+        "peak_kb": peak_kb(),
+    });
+    println!("\n{CMP_MARK}{report}");
+}
+
+/// The Python program that runs an exported driver for [`solver_comparison`]: the driver's own
+/// imports first (the process's peak before any simulation), then the driver as `__main__`, then
+/// the times and the peak resident set (its own and its children's) as JSON in a file.
+const CMP_WRAPPER: &str = r#"import json, os, resource, runpy, sys, time
+t0 = time.time()
+import numpy  # noqa: the driver's imports
+import CSXCAD  # noqa
+import openEMS  # noqa
+t1 = time.time()
+kb = lambda who: resource.getrusage(who).ru_maxrss
+before = kb(resource.RUSAGE_SELF)
+script, report = sys.argv[1], sys.argv[2]
+sys.argv = [script]
+runpy.run_path(script, run_name='__main__')
+t2 = time.time()
+with open(report, 'w') as f:
+    json.dump({'import_seconds': t1 - t0, 'seconds': t2 - t0, 'before_kb': before,
+               'peak_kb': max(kb(resource.RUSAGE_SELF), kb(resource.RUSAGE_CHILDREN))}, f)
+"#;
+
+/// A measured run of either solver.
+struct Measured {
+    threads: u32,
+    /// The whole run: `sim.sparams` as a command, or the driver's process with its imports.
+    seconds: f64,
+    /// openEMS's own account of its engine: the sum of its "Time for N iterations" lines.
+    engine_seconds: Option<f64>,
+    cells: Option<u64>,
+    steps: Vec<u64>,
+    /// The process's peak resident set, and what it was before the run (MB).
+    peak_mb: f64,
+    before_mb: f64,
+    /// The Touchstone file's text.
+    text: String,
+    note: String,
+}
+
+impl Measured {
+    fn data(&self) -> cadlab::touchstone::Touchstone {
+        cadlab::touchstone::parse(&self.text, Some(2)).unwrap()
+    }
+}
+
+/// Runs a case with ems in a process of its own ([`comparison_ems_run`]).
+fn measure_ems(case: &str, out: &Path, name: &str, threads: u32, extra: Option<&Value>) -> Measured {
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args(["comparison_ems_run", "--exact", "--ignored", "--nocapture", "--test-threads", "1"])
+        .env("CADLAB_CMP_CASE", case)
+        .env("CADLAB_CMP_DIR", out)
+        .env("CADLAB_CMP_NAME", name)
+        .env("CADLAB_CMP_THREADS", threads.to_string())
+        .env("RAYON_NUM_THREADS", threads.to_string());
+    match extra {
+        Some(e) => cmd.env("CADLAB_CMP_ARGS", e.to_string()),
+        None => cmd.env_remove("CADLAB_CMP_ARGS"),
+    };
+    let o = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success(), "{case} with ems failed:\n{stdout}\n{}", String::from_utf8_lossy(&o.stderr));
+    let line = stdout.split(CMP_MARK).nth(1).and_then(|l| l.lines().next()).expect("the run's report");
+    let v: Value = serde_json::from_str(line).unwrap();
+    assert_eq!(v["converged"], true, "{case} with ems did not converge: {v}");
+    Measured {
+        threads,
+        seconds: v["seconds"].as_f64().unwrap(),
+        engine_seconds: None,
+        cells: v["cells"].as_u64(),
+        steps: v["steps"].as_array().unwrap().iter().filter_map(Value::as_u64).collect(),
+        peak_mb: v["peak_kb"].as_f64().unwrap() / 1024.0,
+        before_mb: v["before_kb"].as_f64().unwrap() / 1024.0,
+        text: std::fs::read_to_string(out.join(format!("{name}.s2p"))).unwrap(),
+        note: v["solver"].as_str().unwrap_or("ems").to_string(),
+    }
+}
+
+/// The number that follows `key` in `line`.
+fn number_after(line: &str, key: &str) -> Option<f64> {
+    let rest = line.split(key).nth(1)?.trim_start();
+    let end =
+        rest.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Runs an exported driver (`name`.py in `out`) with openEMS on `threads` threads, through
+/// [`CMP_WRAPPER`]. openEMS's console output is kept as `name`.log; its engine's time, steps and
+/// cells are read from the lines it prints at the end of each run ("Time for N iterations with C
+/// cells : T sec"), and are missing from the result if it prints something else.
+fn measure_openems(python: &str, out: &Path, name: &str, threads: u32) -> Measured {
+    let wrapper = out.join("measure.py");
+    std::fs::write(&wrapper, CMP_WRAPPER).unwrap();
+    let report = out.join(format!("{name}.measure.json"));
+    let o = std::process::Command::new(python)
+        .arg(&wrapper)
+        .arg(out.join(format!("{name}.py")))
+        .arg(&report)
+        .env("CADLAB_OPENEMS_THREADS", threads.to_string())
+        .env("OMP_NUM_THREADS", threads.to_string())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+    std::fs::write(out.join(format!("{name}.log")), &stdout).unwrap();
+    assert!(o.status.success(), "{name} with openEMS failed:\n{stdout}\n{}", String::from_utf8_lossy(&o.stderr));
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let ends: Vec<&str> = stdout.lines().filter(|l| l.contains("Time for ") && l.contains(" iterations")).collect();
+    let engine: Vec<f64> = ends.iter().filter_map(|l| number_after(l, " : ")).collect();
+    let said: Vec<&str> = stdout.lines().filter(|l| l.to_lowercase().contains("thread")).collect();
+    let mut note: Vec<String> = said.iter().map(|l| l.trim().to_string()).collect();
+    note.dedup();
+    Measured {
+        threads,
+        seconds: v["seconds"].as_f64().unwrap(),
+        engine_seconds: (!engine.is_empty() && engine.len() == ends.len()).then(|| engine.iter().sum()),
+        cells: ends.first().and_then(|l| number_after(l, " with ")).map(|c| c as u64),
+        steps: ends.iter().filter_map(|l| number_after(l, "Time for ")).map(|n| n as u64).collect(),
+        peak_mb: v["peak_kb"].as_f64().unwrap() / 1024.0,
+        before_mb: v["before_kb"].as_f64().unwrap() / 1024.0,
+        text: std::fs::read_to_string(out.join(format!("{name}.s2p"))).unwrap(),
+        note: note.join("; "),
+    }
+}
+
+/// A lossy line's result against the line's own model, D52 (the 2D field solver's matrices of
+/// the 1 mm strip of 35 µm copper on 0.5 mm of the Djordjevic–Sarkar laminate, with the skin
+/// effect: no FDTD in it), from 0.5 GHz. The loss is the line's without its mismatch,
+/// −10 log₁₀(|S21|² / (1 − |S11|²)), against 8.686 α l; Z₀ is the ABCD matrix's below the first
+/// half-wave resonance (`z_until`), against the field solver's for the strip the model has (zero
+/// thickness with sheets, 35 µm solid). Returns the largest difference of the loss (dB), its
+/// RMS relative to the model's (%), its mean relative to the model's (%, signed), the largest
+/// difference of Z₀ (%), and the loss per frequency.
+fn line_accuracy(ts: &cadlab::touchstone::Touchstone, msl: bool) -> ([f64; 4], Vec<(f64, f64, f64)>) {
+    use cadlab::electrical::fieldsolver::{Accuracy, LossTangents, Structure};
+    use cadlab::electrical::loss::{self, COPPER_CONDUCTIVITY, Conductor, Roughness};
+    let strip = |t: f64| Structure {
+        model: cadlab::electrical::Model::Microstrip,
+        h: 0.5,
+        er: 4.0,
+        h2: 0.0,
+        er2: 4.0,
+        t,
+        etch: 0.0,
+        broadside: None,
+        coplanar_gap: None,
+        mask: None,
+    };
+    let tans = LossTangents { below: 0.02, ref_freq: [Some(1e9), None, None], ..LossTangents::default() };
+    let m = strip(0.035).line_matrices(1.0, None, false, &tans, Accuracy::default()).unwrap();
+    let cond = Conductor {
+        sigma: COPPER_CONDUCTIVITY,
+        roughness: Roughness::Smooth,
+        r_dc: 1.0 / (COPPER_CONDUCTIVITY * 1e-3 * 35e-6),
+    };
+    let z_sheet = strip(0.0).line(1.0, Accuracy::default()).unwrap().z0;
+    // Between the reference planes of the microstrip ports (2 mm inside each end), or the ends.
+    let (l, z_until) = if msl { (0.020, 3.6e9) } else { (0.024, 2.6e9) };
+    let (mut worst, mut sq, mut mean, mut z_worst, mut n) = (0.0f64, 0.0, 0.0, 0.0f64, 0);
+    let mut rows = Vec::new();
+    for (f, s) in ts.freqs.iter().zip(&ts.data) {
+        let p = loss::at(&m, *f, &cond);
+        let want = 20.0 * std::f64::consts::LOG10_E * p.alpha * l;
+        let (s11, s21) = (c(&s[0]).abs(), c(&s[2]).abs());
+        let got = -10.0 * (s21 * s21 / (1.0 - s11 * s11)).log10();
+        rows.push((*f, want, got));
+        if *f < 0.5e9 {
+            continue;
+        }
+        worst = worst.max((got - want).abs());
+        sq += ((got - want) / want).powi(2);
+        mean += (got - want) / want;
+        n += 1;
+        if *f <= z_until {
+            let z = line_from_s(s, 50.0).0.re;
+            let z_ref = if msl { z_sheet } else { p.z0.re };
+            z_worst = z_worst.max((z - z_ref).abs() / z_ref);
+        }
+    }
+    let n = n.max(1) as f64;
+    ([worst, 100.0 * (sq / n).sqrt(), 100.0 * mean / n, 100.0 * z_worst], rows)
+}
+
+/// A series part's |S21| against circuit theory, 2 Z₀ / (2 Z₀ + Z), from 0.5 to 4.5 GHz: the
+/// largest difference.
+fn part_accuracy(ts: &cadlab::touchstone::Touchstone, cap: Option<f64>) -> f64 {
+    let mut worst = 0.0f64;
+    for (f, s) in ts.freqs.iter().zip(&ts.data).filter(|(f, _)| (0.5e9..=4.5e9).contains(*f)) {
+        let z = match cap {
+            None => C64::new(50.0, 0.0),
+            Some(cap) => C64::new(0.0, -1.0 / (2.0 * std::f64::consts::PI * f * cap)),
+        };
+        let ideal = (C64::new(100.0, 0.0) / (C64::new(100.0, 0.0) + z)).abs();
+        worst = worst.max((c(&s[2]).abs() - ideal).abs());
+    }
+    worst
+}
+
+/// The largest difference of |S21| (dB) between two results, from 0.5 GHz.
+fn s21_distance(a: &cadlab::touchstone::Touchstone, b: &cadlab::touchstone::Touchstone) -> f64 {
+    assert_eq!(a.freqs, b.freqs);
+    let db = |v: &cadlab::touchstone::Complex| 20.0 * c(v).abs().log10();
+    let from = a.freqs.iter().zip(a.data.iter().zip(&b.data)).filter(|(f, _)| **f >= 0.5e9);
+    from.map(|(_, (x, y))| (db(&x[2]) - db(&y[2])).abs()).fold(0.0, f64::max)
+}
+
+/// ems and openEMS side by side on the oracle's five cases, on this machine: time, steps, cells,
+/// peak memory, and how far each is from a reference that is neither of them (D52's model of the
+/// line, circuit theory for the parts; the via has none, so the two are held to each other and,
+/// with `CADLAB_CMP_FINE`, to each solver's run on a finer mesh). Each run is a process of its
+/// own, one at a time, on a stated number of threads (`CADLAB_CMP_THREADS`, a list; default 1
+/// and the machine's count): ems through [`comparison_ems_run`], openEMS through the exported
+/// driver with `CADLAB_OPENEMS_THREADS`. `CADLAB_CMP_CASES` (a list) limits the cases;
+/// `CADLAB_CMP_FINE` is JSON options for the via's finer mesh (`{"max_cell": "0.2mm"}`), run by
+/// both solvers on the largest thread count. Without openEMS (`CADLAB_ORACLES=1` and
+/// `CADLAB_ORACLE_OPENEMS`) the table has ems's rows only. The table goes to
+/// `$CARGO_TARGET_TMPDIR/openems_comparison/comparison.md` (and `.json`), with openEMS's console
+/// output beside it; nothing is asserted but that every run ends and converges: the tolerances
+/// are the oracle tests'.
+#[test]
+#[ignore]
+fn solver_comparison() {
+    let python = oracle::optional(Oracle::OpenEms)
+        .map(|_| std::env::var("CADLAB_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into()));
+    let r = Registry::with_builtins();
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("openems_comparison");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    let list = |k: &str| std::env::var(k).ok().map(|v| v.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+    let mut threads: Vec<u32> = match list("CADLAB_CMP_THREADS") {
+        Some(l) => l.iter().map(|t| t.parse().expect("CADLAB_CMP_THREADS")).collect(),
+        None => vec![1, cpus],
+    };
+    threads.dedup();
+    let cases: Vec<&str> = match list("CADLAB_CMP_CASES") {
+        Some(l) => CMP_CASES.into_iter().filter(|c| l.iter().any(|x| x == c)).collect(),
+        None => CMP_CASES.to_vec(),
+    };
+    let fine = std::env::var("CADLAB_CMP_FINE").ok().filter(|v| !v.trim().is_empty());
+    let fine: Option<Value> = fine.map(|v| serde_json::from_str(&v).expect("CADLAB_CMP_FINE is JSON"));
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|c| {
+            c.lines().find(|l| l.starts_with("model name")).and_then(|l| l.split(": ").nth(1)).map(String::from)
+        })
+        .unwrap_or_else(|| "unknown CPU".into());
+
+    let mut md = String::new();
+    let mut time = String::from(
+        "| Case | Solver | Threads | Cells | Steps per port | Whole run (s) | Engine alone (s) | Mcells/s | Peak memory (MB) | Before the run (MB) |\n|---|---|---|---|---|---|---|---|---|---|\n",
+    );
+    let mut acc = String::from("| Case | Quantity (reference) | ems | openEMS | Nearer |\n|---|---|---|---|---|\n");
+    let mut detail = String::new();
+    let mut notes = Vec::new();
+    let mut record = Vec::new();
+    let mut ems_version = String::new();
+    for case in cases {
+        let (_dir, mut s, args) = comparison_case(&r, case, &out);
+        let mut ems = Vec::new();
+        let mut oe = Vec::new();
+        for &n in &threads {
+            eprintln!("{case}: ems, {n} thread(s)");
+            ems.push(measure_ems(case, &out, &format!("{case}_ems_t{n}"), n, None));
+            if let Some(python) = &python {
+                eprintln!("{case}: openEMS, {n} thread(s)");
+                let name = format!("{case}_openems_t{n}");
+                exec(&r, &mut s, "export.openems", with(args.clone(), &json!({"name": name})));
+                oe.push(measure_openems(python, &out, &name, n));
+            }
+        }
+        ems_version = ems[0].note.clone();
+        for (solver, runs) in [("ems", &ems), ("openEMS", &oe)] {
+            for m in runs {
+                let steps: u64 = m.steps.iter().sum();
+                let rate = m.cells.map(|c| c as f64 * steps as f64 / m.engine_seconds.unwrap_or(m.seconds) / 1e6);
+                time += &format!(
+                    "| {case} | {solver} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
+                    m.threads,
+                    m.cells.map_or("?".into(), |c| c.to_string()),
+                    m.steps.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
+                    m.seconds,
+                    m.engine_seconds.map_or("".into(), |e| format!("{e:.1}")),
+                    rate.map_or("?".into(), |r| format!("{r:.0}")),
+                    m.peak_mb,
+                    m.before_mb
+                );
+                record.push(json!({"case": case, "solver": solver, "threads": m.threads, "cells": m.cells,
+                    "steps": m.steps, "seconds": m.seconds, "engine_seconds": m.engine_seconds,
+                    "peak_mb": m.peak_mb, "before_mb": m.before_mb}));
+            }
+            if runs.len() > 1 {
+                let same = runs.iter().all(|m| m.text == runs[0].text);
+                notes.push(format!(
+                    "{case}, {solver}: the Touchstone file is {} on {} threads.",
+                    if same { "the same bytes" } else { "not the same" },
+                    runs.iter().map(|m| m.threads.to_string()).collect::<Vec<_>>().join(" and ")
+                ));
+            }
+        }
+        if let Some(m) = oe.iter().find(|m| !m.note.is_empty()) {
+            notes.push(format!("{case}, openEMS says of its threads: {}", m.note));
+        }
+        // Accuracy, on the largest thread count's results.
+        let (e, o) = (ems.last().unwrap().data(), oe.last().map(Measured::data));
+        let nearer = |a: f64, b: Option<f64>| match b {
+            None => "",
+            Some(b) if a < b => "ems",
+            Some(b) if b < a => "openEMS",
+            _ => "equal",
+        };
+        let cell = |v: Option<f64>, digits: usize| v.map_or(String::new(), |v| format!("{v:.digits$}"));
+        match case {
+            "line_msl" | "line_lumped" => {
+                let msl = case == "line_msl";
+                let (ea, er) = line_accuracy(&e, msl);
+                let oa = o.as_ref().map(|o| line_accuracy(o, msl));
+                let names = [
+                    ("loss, largest difference, dB (D52)", 4),
+                    ("loss, RMS of the relative difference, % (D52)", 1),
+                    ("loss, mean relative difference, % (D52)", 1),
+                    ("Z₀, largest difference, % (2D field solver)", 1),
+                ];
+                for (i, (name, digits)) in names.into_iter().enumerate() {
+                    let b = oa.as_ref().map(|o| o.0[i]);
+                    let near = nearer(ea[i].abs(), b.map(f64::abs));
+                    acc += &format!("| {case} | {name} | {:.digits$} | {} | {near} |\n", ea[i], cell(b, digits));
+                }
+                detail += &format!(
+                    "\n#### {case}: the line's loss without its mismatch, dB\n\n| f (GHz) | D52 | ems | openEMS |\n|---|---|---|---|\n"
+                );
+                for (i, (f, want, got)) in er.iter().enumerate() {
+                    let theirs = oa.as_ref().map(|o| o.1[i].2);
+                    detail += &format!("| {:.2} | {want:.4} | {got:.4} | {} |\n", f / 1e9, cell(theirs, 4));
+                }
+            }
+            "series_r" | "series_c" => {
+                let cap = (case == "series_c").then_some(1e-12);
+                let (a, b) = (part_accuracy(&e, cap), o.as_ref().map(|o| part_accuracy(o, cap)));
+                acc += &format!(
+                    "| {case} | \\|S21\\|, largest difference, 0.5 to 4.5 GHz (circuit theory) | {a:.4} | {} | {} |\n",
+                    cell(b, 4),
+                    nearer(a, b)
+                );
+            }
+            _ => {
+                if let Some(o) = &o {
+                    acc += &format!(
+                        "| {case} | \\|S21\\|, largest difference between the two, dB (no reference) | {:.3} | | |\n",
+                        s21_distance(&e, o)
+                    );
+                }
+                if let Some(fine) = &fine {
+                    let n = *threads.last().unwrap();
+                    eprintln!("{case}: ems on the finer mesh, {n} thread(s)");
+                    let fe = measure_ems(case, &out, &format!("{case}_fine_ems"), n, Some(fine));
+                    let fo = python.as_ref().map(|python| {
+                        eprintln!("{case}: openEMS on the finer mesh, {n} thread(s)");
+                        let name = format!("{case}_fine_openems");
+                        exec(&r, &mut s, "export.openems", with(with(args.clone(), fine), &json!({"name": name})));
+                        measure_openems(python, &out, &name, n)
+                    });
+                    for (solver, m) in [("ems", Some(&fe)), ("openEMS", fo.as_ref())] {
+                        let Some(m) = m else { continue };
+                        let steps: u64 = m.steps.iter().sum();
+                        let rate =
+                            m.cells.map(|c| c as f64 * steps as f64 / m.engine_seconds.unwrap_or(m.seconds) / 1e6);
+                        time += &format!(
+                            "| {case}, finer mesh | {solver} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
+                            m.threads,
+                            m.cells.map_or("?".into(), |c| c.to_string()),
+                            m.steps.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
+                            m.seconds,
+                            m.engine_seconds.map_or("".into(), |e| format!("{e:.1}")),
+                            rate.map_or("?".into(), |r| format!("{r:.0}")),
+                            m.peak_mb,
+                            m.before_mb
+                        );
+                        let reference = m.data();
+                        let (a, b) = (s21_distance(&e, &reference), o.as_ref().map(|o| s21_distance(o, &reference)));
+                        acc += &format!(
+                            "| {case} | \\|S21\\|, largest difference, dB ({solver} on the finer mesh, {fine}) | {a:.3} | {} | {} |\n",
+                            cell(b, 3),
+                            nearer(a, b)
+                        );
+                    }
+                    if let Some(fo) = &fo {
+                        acc += &format!(
+                            "| {case} | \\|S21\\|, the two finer meshes apart, dB | {:.3} | | |\n",
+                            s21_distance(&fe.data(), &fo.data())
+                        );
+                    }
+                }
+            }
+        }
+    }
+    md += &format!(
+        "Machine: {cpu}, {cpus} logical CPUs. {ems_version}{}. One run each, one process per run, one at a time.\n\
+         Whole run: `sim.sparams` as a command (model, both ports' runs, spectra, file) for ems; the driver's process \
+         for openEMS (Python and its modules, geometry, both ports' runs, port calculation, file). Engine alone: what \
+         openEMS prints at the end of each run. Mcells/s: cells × steps over the engine's time for openEMS and over \
+         the whole run for ems. Before the run: the test's process with the board for ems, Python with numpy, CSXCAD \
+         and openEMS imported for openEMS.\n\n",
+        match (&python, std::env::var("OPENEMS_PROJECT_REV")) {
+            (Some(_), Ok(rev)) => format!(", openEMS-Project {rev}"),
+            (Some(_), Err(_)) => ", openEMS".into(),
+            (None, _) => ", openEMS not installed".into(),
+        }
+    );
+    md += &time;
+    md += "\n#### Accuracy against references that are neither solver\n\n";
+    md += &acc;
+    md += &detail;
+    md += "\n";
+    for n in &notes {
+        md += &format!("- {n}\n");
+    }
+    std::fs::write(out.join("comparison.md"), &md).unwrap();
+    std::fs::write(out.join("comparison.json"), serde_json::to_string_pretty(&record).unwrap()).unwrap();
+    eprintln!("{md}");
 }
