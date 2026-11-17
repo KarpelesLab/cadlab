@@ -888,10 +888,6 @@ pub struct RelieveReport {
     /// Pads that still need a look: fewer spokes than the minimum, or no effective relief,
     /// each with what was tried (`reason`).
     pub left: Vec<PadJoint>,
-    /// Pads the pour joined on a layer before and no longer does (`J1.3 on In1.Cu`): where
-    /// no spoke fits, relieving a pad takes its joint to the pour away.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cut: Vec<String>,
 }
 
 impl Command for ZoneRelieve {
@@ -923,7 +919,7 @@ impl Command for ZoneRelieve {
             })
             .filter(attention)
             .collect();
-        let cut: Vec<String> = changes.cut.clone();
+        let cut = &changes.cut;
         let p = ctx.project()?;
         let mut diags = census_warnings(p, &after);
         if !cut.is_empty() {
@@ -952,7 +948,7 @@ impl Command for ZoneRelieve {
         for d in diags {
             ctx.report(d);
         }
-        Ok(RelieveReport { before, after, changes, left, cut })
+        Ok(RelieveReport { before, after, changes, left })
     }
 
     fn summarize(o: &RelieveReport) -> String {
@@ -980,8 +976,8 @@ impl Command for ZoneRelieve {
         if !c.solid.is_empty() {
             s += &format!("\nkept solid on purpose, pad by pad ({}): {}", c.solid.len(), list(&c.solid));
         }
-        if !o.cut.is_empty() {
-            s += &format!("\nno longer joined to their pour ({}): {}", o.cut.len(), list(&o.cut));
+        if !c.cut.is_empty() {
+            s += &format!("\nno longer joined to their pour ({}): {}", c.cut.len(), list(&c.cut));
         }
         if !o.left.is_empty() {
             s += &format!("\nleft to look at ({}):\n{}", o.left.len(), joints_text(&o.left, 20));
@@ -1002,6 +998,7 @@ impl Command for ZoneRelieve {
 #[serde(deny_unknown_fields)]
 pub struct ZonePad {
     /// The pads, each as designator and pad number (`J1.3`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pads: Vec<String>,
     /// Zone connection: thermal, solid, none or tht_thermal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
