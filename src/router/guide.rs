@@ -1,5 +1,5 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96 and D97; docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97 and D101; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -18,7 +18,9 @@
 //! (`RouteOptions::join`): zone filling stays cadlab's, and what cadlab's fill leaves apart goes
 //! to a second run. The first run has the nets with zones among its nets, open or not
 //! ([`first_nets`]), and guide joins the pads its routes cut off those fills again itself
-//! (`RouteOptions::pour_cuts`, D97). What guide's API cannot express is passed the stricter way and named in
+//! (`RouteOptions::pour_cuts`, D97), settles what its passes of rip-up leave open (`RouteOptions::settle`,
+//! D101) and plans the ways out of rows of fine pitch on a board of two layers
+//! (`RouteOptions::row_fanout`, D101). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -73,6 +75,10 @@ const PLANE_COVERAGE: f64 = 0.0;
 /// at 27 s nearly what its two runs had, and the board is the same with either share (465
 /// and 422 over the three orders), so the eleven others decide: 452 with 0.45, 361 with 0.7.
 const FIRST_SHARE: f64 = 0.7;
+
+/// How many copper layers a board has for guide to plan the ways out of its rows of fine
+/// pitch row by row (`RouteOptions::row_fanout`): two. See [`options`].
+const ROW_FANOUT_LAYERS: usize = 2;
 
 /// How many times what the first run needed after it (the verification and the refill) is
 /// kept for after a second run, whose board has more copper.
@@ -984,14 +990,23 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // connections open with it over three orders at 60 s and 381 without (corne-cherry 106
     // and 118, tinytapeout-demo 22 and 28).
     gopts.pour_cuts = true;
+    // What its passes of rip-up leave open, guide settles itself (guide 0.0.10, its default):
+    // a pass ends where it has stopped gaining, and each open connection is then looked for
+    // a route across other nets' routes, with the nets it crosses joined up again around it
+    // at once, kept only if the board has less open for it. D101.
+    gopts.settle = true;
+    let layers = p.board().stackup.copper_names().len();
     // The ways out of a row of fine pitch planned for the whole row (guide 0.0.8, off by
-    // default) stay off: 367 with them for 358 (corne-cherry 99 for 106, glasgow-revC3 127
-    // for 113, buspirate5-rev10 14 for 11). D97.
-    gopts.row_fanout = false;
+    // default), on a board of two layers: a pad of such a row has no inner layer to drop a
+    // via to, and the vias of its row have to be staggered on the two layers that the routes
+    // are on too. With guide 0.0.10, at 40 million nodes over three orders, nrfmicro has 11
+    // connections open with them for 20 and corne-cherry 130 for 140, and on four layers
+    // buspirate5-rev10 15 for 11, tinytapeout-demo 43 for 38, glasgow-revC3 109 for 107
+    // (D101; with 0.0.8 on every board, 367 for 358 on eleven boards, D97).
+    gopts.row_fanout = layers == ROW_FANOUT_LAYERS;
     // The smallest via the rules allow, for a pad trapped in its footprint: the native
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
     let (dia, drill) = super::smallest_via(&p.board().rules);
-    let layers = p.board().stackup.copper_names().len();
     gopts.fanout_via = (layers > 1 && dia > drill).then_some(ViaSize { diameter: dia.0, drill: drill.0 });
     gopts.seed = (opts.seed != 0).then_some(opts.seed);
     if !opts.layers.is_empty() {
@@ -1054,6 +1069,7 @@ fn phase(p: Phase) -> &'static str {
         Phase::Global => "global routing",
         Phase::Detail => "routing",
         Phase::Fine => "routing on the finer lattice",
+        Phase::Settle => "settling what is open",
         Phase::Cleanup => "cleanup",
         Phase::Pairs => "pairs",
         Phase::Zones => "zones",
@@ -2064,9 +2080,10 @@ mod tests {
     }
 
     /// What guide is told beside the board: no fill of its own at the end and no joining of zones'
-    /// pieces on it, the pads its routes cut off the fills joined again, no rows planned, no
-    /// via in a pad, and
-    /// for the escapes of trapped pads the smallest via the rules allow, the native fanout's.
+    /// pieces on it, the pads its routes cut off the fills joined again, what its passes leave
+    /// open settled, the rows of fine pitch planned on a board of two layers and on no other,
+    /// no via in a pad, and for the escapes of trapped pads the smallest via the rules allow,
+    /// the native fanout's.
     #[test]
     fn guide_gets_no_fill_and_the_smallest_via_for_escapes() {
         let mut p = project();
@@ -2074,7 +2091,16 @@ mod tests {
         p.board_mut().rules.min_annular_ring = Nm(100_000);
         let g = options(&p, &RouteOptions::default(), &[0, 1]);
         assert!(!g.fills && !g.join && !g.vias_in_pads && g.keep_partial);
-        assert!(g.pour_cuts && !g.row_fanout);
+        assert!(g.pour_cuts && g.settle && g.row_fanout);
+        let four = BOARD.replace(
+            r#"(0 "F.Cu" signal) (31 "B.Cu" signal)"#,
+            r#"(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)"#,
+        );
+        let mut q = Project::new("t");
+        import(&mut q, &four, &BoardImportOptions { file_name: "t.kicad_pcb".into(), ..Default::default() })
+            .expect("import");
+        assert_eq!(q.board().stackup.copper_names().len(), 4);
+        assert!(!options(&q, &RouteOptions::default(), &[0, 1, 2, 3]).row_fanout);
         assert_eq!(g.fanout_via, Some(ViaSize { diameter: 400_000, drill: 200_000 }));
         assert_eq!((g.seed, g.layers, g.work_budget), (None, None, None));
         let opts = RouteOptions { seed: 7, layers: vec!["B.Cu".into()], ..Default::default() };

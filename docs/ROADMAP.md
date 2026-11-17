@@ -297,12 +297,27 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       the noise on three, behind on three (corne-cherry 36, 35, 38 against 3; nrfmicro 4, 7, 9 against 0;
       sweep-v2.2 6, 7, 6 against 3); 111, 114 and 114 against 93 on the eleven without glasgow-revD1, of which
       corne-cherry alone is more than the difference. The default stays the native router (D97)
+- [x] guide 0.0.10 adopted in the adapter: its passes of rip-up end where they have stopped gaining, and what
+      they leave open is settled by chains (a route for an open connection across other nets' routes, the nets
+      it crosses cut and joined up again around it at once, kept only if the board then has less open, counting
+      the pads that routes cut off their pours, and undone to the track if not); `settle` on, and `row_fanout`
+      on boards of two copper layers, where it gains (nrfmicro, corne-cherry), and on no other, where it loses.
+      Measured (ROUTER.md, "Native router and guide 0.0.10, D101") with a budget of 40 million nodes over three
+      orders, the same run under any load: 853 connections open on the nine boards that a budget cuts for 892
+      with 0.0.9 (corne-cherry 140 for 169), and with the rows nrfmicro 11 for 20 and corne-cherry 130. At 60 s
+      on a machine with 68 to 75 runnable threads on its 64, where the native router has 370 open for D97's 294:
+      412, 408 and 343 for 419, 468 and 362 with 0.0.9 in the same queue; behind the native router in two orders
+      of three in that hour, and in every order on nrfmicro (3, 5, 3 against 0), sweep-v2.2 (6, 8, 6 against 3),
+      buspirate5-rev10 (9, 8, 10 against 2) and corne-cherry (36, 38, 40 against 3). The default stays the
+      native router (D101)
 - [ ] `router: guide` level with the native router on the corpus: needs, in guide, a way out of the pads of a
-      fine row that holds while routes are moved (corne-cherry's two QFN-56 and its USB receptacles), a ground
-      that is a pour on outer layers kept in one piece or routed (corne-cherry again), rip-up that settles and
-      the time it leaves unspent (nrfmicro), searches that end within their limit on a wide board (sweep-v2.2),
-      rule areas by kind and containment with a track width that is routed by, and fewer vias (D97, "Gaps";
-      D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still blocks it")
+      fine row on two layers that the routes of the pads beside it leave open (corne-cherry's two QFN-56 and
+      its USB receptacles, nrfmicro's receptacle: the chains of 0.0.10 are undone seven times in eight there),
+      a ground that is a pour on outer layers kept in one piece or routed (corne-cherry again), searches that
+      end within their limit on a wide board (sweep-v2.2), a run that comes back before its deadline on a
+      loaded machine, rule areas by kind and containment with a track width that is routed by, and fewer vias
+      (D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What
+      still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
