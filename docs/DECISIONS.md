@@ -4633,6 +4633,273 @@ is better for it.
 boards with 0.0.14 (a run with no budget is as it was: the curated boards are); the three runs under a work
 budget on the whole corpus; cadlab's oracles; KiCad's DRC on a board guide routed.
 
+### D107. ems 0.0.16 and 0.0.17: the cells' shares balanced, the cut cells in the bound, 1.22 to 1.41 times the Courant step on the oracle's regions where 0.0.15 had 1.00 to 1.31; what the end criterion costs, measured apart from the step; the mesh at the region's walls evaluated and not taken (2026-11-17)
+D105 left five things: the part of the estimated limit that single cells do not prove, the thirds lines at the
+region's walls, the run's own memory, the lowest frequency of a run to −50 dB, and seven figures that had moved
+by one to three units of the fourth decimal without it being known whether the step or the end criterion moved
+them. This is what each came to, in that order. No openEMS, CSXCAD or other GPL code was read.
+**1. The bound.** The theorem of D105 (`λ_max ≤ max_c λ_c`, Irons and Treharne) holds for any way of dividing an
+edge's capacitance among the cells around it and a face's dual edge between its two cells, as long as the parts
+add up and none is negative. D105 took the geometric division (a quarter of the dual face, half of the dual
+edge), with which a thin cell between thick ones has the Courant limit of its own sizes, because it has little
+of the edges it shares. ems 0.0.16 (`engine::step_bound`, wave 31 of its design notes) divides the dual length
+at every node of every axis between the cell below and the cell above in parts of its choosing, one number per
+node and axis. A cell is then the cell of a grid whose dual lengths at its two ends are its shares `lo`, `hi`,
+and for one ε and μ its eigenvalue is at most `Σ_a (1/lo_a + 1/hi_a)/(Δ_a·εμ)` (the cell is the product of
+three elements of two nodes; curl-curl plus the gradient of the divergence is the sum of their three second
+differences, and the gradient part is not negative); an end that a wall or a conductor closes drops its term.
+On a graded mesh in one medium between walls this family contains the limit itself: the operator is the sum of
+three chains whose largest eigenvalues add up, and a tridiagonal matrix is the sum of its elements' for the
+shares its eigenvector gives. An ems unit test holds the bound to a power iteration on such a mesh within a
+part in 10⁴, where the geometric shares gave the Courant limit, 1.65 times shorter. The shares are found one
+axis at a time (the least level at which a walk along the axis can give every cell what its closed form asks,
+by bisection: what a cell asks is convex in its two shares; a cell whose own eigenvalue is below its closed
+form counts by that eigenvalue at the shares of the round before; two to four rounds, 35 to 70 ms on these
+regions). Whatever the search finds, the step is `courant` over the root of the largest of the cells'
+eigenvalues with those shares, every cell solved or bounded by a closed form that is its eigenvalue: a bound
+by the same proof, and never above that of the geometric shares, which is where the search starts.
+What does not follow the shares: the plane of a sheet keeps the halves (a face in it reads `f+·u+ + f−·u−` by
+the halves, and `(f+·a + f−·b)² ≤ f+²/g+·a² + f−²/g−·b²` for other shares `g±` costs both sides), and an edge
+of lossy metal has its capacitance outside the metal, which the cells with field divide by their shares.
+**The cut cells, which held the via.** D105 read 0.79 of the Courant limit for the via's cut cells "as the
+scheme is" and kept the Courant step there. Three things were in that figure, none of them the scheme. (a) An
+edge of lossy metal beside a cut cell has a floor of capacitance in ems, `C ≥ dt²·Σ n/L/(4θ)` over its faces,
+θ = 1/16, which is there so that the edge answers for itself: `(s + Σ_n u)² ≤ s²/(1 − θ) + n·Σ_n u²/θ` for a
+face's circulation. In the bound such an edge is therefore closed and its faces a sixteenth heavier, in every
+cell they are in; D105 had it open with vacuum's capacitance and a margin of √(15/16) on top. (b) The edges the
+metal's outline cuts are ordinary edges in ems (their covered part a perfect conductor); D105 counted them as
+vacuum's. (c) ems's own test of which small faces keep their current was made at the engine's step, so a
+longer step would have changed the conformal treatment, and the step was held to where it did not. That test
+is made at the Courant step now wherever the cells give a longer one (`ConformalOptions::keep_step`), so a
+model keeps the faces it keeps at the Courant step whatever its step (an ems test compares the two), and the
+cut cells are in the bound with the whole cells, as the scheme has them, with the shares of their slabs. The
+via reads 1.04 with the geometric shares and 1.22 balanced; a model one of whose cut faces fails that test at
+the Courant step (it is interpolated at any step, and its cells bound nothing) stays on the Courant step, as
+does session 6's path.
+**The CPML** has no energy proof, as before (D105): frozen coefficients, a unit test of the characteristic
+polynomial, and long runs.
+
+| Region (`courant` 0.95) | Courant step | 0.0.15 | 0.0.16 and 0.0.17 | Of the Courant step | Steps per port, Courant → 0.0.15 → now | The estimate (kernel alone, not a bound) |
+|---|---|---|---|---|---|---|
+| lossy line, sheets, microstrip ports (`line_msl`) | 0.1949 ps | 0.2544 ps | 0.2742 ps | 1.41× | 6145 → 4737 → 4385 | 1.45× |
+| lossy line, `solid`, lumped ports (`line_lumped`) | 0.0994 ps | 0.1049 ps | 0.1338 ps | 1.35× | 12 065 → 11 425 → 8961 | 1.38× |
+| via transition (`via`, `via_same`) | 0.0545 ps | 0.0545 ps | 0.0664 ps | 1.22× (its cut cells; the whole cells alone 1.28) | 32 961 → 32 961 → 27 041 | 1.29× |
+| series 50 Ω, series 1 pF | 0.1689 ps | 0.1792 ps | 0.2356 ps | 1.39× | 7105 → 6689 → 5089 | 1.40× |
+| 64 mm lossy microstrip, `solid` (`sim_sparams_microstrip_validation`) | 0.0994 ps | 0.1049 ps | 0.1338 ps | 1.35× | 21 153 → 20 033 → 15 713 | |
+| stripline with its via fence (`measure_stripline`) | 0.1013 ps | 0.1077 ps | 0.1192 ps | 1.18× | 9089 → 8545 → 7713 | |
+| lossless line, sheets (`measure_microstrip`); parts on the finer mesh | 0.1949; 0.1689 ps | 0.2546; 0.2410 ps | 0.2782; 0.2744 ps | 1.43×; 1.62× | 5217 → 4001 → 3649; 7745 → 5441 → 4769 | |
+| bent line (`measure_diagonal_copper`): staircase with perfect and lossy sheets on two meshes; conformal with lossy sheets and lossy `solid` on the default mesh | | | | 1.20 to 1.23×, 1.06× and 1.20× of 0.0.15's | 7617 → 6177, 7809 → 6337, 6465 → 5377, 6817 → 5665; 7777 → 7329; 13 729 → 11 457 | |
+| 45° line, conformal, perfect copper, six meshes, and the bent line's other six models; via on perfect sheets; session 6's RF path | | | as 0.0.15 | (the worst cut cell is one that shares of a whole slab do not reach; session 6: Courant) | unchanged | |
+
+openEMS's criterion gives 0.1982 ps on the sheet line (ems 0.2742), 0.1011 on the `solid` line (0.1338), 0.1966
+on the parts (0.2356) and 0.0482 or 0.0460 on the via (0.0664): ems's step is the longer on every case now.
+On boards of perfect copper the bound is the limit to four digits (a power iteration reads 0.9996 to 1.0000 of
+it in ems's `the_bound_is_not_above_the_estimate`), so `courant` is the whole margin there, where D105's bound
+had ten to thirty per cent of its own: at factor 1 in a closed box the highest mode grows with the step count,
+as it does at the Courant limit of a uniform mesh (26 times the energy in 30 000 steps), and at 0.999 nothing
+does. cadlab's 0.95 stands.
+**Stability, tested.** ems (`tests/step_limit.rs`, noise on every edge, no source): the boards of D105 at the
+new steps (1.68 to 2.77 times their Courant steps), 30 000 steps each with the CPML at factor 1 and in a closed
+box at 0.999; strips at 17°, 30° and 45° with their cut cells in the bound, 40 000 steps, the 30° strips at the
+limit too; `#[ignore]`, run once on the released code: 400 000 steps on eight boards (perfect, ladder,
+rational sheets and lossy metal, on the mesh and at 30°), every energy below its start, 3.4 to 5.2·10⁻¹¹ J at
+the end from 7.9 to 8.6·10⁻¹¹. cadlab (`long_runs_stay_bounded`, `#[ignore]`, 4 min 39 s on four threads): the
+oracle's five cases to their criterion and then ten times as many steps, the energy of every progress line
+under the criterion after the usual end and no higher at the end than at twice the usual length. Read: the
+sheet line −62.0 dB at twice its 4385 steps and −87.3 dB after 43 841; the `solid` line −62.0 and −88.6 dB
+(89 601 steps); the via −63.8 and −85.3 dB (270 401 steps at 0.0664 ps); the parts −128 dB (50 881 steps).
+Nothing came back. Not done again: D105's sixty runs by hand at five times the usual length.
+**Validation: every case against its reference, 0.0.15 and 0.0.16** (0.0.17 gives 0.0.16's Touchstone files
+byte for byte, below). Both columns are one harness on two worktrees, ems from crates.io, release, four threads
+(the base at three). *What moved the wrong way, first:* the 64 mm microstrip's worst \|S21\| against D52,
+0.0875 → 0.0901 dB at 9 GHz (5.28 → 5.44 %; RMS over its seventeen points 2.79 → 2.85 %); the sheet line's
+loss, largest 0.0187 → 0.0189 dB and mean +2.6 → +2.7 %, and its 0.06 GHz point, 0.0076 → 0.0079 dB off; the
+`solid` line's RMS 5.8 → 5.9 %, mean +4.6 → +4.7 %, 0.06 GHz point 0.0089 → 0.0090 dB off; the lossless
+`solid` line from 0.5 GHz, 0.0200 → 0.0201 dB; the lossless sheet line's Σ\|S\|² (`measure_microstrip`),
+0.99845 to 1.00070 → 0.99843 to 1.00076. Each is inside its test's tolerance by the margin it had. Section 5
+says which of them the step moved: one.
+
+| Case | Reference | 0.0.15 | 0.0.16 |
+|---|---|---|---|
+| lossy line, sheets (`line_msl`): loss from 0.5 GHz | D52 | within 0.0187 dB, RMS 4.2 %, mean +2.6 % | 0.0189 dB, 4.2 %, +2.7 % |
+| the same at 0.06 GHz; Z₀ | D52 (0.0072 dB); 2D field solver | 0.0076 dB off; 0.3 % | 0.0079 dB off; 0.3 % |
+| lossy line, `solid` (`line_lumped`): loss from 0.5 GHz | D52 | 0.0403 dB, RMS 5.8 %, mean +4.6 % | 0.0403 dB, 5.9 %, +4.7 % |
+| the same at 0.06 GHz; Z₀ | D52 (0.0086 dB); field solver | 0.0089 dB off; 5.5 % | 0.0090 dB off; 5.5 % |
+| series 50 Ω (comparison) | circuit theory: ideal lines; the lines as the field solver has them | 0.0048; 0.0015 | 0.0048; 0.0015 |
+| series 1 pF (comparison) | the same two | 0.0100; 0.0065 | 0.0100; 0.0064 |
+| 64 mm lossy microstrip, \|S21\| | D52 | −1.38 to +5.28 %, RMS 2.79 %, worst 0.0875 dB; to 2.5 GHz 0.0043 dB | −1.38 to +5.44 %, RMS 2.85 %, worst 0.0901 dB; to 2.5 GHz 0.0042 dB |
+| the same, Z₀ and εeff | 2D field solver | within 2.94 % and 0.98 % | 2.94 % and 0.98 % |
+| lossless line next to the absorber, Σ\|S\|² | passivity (1) | 0.99908 to 1.00068 | 0.99908 to 1.00066 |
+| solder mask: Z₀, εeff; bare εeff | 2D field solver | the test's tolerances hold (it prints no figure) | hold |
+| parts on the finer mesh: 50 Ω, 1 pF, 1 pF with ESL and ESR | circuit theory | 0.0073, 0.0094, 0.0079 | 0.0073, 0.0094, 0.0078 |
+| the parts of `measure_parts`: R, C, RLC, 0.5 to 4.5 GHz | circuit theory | 0.0048, 0.0100, 0.0077 | the same |
+| cavities: PEC modes, Q from σ, from copper plates, Debye filling | analytic modes and Q | −0.08 %; +0.04 %; +0.08, −0.14, −0.22 %; resonance −0.01 %, Q −0.65 to −0.74 % | the same lines (uniform meshes: the Courant step) |
+| stripline: Z₀, εeff | 2D field solver | within 1.78 %, 0.457 % | 1.78 %, 0.457 % |
+| lossless-copper `solid` line with the Debye laminate, from 0.5 GHz; at 0.06 GHz | D52 | within 0.0200 dB; 0.0123 dB off | 0.0201 dB; 0.0121 dB off |
+| lossless sheet line (`measure_microstrip`): Z₀, εeff, Σ\|S\|² | 2D field solver; passivity | 1.22 %, 0.59 %; 0.99845 to 1.00070 | 1.22 %, 0.59 %; 0.99843 to 1.00076 |
+| routed 45° line, six meshes; the 45° line of `measure_diagonal`; the via on perfect sheets (`measure_via_convergence`, −0.376 dB at 4 GHz) | the straight line of its length; the finer meshes; the 0.2 mm mesh | (as printed) | the same lines, every digit |
+| bent line, six copper models on two meshes: largest Σ\|S\|² | passivity | 1.0003, 1.0002, 0.9979, 0.9978, 1.0001, 0.9983; 1.0001, 1.0006, 0.9977, 0.9979, 1.0001, 0.9983 | 1.0003, 1.0001, then the same ten |
+| session 6's RF path | its ideal chain (not a reference) | \|S11\| 0.5726, 14 529 steps | the same (Courant step) |
+| the removed engine's recorded figures (`RECORDED_*`, `ems_runs_the_region`) | cadlab's own engine at 3aa423f | within 0.01 and 0.015 | within the same tolerances; no constant touched |
+
+**2. The mesh at the region's walls: evaluated, not taken.** The change: an edge of a copper shape that lies on
+a side of the window is where the window cuts the copper, not where the copper ends, so `thirds` leaves it
+alone (two conditions in `openems::thirds`). It takes a fifth of the cells of a line region away and the cells
+that set its step: the sheet line 67 200 → 53 760 cells and 0.2742 → 0.3443 ps (4385 → 3489 steps), the parts
+69 312 → 55 296 cells and 0.2356 → 0.3670 ps (5089 → 3265 steps), the `solid` line 85 320 → 68 256 cells on
+the step it had, the via unchanged (no copper on its window's sides), the conformal 45° lines 0.2036 → 0.2360
+and 0.1689 → 0.2040 ps. Against the references, on ems 0.0.16, to each case's own criterion and again to
+−80 dB, where the end of the run moves nothing (section 5):
+
+| Case | Reference | thirds at the walls (today) | without them | The same two to −80 dB |
+|---|---|---|---|---|
+| 64 mm lossy microstrip: worst \|S21\|, RMS; Z₀ | D52; field solver | 0.0901 dB, 2.85 %; 2.94 % | 0.0829 dB, 2.68 %; 2.90 % | 0.0925, 2.87 %, 2.94 % → 0.0854, 2.71 %, 2.90 % |
+| parts on the finer mesh | circuit theory | 0.0073, 0.0094, 0.0078 | 0.0072, 0.0089, 0.0073 | 0.0073, 0.0095, 0.0078 → 0.0072, 0.0090, 0.0073 |
+| `measure_parts` R, C, RLC | circuit theory | 0.0048, 0.0100, 0.0077 | 0.0047, 0.0098, 0.0075 | 0.0048, 0.0093, 0.0077 → 0.0047, 0.0091, 0.0075 |
+| series 1 pF (comparison) | ideal lines; lines as they are | 0.0100; 0.0064 | 0.0098; 0.0065 | 0.0093; 0.0029 → 0.0091; 0.0027 |
+| series 50 Ω (comparison) | the same | 0.0048; 0.0015 | 0.0047; 0.0014 | |
+| sheet line: loss; 0.06 GHz | D52 | 0.0189 dB, 4.2 %, +2.7 %; 0.0079 off | 0.0189 dB, 4.2 %, +2.6 %; 0.0082 off | 0.0165 dB, 0.0007 off → 0.0164 dB, 0.0008 off |
+| `solid` line: loss; 0.06 GHz | D52 | 0.0403 dB, 5.9 %, +4.7 %; 0.0090 off | 0.0403 dB, 5.9 %, +4.7 %; 0.0089 off | 0.0394 dB → 0.0393 dB; 0.0007 off both |
+| lossless `solid` line with the Debye laminate | D52 | 0.0201 dB; 0.0121 off | 0.0200 dB; 0.0120 off | 0.0164 → 0.0163 dB |
+| lossless line next to the absorber, Σ\|S\|² | passivity | 0.99908 to 1.00066 | 0.99909 to 1.00069 | 0.99917 to 1.00000 → 0.99918 to 1.00000 |
+| stripline: Z₀, εeff | field solver | 1.78 %, 0.457 % | 1.78 %, 0.460 % | 1.85 %, 0.450 % both |
+| **lossless sheet line (`measure_microstrip`): Z₀**; εeff; Σ\|S\|² | field solver (50.81 Ω) | **1.22 %** (50.73 to 50.19 Ω over six frequencies); 0.59 %; 0.99843 to 1.00076 | **1.26 %** (50.72 to 50.17 Ω); 0.59 %; 0.99844 to 1.00073 | **1.20 % → 1.24 %**, 0.02 Ω lower at every frequency; the rest equal |
+| bent line, largest Σ\|S\|² (twelve models) | passivity | 1.0003, 1.0001, 0.9979, 0.9978, 1.0001, 0.9983; 1.0001, 1.0006, 0.9977, 0.9979, 1.0001, 0.9983 | 1.0004, 1.0002, 0.9978, 0.9979, 1.0001, 0.9982; 1.0002, 1.0007, 0.9977, 0.9980, 1.0001, 0.9983 | not run |
+| routed 45° line: S11, S21, phase at 3.1, 5, 10 GHz on six meshes | the straight line; the finer meshes | (as printed) | S11 within 0.2 dB of it, the phases within 0.1°, S21 the same digits | not run |
+
+Of the eleven rows run to −80 dB, nine are nearer or equal once the end of the run is out of them, some by
+much (the 64 mm line's worst point by 0.007 dB of 0.09, the capacitor by 0.0005 of 0.0094). Two are not: the
+lossless sheet line's Z₀ reads 0.02 Ω lower at every frequency, 1.20 → 1.24 % from the field solver at its
+worst point, to either criterion; and the sheet line's 0.06 GHz point is 0.0001 dB further at −80 dB. The
+bent line's passivity, to its own criterion only, moves by 0.0001 on eight of twelve models, six of them
+away from 1. The condition was every validation as near or nearer, so it is not taken. Two more things it would need: `ems_runs_the_region` holds
+the removed engine's recorded figures on the mesh they were recorded on (27 × 19 × 15 lines, asserted), which
+this changes, so that reference would end; and the openEMS oracle shares the mesh and was not run on it.
+The two lines of the change are in this section, and nothing of it is in the tree.
+**3. Memory.** The heap of a run of the via transition, block by block (valgrind's massif, one thread, 41.3 MB
+at a time of which 6.7 MB the allocator's own): the largest single block was not in the engine but beside it,
+the compiled model's list of the laminate's poles, kept for the next port's engine (16 bytes an entry, 387 000
+entries: 6.2 MB); then the Debye state (2.6 MB each for the charges and the two constants of 320 000 poles,
+2.8 MB for 84 000 edges), the fields (3.3 MB), the CPML (2.0), the coefficients (1.7), the lossy metal (1.4),
+and cadlab's own command schemas (1.9 MB, in the 22 MB before the run). ems 0.0.17 (wave 32) holds the list as
+runs of edges along z with the sequence of poles they share, 32 bytes a run, and a Debye edge's previous
+field value as the field's `f32`. The Touchstone files of the sheet line, the `solid` line, the capacitor and
+the via are 0.0.16's byte for byte; the process's peak on the development machine (four threads, three
+runs each, 22 MB of it before the run) falls from 59 to 60 MB to 53 to 56 MB on the via and from 45 to 48 MB
+to 43 MB on the `solid` line, and is within the scatter of the runs on the sheet line (42 to 43 → 40 to
+43 MB) and the parts (35 → 32 to 35 MB). Of D98's two
+items: `cb` and `db` on a mesh graded in the plane are a factor per axis times the edge's permittivity, but a
+product formed in the loop is not the stored `f32` bit for bit, so they stay (24 bytes a node); a probe's
+series is under 2 MB of these runs (eight to sixteen series of 4400 to 27 000 steps), and a running spectrum
+would need the frequencies before the run: not taken. The two constants of a Debye pole per distinct edge
+(16 bytes a pole, 5 MB here) are the pole's over the edge's `ε0·A/l`; formed in the loop they would not be the
+same bits either.
+**4. The lowest frequency, and what the end criterion costs.** Section 5's runs show the end criterion is the
+largest error left in several rows, not only at 0.06 GHz: to −80 dB the capacitor is 0.0029 from the lines as
+they are where the run to −50 dB reads 0.0064 (openEMS 0.0058), the 0.06 GHz points are 0.0007 dB from D52
+where they read 0.0079 and 0.0090, the lossless lines' Σ\|S\|² end at 1.00000 and 1.00003 where they read
+1.00066 and 1.00076. What a decibel costs depends on the region. The energy of a part's region goes on falling
+as it fell (−50 dB at 5057 steps, −60 at 5569, −80 at 6657: 1.3 times the steps for 30 dB). A line's or the
+via's has a knee just below −50 dB (the sheet line: −50 dB at 4257 steps, −55 at 5441, −60 at 7585, −70 at
+15 617, −80 at 25 697; the via −50 at 23 265, −60 at 40 225, −70 at 87 361), which is where D105's 1.72 times
+for −60 dB came from: after the knee a slow part decays by 10 dB in 0.9 to 2.8 ns, and it is that part the
+0.06 GHz point lacks. *Extrapolating the tail, tried:* a matrix-pencil fit (sums of decaying exponentials,
+order up to 12 and 20) on the last third, half or two thirds of each port signal of a run to −50 dB,
+continued to infinity and added to the spectrum, against the same signal run to −80 dB. On the capacitor it
+takes one probe from 3.8·10⁻³ of its spectrum at the worst of thirteen frequencies to 4·10⁻⁴ and leaves the
+five others where they were or worse (0.11, 0.11, 0.19, 0.18, 0.18 before; 0.10, 0.10, 0.23, 0.19, 0.20
+after), and with the longer windows up to seven times the spectrum; on the sheet line three probes are five
+times worse on average (4·10⁻⁴ of the spectrum before, 2·10⁻³ after) and three a quarter better. The record
+to −50 dB ends at the knee: the slow part is not yet what the window holds, and the fit has nothing to find
+it by. Not taken. *A bounded continuation* (run on past the criterion while the energy still falls by
+2 dB per twentieth of the steps so far, a quarter more steps at most) would take the parts to about −74 dB for
+a quarter more steps and stop the lines within a twentieth, by the energies above. By the −80 dB values it
+would move the capacitor's 0.0064 towards 0.0029 and the finer-mesh capacitor's 0.0094 towards 0.0095; it
+was not run and is not made here: `end_criteria: 60dB` or more is there for who needs the low end, and its
+cost per case is the list above.
+**5. The seven figures of D105, step or end.** Every case on three steps (the Courant step through a switch in
+the driver that is not kept, 0.0.15's and 0.0.16's), each to its own criterion and to −80 dB, where a run's
+end no longer moves a printed digit. To −80 dB the three steps read: the sheet line's loss 0.0165 dB, RMS
+3.1 %, mean +2.3 % on all three, its 0.06 GHz point 0.0064, 0.0065, 0.0065 dB; the `solid` line 0.0394,
+0.0393, 0.0394 dB; the capacitor 0.0093 and 0.0029 on all three; the parts on the finer mesh 0.0073, 0.0095,
+0.0078 on all three; the stripline 1.85 % and 0.450 % on all three; the lossless `solid` line 0.0163, 0.0162,
+0.0164 dB; the lossless lines' Σ\|S\|² 0.99917 to 1.00000 and 0.99884 to 1.00002 or 1.00003. So six of D105's
+seven moves (the capacitor's two, the capacitor with ESL and ESR, the stripline's εeff, the lossless `solid`
+line's lowest point, and by the lines' evidence the bent line's Σ\|S\|², which was not run to −80 dB) were
+where the run stopped: a longer step moves the 32-step grid of the criterion's checks, and the result with it
+by one to three units of the fourth decimal in either direction. The seventh is the step: the 64 mm line's
+worst \|S21\| against D52 reads 0.0896, 0.0898 and 0.0925 dB at 9 GHz to −80 dB on the three steps (0.0872,
+0.0875, 0.0901 to its own criterion, which takes 0.0024 dB off each), growing with frequency (0.0005 dB at
+6 GHz between 0.0.15 and 0.0.16) and present on `solid` copper over 64 mm only; the sheet line shows none.
+Its cause was not found (the trapezoidal branches warp frequency by parts in 10⁵ at these steps, which is
+not it).
+**Time and memory beside openEMS.** On the development machine (AMD Threadripper 9970X, shared; the
+comparison without openEMS; ems 0.0.15 → 0.0.17, the whole `sim.sparams` run): on one thread, one run each,
+the sheet line 7.2 → 6.6 s, the `solid` line 16.4 → 13.4 s, the parts 3.9 and 4.0 → 3.1 and 3.0 s, the via
+62.2 → 50.8 s; on four threads, the best of three, the `solid` line 4.7 → 4.5 s, the parts 1.17 and 1.16 →
+1.07 s, the via 21.3 → 18.9 s, and the sheet line 2.0 → 2.0 s (three runs of each in turn: 2.06, 1.99, 2.08
+and 1.97, 1.99, 2.05 s; its 7 % fewer steps are 0.1 s of time stepping, and the search for the shares takes
+0.07 s of the compile where the single cells took 0.01). On the runner, beside openEMS in the same job (run
+44114553606, `openems-comparison`, 46 minutes; an AMD EPYC 7763, four logical CPUs, the CPU model of D105's
+run 44058840773, so its column is 0.0.15's on the same kind of machine, one run each):
+
+| Case | Steps per port, ems 0.0.15 → 0.0.17 / openEMS | Time step, ems 0.0.15 → 0.0.17 / openEMS (ps) | Whole run on one thread, ems 0.0.15 → 0.0.17 / openEMS | Each at its fastest (threads), ems / openEMS | Peak memory, ems 0.0.15 → 0.0.17 / openEMS | Of it the run |
+|---|---|---|---|---|---|---|
+| `line_msl` | 4737 → 4385 / 8820 | 0.2544 → 0.2742 / 0.1982 | 15.9 → 14.8 / 48.4 s (3.3×) | 7.2 (4) / 48.4 (1) s (6.7×) | 45 → 42 / 75 MB | 22 → 19 / 24 MB |
+| `line_lumped` | 11 425 → 8961 / 19 680 | 0.1049 → 0.1338 / 0.1011 | 39.2 → 31.6 / 141.7 s (4.5×) | 15.6 (4) / 130.9 (4) s (8.4×) | 50 → 46 / 78 MB | 27 → 23 / 27 MB |
+| `via` | 32 961 → 27 041 / 27 216 | 0.0545 → 0.0664 / 0.0482 | 154.9 → 127.2 / 441.1 s (3.5×) | 74.3 (4) / 383.0 (4) s (5.2×) | 65 → 59 / 109 MB | 42 → 37 / 58 MB |
+| `series_r` | 6689 → 5089 / 8037 | 0.1792 → 0.2356 / 0.1966 | 8.6 → 6.7 / 30.5 s (4.6×) | 3.7 (4) / 26.4 (4) s (7.2×) | 35 → 35 / 71 MB | 12 / 20 MB |
+| `series_c` | 6689 → 5089 / 8460 | 0.1792 → 0.2356 / 0.1966 | 8.5 → 6.6 / 32.1 s (4.8×) | 3.7 (4) / 27.8 (4) s (7.6×) | 36 → 35 / 71 MB | 12 / 20 MB |
+| `via_same` | 32 961 → 27 041 / 28 518 | 0.0545 → 0.0664 / 0.0460 | 154.6 → 126.8 / 300.1 s (2.4×) | 73.9 (4) / 281.1 (4) s (3.8×) | 66 → 57 / 92 MB | 44 → 35 / 41 MB |
+
+ems is 2.4 to 4.8 times as fast on one thread and 3.8 to 8.4 times at each solver's fastest (0.0.15 on that
+CPU: 2.0 to 3.8 and 3.2 to 6.6), takes fewer steps on every case (the via 27 041 for 27 216 and 28 518, where
+0.0.15 took 32 961) on a longer step on every case, and the run's own memory is below openEMS's on every case
+(the via on one mesh 35 for 41 MB, where it was 44; the `solid` line 23 for 27, where it was level). Accuracy
+beside openEMS, the references being neither: the lines' loss from 0.5 GHz 0.0189 dB (4.2 % RMS) for 0.0268 dB
+(15.8 %) and 0.0403 dB (5.9 %) for 0.0822 dB (17.0 %); Z₀ 0.3 for 4.0 % and 5.5 for 5.4 %; at 0.06 GHz 0.0079
+and 0.0090 dB for openEMS's 0.0053 and 0.0051; the parts against ideal lines 0.0048 and 0.0100 for 0.0029 and
+0.0089, against the lines as they are 0.0015 and 0.0064 for 0.0054 and 0.0058; the via 0.067 and, on one mesh,
+0.112 dB from openEMS, as with 0.0.15. Both solvers' files are the same bytes on one and four threads in this
+run. *Where openEMS is still ahead or level:* the 0.06 GHz point of both lines (its longer run; section 4);
+the parts against ideal lines (0.0029 for 0.0048, 0.0089 for 0.0100) and the capacitor against the lines as
+they are by 0.0006 (to −80 dB ems reads 0.0029 there); the `solid` line's Z₀ by 0.1 %. Not on time, steps,
+time step or memory on any case any more.
+**Tried and dropped.** Shares as the eigenvector of a power iteration gives them (each cell its part of
+`A·v` over `λ·C·v`): exact where the vector is exact, and negative or without meaning where it is small, which
+is most of a region. Shares balanced edge by edge with a multiplicative rule: 1.15 on a board mesh whose limit
+is 1.195, where the shares per node and axis give 1.195. Sheet planes with free shares: the face in the plane
+then costs both sides. An edge of lossy metal with its geometric quarter whatever the shares: the cell that
+takes more has less of it by proportion and the closed form leaves the search nothing to go by. The walks of
+the search as they come (every cell the least it needs): lopsided shares, and cells beside lossy metal that
+read worse than with the halves; the middle of the walks from both ends is taken. The scheme's own stability
+check after the bound has decided: it is the geometric bound over the grid, which a longer step does not pass,
+and then a power iteration, 0.4 s of every run on these regions for a check the bound has made (0.0.16 pays
+it, 0.0.17 does not).
+**Verification.** ems: `scripts/check.sh` (fmt, clippy and the tests with all features and with none, docs,
+`cargo +1.95 check`) before each of the three merges, four build jobs and four test threads, 14 minutes each:
+the first stopped at the docs on four links to private items (the tests before it had passed; the links were
+made text and the remaining steps run by hand, clippy with no default features among them), the second and
+third printed ALL-OK. Release PRs 16 and 17: Test & lint on Linux, Windows and macOS, Docs and MSRV green, and
+master's CI green, before each `gh pr merge`; 0.0.16 and 0.0.17 are on crates.io. The 400 000-step noise run
+(`#[ignore]`) passed on 0.0.16's code, 12 minutes on one thread.
+cadlab (Linux x86-64, ems 0.0.17 from crates.io, no patch): `cargo fmt --all --check`; `cargo clippy
+--all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`;
+the test targets `fdtd`, `fdtd_ems`, `fdtd_parts`, `fdtd_conformal`, `openems`, `agent_session6`,
+`agent_ergonomics`, `cli`, `mcp` and the `fdtd` unit tests in a debug build; in release the fourteen `#[ignore]`
+validations of the table (on 0.0.15, on 0.0.16 and on 0.0.17, whose printed lines are 0.0.16's to every digit),
+`long_runs_stay_bounded` and `solver_comparison` without openEMS (on 0.0.17's code before its release, by a
+path dependency that is not committed). All pass; no golden file or snapshot changed (the export's mesh is
+untouched). Not run here: the full `cargo test --all-features` (the merger's), `cargo deny`, cadlab's MSRV
+check. With openEMS, on the branch `ci/ems-016` (the two openEMS jobs alone), run 44114553606
+(https://github.com/KarpelesLab/cadlab/actions/runs/44114553606), ems 0.0.17 from crates.io: `openems`, the
+nine oracle tests, passes in 10 minutes; `openems-comparison` passes in 46.
+*Not established:* why the 64 mm `solid` line's loss at 9 GHz grows by 0.003 dB with the step; the bent
+line's and the 45° lines' figures to −80 dB; the mesh change against openEMS; the CPML beyond frozen
+coefficients and long runs; stability from noise on cadlab's own regions (cadlab's long runs are pulses);
+the one-thread times on the development machine beyond one run each, on a shared machine; what a bounded
+continuation of the run past its criterion reads (it was reasoned from the energies, not run).
+
 ### D108. guide 0.0.15 adopted: two nets that cross in a row of fine pitch have the crossing planned where the row's layer has no room; more runs that move routes, in other orders; the stubs that cadlab's fill makes needless taken out; the default unchanged (2026-11-18)
 This round is for D106's gaps (guide's `docs/benchmarks.md`, "PCB routing of two nets that cross in a row").
 `guide = { version = "0.0.15", default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock`

@@ -600,6 +600,16 @@ Research-sized items beyond the milestones above; none blocks a release.
       times the Courant step on the oracle's regions, every validation within three units of the fourth decimal
       of what it read. Left: the part of the estimated limit (1.29 to 1.45 times) that single cells do not
       prove; the thirds lines at the region's walls, which set the smallest cells; the run's own memory
+- [x] ems 0.0.16 and 0.0.17 (D107): the cells' shares balanced (the dual length at every node divided between
+      its two cells so that the largest of the cells' eigenvalues is small: the limit itself on a graded mesh
+      in one medium), the cut cells in the bound and the conformal treatment that of the Courant step: 1.22
+      to 1.41 times the Courant step on the oracle's regions (0.0.15: 1.00 to 1.31), ems's step the longer
+      beside openEMS on every case; the compiled model's poles as runs (memory); the moves of D105's table
+      separated into the step (one) and where the run ends (six). Evaluated and not taken: the mesh without
+      the thirds lines at the region's walls (two validations of eleven further from their references), a tail
+      extrapolated from the port signals (it does not predict the signal run on). Left: the end criterion is
+      the largest error of a run to −50 dB at the low end and on the parts; conformal models whose worst cut
+      cell the shares of a slab do not reach
 
 ---
 

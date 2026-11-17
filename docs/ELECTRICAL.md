@@ -522,7 +522,14 @@ takes the step from a bound over the cells (D105; "Guards" below): 0.2544 ps for
 line, 0.1792 ps for its 0.1966 on the parts (above what a single cell proves there, 0.1886 at factor 1), the
 via's unchanged. With 0.0.15 on an AMD EPYC 7763 runner (run 44058840773): 2.0 to 3.8 times openEMS's speed
 on one thread and 3.2 to 6.6 times at each solver's fastest, the memory and the accuracy rows as above but for
-the `solid` line's run (27 for 27 MB) and the lines' loss (0.0187 and 0.0403 dB from D52); the table is in D105. One more difference is not in a
+the `solid` line's run (27 for 27 MB) and the lines' loss (0.0187 and 0.0403 dB from D52); the table is in D105.
+With 0.0.17 on the same CPU model (run 44114553606; D107 has the table): the shares of the cells balanced and
+the cut cells in the bound give 0.2742, 0.1338, 0.2356 and 0.0664 ps for openEMS's 0.1982, 0.1011, 0.1966 and
+0.0482 or 0.0460, fewer steps than openEMS on every case, 2.4 to 4.8 times its speed on one thread and 3.8 to
+8.4 times at each solver's fastest, and the run's own memory below its on every case (19 to 37 MB for 20 to
+58). Where openEMS is still ahead: the 0.06 GHz point of a run to −50 dB, the parts against ideal lines, the
+capacitor against the lines as they are by 0.0006, which are where ems's run ends (to −80 dB the capacitor
+reads 0.0029 for openEMS's 0.0058 and the 0.06 GHz points 0.0007 dB for 0.005: D107). One more difference is not in a
 column: openEMS looks at its end criterion when it prints a progress line, every few seconds of wall time, so
 its number of steps and with it its result follow the machine (the `solid` line ran 22 221 steps per port on
 four runs and 22 221, 27 265, 22 960 and 19 475 on a slower runner, reading 41.6 % for the 40.2 % above; the
@@ -566,7 +573,7 @@ pure-Rust FDTD solver (MIT, with its geometry crate `csx`; no further dependenci
 from crates.io and a dependency of every build (DECISIONS D86, D94, D100). cadlab builds the model, places the
 ports and reads the waves; ems does the time stepping. There is no solver to choose: until D100 cadlab also had
 an FDTD engine of its own (D59) behind `solver: builtin`, and the parameter went with it. The result names what
-ran, `solver: "ems 0.0.15"` in the output and `(solver: ems 0.0.15)` in the Touchstone file's first line.
+ran, `solver: "ems 0.0.17"` in the output and `(solver: ems 0.0.17)` in the Touchstone file's first line.
 
 ```
 cadlab sim sparams --f-max 10GHz --around track#12 --copper sheet \
@@ -684,14 +691,20 @@ run; `threads` sets the worker threads (default: from the grid and the machine; 
 it). The cost is cells × timesteps × ports ("Measured" below has times; the timestep follows the smallest cell:
 a 35 µm copper layer in `solid` copper forces small steps; `copper: sheet` avoids it). The timestep is `courant`
 (0.95) of a bound over the mesh's cells, each with its own sizes, the permittivity of its edges and the walls
-and copper it lies against (ems 0.0.15's `StepLimit::Cells`, D105: proven for the lossless scheme and, part by
-part, for the laminate's poles, lossy sheets and metal, lumped parts and cut cells; tested from noise and by
-runs ten times the usual length). It is never less than `courant` of the Courant limit of the smallest cell
-sizes in vacuum, which it was before: 1.31 times that on the lossy sheet line, 1.06 on the `solid` line and
-the parts, 1.17 to 1.36 on perfect-copper lines, and equal to it on the via transition and wherever cut cells
-give no more. Power iterations put the scheme's own limit at 1.29 to 1.45 times: that is an estimate, and what
-a single cell does not prove of it is left (D105). The smallest cells of these regions are the ones the thirds
-rule puts at the region's walls, where it cuts the planes. The mesh keeps `min_cell`
+and copper it lies against, and with the part of the edges and faces it shares with its neighbours that
+leaves the largest of the cells' eigenvalues smallest (ems's `StepLimit::Cells`, D105 and D107: proven for the
+lossless scheme and, part by part, for the laminate's poles, lossy sheets and metal, lumped parts and cut
+cells; tested from noise and by runs ten times the usual length). It is never less than `courant` of the
+Courant limit of the smallest cell sizes in vacuum, which it was until ems 0.0.15: 1.41 times that on the
+lossy sheet line, 1.35 on the `solid` line, 1.39 on the parts, 1.22 on the via transition (its cut cells are
+in the bound as the scheme has them, and keep the faces they keep at the Courant step), and equal to it where
+a cut face is too small to keep at the Courant step (session 6's path). Power iterations put the limit of the
+scheme without its sheets and lossy metal at 1.29 to 1.45 times: on boards of perfect copper the bound is
+that limit to four digits, so `courant` is the whole margin (D107). The smallest cells of these regions are
+the ones the thirds rule puts at the region's walls, where it cuts the planes; leaving them out was
+evaluated and not taken (D107: a fifth fewer cells and a step 1.26 to 1.56 times as long on the lines and
+the parts, and two validations of eleven further from their references, one of them by 0.04 % of an impedance). The mesh keeps
+`min_cell`
 between metal lines: clusters of lines merge to one each, and a line that lands closer than `min_cell` to the
 line before it goes (before D70 two neighbouring clusters could leave a 5 µm sliver in a 58 µm minimum, and
 that one cell set the timestep).
@@ -740,8 +753,9 @@ line), `sim.port_at_edge`, `sim.unstable`, `sim.ems_failed`, `cancelled`. Notes:
 
 **Accuracy.** Each row is a test with a reference that is not `sim.sparams` itself; the `#[ignore]` ones run
 in release (`cargo test --release --test <file> -- --ignored --nocapture`). Figures are ems 0.0.12's unless a row
-says otherwise; with 0.0.15's longer step they move by at most three units of the fourth decimal, each case
-with its reference before and after in D105's table (0.0.10's stand for 0.0.11 and 0.0.12, whose Touchstone files are 0.0.10's byte for byte on the
+says otherwise; with 0.0.15's and 0.0.16's longer steps they move by at most three units of the fourth
+decimal (the 64 mm line's worst point by 0.003 dB), each case with its reference before and after in D105's
+and D107's tables, and D107 has which of those moves are the step and which are where the run ends (0.0.10's stand for 0.0.11 and 0.0.12, whose Touchstone files are 0.0.10's byte for byte on the
 nine cases compared: D94, D98; and 0.0.12's for 0.0.13 and 0.0.14, whose Touchstone data are 0.0.12's on the ten
 cases compared, the first comment line naming the version: D103).
 
