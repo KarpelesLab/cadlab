@@ -4495,4 +4495,59 @@ frozen coefficients and long runs (no proof for the graded layer is known to me)
 cadlab's own regions (cadlab's long runs are pulses; the noise runs are ems's boards); times on an unshared
 machine.
 
+### D106. guide 0.0.13 adopted: a route that keeps what it reaches begins another tree from a terminal it leaves out; level or ahead is said by ranges of four runs; the default unchanged (2026-11-17)
+This round is for D104's gaps, a release of guide at a time (guide's `docs/benchmarks.md`, "PCB routing of a board
+in two parts"; its `docs/architecture.md`). `guide = { version = "0.0.13", default-features = false, features =
+["pcb"] }`; nothing else in `Cargo.lock` moves.
+**The basis of every comparison from here on.** D104 found that the native router's own runs of glasgow-revD1 are
+115 to 200 open. So both routers are measured over four runs in one hour, the native router with seeds 1 to 4 on
+three threads, guide over four orders of its nets (no seed, 2, 3, 4) on one thread, and "level", "ahead" and
+"behind" are said of the ranges, least / median / most (ROUTER.md, "Native router and guide 0.0.13, D106"). The
+figures at 40 million nodes stay beside them: they are the same on any machine.
+**What guide 0.0.13 does** (D104's fourth gap, its branch `forest-wip` made releasable):
+- *Another tree.* In a run with a budget, a route that keeps what it reaches (a net with a plane, one of more
+  than 64 pads, or any net with `keep_partial`) and leaves two to eight terminals out begins another tree from one
+  of them, twice at most; the net's pieces are counted from its copper. A net with pads in both halves of
+  sweep-v2.2, which only the schematic joins, has the pads of each half joined and one connection open, where
+  every pad of the half without its first terminal was left on its own.
+- *Not in one search*: the one that a net has with nothing moved in the first pass, before its turn to cross
+  other nets' routes. This is what the branch cost tinytapeout-demo: what that search leaves is copper that waits
+  for the net's next turn, and pads joined among themselves that the first terminal reaches none of were then in
+  the way of nets that had room without them. Found by turning the trees off search by search at 60 s over six
+  orders: 91 open with them everywhere for 59 with 0.0.12; 81 without those of the nets with a plane, 85 without
+  those for the pads cut off a fill, 81 without both; 60 with none in the searches with nothing moved; 60 with
+  none in that one search alone, which is the release. buspirate5-rev10's loss on the branch was between two
+  runs of a board that differs by as much from itself (1, 7, 7 and 4 with 0.0.12 in this hour; 0, 5, 4 and 0
+  with 0.0.13).
+**What the adapter takes from it:** nothing to set: the trees are of any run with a budget.
+**Measured** (ROUTER.md, "Native router and guide 0.0.13, D106"), 60 s, four orders, 0.0.12 and 0.0.13 behind the
+same adapter: the twelve boards 237 to 267 open (median 239) → 218 to 259 (223); the eleven without glasgow-revD1
+104 to 116 (109) → 91 to 98 (95.5), against the native router's 80 to 107 (89) over its four runs. sweep-v2.2 6,
+7, 6 and 7 → 3, 3, 3 and 3; cynthion 79 over the four → 67, glasgow-revC3 147 → 133, buspirate5-rev10 19 → 9,
+corne-cherry 115 → 107, tinytapeout-demo 38 → 37, nrfmicro 12 → 13, lumenpnp-mobo 2 and glasgow-revD1 544 → 543
+the same runs. Zero DRC errors other than unrouted, no via in a pad of its net, nothing taken out by the
+verification, no call over 58.2 s. At 40 million nodes, three orders: 814 → 801 on the nine boards a budget cuts
+(corne-cherry 118 → 108, glasgow-revC3 109 → 104, sweep-v2.2 19 → 16, buspirate5-rev10 9 → 12, nrfmicro 9 → 10,
+cynthion 55 → 56, the others the same); the released crate gives the figures of its source on the two boards
+run with it (nrfmicro, corne-cherry). guide's curated
+boards are as they were, 1150 of 1151 connections with 712 vias.
+**Tried and not kept**, in guide: the trees in every search (above); kept to routes that are not stubs and to
+eight pads left out (D104: sweep-v2.2 15 over three orders, not level). On glasgow-revD1 the trees in every search
+had 373 to 408 open over three orders for 421, which the release does not have: its minute ends in the first
+pass, where pads joined among themselves early are connections made.
+**Default: unchanged.** By the ranges: level on four boards (buspirate-flash-sop, buspirate-rs232,
+lumenpnp-ringlight, sweep-v2.2); ahead in every run on two (lumenpnp-mobo 0 to 1 against 8 to 29; cynthion 14 to
+23 against 28 to 29); ranges that overlap on four (buspirate5-rev10 0 to 5 against 0 to 5; glasgow-revC3 31 to 35
+against 31 to 36; glasgow-revD1 121 to 162 against 118 to 192; tinytapeout-demo 5 to 16 against 3 to 8, medians 8
+and 5.5); behind in every run on two (nrfmicro 2 to 5 against 0; corne-cherry 21 to 33 against 0 to 4). The
+condition, at least as good on every board, is not met on those two, nor shown on tinytapeout-demo.
+`router: guide` stays the second opinion.
+*Why:* a tree that grows from one terminal says "not reached" of every pad beyond a gap that no track passes, and
+the count of what is open then says how many pads are beyond it, not how many connections are missing. The
+trees are kept out of the one search whose result waits as copper, because there they were laid before the nets
+that had room, on a board where every net has a way with them out of it.
+*Not measured:* the native router over more than four seeds; guide over more than four orders at 60 s on the
+whole corpus; the generated boards (a run with no budget begins no second tree); cadlab's oracles; KiCad's DRC on
+a board guide routed.
+
 ## Open questions

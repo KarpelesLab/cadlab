@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -796,7 +796,8 @@ and that joins the pads its routes cut off the fills it planned on, 0.0.9 that o
 open by chains of moves kept only if the board has less open for them, 0.0.11 that one without its chains for
 the pads cut off their pours, which cost a board with every net routed a third of its time (D101), 0.0.12 the one
 that negotiates for each connection its passes leave open before its chains, every net near it giving way a
-little (D104); what this
+little (D104), 0.0.13 the one whose routes that keep what they reach begin another tree from a terminal left out,
+for a net's pads that nothing joins to its first (D106); what this
 section says of 0.0.2 is in D85.
 
 **What goes to guide** (`router::guide::adapt`):
@@ -2260,6 +2261,61 @@ What the numbers say:
 
 The default is unchanged (DECISIONS D104).
 
+**Native router and guide 0.0.13, D106** (guide 0.0.12 and 0.0.13 from crates.io behind the same adapter; the
+corpus at the default 60 s time budget; the same machine within one hour, with a load of 6 to 15 from other work).
+Every figure of "level", "ahead" or "behind" from here on stands on ranges, since the native router is not the
+same from one run to the next on the boards that its budget cuts: *four runs* of the native router (seeds 1 to 4,
+three threads each, two runs at a time) and *four orders* of the nets for guide (no seed, seeds 2, 3 and 4, one
+thread each, four to six runs at a time). Open connections run by run, then the least, the median and the most;
+the vias, length and time are those of the first run.
+
+| board | layers | native: open by run (min / median / max); vias, length, time | guide 0.0.12: open by run (min / median / max); vias, length, time | guide 0.0.13: open by run (min / median / max); vias, length, time |
+|---|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 7, 496.9 mm, 0.9 s | 0, 0, 0, 0 (0 / 0 / 0); 7, 496.9 mm, 0.8 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 6, 356.2 mm, 0.8 s | 0, 0, 0, 0 (0 / 0 / 0); 6, 356.2 mm, 0.7 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 2, 180.4 mm, 0.4 s | 0, 0, 0, 0 (0 / 0 / 0); 1, 209.6 mm, 0.3 s | 0, 0, 0, 0 (0 / 0 / 0); 1, 209.6 mm, 0.3 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 12.5 s | 2, 4, 3, 3 (2 / 3 / 4); 35, 521.3 mm, 11.0 s | 5, 2, 3, 3 (2 / 3 / 5); 44, 494.3 mm, 11.7 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 55.5 s | 6, 7, 6, 7 (6 / 6.5 / 7); 42, 2231.0 mm, 55.9 s cut | 3, 3, 3, 3 (3 / 3 / 3); 48, 2290.4 mm, 57.7 s cut |
+| corne-cherry | 2 | 3, 4, 0, 3 (0 / 3 / 4); 483, 8275.6 mm, 35.1 s | 34, 28, 26, 27 (26 / 27.5 / 34); 454, 6080.5 mm, 50.0 s cut | 33, 27, 21, 26 (21 / 26.5 / 33); 529, 6656.0 mm, 51.0 s cut |
+| tinytapeout-demo | 4 | 8, 5, 6, 3 (3 / 5.5 / 8); 273, 4910.1 mm, 61.2 s | 9, 6, 5, 18 (5 / 7.5 / 18); 605, 5799.4 mm, 51.4 s cut | 9, 7, 5, 16 (5 / 8 / 16); 605, 5799.4 mm, 51.1 s cut |
+| buspirate5-rev10 | 4 | 2, 3, 5, 0 (0 / 2.5 / 5); 313, 3053.2 mm, 37.4 s | 1, 7, 7, 4 (1 / 5.5 / 7); 536, 3779.1 mm, 48.8 s cut | 0, 5, 4, 0 (0 / 2 / 5); 484, 3792.0 mm, 36.9 s |
+| lumenpnp-mobo | 4 | 15, 8, 29, 12 (8 / 13.5 / 29); 347, 5423.7 mm, 62.2 s cut | 0, 1, 0, 1 (0 / 0.5 / 1); 713, 6544.4 mm, 34.4 s | 0, 1, 0, 1 (0 / 0.5 / 1); 712, 6538.5 mm, 31.5 s |
+| cynthion | 4 | 28, 29, 29, 28 (28 / 28.5 / 29); 476, 3177.0 mm, 61.5 s cut | 17, 15, 25, 22 (15 / 19.5 / 25); 521, 3545.3 mm, 55.7 s cut | 14, 15, 23, 15 (14 / 15 / 23); 512, 3514.5 mm, 54.2 s cut |
+| glasgow-revC3 | 4 | 36, 31, 35, 31 (31 / 33 / 36); 415, 3436.4 mm, 60.3 s cut | 36, 36, 41, 34 (34 / 36 / 41); 551, 3930.5 mm, 56.9 s cut | 33, 31, 35, 34 (31 / 33.5 / 35); 560, 4014.4 mm, 57.8 s cut |
+| glasgow-revD1 | 6 | 192, 154, 118, 125 (118 / 139.5 / 192); 1046, 8967.0 mm, 62.5 s cut | 162, 137, 124, 121 (121 / 130.5 / 162); 1085, 7953.6 mm, 57.9 s cut | 162, 136, 124, 121 (121 / 130 / 162); 1085, 7953.6 mm, 58.1 s cut |
+| all twelve | | 287, 237, 225, 205 (205 / 231 / 287) | 267, 241, 237, 237 (237 / 239 / 267) | 259, 227, 218, 219 (218 / 223 / 259) |
+| the eleven without glasgow-revD1 | | 95, 83, 107, 80 (80 / 89 / 107) | 105, 104, 113, 116 (104 / 109 / 116) | 97, 91, 94, 98 (91 / 95.5 / 98) |
+
+Zero DRC errors other than unrouted on every run, no via in a pad of its net, nothing taken out by the
+verification; no call of guide over 58.2 s.
+
+What the numbers say:
+
+- *From 0.0.12 to 0.0.13*: the twelve boards have 218 to 259 open over the four orders (median 223) for 237 to
+  267 (239), the eleven without glasgow-revD1 91 to 98 (95.5) for 104 to 116 (109). sweep-v2.2 has 3 in every
+  order for 6 or 7: the three that the native router has too, and that the board has however it is routed.
+  cynthion 14 to 23 for 15 to 25, glasgow-revC3 31 to 35 for 34 to 41, buspirate5-rev10 0 to 5 for 1 to 7,
+  corne-cherry 21 to 33 for 26 to 34; nrfmicro 2 to 5 for 2 to 4 and tinytapeout-demo 5 to 16 for 5 to 18, the
+  same within what their runs differ by; lumenpnp-mobo and glasgow-revD1 the same runs.
+- *Against the native router, by the ranges*: level on four (the three small boards and sweep-v2.2); ahead in
+  every run on two (lumenpnp-mobo 0 to 1 against 8 to 29, cynthion 14 to 23 against 28 to 29); ranges that
+  overlap on four (buspirate5-rev10 0 to 5 against 0 to 5, glasgow-revC3 31 to 35 against 31 to 36,
+  glasgow-revD1 121 to 162 against 118 to 192, tinytapeout-demo 5 to 16 against 3 to 8, where the medians are 8
+  and 5.5); behind in every run on two (nrfmicro 2 to 5 against 0, corne-cherry 21 to 33 against 0 to 4). The
+  eleven without glasgow-revD1: 91 to 98 against 80 to 107, medians 95.5 and 89.
+- *The native router's spread*: glasgow-revD1 118 to 192 and lumenpnp-mobo 8 to 29 over its four seeds; its twelve
+  boards are 205 to 287, a wider range than guide's four orders have.
+- *Vias and track*, first run, guide 0.0.13 against the native router: lumenpnp-mobo 712 vias against 347,
+  tinytapeout-demo 605 against 273, buspirate5-rev10 484 against 313, glasgow-revC3 560 against 415, sweep-v2.2
+  48 against 21, corne-cherry 529 against 483, cynthion 512 against 476, glasgow-revD1 1085 against 1046,
+  nrfmicro 44 against 46. Nothing in this release is for vias.
+- *At a budget of work*, 40 million of guide's nodes, one run of guide, three orders (0.0.12 → 0.0.13, the
+  released crates; the same on any machine): the nine boards that a budget cuts have 814 → 801 open: corne-cherry
+  118 → 108, glasgow-revC3 109 → 104, sweep-v2.2 19 → 16 (its first pass is cut by that budget), buspirate5-rev10
+  9 → 12, nrfmicro 9 → 10, cynthion 55 → 56, tinytapeout-demo 40, lumenpnp-mobo 1 and glasgow-revD1 454 the same.
+
+The default is unchanged (DECISIONS D106).
+
 With arcs (`route.all {arcs: true, arc_radius: 0.8mm}`) the ATtiny board routes the same with its bends rounded,
 DRC-clean, exported as arcs to Gerber and KiCad (`tests/route.rs`, `arc_corners_are_drc_clean_and_exported`).
 
@@ -2381,7 +2437,7 @@ router's column is not the 60 s run: it has the same 30 minutes as a budget, on 
 | all twelve, open | | 1187 | 1784 |  |  |
 | the eleven without glasgow-revD1, open | | 630 | 1067 |  |  |
 
-**On a CI runner** (job `freerouting`, 4 vCPU, nothing else running; freerouting with four processors and
+**On a CI runner** (the job that is `freerouting-corpus` since D105, then named `freerouting`; 4 vCPU, nothing else running; freerouting with four processors and
 `-mt 4`, the native router on its default threads; one run each;
 https://github.com/KarpelesLab/cadlab/actions/runs/44010687386; the runs before and after it,
 https://github.com/KarpelesLab/cadlab/actions/runs/44003908234 and
@@ -2497,9 +2553,9 @@ RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide $B --corpus                       
 `CADLAB_BENCH_FR_THREADS=<n>` gives freerouting more processors, `CADLAB_BENCH_KEEP=<dir>` keeps each board's DSN,
 session, log and `result.json` (and `CADLAB_BENCH_FR_REUSE=1` then counts the kept sessions again without a run),
 `CADLAB_BENCH_FR_ARGS` adds arguments, `CADLAB_BENCH_VERBOSE=1` lists each error with its place, each open
-connection and what the DSN did not hold. The CI job `freerouting` runs the 60 s tables on every run of the
-workflow (`gh workflow run CI --ref <branch>`; about 46 minutes) and keeps them in its summary and in the
-`freerouting-corpus` artifact. Times are budgets, so no two runs give the same numbers: the three CI runs are within
+connection and what the DSN did not hold. The CI job `freerouting-corpus` runs the 60 s tables on the weekly
+schedule and on a manual dispatch (`gh workflow run CI --ref <branch>`; about 46 minutes; not on a push, D105;
+docs/TESTING.md) and keeps them in its summary and in the `freerouting-corpus` artifact. Times are budgets, so no two runs give the same numbers: the three CI runs are within
 13 connections of each other in 1700 for freerouting, this machine a third apart between a quiet hour and a
 loaded one.
 

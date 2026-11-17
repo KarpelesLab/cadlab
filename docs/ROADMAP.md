@@ -315,17 +315,19 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       every order, level on three, within the noise on three, behind in every order on three (nrfmicro 3, 5, 3
       against 0, where it had 4, 7, 9; sweep-v2.2 6, 7, 6 against 3; corne-cherry 31, 37, 36 against 3). The
       default stays the native router (D101)
-- [ ] `router: guide` level with the native router on the corpus: needs, in guide, the pads of a fine row on
-      two layers that a fan of a dozen tracks beside them shuts in (corne-cherry's two QFN-56: the negotiations
-      of 0.0.12 make some fifteen connections a run there and leave as many, which thirty-two nets and
-      twenty-four rounds do not move), a second run that goes on from the first run's routes instead of one on a
-      board where they are fixed, for the pads that cadlab's fill finds cut off a pour (corne-cherry again), the
-      D+ of a USB receptacle whose pads have those of D- between them (nrfmicro, corne-cherry), a net's pads that nothing
-      joins to its first joined among themselves (sweep-v2.2, two halves that only the schematic joins: on
-      guide's branch `forest-wip`, where it costs tinytapeout-demo and buspirate5-rev10 connections), a first pass that ends within the minute on six layers
-      (glasgow-revD1, where the native router's own runs are 115 to 200 open), rule areas by kind and containment
-      with a track width that is routed by, and fewer vias (D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96,
-      "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still blocks it")
+- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D106:
+      level on four boards, ahead on two, ranges that overlap on four, behind on nrfmicro and corne-cherry):
+      needs, in guide, the pads of a fine row on two layers that a fan of a dozen tracks beside them shuts in
+      (corne-cherry's two QFN-56: the negotiations of 0.0.12 make some fifteen connections a run there and leave
+      as many, which thirty-two nets and twenty-four rounds do not move), a second run that goes on from the
+      first run's routes instead of one on a board where they are fixed, for the pads that cadlab's fill finds
+      cut off a pour (corne-cherry again, tinytapeout-demo), the D+ of a USB receptacle whose pads have those of
+      D- between them (nrfmicro, corne-cherry), a first pass that ends within the minute on six layers
+      (glasgow-revD1, where the native router's own runs are 118 to 192 open), rule areas by kind and containment
+      with a track width that is routed by, and fewer vias (D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97,
+      "Gaps"; D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still blocks it").
+      Done since D104: a net's pads that nothing joins to its first are joined among themselves (guide 0.0.13,
+      D106: sweep-v2.2 has the 3 that the native router has)
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
 *Measured 2026-11-17 (D102; ROUTER.md, "freerouting on the corpus"), freerouting 2.5.0 run on both sets and counted by
