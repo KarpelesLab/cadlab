@@ -197,6 +197,11 @@ fn solid_zone_is_reported_and_repaired() {
     // The fab check carries them too, as warnings: the export is not blocked.
     let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
     assert_eq!(findings(&o, "fab.solid_pad").len(), 4);
+    // With the fab as a target of the project, drc.run does not say each pad twice.
+    s.project.as_mut().unwrap().manifest_mut().targets = vec!["generic".into()];
+    let o = exec(&r, &mut s, "drc.run", json!({}));
+    assert_eq!((findings(&o, "drc.solid_pad").len(), findings(&o, "fab.solid_pad").len()), (4, 0));
+    s.project.as_mut().unwrap().manifest_mut().targets.clear();
     // Repair.
     let o = exec(&r, &mut s, "zone.relieve", json!({}));
     let out = &o["output"];

@@ -29,7 +29,10 @@ fn target_warnings(p: &crate::model::Project) -> Vec<Diagnostic> {
             continue;
         };
         for mut d in crate::fab::check::check(p, profile, None).diagnostics {
-            if d.severity == Severity::Info {
+            // The thermal relief findings the fab check carries are the DRC's own, already in
+            // this report under their `drc.` codes (`fab.thermal_size` is the fab's).
+            let repeated = matches!(d.code.as_ref(), "fab.solid_pad" | "fab.thermal_nominal" | "fab.starved_thermal");
+            if d.severity == Severity::Info || repeated {
                 continue;
             }
             d.severity = Severity::Warning;
