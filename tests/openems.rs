@@ -969,8 +969,9 @@ const CMP_MARK: &str = "CADLAB_CMP ";
 /// test with `CADLAB_CMP_CASE`, the output directory `CADLAB_CMP_DIR`, the file name
 /// `CADLAB_CMP_NAME`, `CADLAB_CMP_THREADS` and, for another mesh, options as JSON in
 /// `CADLAB_CMP_ARGS`): a process's peak memory is the largest run it ever made, and a time taken
-/// beside another test's run is not the solver's. Prints the command's time, the mesh, the steps
-/// and the process's peak before and after the run. Does nothing without `CADLAB_CMP_CASE`.
+/// beside another test's run is not the solver's. Prints the command's time, the time stepping's
+/// share of it (from the progress reports), the mesh, the steps and the process's peak before and
+/// after the run. Does nothing without `CADLAB_CMP_CASE`.
 #[test]
 #[ignore]
 fn comparison_ems_run() {
@@ -985,22 +986,49 @@ fn comparison_ems_run() {
     args["name"] = json!(var("CADLAB_CMP_NAME"));
     args["threads"] = json!(var("CADLAB_CMP_THREADS").parse::<u32>().expect("CADLAB_CMP_THREADS"));
     let before = peak_kb();
+    let stamps = Stamps(std::sync::Mutex::new(Vec::new()));
     let t = std::time::Instant::now();
-    let o = exec(&r, &mut s, "sim.sparams", args);
+    let o = r
+        .execute_with(&mut s, "sim.sparams", args, RunOptions::default(), &stamps, &cadlab::command::CancelToken::new())
+        .unwrap_or_else(|f| panic!("sim.sparams failed: {}", f.error));
     let seconds = t.elapsed().as_secs_f64();
+    let o = serde_json::to_value(&o).unwrap();
     let x = &o["output"];
     let runs = x["runs"].as_array().unwrap();
+    // A port's time stepping: from its first progress report to its last, scaled to all its steps.
+    let stamps = stamps.0.into_inner().unwrap();
+    let engine: f64 = (1..=runs.len())
+        .map(|port| {
+            let of: Vec<&(String, u64, std::time::Instant)> =
+                stamps.iter().filter(|s| s.0.starts_with(&format!("port {port}/"))).collect();
+            match (of.first(), of.last()) {
+                (Some(a), Some(b)) if b.1 > a.1 => (b.2 - a.2).as_secs_f64() * b.1 as f64 / (b.1 - a.1) as f64,
+                _ => f64::NAN,
+            }
+        })
+        .sum();
     let report = json!({
         "seconds": seconds,
+        "engine_seconds": engine.is_finite().then_some(engine),
         "cells": x["mesh"]["cells"],
         "steps": runs.iter().map(|r| r["steps"].clone()).collect::<Vec<_>>(),
         "converged": runs.iter().all(|r| r["converged"] == true),
         "timestep": x["timestep"],
+        "conformal_edges": x["conformal_edges"],
         "solver": x["solver"],
         "before_kb": before,
         "peak_kb": peak_kb(),
     });
     println!("\n{CMP_MARK}{report}");
+}
+
+/// The progress reports of a `sim.sparams` run with the time of each: message, steps done, when.
+struct Stamps(std::sync::Mutex<Vec<(String, u64, std::time::Instant)>>);
+
+impl cadlab::command::Progress for Stamps {
+    fn report(&self, done: u64, _: Option<u64>, message: &str) {
+        self.0.lock().unwrap().push((message.to_string(), done, std::time::Instant::now()));
+    }
 }
 
 /// The Python program that runs an exported driver for [`solver_comparison`]: the driver's own
@@ -1028,10 +1056,14 @@ struct Measured {
     threads: u32,
     /// The whole run: `sim.sparams` as a command, or the driver's process with its imports.
     seconds: f64,
-    /// openEMS's own account of its engine: the sum of its "Time for N iterations" lines.
+    /// The time stepping alone: openEMS's own account (the sum of its "Time for N iterations"
+    /// lines); for ems, each port from its first progress report to its last, scaled to its steps.
     engine_seconds: Option<f64>,
+    /// The solver's own count (openEMS counts the mesh lines, ems the cells between them).
     cells: Option<u64>,
     steps: Vec<u64>,
+    /// The time step, seconds.
+    timestep: Option<f64>,
     /// The process's peak resident set, and what it was before the run (MB).
     peak_mb: f64,
     before_mb: f64,
@@ -1068,9 +1100,10 @@ fn measure_ems(case: &str, out: &Path, name: &str, threads: u32, extra: Option<&
     Measured {
         threads,
         seconds: v["seconds"].as_f64().unwrap(),
-        engine_seconds: None,
+        engine_seconds: v["engine_seconds"].as_f64(),
         cells: v["cells"].as_u64(),
         steps: v["steps"].as_array().unwrap().iter().filter_map(Value::as_u64).collect(),
+        timestep: v["timestep"].as_f64(),
         peak_mb: v["peak_kb"].as_f64().unwrap() / 1024.0,
         before_mb: v["before_kb"].as_f64().unwrap() / 1024.0,
         text: std::fs::read_to_string(out.join(format!("{name}.s2p"))).unwrap(),
@@ -1108,15 +1141,18 @@ fn measure_openems(python: &str, out: &Path, name: &str, threads: u32) -> Measur
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
     let ends: Vec<&str> = stdout.lines().filter(|l| l.contains("Time for ") && l.contains(" iterations")).collect();
     let engine: Vec<f64> = ends.iter().filter_map(|l| number_after(l, " : ")).collect();
-    let said: Vec<&str> = stdout.lines().filter(|l| l.to_lowercase().contains("thread")).collect();
-    let mut note: Vec<String> = said.iter().map(|l| l.trim().to_string()).collect();
+    let mut note: Vec<String> =
+        stdout.lines().filter(|l| l.contains("number of threads")).map(|l| l.trim().to_string()).collect();
     note.dedup();
+    // (Printed once per run; in full precision by the first only.)
+    let timestep = stdout.lines().filter_map(|l| number_after(l, "FDTD timestep is: ")).find(|t| *t > 0.0);
     Measured {
         threads,
         seconds: v["seconds"].as_f64().unwrap(),
         engine_seconds: (!engine.is_empty() && engine.len() == ends.len()).then(|| engine.iter().sum()),
         cells: ends.first().and_then(|l| number_after(l, " with ")).map(|c| c as u64),
         steps: ends.iter().filter_map(|l| number_after(l, "Time for ")).map(|n| n as u64).collect(),
+        timestep,
         peak_mb: v["peak_kb"].as_f64().unwrap() / 1024.0,
         before_mb: v["before_kb"].as_f64().unwrap() / 1024.0,
         text: std::fs::read_to_string(out.join(format!("{name}.s2p"))).unwrap(),
@@ -1249,10 +1285,14 @@ fn solver_comparison() {
 
     let mut md = String::new();
     let mut time = String::from(
-        "| Case | Solver | Threads | Cells | Steps per port | Whole run (s) | Engine alone (s) | Mcells/s | Peak memory (MB) | Before the run (MB) |\n|---|---|---|---|---|---|---|---|---|---|\n",
+        "| Case | Solver | Threads | Cells | Steps per port | Time step (ps) | Whole run (s) | Engine alone (s) | Mcells/s | Peak memory (MB) | Before the run (MB) |\n|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     let mut acc = String::from("| Case | Quantity (reference) | ems | openEMS | Nearer |\n|---|---|---|---|---|\n");
     let mut detail = String::new();
+    let mut summary = format!(
+        "| Case | Whole run on {} thread(s), ems / openEMS (s) | Each at its fastest (threads), ems / openEMS (s) | Peak memory, ems / openEMS (MB) | Of it the run, ems / openEMS (MB) |\n|---|---|---|---|---|\n",
+        threads[0]
+    );
     let mut notes = Vec::new();
     let mut record = Vec::new();
     let mut ems_version = String::new();
@@ -1276,10 +1316,11 @@ fn solver_comparison() {
                 let steps: u64 = m.steps.iter().sum();
                 let rate = m.cells.map(|c| c as f64 * steps as f64 / m.engine_seconds.unwrap_or(m.seconds) / 1e6);
                 time += &format!(
-                    "| {case} | {solver} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
+                    "| {case} | {solver} | {} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
                     m.threads,
                     m.cells.map_or("?".into(), |c| c.to_string()),
                     m.steps.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
+                    m.timestep.map_or("?".into(), |t| format!("{:.4}", t * 1e12)),
                     m.seconds,
                     m.engine_seconds.map_or("".into(), |e| format!("{e:.1}")),
                     rate.map_or("?".into(), |r| format!("{r:.0}")),
@@ -1287,7 +1328,7 @@ fn solver_comparison() {
                     m.before_mb
                 );
                 record.push(json!({"case": case, "solver": solver, "threads": m.threads, "cells": m.cells,
-                    "steps": m.steps, "seconds": m.seconds, "engine_seconds": m.engine_seconds,
+                    "steps": m.steps, "timestep": m.timestep, "seconds": m.seconds, "engine_seconds": m.engine_seconds,
                     "peak_mb": m.peak_mb, "before_mb": m.before_mb}));
             }
             if runs.len() > 1 {
@@ -1301,6 +1342,27 @@ fn solver_comparison() {
         }
         if let Some(m) = oe.iter().find(|m| !m.note.is_empty()) {
             notes.push(format!("{case}, openEMS says of its threads: {}", m.note));
+        }
+        // The case in one row: each solver on one thread and at its fastest, and its memory.
+        if !oe.is_empty() {
+            let best = |runs: &[Measured]| runs.iter().min_by(|a, b| a.seconds.total_cmp(&b.seconds)).unwrap().threads;
+            let at = |runs: &[Measured], n: u32| runs.iter().find(|m| m.threads == n).map_or(f64::NAN, |m| m.seconds);
+            let peak = |runs: &[Measured]| runs.iter().map(|m| m.peak_mb).fold(0.0, f64::max);
+            let run = |runs: &[Measured]| runs.iter().map(|m| m.peak_mb - m.before_mb).fold(0.0, f64::max);
+            let (be, bo) = (best(&ems), best(&oe));
+            summary += &format!(
+                "| {case} | {:.1} / {:.1} ({:.1}×) | {:.1} ({be}) / {:.1} ({bo}) ({:.1}×) | {:.0} / {:.0} | {:.0} / {:.0} |\n",
+                at(&ems, threads[0]),
+                at(&oe, threads[0]),
+                at(&oe, threads[0]) / at(&ems, threads[0]),
+                at(&ems, be),
+                at(&oe, bo),
+                at(&oe, bo) / at(&ems, be),
+                peak(&ems),
+                peak(&oe),
+                run(&ems),
+                run(&oe)
+            );
         }
         // Accuracy, on the largest thread count's results.
         let (e, o) = (ems.last().unwrap().data(), oe.last().map(Measured::data));
@@ -1317,11 +1379,23 @@ fn solver_comparison() {
                 let (ea, er) = line_accuracy(&e, msl);
                 let oa = o.as_ref().map(|o| line_accuracy(o, msl));
                 let names = [
-                    ("loss, largest difference, dB (D52)", 4),
-                    ("loss, RMS of the relative difference, % (D52)", 1),
-                    ("loss, mean relative difference, % (D52)", 1),
+                    ("loss from 0.5 GHz, largest difference, dB (D52)", 4),
+                    ("loss from 0.5 GHz, RMS of the relative difference, % (D52)", 1),
+                    ("loss from 0.5 GHz, mean relative difference, % (D52)", 1),
                     ("Z₀, largest difference, % (2D field solver)", 1),
                 ];
+                // The first frequency, 1 % of f_max, is below what the tests hold: on its own row.
+                {
+                    let (f, want, got) = er[0];
+                    let theirs = oa.as_ref().map(|o| (o.1[0].2 - want).abs());
+                    acc += &format!(
+                        "| {case} | loss at {:.2} GHz, difference, dB (D52: {want:.4} dB) | {:.4} | {} | {} |\n",
+                        f / 1e9,
+                        (got - want).abs(),
+                        cell(theirs, 4),
+                        nearer((got - want).abs(), theirs)
+                    );
+                }
                 for (i, (name, digits)) in names.into_iter().enumerate() {
                     let b = oa.as_ref().map(|o| o.0[i]);
                     let near = nearer(ea[i].abs(), b.map(f64::abs));
@@ -1367,10 +1441,11 @@ fn solver_comparison() {
                         let rate =
                             m.cells.map(|c| c as f64 * steps as f64 / m.engine_seconds.unwrap_or(m.seconds) / 1e6);
                         time += &format!(
-                            "| {case}, finer mesh | {solver} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
+                            "| {case}, finer mesh | {solver} | {} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
                             m.threads,
                             m.cells.map_or("?".into(), |c| c.to_string()),
                             m.steps.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
+                            m.timestep.map_or("?".into(), |t| format!("{:.4}", t * 1e12)),
                             m.seconds,
                             m.engine_seconds.map_or("".into(), |e| format!("{e:.1}")),
                             rate.map_or("?".into(), |r| format!("{r:.0}")),
@@ -1398,16 +1473,22 @@ fn solver_comparison() {
     md += &format!(
         "Machine: {cpu}, {cpus} logical CPUs. {ems_version}{}. One run each, one process per run, one at a time.\n\
          Whole run: `sim.sparams` as a command (model, both ports' runs, spectra, file) for ems; the driver's process \
-         for openEMS (Python and its modules, geometry, both ports' runs, port calculation, file). Engine alone: what \
-         openEMS prints at the end of each run. Mcells/s: cells × steps over the engine's time for openEMS and over \
-         the whole run for ems. Before the run: the test's process with the board for ems, Python with numpy, CSXCAD \
-         and openEMS imported for openEMS.\n\n",
+         for openEMS (Python and its modules, geometry, both ports' runs, port calculation, file). Engine alone: the time \
+         stepping, as openEMS prints it at the end of each run and as ems's progress reports time it. Mcells/s: \
+         cells × steps over the engine's time. Cells: each solver's own count (openEMS counts the mesh lines, ems the cells \
+         between them; with the absorbing layer beyond the region openEMS's mesh has those cells too). Before the \
+         run: the test's process with the board for ems, Python with numpy, CSXCAD and openEMS imported for openEMS; \
+         \"of it the run\" is the peak less that.\n\n",
         match (&python, std::env::var("OPENEMS_PROJECT_REV")) {
             (Some(_), Ok(rev)) => format!(", openEMS-Project {rev}"),
             (Some(_), Err(_)) => ", openEMS".into(),
             (None, _) => ", openEMS not installed".into(),
         }
     );
+    if python.is_some() {
+        md += &summary;
+        md += "\n#### Every run\n\n";
+    }
     md += &time;
     md += "\n#### Accuracy against references that are neither solver\n\n";
     md += &acc;
