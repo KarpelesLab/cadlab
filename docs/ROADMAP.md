@@ -583,6 +583,11 @@ Research-sized items beyond the milestones above; none blocks a release.
       close what its profiles showed (the stability estimate of conformal PEC, the CPML's short rows, a Debye
       edge's loops) with the Touchstone data unchanged. Left: ems's time step, shorter than the scheme would
       carry, and the memory of a run with a Debye laminate, as much as openEMS's
+- [x] ems 0.0.15 (D105): the time step from a bound over the mesh's cells (each with its sizes, permittivities,
+      walls and copper), proven part by part and tested from noise and by runs ten times as long: 1.00 to 1.31
+      times the Courant step on the oracle's regions, every validation within three units of the fourth decimal
+      of what it read. Left: the part of the estimated limit (1.29 to 1.45 times) that single cells do not
+      prove; the thirds lines at the region's walls, which set the smallest cells; the run's own memory
 
 ---
 

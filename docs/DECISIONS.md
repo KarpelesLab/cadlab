@@ -4192,4 +4192,205 @@ than the pinned one; whether the 4 % of loss ems reads over D52 on the solid lin
 ports' or the model's.
 
 
+### D105. ems 0.0.15: the time step from a bound over the cells, proven part by part and tested from noise; 1.00 to 1.31 times the Courant step on the oracle's regions, where an estimate had read 1.35 to 1.5; the comparison and the corpus tables out of every push (2026-11-17)
+D103 left the time step as the largest thing in time: ems took `courant` of the Courant limit of the smallest
+cell sizes at the vacuum speed, openEMS's criterion gave 2 to 16 % more on four cases, and "the stability
+figures read 0.66 to 0.74, so the scheme would carry a step 1.35 to 1.5 times as long". This change takes what
+of that can be proven, says what it rests on part by part, and tests it. No openEMS, CSXCAD or other GPL code was
+read.
+**What the 0.66 to 0.74 were.** Power iterations on the curl-curl operator: estimates of its largest eigenvalue
+from below, converged (1000 and 4000 products agree to four digits), not bounds. Read again on ems 0.0.15 they
+put the limit at 1.45 (lossy line, sheets), 1.38 (lossy line, `solid`), 1.29 (via) and 1.40 (parts) times the
+Courant limit. A step taken from them would rest on a measurement of each mesh, so it is not taken: the step is
+`courant` times a bound.
+**The bound** (ems `StepLimit::Cells`, `engine::step_bound`, wave 30 of its design notes; cadlab asks for it in
+`fdtd::ems::settings`). The lossless scheme `C u' = Kᵀi`, `L i' = −K u` on leapfrog is stable iff
+`dt² λ_max(C⁻¹KᵀL⁻¹K) ≤ 4`. Curl-curl operator and capacitance are sums over the cells, so `λ_max ≤ max λ_c`
+over the cells (the element bound of Irons and Treharne, which ems already kept small cut faces by): `λ_c` is
+the largest eigenvalue of a cell's own six faces and twelve edges, each edge with its permittivity and its part
+of the capacitance, the edges on the region's PEC walls and on PEC copper closed. For one ε and μ it is the
+Courant limit of that cell in that medium, exactly. The step is `courant · min 2/√λ_c`, never less than before
+(the Courant step where the cells give less) and equal to it on a uniform mesh in vacuum. Every other part, by
+its own theory and not by a margin:
+- *conductivity, the Debye laminate, lumped R, L, C and ports*: trapezoidal branches coupled implicitly; the
+  energy of fields and branches does not grow at any step and is positive under the same condition (the
+  laminate counts with ε∞, which is what its edges' capacitance holds);
+- *lossy sheets* (rational impedance or ladder): the edge is two face voltages with the capacitances of their
+  sides, joined by a passive branch; a face in the sheet's plane reads a convex combination of the two, so the
+  split system is bounded by the cells above with one and the cells below with the other. The bound takes a
+  sheet edge with its upper side's capacitance in the cells above (air: ε 1) and the lower side's below;
+- *lossy `solid` copper*: an edge in the metal's surface is an ordinary edge with the capacitance of the part
+  of its dual face outside the metal, at least vacuum's; cells inside the metal have no field;
+- *cut cells* (slanted and round copper): in the same bound with their open lengths and areas. The step is
+  held so that every cell with a cut face passes twice: as ems's own test sees it, so the faces kept with
+  their true area at the Courant step are still kept (D89; the conformal treatment of a model does not change
+  with the step), and as the scheme is, within `courant` (an edge that the outline of a lossy sheet cuts is
+  its open part in series with the covered part's faces, not a perfect conductor's `C/f`; beside lossy metal
+  within √(15/16), which the floor of its surface edges' capacitance there is proven for);
+- *the CPML*: no energy proof exists. With frozen coefficients its characteristic polynomial has no root
+  outside the unit circle up to the Courant number 1 of the unstretched cell, over κ 1 to 15, σ·dt/ε₀ 0 to 100
+  and α·dt/ε₀ 0 to 5 (an ems unit test scans them); the graded layer rests on the long runs below.
+Where a model has a part outside the bound, ems keeps the Courant step and says which (`Compiled::step`): of
+what cadlab makes, a cut face below the merge threshold inside the absorbing layer, and any mesh with a cut face
+too small to keep at the Courant step (it is interpolated at either step, and its cells bound nothing).
+**What limits it, and the step gained.** On cadlab's meshes the smallest cells are not at the copper but at the
+region's walls: the mesher refines towards every copper edge (`thirds`), and the edge where the region cuts a
+plane is one, so the last cells before the wall are 83 µm across where the cells under the strip are 250 µm.
+The cell that sets the Courant limit lies against the wall, and the wall closes four of its edges: its own
+eigenvalue allows 1.31 times the Courant step on the sheet line, where the closed form (the cell's sizes and its
+least ε) finds 1.06. On the `solid` line and the via the smallest cells are the copper's own thickness, in air
+beside the copper, with the smallest sizes of all three axes in one cell: there the bound is the Courant limit,
+but for what the wall gives.
+
+| Region (`courant` 0.95) | Courant step | Step of the cells | Gained | Steps per port | By the estimate (not taken) |
+|---|---|---|---|---|---|
+| lossy line, sheets, microstrip ports (`line_msl`) | 0.1949 ps | 0.2544 ps | 1.31× | 6145 → 4737 | 1.45× |
+| lossy line, `solid`, lumped ports (`line_lumped`) | 0.0994 ps | 0.1049 ps | 1.06× | 12 065 → 11 425 | 1.38× |
+| via transition (`via`, `via_same`) | 0.0545 ps | 0.0545 ps | 1.00× (the whole cells give 1.006, its 532 cut faces' cells as the scheme is 0.79: the Courant step) | 32 961 | 1.29× |
+| series 50 Ω, series 1 pF | 0.1689 ps | 0.1792 ps | 1.06× | 7105 → 6689 | 1.40× |
+| stripline (`measure_stripline`); lossless `solid` line (`measure_dielectric_loss`) | 0.1013 ps; 0.0994 ps | 0.1077 ps; 0.1049 ps | 1.06× | 9089 → 8545; 12 065 → 11 425 | |
+| straight and 45° line, perfect sheets, 1 mm cells and the refined mesh | 0.1689 ps | 0.2299, 0.1983, 0.2036 ps | 1.36×, 1.17×, 1.21× | 7745 → 6433 (conformal), 8929 → 7617 (staircase) | |
+| 45° line with lossy sheets or lossy `solid` copper, conformal; its 0.25 mm and 0.3 mm conformal meshes; session 6's RF path | | | 1.00× (the cells with cut faces give less than the Courant step: on the two finer meshes 0.28 and 0.62 of it, where the whole cells give 1.22 and 1.24) | unchanged | |
+
+openEMS's criterion gives 0.1982 ps on the sheet line (ems now 0.2544) and 0.1966 ps on the parts, where ems
+proves 0.1886 ps at factor 1 and runs 0.1792: openEMS's step there is above what a single cell proves and below
+the estimate. **What is left** is the difference between the bound and the estimate, 1.11 to 1.32 times. The
+theorem holds for any partition of the cells into patches, and a mode cannot live in one cell: patches of a few
+cells around the worst ones would prove more. Not made here. And a cadlab matter this showed: without the thirds
+lines at the walls (copper the region cuts is not an edge) the sheet line's smallest cells would be the 125 µm
+of laminate under 174 µm of air, about twice today's step by the same bound, on a mesh with fewer cells; that
+changes the mesh of every region and both solvers' results, and is not done here.
+**Stability, tested on the scheme as assembled.** A band-limited pulse reaches the grid's highest modes only
+through rounding, so ems's tests (`tests/step_limit.rs`) fill every edge of a compiled model with noise, which
+has every mode in it, and step it without a source: the energy must stay below its start. Boards with a Debye
+laminate, CPML and lumped ports, copper as PEC sheets, ladder sheets, rational sheets and 35 µm of lossy metal:
+30 000 steps each at 0.95 and at factor 1, with the CPML and in a closed box; strips at 17° and 45° (38 to 80
+cut edges); adversarial meshes, 20 µm cells beside 0.5 mm ones and a laminate of eight 25 µm layers under a
+strip at 30°, 40 000 steps; `#[ignore]`: 400 000 steps. A uniform grid of ε 4 is bounded at 0.999 of the bound
+(twice the Courant limit) and grows at 1.03: the bound is sharp where it is exact. In cadlab
+(`long_runs_stay_bounded`, `tests/openems.rs`, `#[ignore]`): the oracle's five cases, each to its criterion
+and then ten times as many steps to a criterion no run reaches; the energy of every progress line must stay
+under the criterion after the usual end and not be higher at the end than at twice the usual length. Read:
+the sheet line −62.0 dB at twice its 4737 steps and −87.3 dB after 47 361; the `solid` line −62.0 and −88.5 dB
+(114 241 steps); the via −63.8 and −85.1 dB (329 601 steps, at the Courant step); the parts −127 dB (66 881
+steps). Nothing came back. And every case of the validation table below once more by hand (a hook in the
+driver for the measurement, not kept: beside each port's run a second engine of the same compiled model
+stepped five times as long, its energy read at the usual end, at twice and at five times that): 60 runs, the
+64 mm microstrip, the passive line, the mask, the parts on the finer mesh, the six meshes of the 45° line
+(2.46 million cells among them), the cavities, the via, the stripline, the twelve bent lines and session 6's
+path. In none is the energy at twice the usual length above that at the usual end, or above the level at twice
+later on, but for four runs that wander at their rounding floor, a millionth of the energy they ended on.
+**Validation: every case against its reference, 0.0.14 and 0.0.15.** The comparison's rows are 0.0.14 from
+crates.io and the new code; the other rows are one binary of the new code on the Courant step, which is
+0.0.14's scheme (it reads 0.0.14's figures on the comparison's cases to every printed digit), and on the step
+of the cells. Release build, six threads. *What moved the wrong way, first:* seven figures, by one
+to three units of the fourth decimal: the 64 mm microstrip's worst \|S21\| against D52 (0.0872 → 0.0875 dB at
+9 GHz, 5.26 → 5.28 %; to 2.5 GHz 0.0030 → 0.0032 dB, 1.30 → 1.38 %), the capacitor with ESL and ESR (0.0078 →
+0.0079), the series 1 pF of the comparison (0.0099 → 0.0100 and 0.0064 → 0.0065), the stripline's εeff (0.45 →
+0.46 %), the lossless `solid` line's lowest point (0.0122 → 0.0123 dB), and the bent line's largest Σ\|S\|² on
+perfect copper (staircase 1.0001 → 1.0002, `solid` 1.0000 → 1.0001). Each is inside its test's tolerance by
+the margin it had; they are of the size by which a run's last 32 steps move a result, and whether they are that
+or the step is not separated. Everything else is equal or nearer:
+
+| Case | Reference | 0.0.14 (Courant step) | 0.0.15 (cells) |
+|---|---|---|---|
+| lossy line, sheets (`line_msl`): loss from 0.5 GHz | D52 | within 0.0190 dB, RMS 4.3 %, mean +2.6 % | 0.0187 dB, 4.2 %, +2.6 % |
+| the same at 0.06 GHz | D52 (0.0072 dB) | 0.0082 dB off | 0.0076 dB off |
+| the same, Z₀ | 2D field solver | 0.3 % | 0.3 % |
+| lossy line, `solid` (`line_lumped`): loss from 0.5 GHz | D52 | 0.0404 dB, RMS 5.9 %, mean +4.6 % | 0.0403 dB, 5.8 %, +4.6 % |
+| the same at 0.06 GHz; Z₀ | D52 (0.0086 dB); field solver | 0.0089 dB off; 5.5 % | 0.0089 dB off; 5.5 % |
+| series 50 Ω (comparison) | circuit theory: ideal lines; the lines as the field solver has them | 0.0048; 0.0015 | 0.0048; 0.0015 |
+| series 1 pF (comparison) | the same two | 0.0099; 0.0064 | 0.0100; 0.0065 |
+| 64 mm lossy microstrip, \|S21\| | D52 | −1.3 to +5.3 %, RMS 2.71 % | −1.4 to +5.3 %, RMS 2.71 % |
+| the same, Z₀ and εeff | 2D field solver | within 2.94 % and 0.98 % | 2.94 % and 0.98 % |
+| lossless line next to the absorber, Σ\|S\|² | passivity (1) | 0.99908 to 1.00068 | 0.99908 to 1.00068 |
+| solder mask: Z₀, εeff; bare εeff | 2D field solver | 50.62 for 50.07, 3.1542 for 3.1623; 3.0837 for 3.0709 | the same digits |
+| parts on the finer mesh: 50 Ω, 1 pF, 1 pF with ESL and ESR | circuit theory | 0.0073, 0.0094, 0.0078 | 0.0073, 0.0094, 0.0079 |
+| cavities: PEC modes, Q from σ, from copper plates, Debye filling | analytic modes and Q | −0.05 and −0.08 %; +0.04 %; +0.08, −0.14, −0.22 %; resonance −0.01 %, Q −0.65 to −0.74 % | the same digits |
+| stripline: Z₀, εeff | 2D field solver | within 1.78 %, 0.45 % | 1.78 %, 0.46 % |
+| lossless-copper line with the Debye laminate (`measure_dielectric_loss`), from 0.5 GHz | D52 | within 0.0200 dB | 0.0200 dB |
+| routed 45° line, six meshes: S11, S21, phase at 3.1, 5 and 10 GHz | the straight line of its length; the finer meshes | (as printed) | the same digits on all six, four of them on a longer step |
+| via, perfect sheets, 0.3 mm cells: \|S21\| at 4 GHz, staircase and conformal | the 0.2 mm mesh (D87: −0.348 dB) | −0.425, −0.376 dB | −0.425, −0.376 dB |
+| bent line, six copper models on two meshes: largest Σ\|S\|² | passivity | 1.0003, 1.0001, 0.9979, 0.9979, 1.0000, 0.9983 (1 mm) | 1.0003, 1.0002, 0.9979, 0.9978, 1.0001, 0.9983 |
+| session 6's RF path | its ideal chain (not a reference: pads and the via are not in it) | \|S11\| 0.5726, 14 529 steps | the same (Courant step) |
+| the removed engine's recorded figures (`RECORDED_*`, `ems_runs_the_region`) | cadlab's own engine at 3aa423f | within 0.01 and 0.015 | within the same tolerances; no constant touched |
+
+**Time and memory beside openEMS.** On the development machine (AMD Threadripper 9970X, one run each, the
+comparison without openEMS), the whole `sim.sparams` run, 0.0.14 → 0.0.15: on one thread the sheet line 9.1 →
+7.0 s, the `solid` line 17.5 → 17.4 s (16.8 s in another run), the via 63.2 → 62.9 s (the same step), the parts
+4.2 and 4.3 → 4.0 and 4.1 s; on four threads 2.7 → 2.0 s, 4.9 → 4.7 s, 23.2 → 22.3 s, 1.4 → 1.2 and 1.1 s. The bound itself
+takes 6 to 12 ms of a compile on these regions and 0.2 s on 2.46 million cells. The peak memory is what it was
+(41, 46, 61, 34 MB). On the runner, beside openEMS in the same job
+(run 44058840773, the new `openems-comparison` job, 48 minutes; an AMD EPYC 7763 this time, four logical CPUs:
+a fourth CPU model since D103, so the seconds and the ratios are this runner's and D103's table, on a Xeon
+6975P-C, is not their "before"; the steps and the time steps are the same on any machine):
+
+| Case | Steps per port, ems 0.0.14 → 0.0.15 / openEMS | Time step, ems 0.0.14 → 0.0.15 / openEMS (ps) | Whole run on one thread, ems / openEMS | Each at its fastest (threads) | Peak memory | Of it the run |
+|---|---|---|---|---|---|---|
+| `line_msl` | 6145 → 4737 / 8820 | 0.1949 → 0.2544 / 0.1982 | 15.9 / 48.4 s (3.0×) | 7.9 (4) / 48.4 (1) s (6.1×) | 45 / 75 MB | 22 / 24 MB |
+| `line_lumped` | 12 065 → 11 425 / 19 680 | 0.0994 → 0.1049 / 0.1011 | 39.2 / 136.5 s (3.5×) | 19.4 (4) / 128.7 (4) s (6.6×) | 50 / 78 MB | 27 / 27 MB |
+| `via` | 32 961 / 27 216 | 0.0545 / 0.0482 | 154.9 / 435.8 s (2.8×) | 89.4 (4) / 391.8 (4) s (4.4×) | 65 / 109 MB | 42 / 58 MB |
+| `series_r` | 7105 → 6689 / 8037 | 0.1689 → 0.1792 / 0.1966 | 8.6 / 30.6 s (3.6×) | 4.6 (4) / 26.6 (4) s (5.8×) | 35 / 71 MB | 12 / 20 MB |
+| `series_c` | 7105 → 6689 / 8460 | 0.1689 → 0.1792 / 0.1966 | 8.5 / 32.1 s (3.8×) | 4.6 (4) / 27.7 (4) s (6.0×) | 36 / 71 MB | 12 / 20 MB |
+| `via_same` | 32 961 / 28 518 | 0.0545 / 0.0460 | 154.6 / 315.8 s (2.0×) | 89.5 (4) / 283.4 (4) s (3.2×) | 66 / 91 MB | 44 / 41 MB |
+
+ems is 2.0 to 3.8 times as fast on one thread and 3.2 to 6.6 times at each solver's fastest on this runner
+(with 0.0.14 on the Xeon: 1.5 to 3.2 and 2.7 to 7.0 times; with 0.0.12, 1.4 to 2.4 times on an EPYC 9V45 and
+1.8 to 2.9 on the Xeon: the CPU moves the ratio by as much as a release does, and what this release did to
+ems's own time is the development machine's row above, the steps' ratio at most). Accuracy beside openEMS, the
+references being neither: the lines' loss from 0.5 GHz 0.0187 dB (4.2 % RMS) for openEMS's 0.0268 dB (15.8 %)
+and 0.0403 dB (5.8 %) for 0.0815 dB (17.0 %); Z₀ 0.3 for 4.0 % and 5.5 for 5.4 %; at 0.06 GHz 0.0076 and
+0.0089 dB for openEMS's 0.0053 and 0.0051 dB; the parts against ideal lines 0.0048 and 0.0100 for 0.0029 and
+0.0089, against the lines as they are 0.0015 and 0.0065 for 0.0054 and 0.0058; the via 0.067 dB and, on one
+mesh, 0.112 dB from openEMS (0.067 and 0.047 or 0.112 dB with 0.0.14: openEMS ran 28 518 steps on port one
+this time). ems's files are the same bytes on one and four threads on every case; openEMS's `solid` line is
+not (19 680 and 18 655 steps on port one; 22 221 in D103's runs). *Where openEMS is still ahead or level:* the
+0.06 GHz point; the parts against ideal lines, and the capacitor against the lines as they are by 0.0007; the
+run's own memory on the via on one mesh (44 for 41 MB) and level on the `solid` line (27 for 27 MB); and its
+time step on the parts, 0.1966 for ems's 0.1792 ps.
+**Not taken, with the measurement.** *The lowest frequency (D103's item):* an end criterion that knows the
+lowest frequency asked for would have to run the −50 dB runs to about −60 dB: the sheet line's 0.06 GHz point
+is 0.0076 dB from D52 at −50 dB (4737 steps), 0.0018 dB at −60 dB (8161 steps, 1.72 times) and 0.0009 dB at
+−70 dB (16 801, 3.5 times); the `solid` line 0.0089, 0.0023, 0.0011 dB for 11 425, 19 617 and 40 481 steps.
+openEMS's 0.004 to 0.005 dB is what its longer run buys (8820 steps where ems took 6145). A criterion that
+costs 1.7 times the steps for one point at 1 % of `f_max` is not a gain as a default; `end_criteria: 60dB`
+is there for who needs that point, and extrapolating the tail instead of running it is not attempted. *The
+run's own memory on the `solid` line and the via, and D98's two items* (`cb`/`db` on meshes graded in the
+plane, eight bytes per step and probe): not touched. A Debye edge already holds one charge per pole and shares
+its constants between edges of one geometry; what is left is `f64` state, and narrowing it changes results.
+**Tried and dropped.** The closed form alone (the cell's sizes with its least ε): rigorous and nearly free, but
+it finds 1.00 to 1.06 where the cell's eigenvalue finds 1.00 to 1.31, because it does not see the wall. Lossy
+metal's surface edges as vacuum everywhere: it made cells inside the copper the worst cells of the via (they
+have no field). A model with any cut face in the absorbing layer kept on the Courant step: the sheet line has cut faces
+there, above the merge threshold, where they keep their current as outside the layer; only a face below the
+threshold there keeps the model on the Courant step now. The step from the power iteration: above.
+**The CI jobs.** The `openems` job had grown from 13 to 45–60 minutes with the comparison, on every push, and
+`freerouting` took 46. Each is two jobs now: `openems` (the nine oracle tests) and `freerouting` (the DSN and
+session oracle of `tests/specctra.rs`, which needs the jar and Java but neither the corpus nor `route_bench`)
+stay on every push; `openems-comparison` (with the `openems_fine` input) and `freerouting-corpus` (the four
+tables) run on the weekly schedule (Monday 03:17 UTC) and on a manual dispatch only. One dispatch makes both
+tables again: `gh workflow run CI --ref master`. The schedule runs the other jobs too, once a week. ROUTER.md's
+sentence on the job that makes its table means `freerouting-corpus` now (that file is another change's).
+**Verification.** ems: `scripts/check.sh` (fmt, clippy and the tests with all features and with none, docs,
+`cargo +1.95 check`) passed before the merge (13 minutes, six build jobs, four test threads); the release PR (ems PR 15) had Test & lint on Linux, Windows and macOS, Docs and MSRV green, and master's CI
+was green, before `gh pr merge`; 0.0.15 is on crates.io.
+cadlab (Linux x86-64, ems 0.0.15 from crates.io): `cargo fmt --all --check`; `cargo clippy --all-targets
+--all-features -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`; the test
+targets `fdtd`, `fdtd_ems`, `fdtd_parts`, `fdtd_conformal`, `openems`, `agent_session6`, `agent_ergonomics`,
+`cli`, `mcp` and the `fdtd` unit tests in a debug build; in release the `#[ignore]` validations of the table,
+`long_runs_stay_bounded` and `solver_comparison` without openEMS. All pass; no golden file or snapshot changed
+(the export's mesh and driver are untouched, and no figure of a snapshot comes from a run). Not run here: the
+full `cargo test --all-features` (the merger's), `cargo deny`, the MSRV check of cadlab. With openEMS, on the branch
+`ci/ems-015` (the two openEMS jobs alone, the other jobs cut from that branch's workflow), run 44058840773
+(https://github.com/KarpelesLab/cadlab/actions/runs/44058840773), ems 0.0.15 from crates.io: `openems`, the
+nine oracle tests, passes in 14 minutes (13 before D103 added the comparison to it, 45 to 60 with it);
+`openems-comparison` passes in 48 minutes. The schedule trigger and the `freerouting` and
+`freerouting-corpus` jobs have not run: the workflow file parses (it was dispatched from the branch with the
+same triggers and conditions), and the two freerouting jobs are the old job's steps divided, unrun.
+*Not established:* whether the seven figures that moved by 0.0001 to 0.0003 are the step or the run's last
+steps; a bound over patches of cells and how much of the estimated 1.29 to 1.45 it proves; the CPML beyond
+frozen coefficients and long runs (no proof for the graded layer is known to me); stability from noise on
+cadlab's own regions (cadlab's long runs are pulses; the noise runs are ems's boards); times on an unshared
+machine.
+
 ## Open questions
