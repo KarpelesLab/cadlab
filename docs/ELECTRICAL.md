@@ -529,7 +529,16 @@ the cut cells in the bound give 0.2742, 0.1338, 0.2356 and 0.0664 ps for openEMS
 8.4 times at each solver's fastest, and the run's own memory below its on every case (19 to 37 MB for 20 to
 58). Where openEMS is still ahead: the 0.06 GHz point of a run to −50 dB, the parts against ideal lines, the
 capacitor against the lines as they are by 0.0006, which are where ems's run ends (to −80 dB the capacitor
-reads 0.0029 for openEMS's 0.0058 and the 0.06 GHz points 0.0007 dB for 0.005: D107). One more difference is not in a
+reads 0.0029 for openEMS's 0.0058 and the 0.06 GHz points 0.0007 dB for 0.005: D107). With 0.0.18 (run
+44174491916, on an AMD EPYC 9V45, which is not D107's CPU; D111 has the table) a run goes on past its energy
+criterion while the ports' signals still add to the lowest frequency, and the layers' convolution is second
+order in the step: the 0.06 GHz points read 0.0008 and 0.0011 dB for openEMS's 0.0053 and 0.0035, the
+capacitor 0.0029 for 0.0058, the lines' loss from 0.5 GHz 0.0167 and 0.0397 dB for 0.0268 and 0.0862; the
+lines take twice the steps they took (8801 for openEMS's 8820, 17 953 for 22 221) and the via 6 % more
+(28 577 for 27 216 and 28 518), and ems is 1.3 to 3.3 times as fast on one thread and 2.7 to 5.9 times at
+each solver's fastest on that CPU. Where openEMS is still ahead: the parts against ideal 50 Ω lines (0.0029
+for 0.0048, 0.0089 for 0.0093; against the lines as they are ems is the nearer), the `solid` line's Z₀ by
+0.1 % at a frequency where the ports decide it, and the via's steps. One more difference is not in a
 column: openEMS looks at its end criterion when it prints a progress line, every few seconds of wall time, so
 its number of steps and with it its result follow the machine (the `solid` line ran 22 221 steps per port on
 four runs and 22 221, 27 265, 22 960 and 19 475 on a slower runner, reading 41.6 % for the 40.2 % above; the
@@ -679,10 +688,11 @@ lossy `solid` copper stays metal volumes, where the export writes two conducting
   of the energy's logarithm over the same window, is more than 10⁻⁴ of the sum of the signal's absolute
   values: that is what the spectrum still lacks if the signal goes on as the window has it and decays as the
   fields do. A part's region, whose energy falls 30 dB in a third of a run, ends at once (a series resistor:
-  1.01 times the steps; a capacitor 1.35 times, at −81 dB); a line past its knee goes on, and the cap of
-  half as many steps again (1.5 N₀) ends it: 1.50 times the steps of a run to −50 dB for 0.003 and 0.004 dB
-  at 0.06 GHz, and at the default 60 dB 1.2 to 1.35 times, where the test itself ends the lines (0.0001 and
-  0.0002 dB). `settle: false` is the energy criterion alone, as until ems 0.0.17. The tolerance is of the
+  1.01 times the steps; a capacitor 1.35 times, at −81 dB); a line past its knee goes on until the test is
+  met, at 2.33 times the steps of a run to −50 dB (0.0001 and 0.0002 dB at 0.06 GHz), or until the cap of as
+  many steps again (2 N₀): asked for 50 dB the lines end there, 0.0008 and 0.0012 dB from D52 at 0.06 GHz,
+  and at the default 60 dB the test ends them, 1.2 to 1.35 times the steps of the energy criterion alone.
+  `settle: false` is the energy criterion alone, as until ems 0.0.17. The tolerance is of the
   signal's size, not of its spectrum at that frequency, so a frequency the pulse hardly excites is held less
   tightly: a lossless bent line's Σ|S|² at its lowest frequency reads 1.0005 where the runs to −70 dB alone
   read 1.0001 to 1.0003.
@@ -778,7 +788,9 @@ line), `sim.port_at_edge`, `sim.unstable`, `sim.ems_failed`, `cancelled`. Notes:
 in release (`cargo test --release --test <file> -- --ignored --nocapture`). Figures are ems 0.0.12's unless a row
 says otherwise; with 0.0.15's and 0.0.16's longer steps they move by at most three units of the fourth
 decimal (the 64 mm line's worst point by 0.003 dB), each case with its reference before and after in D105's
-and D107's tables, and D107 has which of those moves are the step and which are where the run ends (0.0.10's stand for 0.0.11 and 0.0.12, whose Touchstone files are 0.0.10's byte for byte on the
+and D107's tables, and D107 has which of those moves are the step and which are where the run ends; with
+0.0.18's layer and end of run the lowest frequencies and the 64 mm line's upper band move by more, towards
+their references but for six figures, each case before and after in D111's table (0.0.10's stand for 0.0.11 and 0.0.12, whose Touchstone files are 0.0.10's byte for byte on the
 nine cases compared: D94, D98; and 0.0.12's for 0.0.13 and 0.0.14, whose Touchstone data are 0.0.12's on the ten
 cases compared, the first comment line naming the version: D103).
 

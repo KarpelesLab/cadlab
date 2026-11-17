@@ -638,6 +638,13 @@ Research-sized items beyond the milestones above; none blocks a release.
       extrapolated from the port signals (it does not predict the signal run on). Left: the end criterion is
       the largest error of a run to −50 dB at the low end and on the parts; conformal models whose worst cut
       cell the shares of a slab do not reach
+- [x] ems 0.0.18 (D111): the loss that moved with the time step was the absorbing layers' convolution, first
+      order in the step (a layer whose conductivity grew with the step: 0.082 dB/ps on a 60 mm line at 9 GHz),
+      second order now, the 64 mm line 0.082 dB from D52 for 0.090; a run goes on past its energy criterion
+      while the ports' signals still add to the lowest frequency (`settle`, on by default, twice the steps at
+      most): the 0.06 GHz points 0.0008 and 0.0011 dB for openEMS's 0.0053 and 0.0035, the capacitor 0.0029
+      for 0.0058. Left: openEMS nearer on the parts against ideal 50 Ω lines and by 0.1 % on a Z₀ read where
+      the ports decide it; the via takes 6 % more steps than it did
 
 ---
 
