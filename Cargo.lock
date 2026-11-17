@@ -364,9 +364,9 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "ems"
-version = "0.0.15"
+version = "0.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69dfeaf4702c7b0062ff80e79c3736ad64ecdbe97eaf9c193ff8cbec446b523b"
+checksum = "fffc2bb9b8900690ae289dfff0fb94d823462dd8033425c23824b558adf7f82d"
 dependencies = [
  "csx",
 ]

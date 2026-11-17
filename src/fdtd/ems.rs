@@ -340,9 +340,12 @@ fn threads(o: &Options, r: &Region) -> usize {
 /// The solver settings of a region: the pulse, CPML of `pml_cells` on every face with its
 /// frequency shift α at f₀ (2π ε₀ f₀: at a tenth of that a line near the absorber read gain, D68),
 /// the end criterion, the step limit and the timestep: `courant` of the bound of the mesh's cells
-/// (ems's `StepLimit::Cells`, D105: each cell with its own sizes, the permittivity of its edges
-/// and the walls and copper it lies against; never less than `courant` of the Courant limit of
-/// the smallest cell sizes in vacuum, which it was until ems 0.0.15).
+/// (ems's `StepLimit::Cells`, D105 and D107: each cell with its own sizes, the permittivity of its
+/// edges, the walls and copper it lies against and the part of the edges it shares with its
+/// neighbours that leaves the largest of the cells' eigenvalues smallest, the cells conformal copper
+/// cuts among them; never less than `courant` of the Courant limit of the smallest cell sizes in
+/// vacuum, which it was until ems 0.0.15). On perfect copper that bound is the scheme's limit, so
+/// `courant` is the margin.
 fn settings(o: &Options, r: &Region, threads: usize) -> Fdtd {
     let f0 = r.f0 as f64;
     let pml = Cpml::cells(o.region.pml_cells as usize).alpha_max(2.0 * std::f64::consts::PI * EPS0 * f0);
