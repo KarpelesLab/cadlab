@@ -531,6 +531,23 @@ fn one_placed_pad_alone() {
         findings(&o, "export.pad_layer_connection").iter().any(|m| m.contains("J1.1")),
         "KiCad has no connection per layer: {o}"
     );
+    // Read back from the KiCad file, the settings are those pads' own again (the footprints
+    // of the library are untouched; the reason and the layers are not in the file).
+    let mut s3 = Session::new();
+    exec(&r, &mut s3, "project.open", json!({"path": d.path().join("p")}));
+    exec(&r, &mut s3, "board.import_kicad", json!({"path": pcb, "replace": true}));
+    let o = exec(&r, &mut s3, "zone.pad", json!({"pads": []}));
+    assert_eq!(
+        o["output"]["pads"],
+        json!([
+            {"pad": "C1.2", "zone_connection": "solid"},
+            {"pad": "J1.1", "thermal_gap": "0.3mm", "thermal_spoke": "0.4mm"}
+        ]),
+        "{}",
+        o["output"]
+    );
+    let fps = |s: &Session| s.project.as_ref().unwrap().library().footprints.clone();
+    assert_eq!(fps(&s3), fps(&s2), "no footprint variant is made for a pad's own setting");
     // Unset, and undo.
     let o = exec(&r, &mut s, "zone.pad", json!({"pads": ["C1.2"], "unset": ["all"]}));
     assert_eq!(o["output"]["pads"], json!([]));

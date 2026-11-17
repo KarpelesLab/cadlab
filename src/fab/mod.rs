@@ -84,6 +84,9 @@ pub struct FabProfile {
 pub struct ThermalRelief {
     /// Whether the fab publishes any thermal relief value of its own.
     pub published: bool,
+    /// Date the pages were read for this (`YYYY-MM-DD`; the profile's own `verified_at` is
+    /// that of its other values).
+    pub verified_at: String,
     /// Minimum spoke width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_spoke: Option<Nm>,

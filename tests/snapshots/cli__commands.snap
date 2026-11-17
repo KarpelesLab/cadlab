@@ -1,5 +1,6 @@
 ---
 source: tests/cli.rs
+assertion_line: 155
 expression: names
 ---
 [
@@ -126,6 +127,7 @@ expression: names
   "zone.fill",
   "zone.thermals",
   "zone.relieve",
+  "zone.pad",
   "keepout.add",
   "keepout.set",
   "keepout.remove",

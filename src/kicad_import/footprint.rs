@@ -1614,6 +1614,63 @@ fn attach_paste(
         .collect()
 }
 
+/// How the pads of `c` join zones differently from those of `lib`, by pad number, when that is
+/// all the two footprints differ in ([`equivalent`] otherwise) and every difference can be said
+/// as a placed pad's own setting: a value `c` sets and `lib` does not, or sets otherwise.
+/// `None` when they differ in more, or when `c` leaves unset what `lib` sets. Pads sharing a
+/// number must agree on each side.
+pub(super) fn pad_joins(lib: &Footprint, c: &Footprint) -> Option<BTreeMap<String, crate::model::board::PadJoin>> {
+    use crate::model::board::PadJoin;
+    type Zone = (Option<crate::model::board::PadConnection>, Option<Nm>, Option<Nm>, Option<Angle>);
+    let zone = |p: &Pad| -> Zone {
+        let o = &p.overrides;
+        (o.zone_connection, o.thermal_gap, o.thermal_spoke, o.thermal_angle)
+    };
+    let by_number = |f: &Footprint| -> Option<BTreeMap<String, Zone>> {
+        let mut m: BTreeMap<String, Zone> = BTreeMap::new();
+        for p in &f.pads {
+            if *m.entry(p.number.clone()).or_insert(zone(p)) != zone(p) {
+                return None;
+            }
+        }
+        Some(m)
+    };
+    let (ours, theirs) = (by_number(lib)?, by_number(c)?);
+    let mut out = BTreeMap::new();
+    for (number, t) in &theirs {
+        let o = ours.get(number)?;
+        if o == t {
+            continue;
+        }
+        fn pick<T: PartialEq + Copy>(lib: Option<T>, c: Option<T>) -> Option<Option<T>> {
+            match (lib, c) {
+                (a, b) if a == b => Some(None),
+                (_, Some(v)) => Some(Some(v)),
+                (Some(_), None) => None,
+                (None, None) => Some(None),
+            }
+        }
+        out.insert(
+            number.clone(),
+            PadJoin {
+                zone_connection: pick(o.0, t.0)?,
+                thermal_gap: pick(o.1, t.1)?,
+                thermal_spoke: pick(o.2, t.2)?,
+                thermal_angle: pick(o.3, t.3)?,
+                ..PadJoin::default()
+            },
+        );
+    }
+    // The rest must be the same land pattern: `c` with the library's zone settings.
+    let mut same = c.clone();
+    for p in &mut same.pads {
+        let o = ours.get(&p.number)?;
+        (p.overrides.zone_connection, p.overrides.thermal_gap, p.overrides.thermal_spoke, p.overrides.thermal_angle) =
+            *o;
+    }
+    (!out.is_empty() && equivalent(lib, &same)).then_some(out)
+}
+
 /// Whether two footprints are the same land pattern, allowing the few nanometers of rounding a
 /// rotated placement leaves in exported local coordinates (names and descriptions ignored).
 pub(super) fn equivalent(a: &Footprint, b: &Footprint) -> bool {

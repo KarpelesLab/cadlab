@@ -665,7 +665,7 @@ fn kicad_loads_every_feature() {
 /// A 1x04 pin header whose pin 1 is on GND, in a GND pour on the bottom layer, with a track of
 /// another net around the pin: on three sides (`sides = 3`: one spoke reaches the pour) or on
 /// two (two spokes reach it).
-fn fenced_pin(sides: usize) -> (tempfile::TempDir, Registry, Session) {
+fn fenced_pin(sides: usize, d: f64, leg: f64) -> (tempfile::TempDir, Registry, Session) {
     let dir = tempfile::tempdir().unwrap();
     let r = Registry::with_builtins();
     let mut s = Session::new();
@@ -693,19 +693,25 @@ fn fenced_pin(sides: usize) -> (tempfile::TempDir, Registry, Session) {
         cadlab::board::placed_pads(p).into_iter().find(|pp| pp.refdes == "J1" && pp.number == "1").unwrap().center
     };
     let (x, y) = (at.x.0 as f64 / 1e6, at.y.0 as f64 / 1e6);
-    let d = 1.5;
-    let fence = [mm(x - d, y - d), mm(x - d, y + d), mm(x + d, y + d), mm(x + d, y - d)];
+    let fence = [mm(x - d, y - leg), mm(x - d, y + d), mm(x + d, y + d), mm(x + d, y - leg)];
     exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "SIG", "points": fence[..=sides].to_vec()}));
     (dir, r, s)
 }
 
 /// KiCad's `starved_thermal` as the oracle of `drc.starved_thermal`: on the exported fill
 /// (cadlab's copper, no refill) and on KiCad's own refill, it reports the pad one spoke
-/// reaches, as cadlab does, and nothing on the pad two spokes reach.
+/// reaches, as cadlab does, and nothing on the pad two spokes reach. The third case is where
+/// the two fills differ (D112): a U that leaves room for diagonal spokes, which cadlab's fill
+/// places when the spokes along the axes do not survive. KiCad must count them on the exported
+/// fill (no finding); what its own refill gives the pad is printed, not asserted.
 #[test]
 fn kicad_agrees_on_starved_thermals() {
-    for (sides, starved) in [(3, true), (2, false)] {
-        let (_d, r, mut s) = fenced_pin(sides);
+    for (name, sides, d, leg, starved, same_refill) in [
+        ("starved3", 3, 1.3, 3.0, true, true),
+        ("starved2", 2, 1.5, 1.5, false, true),
+        ("turned3", 3, 1.5, 1.5, false, false),
+    ] {
+        let (_d, r, mut s) = fenced_pin(sides, d, leg);
         let ours: Vec<String> = cadlab::drc::check(s.project.as_ref().unwrap())
             .into_iter()
             .filter(|d| d.code == "drc.starved_thermal")
@@ -716,8 +722,7 @@ fn kicad_agrees_on_starved_thermals() {
             assert!(ours[0].contains("J1.1") && ours[0].contains("1 on B.Cu of 4"), "{}", ours[0]);
         }
         let Some(cli) = oracle::require(Oracle::KicadCli) else { continue };
-        let name = format!("starved{sides}");
-        let pcb = export(&r, &mut s, &name);
+        let pcb = export(&r, &mut s, name);
         let stored = pcb.with_extension("stored.json");
         oracle::run(
             &cli,
@@ -734,11 +739,15 @@ fn kicad_agrees_on_starved_thermals() {
         );
         let stored: Value = serde_json::from_str(&std::fs::read_to_string(&stored).unwrap()).unwrap();
         let refilled = kicad_drc(&cli, &pcb);
-        keep(&pcb, &name);
+        keep(&pcb, name);
         for (what, report) in [("the exported fill", &stored), ("KiCad's refill", &refilled)] {
             let theirs: Vec<String> =
                 violations(report).into_iter().filter(|(ty, _)| ty == "starved_thermal").map(|(_, d)| d).collect();
-            assert_eq!(theirs.len(), usize::from(starved), "KiCad on {what}, fence on {sides} sides: {theirs:#?}");
+            if !same_refill && what == "KiCad's refill" {
+                eprintln!("{name}: KiCad on its own refill reports {} starved pad(s): {theirs:?}", theirs.len());
+                continue;
+            }
+            assert_eq!(theirs.len(), usize::from(starved), "KiCad on {what}, {name}: {theirs:#?}");
             if starved {
                 assert!(theirs[0].contains("J1"), "KiCad names the pad of J1: {}", theirs[0]);
             }

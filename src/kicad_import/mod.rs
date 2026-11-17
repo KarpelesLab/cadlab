@@ -785,6 +785,12 @@ pub fn import(
             .map(|f| f.footprint.clone());
         let mut pf = c.placement.clone();
         pf.footprint = (preferred.as_deref() != Some(fp_name.as_str())).then(|| fp_name.clone());
+        if let Some(f) = p.library().footprints.get(fp_name)
+            && !footprint::equivalent(f, &c.fp)
+            && let Some(joins) = footprint::pad_joins(f, &c.fp)
+        {
+            pf.pads = joins;
+        }
         p.board_mut().footprints.insert(refdes.clone(), pf);
         default_reference_text(p, &refdes);
         if c.attrs.contains("dnp") {
@@ -1789,15 +1795,35 @@ fn unset_fitted_spokes(p: &mut Project) {
     if p.board().zones.iter().any(|z| !thermal::is_teardrop(z) && z.thermal_spoke.is_some()) {
         return;
     }
+    let fitted = |pad: &crate::model::footprint::Pad| -> Option<Nm> {
+        let shape = crate::board::pad_shape_local(&pad.shape).ok()?;
+        Some(Nm(zones::fitted_spoke(zones::short_side(&vec![shape]))))
+    };
+    // The placed pads' own widths first (the footprint of the library has none).
+    let refs: Vec<String> =
+        p.board().footprints.iter().filter(|(_, f)| !f.pads.is_empty()).map(|(r, _)| r.clone()).collect();
+    for refdes in refs {
+        let Some(fp) = crate::board::footprint_for(p, &refdes).cloned() else { continue };
+        let Some(pf) = p.board_mut().footprints.get_mut(&refdes) else { continue };
+        for pad in &fp.pads {
+            if let Some(join) = pf.pads.get_mut(&pad.number)
+                && join.thermal_spoke.is_some()
+                && join.thermal_spoke == fitted(pad)
+            {
+                join.thermal_spoke = None;
+                if join.is_empty() {
+                    pf.pads.remove(&pad.number);
+                }
+            }
+        }
+    }
     let lib = p.library_mut();
     for fp in lib.footprints.values_mut() {
         if fp.overrides.thermal_spoke.is_some() {
             continue;
         }
         for pad in &mut fp.pads {
-            let Some(w) = pad.overrides.thermal_spoke else { continue };
-            let Ok(shape) = crate::board::pad_shape_local(&pad.shape) else { continue };
-            if w.0 == zones::fitted_spoke(zones::short_side(&vec![shape])) {
+            if pad.overrides.thermal_spoke.is_some() && pad.overrides.thermal_spoke == fitted(pad) {
                 pad.overrides.thermal_spoke = None;
             }
         }
@@ -2102,6 +2128,22 @@ fn choose_footprint(p: &mut Project, c: &Converted, preferred: Option<&str>, add
         return name.to_string();
     }
     let base = c.fp.name.clone();
+    // A footprint of the library that differs only in how some pads join zones is that
+    // footprint, placed with those pads' own settings (`PlacedFootprint::pads`, D112): after
+    // the ones that are equal altogether, before a new variant is added.
+    let named = |i: usize| if i == 1 { base.clone() } else { format!("{base}_{i}") };
+    let existing: Vec<String> =
+        (1..).map_while(|i| p.library().find_footprint_ci(&named(i)).map(String::from)).collect();
+    if !existing.iter().any(|k| footprint::equivalent(&p.library().footprints[k], &c.fp)) {
+        let relaxed = preferred
+            .into_iter()
+            .map(String::from)
+            .chain(existing)
+            .find(|k| p.library().footprints.get(k).is_some_and(|f| footprint::pad_joins(f, &c.fp).is_some()));
+        if let Some(k) = relaxed {
+            return k;
+        }
+    }
     for i in 1.. {
         let name = if i == 1 { base.clone() } else { format!("{base}_{i}") };
         let existing = p.library().find_footprint_ci(&name).map(String::from);
