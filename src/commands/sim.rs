@@ -237,7 +237,7 @@ pub struct Simulated {
     /// Mesh edges partly covered by diagonal or curved copper (conformal cells).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conformal_edges: usize,
-    /// The solver that ran (or would run) and its version: `ems 0.0.13`.
+    /// The solver that ran (or would run) and its version: `ems 0.0.14`.
     #[serde(default)]
     pub solver: String,
 }

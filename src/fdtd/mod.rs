@@ -50,7 +50,7 @@ const CELLS_ACROSS: f64 = 2.0;
 
 /// The solver of `sim.sparams`, as a result names it: the `ems` crate and the version this build
 /// depends on (`Cargo.toml` asks for exactly this one; a test holds the two together).
-pub const SOLVER: &str = "ems 0.0.13";
+pub const SOLVER: &str = "ems 0.0.14";
 
 /// A Gaussian-modulated pulse covering `f0 − fc .. f0 + fc` at −20 dB (a plain Gaussian, from
 /// DC, when `f0` is 0).
