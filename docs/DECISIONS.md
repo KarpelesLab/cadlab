@@ -4633,4 +4633,91 @@ is better for it.
 boards with 0.0.14 (a run with no budget is as it was: the curated boards are); the three runs under a work
 budget on the whole corpus; cadlab's oracles; KiCad's DRC on a board guide routed.
 
+### D108. guide 0.0.15 adopted: two nets that cross in a row of fine pitch have the crossing planned where the row's layer has no room; more runs that move routes, in other orders; the stubs that cadlab's fill makes needless taken out; the default unchanged (2026-11-18)
+This round is for D106's gaps (guide's `docs/benchmarks.md`, "PCB routing of two nets that cross in a row").
+`guide = { version = "0.0.15", default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock`
+moves. Measured with the crate from crates.io, where D106's second release was measured from source.
+**What guide 0.0.15 does:**
+- *`RouteOptions::crossings`*, on by default in a run with a budget. In a row of fine pitch, the pad between two
+  pads of another net, with a pad of its own net two along (the D+ and D- of a USB receptacle), is looked for a
+  via straight out of its end with ways for the two pads beside it past the via. Where a track of the other net
+  then fits round the via, nothing is planned. Where none does (nrfmicro: a diode's pad 1.9 mm in front of the
+  row), the net's other pad gets a via of its own and a track on the other side of the board joins the two, the
+  pads further along get the step aside that this needs, and all of it is fixed copper, as escapes are.
+- *Hops taken out in cleanup*: a run of tracks between two vias that both go back to one layer is replaced by
+  tracks on that layer where they fit within sixteen pitches, after the search for the whole net with dearer
+  vias. A few vias in a hundred (lumenpnp-mobo 712 → 706).
+**What the adapter does with it and beside it** (`router::guide`; ROUTER.md, "guide as a backend"):
+- *`crossings` set by name.*
+- *More runs that move routes* (`MOVE_AGAIN`, four): after D106's third run, while something is open and 3 s are
+  left, another with the nets in another order, kept only if the board has less open. nrfmicro's run ended after
+  20 s of 60 with one to three connections open; with them two orders of four have none and two have one.
+- *The stubs that the fill makes needless* (`stub_pieces`): once the runs are over, with time for two fills, the
+  pieces of new copper of a net with zones that are one via and one to four tracks are taken out, the board is
+  filled again, those whose ends are then off their net's largest island are put back, and the result is kept if
+  the board has no more open. guide plans on no pour of an outer layer and gives each such pad a stub to the
+  plane inside; cadlab's fill joins most of them without.
+**Measured** (ROUTER.md, "Native router and guide 0.0.15, D108"). 0.0.14 → 0.0.15 from source behind D106's
+adapter, 60 s, four orders: 902 open on the twelve boards → 877 (nrfmicro 13 → 6, corne-cherry 87 → 79,
+buspirate5-rev10 5 → 2, lumenpnp-mobo 1 → 0, cynthion 72 → 69, the others the same). With this adapter and the
+crate from crates.io, four runs of each router in one hour: the twelve boards 195 to 238 open for guide (median
+209) against 199 to 287 for the native router (224); the eleven without glasgow-revD1 72 to 87 (76) against 81 to
+87 (84.5). Zero DRC errors other than unrouted, no via in a pad of its net, no call over 59.1 s. At 40 million
+nodes, three orders, the nine boards a budget cuts: 797 → 791 (nrfmicro 10 → 2, lumenpnp-mobo 1 → 0,
+tinytapeout-demo 36 → 35, corne-cherry 108 → 112, the others the same); a run that the budget stops is the same
+from source and from crates.io. guide's curated boards: 1150 of 1151 connections with 712 vias, as before.
+Vias, where the stubs go: lumenpnp-mobo 510, 571 and 568 in three orders for 699, 738 and 720 (706 in the fourth,
+where taking them out left more open and they were put back), buspirate5-rev10 452 for 484, against the native
+router's 344 and 313.
+**One run of 48 had copper taken out by the verification**: buspirate5-rev10 in the order of seed 3, a via of GND
+on a via of GND from a run after the first (`drc.hole_to_hole`; 15 items, counted as the one connection open
+there). Not new: guide 0.0.13 does it in that order at 40 million nodes. It is in the gaps.
+**Tried and not kept:**
+- In guide (its `docs/benchmarks.md`): *every crossing planned*, those with room round the via too (at 60 s over
+  six orders nrfmicro 11 for 20, but corne-cherry 154 for 137, tinytapeout-demo 67 for 54: the fixed copper is in
+  the way of the pads beside it); *the crossing as routes that rip-up may take out* (nrfmicro 12 over four orders
+  for 13: gone the first time a net crosses the place); *the negotiations for places made cheaper* (D106's first
+  gap as it was put: a faster price once six or ten nets are left, 15 000 nodes for a net that is whole, 2.5 or
+  4 million nodes a place, two places at most: corne-cherry 94 and 89 over four orders for 80 without, cynthion
+  78 and 71 for 70); *the pours of outer layers planned on* (fewer vias, and tinytapeout-demo 153 open for 36 at
+  40 million nodes, glasgow-revD1 837 for 454); *the parts of a board that its edge keeps apart told by a flood*,
+  for sweep-v2.2's three connections: its outline is one area, so the edge is not what keeps its halves apart.
+- In the adapter: *the runs after the first shortened to leave the time for the stubs* (2.5 times the first
+  verification, an eighth of the budget at most, where 20 vias or more are of nets with pours): at 60 s over four
+  orders corne-cherry 95 open for 79 and cynthion 77 for 69, for 18 vias on tinytapeout-demo and 45 on cynthion.
+  *The stubs taken out before the runs that follow*: lumenpnp-mobo 697 vias for 702, as a run for a net with a
+  plane gives every pad its stub again.
+**Gaps, for guide's next release**, most useful first:
+1. *corne-cherry's two QFN-56*: 15 to 23 open against 0 to 4, the one board behind in every run. What is open is
+   pads of the two packages shut in by the tracks and vias of the pads beside them. Rows planned as routes are
+   cut, as walls they were worse (D97), negotiations for places settle them in four minutes and not in one
+   (D106, and above). What the native router does is plan a package's escapes together and keep them; what is
+   not tried in guide is that plan as fixed copper for the pads that stay shut in after a first pass, as the
+   crossing is here, in place of every pad before it.
+2. *A via on a via of its net* in a run after the first (buspirate5-rev10, seed 3).
+3. *The last connection behind nrfmicro's receptacle*: one in two orders of four, where the native router has
+   none. The crossing is made; the nets beside it have too little room, and four more runs in other orders each
+   end with the same one open.
+4. *Vias*: a router that plans on the host's fill of outer pours has half of them. Told by the host after the
+   fact, they go only where a run leaves the time; told by guide before, routes cut the pours. tinytapeout-demo
+   has 450 to 602 against 270 to 281.
+5. *Rule areas with a routed track width* (tinytapeout-demo's +3V3 pins: 0 to 16 open, most of the 16 of that
+   net, against 3 to 6), *six layers in a minute* (glasgow-revD1: not profiled, this machine lets no process be
+   sampled), *sweep-v2.2 at its deadline*: not touched, or tried and found not to be what was thought (above).
+**Default: unchanged.** By the ranges of four runs of each in one hour, with 0.0.15: level on four boards
+(buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, sweep-v2.2); ahead in every run on two (lumenpnp-mobo
+0 against 3 to 17; cynthion 11 to 14 against 28 to 29); ranges that overlap on five (nrfmicro 0 to 1 against 0;
+buspirate5-rev10 0 to 1 against 0 to 5; glasgow-revC3 31 to 35 against 31 to 36; glasgow-revD1 120 to 162 against
+118 to 200; tinytapeout-demo 0 to 16 against 3 to 6, medians 8.5 and 4.5); behind in every run on one
+(corne-cherry 15 to 23 against 0 to 4). The condition, at least as good on every board, is not met: not on
+corne-cherry, not on nrfmicro by its median, nor shown on tinytapeout-demo. `router: guide` stays the second
+opinion, and the native router stays.
+*Why only the crossing with no room is planned:* fixed copper is a decision that no later net can undo. Where
+rip-up finds the crossing itself it finds it with the pads beside it in mind, and where it never does, the plan
+is the only way there is.
+*Not measured:* the generated boards with 0.0.15 (a run with no budget plans no crossing; the curated boards are
+as they were); more than four runs of either router; the taking out of stubs by a test of its own on a board
+with a plane (`stub_pieces` has one; the rest is measured on the corpus); cadlab's oracles; KiCad's DRC on a
+board guide routed; cadlab's whole test suite, which is run at the merge.
+
 ## Open questions

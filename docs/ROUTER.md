@@ -873,6 +873,25 @@ exports and the count all read cadlab's fill). The result is then treated as the
   fewer connections open for it, so no board ends with more than the two runs before it left; at least 3 s must
   be left for it (`stats.iterations` is 1 to 3). On sweep-v2.2, whose second run is cut by the deadline, there is
   no third.
+- *More runs that move routes, in other orders* (D108). A run that moves routes ends on its own once its order
+  of the nets has no more to give: on nrfmicro after some 9 s, with one connection open and most of the minute left.
+  For as long as something is open and 3 s are left, another such run has the same board and every open net
+  with the nets in another order (the seed moved by 7919 a run, four more at most), each kept only if the board
+  then has fewer connections open (`stats.iterations` is 1 to 7). Under a work budget they go on within it.
+- *The stubs that the fill makes needless* (D108). guide gives each pad of a net with a plane inside a stub
+  through a via to it, and plans on no pour of an outer layer, which routes cut (planned on them, tinytapeout-demo
+  had 153 open for 36 at 40 million nodes). cadlab's fill around the routed board joins many of those pads on an
+  outer pour all the same. Once the runs are over and the budget has the time for two fills (2.5 times what the
+  first run needed after it), every piece of new copper of a net with zones that is one via and one to four
+  tracks and no escape is taken out, the board is filled again, the stubs whose ends are then not on their net's
+  largest island are put back, and the result is kept if the board has no more open than before. No rule is
+  checked again: copper taken out breaks none. The runs are not shortened for it: a run with no time left keeps
+  its stubs (corne-cherry, cynthion, glasgow-revC3 and most orders of tinytapeout-demo at 60 s), which is where
+  the vias saved would have cost connections (below, "tried").
+- *Crossings in a row of fine pitch* (guide 0.0.15, D108): `RouteOptions::crossings`, guide's default, set by
+  name. Where the pads of two nets take turns along a row with no room for one to go round the other's via on
+  the row's layer, guide plans the crossing on another layer before it routes, as fixed copper that comes back as
+  escapes do.
 - *The count is the board's* (D80). Completion is read from the board with its pours filled again: failed
   connections are the ratsnest lines the board has left for the nets in scope, pads the routing cut off from a
   pour included; routed ones are counted per island of the result (an island holding `k` of the planned islands
@@ -2328,6 +2347,60 @@ What the numbers say:
   9 → 12, nrfmicro 9 → 10, cynthion 55 → 56, tinytapeout-demo 40, lumenpnp-mobo 1 and glasgow-revD1 454 the same.
 
 The default is unchanged (DECISIONS D106).
+
+**Native router and guide 0.0.15, D108** (guide 0.0.15 from crates.io behind the adapter with its runs in other
+orders and the needless stubs taken out; the corpus at the default 60 s; four runs of the native router, seeds 1
+to 4, three threads, two at a time, and four orders of guide, one thread, four at a time, begun 15 minutes
+apart in one hour, with a build of two threads beside the second):
+
+| board | layers | native: open by run (min / median / max); vias, length, time | guide 0.0.15: open by run (min / median / max); vias, length, time |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.4 s | 0, 0, 0, 0 (0 / 0 / 0); 7, 496.9 mm, 0.8 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.4 s | 0, 0, 0, 0 (0 / 0 / 0); 6, 356.2 mm, 0.7 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 2, 180.4 mm, 0.4 s | 0, 0, 0, 0 (0 / 0 / 0); 1, 209.6 mm, 0.3 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 11.3 s | 1, 1, 0, 0 (0 / 0.5 / 1); 55, 538.2 mm, 56.8 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 52.9 s | 3, 3, 3, 3 (3 / 3 / 3); 48, 2290.1 mm, 57.7 s cut |
+| corne-cherry | 2 | 3, 4, 0, 3 (0 / 3 / 4); 483, 8275.6 mm, 28.6 s | 15, 22, 19, 23 (15 / 20.5 / 23); 526, 6911.1 mm, 58.9 s cut |
+| tinytapeout-demo | 4 | 6, 3, 6, 3 (3 / 4.5 / 6); 274, 4913.3 mm, 58.6 s | 12, 5, 0, 16 (0 / 8.5 / 16); 570, 5847.8 mm, 56.3 s cut |
+| buspirate5-rev10 | 4 | 2, 3, 5, 0 (0 / 2.5 / 5); 313, 3053.2 mm, 27.4 s | 0, 0, 1, 0 (0 / 0 / 1); 452, 3762.0 mm, 37.4 s |
+| lumenpnp-mobo | 4 | 9, 6, 3, 17 (3 / 7.5 / 17); 344, 5425.7 mm, 62.2 s cut | 0, 0, 0, 0 (0 / 0 / 0); 706, 6523.7 mm, 35.1 s |
+| cynthion | 4 | 28, 29, 29, 28 (28 / 28.5 / 29); 476, 3177.0 mm, 61.3 s cut | 12, 14, 14, 11 (11 / 13 / 14); 530, 3547.5 mm, 53.9 s cut |
+| glasgow-revC3 | 4 | 36, 36, 35, 31 (31 / 35.5 / 36); 415, 3436.4 mm, 60.6 s cut | 33, 31, 35, 34 (31 / 33.5 / 35); 558, 4014.2 mm, 57.8 s cut |
+| glasgow-revD1 | 6 | 200, 137, 118, 142 (118 / 139.5 / 200); 1029, 8897.0 mm, 61.2 s cut | 162, 135, 123, 120 (120 / 129 / 162); 1085, 7953.6 mm, 57.9 s cut |
+| all twelve | | 287, 221, 199, 227 (199 / 224 / 287) | 238, 211, 195, 207 (195 / 209 / 238) |
+| the eleven without glasgow-revD1 | | 87, 84, 81, 85 (81 / 84.5 / 87) | 76, 76, 72, 87 (72 / 76 / 87) |
+
+Zero DRC errors other than unrouted on every run, no via in a pad of its net, no call of guide over 59.1 s. In
+one run of the 48 the verification took copper out: buspirate5-rev10 in the order of seed 3, where a run after
+the first put a via of GND on a via of GND (`drc.hole_to_hole`, 15 items of the net taken out, the one connection
+that order has open). guide 0.0.13 did the same in that order at 40 million nodes; it is guide's to mend.
+
+What the numbers say:
+
+- *From 0.0.14 to 0.0.15*, the two from source behind D106's adapter, one after the other: 902 open over the four
+  orders on the twelve boards → 877; nrfmicro 5, 2, 3 and 3 → 1, 1, 1 and 3, corne-cherry 15, 27, 19 and 26 → 15,
+  22, 19 and 23, buspirate5-rev10 0, 2, 3 and 0 → 0, 1, 1 and 0, the others within one of themselves. With this
+  adapter and the crate from crates.io, the table: 851.
+- *Against the native router, by the ranges of the table*: level on the three small boards and sweep-v2.2;
+  ahead in every run on two (lumenpnp-mobo 0 against 3 to 17, cynthion 11 to 14 against 28 to 29); ranges that
+  overlap on five: nrfmicro 0 to 1 against 0 (two orders of four level, where every order had 2 to 5),
+  buspirate5-rev10 0 to 1 against 0 to 5, glasgow-revC3 31 to 35 against 31 to 36, glasgow-revD1 120 to 162
+  against 118 to 200, tinytapeout-demo 0 to 16 against 3 to 6, medians 8.5 and 4.5; behind in every run on one,
+  corne-cherry, 15 to 23 against 0 to 4. The twelve boards: 195 to 238 (median 209) against 199 to 287 (224);
+  the eleven without glasgow-revD1: 72 to 87 (76) against 81 to 87 (84.5).
+- *Vias and track*, first run: lumenpnp-mobo 706 vias against 344 in the order with no seed, where the stubs
+  taken out left more open and were put back, and 510, 571 and 568 in the three others (699, 738 and 720 with
+  0.0.14); buspirate5-rev10 452 against 313 (484); tinytapeout-demo 570 against 274 (605), and 450 in the order
+  that ends before its deadline; glasgow-revC3 558 against 415, cynthion 530 against 476. Track is longer than the
+  native router's on ten boards, by 6% (sweep-v2.2) to 27% (buspirate-rs232), and shorter on corne-cherry,
+  where it has less routed, and on glasgow-revD1.
+- *At 40 million nodes*, three orders, the nine boards a budget cuts: 797 open with 0.0.14 → 791 (nrfmicro 5, 2
+  and 3 → 1, 1 and 0; lumenpnp-mobo 0, 1 and 0 → 0, 0 and 0; tinytapeout-demo 16, 19 and 1 → 16, 19 and 0;
+  corne-cherry 38, 38 and 32 → 39, 41 and 32; sweep-v2.2 16, buspirate5-rev10 12, cynthion 56, glasgow-revC3 104
+  and glasgow-revD1 454 the same). A run that the budget stops is the same from source and from crates.io, to
+  the connection (corne-cherry 39, 41 and 32 in both).
+
+The default is unchanged (DECISIONS D108).
 
 **Native router and guide 0.0.14, D106** (guide 0.0.14's source behind the adapter with three runs; the corpus at
 the default 60 s; four runs of the native router, seeds 1 to 4, three threads, two at a time, and four orders of

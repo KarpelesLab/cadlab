@@ -23,7 +23,9 @@
 //! D101), each open connection by a negotiation before its chains (`RouteOptions::negotiate`, D104). After the run
 //! on the board with the first run's routes fixed, a last run has those routes back as routes
 //! that it may move (`pcb::route_from`, [`Adapted::take_back`], D106), kept if the board then has
-//! less open. What guide's API cannot express is passed the stricter way and named in
+//! less open, and for as long as there is time and something open, another such run has the
+//! nets in another order (D108). Once the runs are over, the stubs to a plane whose pads
+//! cadlab's fill joins without them are taken out again (D108). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -1049,6 +1051,11 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // six orders corne-cherry has 160 connections open without them for 155 with, and
     // nrfmicro 19 for 18 (D104).
     gopts.row_fanout = false;
+    // Two nets whose pads take turns along a row of fine pitch, with no room to cross on its
+    // layer, have their crossing planned on another layer as fixed copper (guide 0.0.15, its
+    // default, set by name): the D+ of nrfmicro's USB receptacle, whose pads have those of D-
+    // between them and a diode's pad in front (D108).
+    gopts.crossings = true;
     let layers = p.board().stackup.copper_names().len();
     // The smallest via the rules allow, for a pad trapped in its footprint: the native
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
@@ -1109,6 +1116,50 @@ fn pieces(tracks: &[Track], vias: &[Via]) -> Vec<usize> {
 /// Most runs after the first ([`route`], "A second run"): one on the board with the first run's
 /// routes fixed, and one that takes them back to move them (D106).
 const POUR_ROUNDS: usize = 2;
+
+/// How many more runs that move routes there may be after the first of them, each with
+/// another order of the nets, and what the seed moves by from one to the next.
+const MOVE_AGAIN: usize = 4;
+const AGAIN_SEED: u64 = 7919;
+
+/// The most tracks a stub to a plane has (`route`, "The stubs that the fill makes needless").
+const STUB_TRACKS: usize = 4;
+
+/// What taking the needless stubs out needs, in times what the first run needed after it: two
+/// fills of the board.
+const PRUNE_SHARE: f64 = 2.5;
+
+/// The pieces of new copper (by [`pieces`]) that are stubs to a plane: of a net with zones,
+/// one via that is no escape's and one to [`STUB_TRACKS`] tracks.
+fn stub_pieces(
+    tracks: &[Track],
+    vias: &[Via],
+    piece: &[usize],
+    poured: &BTreeSet<&str>,
+    escapes: &BTreeSet<(i64, i64)>,
+) -> BTreeSet<usize> {
+    let nt = tracks.len();
+    // By piece: its vias and tracks.
+    let mut size: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    let mut not: BTreeSet<usize> = BTreeSet::new();
+    for (i, t) in tracks.iter().enumerate() {
+        if t.net.as_deref().is_some_and(|n| poured.contains(n)) {
+            size.entry(piece[i]).or_default().1 += 1;
+        }
+    }
+    for (i, v) in vias.iter().enumerate() {
+        if v.net.as_deref().is_some_and(|n| poured.contains(n)) {
+            size.entry(piece[nt + i]).or_default().0 += 1;
+            if escapes.contains(&(v.at.x.0, v.at.y.0)) {
+                not.insert(piece[nt + i]);
+            }
+        }
+    }
+    size.iter()
+        .filter(|(k, (v, t))| *v == 1 && (1..=STUB_TRACKS).contains(t) && !not.contains(k))
+        .map(|(k, _)| *k)
+        .collect()
+}
 
 /// The least time a run that takes the routes back is begun with: it places every route
 /// before it routes anything.
@@ -1471,11 +1522,17 @@ pub(crate) fn route(
         .budget
         .zip(deadline)
         .map(|(b, d)| (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + REPORT).map_or(d, |t| t.max(d)));
-    for round in 1..=POUR_ROUNDS {
-        // The last run is the one that moves routes: it has what time the run before it
-        // leaves, and every net left open, those that a run on the fixed board found no way
-        // for among them.
-        let moves = round == POUR_ROUNDS;
+    for round in 1..=POUR_ROUNDS + MOVE_AGAIN {
+        // The last runs are those that move routes: the first of them has what time the run
+        // before it leaves, and every net left open, those that a run on the fixed board found
+        // no way for among them. And for as long as there is time and something open, another
+        // has the same in another order of the nets (D108): rip-up ends where its order of the
+        // nets took it, and a run that ends on its own with one connection open has said all
+        // it has to say of that order.
+        let moves = round >= POUR_ROUNDS;
+        if round > POUR_ROUNDS {
+            gopts.seed = Some(opts.seed.wrapping_add((round - POUR_ROUNDS) as u64 * AGAIN_SEED));
+        }
         let least = if moves { MOVE_MIN } else { SECOND_MIN };
         if stopped == Some(Stopped::WorkBudget) || second.is_some_and(|d| Instant::now() + least >= d) {
             break;
@@ -1552,6 +1609,104 @@ pub(crate) fn route(
         // What this run says of its nets replaces what the first said of them.
         opens.retain(|o| !again.contains(&o.net) && !moved.contains(o.net.as_str()));
         opens.extend(explain_all(&ad, &more));
+    }
+
+    // The stubs that the fill makes needless (D108): guide gives every pad of a net with a
+    // plane a stub through a via to it, and plans on no pour of an outer layer, which routes
+    // cut. Where cadlab's fill around the routed board joins such a pad to its net all the
+    // same, the stub and its via are taken out again: all of them at once, the board filled
+    // again, and those put back whose pad the fill then leaves apart. Kept if the board has no
+    // more open for it. After the last run, as a run for a net with a plane gives every pad
+    // that guide's own fill does not join its stub again.
+    let mut pruned = 0;
+    let prune = stopped != Some(Stopped::WorkBudget)
+        && opts.budget.is_none_or(|b| Instant::now() + after.mul_f64(PRUNE_SHARE) + REPORT < start + b);
+    if prune && !poured.is_empty() {
+        let piece = pieces(&tracks, &vias);
+        let nt = tracks.len();
+        let stubs = stub_pieces(&tracks, &vias, &piece, &poured, &escapes);
+        if !stubs.is_empty() {
+            let before = open(&fitems, &fisl).len();
+            let without = |needed: &BTreeSet<usize>| {
+                let gone = |i: usize| stubs.contains(&piece[i]) && !needed.contains(&piece[i]);
+                let t: Vec<Track> =
+                    tracks.iter().enumerate().filter(|(i, _)| !gone(*i)).map(|(_, t)| t.clone()).collect();
+                let v: Vec<Via> =
+                    vias.iter().enumerate().filter(|(i, _)| !gone(nt + *i)).map(|(_, v)| v.clone()).collect();
+                (t, v)
+            };
+            // Copper taken out breaks no rule that the board kept: no check, the fill alone.
+            let placed = |t: &mut [Track], v: &mut [Via]| {
+                let mut q = p.clone();
+                for t in t.iter_mut() {
+                    t.id = q.alloc_id();
+                    q.board_mut().tracks.push(t.clone());
+                }
+                for v in v.iter_mut() {
+                    v.id = q.alloc_id();
+                    q.board_mut().vias.push(v.clone());
+                }
+                q
+            };
+            let (mut t2, mut v2) = without(&BTreeSet::new());
+            let mut proj2 = placed(&mut t2, &mut v2);
+            let mut items2 = geo::copper_items(&proj2);
+            let mut isl2 = geo::islands(&items2);
+            // By net, its largest island, and by net the items with their islands.
+            let mut members: BTreeMap<(&str, usize), usize> = BTreeMap::new();
+            let mut of_net: BTreeMap<&str, Vec<(Point, usize)>> = BTreeMap::new();
+            for (it, &k) in items2.iter().zip(&isl2) {
+                if let Some(n) = it.net.as_deref().filter(|n| poured.contains(n)) {
+                    *members.entry((n, k)).or_default() += 1;
+                    of_net.entry(n).or_default().push((it.anchor, k));
+                }
+            }
+            let mut main: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+            for (&(n, k), &c) in &members {
+                let m = main.entry(n).or_insert((c, k));
+                if c > m.0 {
+                    *m = (c, k);
+                }
+            }
+            // A stub is needed if the item of its net nearest one of its ends, the pad it was
+            // for, is no longer on that island.
+            let mut needed: BTreeSet<usize> = BTreeSet::new();
+            for (i, t) in tracks.iter().enumerate().filter(|(i, _)| stubs.contains(&piece[*i])) {
+                let Some(n) = t.net.as_deref() else { continue };
+                let near = |at: Point| {
+                    of_net.get(n).and_then(|items| {
+                        items
+                            .iter()
+                            .map(|(q, k)| {
+                                let (dx, dy) = ((q.x.0 - at.x.0) as i128, (q.y.0 - at.y.0) as i128);
+                                (dx * dx + dy * dy, *k)
+                            })
+                            .min()
+                    })
+                };
+                let joined = [t.start, t.end]
+                    .into_iter()
+                    .all(|e| near(e).is_some_and(|(_, k)| main.get(n).is_some_and(|m| m.1 == k)));
+                if !joined {
+                    needed.insert(piece[i]);
+                }
+            }
+            if !needed.is_empty() && needed.len() < stubs.len() {
+                (t2, v2) = without(&needed);
+                proj2 = placed(&mut t2, &mut v2);
+                items2 = geo::copper_items(&proj2);
+                isl2 = geo::islands(&items2);
+            }
+            if needed.len() < stubs.len() && open(&items2, &isl2).len() <= before {
+                pruned = vias.len() - v2.len();
+                (tracks, vias, proj, fitems, fisl) = (t2, v2, proj2, items2, isl2);
+                (hooks.progress)(
+                    0,
+                    None,
+                    &format!("guide: {pruned} stub(s) to a plane taken out, their pads on a pour"),
+                );
+            }
+        }
     }
 
     // The report, from the board with its zones filled again around the new copper (D80).
@@ -1720,7 +1875,7 @@ pub(crate) fn route(
     stats.vias = vias.len();
     stats.length = tracks_length(&tracks);
     stats.iterations = calls;
-    stats.vias_removed = routed.stats.before_cleanup.0.saturating_sub(routed.stats.after_cleanup.0);
+    stats.vias_removed = routed.stats.before_cleanup.0.saturating_sub(routed.stats.after_cleanup.0) + pruned;
     stats.work = work;
     stats.budget_exhausted = stopped.is_some();
     stats.fanout_vias = vias.iter().filter(|v| escapes.contains(&(v.at.x.0, v.at.y.0))).count();
@@ -2195,6 +2350,52 @@ mod tests {
         assert_eq!((t.len(), v.len()), (r.tracks.len(), r.vias.len()));
     }
 
+    /// A stub to a plane is a piece of a net with zones of one via and a few tracks: not a
+    /// route between two pads through two vias, not an escape, not another net's.
+    #[test]
+    fn the_stubs_to_a_plane_are_told_from_routes() {
+        let track = |net: &str, a: (i64, i64), b: (i64, i64), layer: &str| Track {
+            id: ObjectId(0),
+            layer: layer.into(),
+            width: Nm(200_000),
+            net: Some(net.into()),
+            start: Point { x: Nm(a.0), y: Nm(a.1) },
+            end: Point { x: Nm(b.0), y: Nm(b.1) },
+            mid: None,
+            locked: false,
+        };
+        let via = |net: &str, at: (i64, i64)| Via {
+            id: ObjectId(0),
+            at: Point { x: Nm(at.0), y: Nm(at.1) },
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some(net.into()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        };
+        let tracks = vec![
+            // A stub of GND, a route of GND through two vias, a stub of SIG, an escape of GND.
+            track("GND", (0, 0), (1_000_000, 0), "F.Cu"),
+            track("GND", (0, 5_000_000), (1_000_000, 5_000_000), "F.Cu"),
+            track("GND", (1_000_000, 5_000_000), (4_000_000, 5_000_000), "B.Cu"),
+            track("GND", (4_000_000, 5_000_000), (5_000_000, 5_000_000), "F.Cu"),
+            track("SIG", (0, 9_000_000), (1_000_000, 9_000_000), "F.Cu"),
+            track("GND", (0, 12_000_000), (1_000_000, 12_000_000), "F.Cu"),
+        ];
+        let vias = vec![
+            via("GND", (1_000_000, 0)),
+            via("GND", (1_000_000, 5_000_000)),
+            via("GND", (4_000_000, 5_000_000)),
+            via("SIG", (1_000_000, 9_000_000)),
+            via("GND", (1_000_000, 12_000_000)),
+        ];
+        let piece = pieces(&tracks, &vias);
+        let poured: BTreeSet<&str> = ["GND"].into();
+        let escapes: BTreeSet<(i64, i64)> = [(1_000_000, 12_000_000)].into();
+        assert_eq!(stub_pieces(&tracks, &vias, &piece, &poured, &escapes), [piece[0]].into());
+    }
+
     /// The first run has the nets with zones in scope beside those with open connections.
     #[test]
     fn the_first_run_has_the_nets_with_zones_too() {
@@ -2221,7 +2422,7 @@ mod tests {
         p.board_mut().rules.min_annular_ring = Nm(100_000);
         let g = options(&p, &RouteOptions::default(), &[0, 1]);
         assert!(!g.fills && !g.join && !g.vias_in_pads && g.keep_partial);
-        assert!(g.pour_cuts && g.settle && g.negotiate && !g.row_fanout);
+        assert!(g.pour_cuts && g.settle && g.negotiate && !g.row_fanout && g.crossings && !g.negotiate_places);
         let four = BOARD.replace(
             r#"(0 "F.Cu" signal) (31 "B.Cu" signal)"#,
             r#"(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)"#,
