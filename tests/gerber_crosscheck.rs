@@ -51,7 +51,8 @@ const COMPARED: &[(&str, &str, &str, Mode)] = &[
 
 /// Differences that are meant: (case, layer, largest area in mm², the box they lie in as
 /// x0, x1, y0, y1 in mm, why).
-const KNOWN: &[(&str, &str, f64, (f64, f64, f64, f64), &str)] = &[(
+type Known = (&'static str, &'static str, f64, (f64, f64, f64, f64), &'static str);
+const KNOWN: &[Known] = &[(
     "features",
     "B.Cu",
     0.08,
