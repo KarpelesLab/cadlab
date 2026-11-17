@@ -190,8 +190,9 @@ stitching via drawn as a footprint). Only `through` and `smd` pads are held to t
 
 They are warnings, as the other findings that leave the board correct and connected (`drc.current_width`,
 `drc.split_crossing`): `drc.run` counts them, `fab.check` carries them as `fab.solid_pad`,
-`fab.thermal_nominal`, `fab.starved_thermal` and, against the fab's own minimum track and space,
-`fab.thermal_size`, and `fab.export` writes the files and says so (`drc.run` with fab `targets` does not say
+`fab.thermal_nominal`, `fab.starved_thermal` and, against the thermal relief minimums the fab publishes
+(`[thermal_relief]` of its profile: Eurocircuits; for the others, which publish none, their minimum track and
+space), `fab.thermal_size`, and `fab.export` writes the files and says so (`drc.run` with fab `targets` does not say
 each pad a second time under its `fab.` code). An error would refuse the export of every
 imported board whose designer meant its pads solid.
 
