@@ -1043,7 +1043,11 @@ fn comparison_ems_run() {
         }
         ("series_r" | "series_c", Ok(ts)) => {
             let worst = part_accuracy(&ts, (case == "series_c").then_some(1e-12));
-            println!("|S21| against circuit theory, 0.5 to 4.5 GHz: within {worst:.4}");
+            println!(
+                "|S21| against circuit theory, 0.5 to 4.5 GHz: within {:.4} of the ideal, {:.4} of the part between \
+                 its lines",
+                worst[0], worst[1]
+            );
             for (f, s) in ts.freqs.iter().zip(&ts.data) {
                 println!("  {:.2} GHz: |S21| {:.4}, |S11| {:.4}", f / 1e9, c(&s[2]).abs(), c(&s[0]).abs());
             }
@@ -1248,17 +1252,53 @@ fn line_accuracy(ts: &cadlab::touchstone::Touchstone, msl: bool) -> ([f64; 4], V
     ([worst, 100.0 * (sq / n).sqrt(), 100.0 * mean / n, 100.0 * z_worst], rows)
 }
 
-/// A series part's |S21| against circuit theory, 2 Z₀ / (2 Z₀ + Z), from 0.5 to 4.5 GHz: the
-/// largest difference.
-fn part_accuracy(ts: &cadlab::touchstone::Touchstone, cap: Option<f64>) -> f64 {
-    let mut worst = 0.0f64;
+/// A series part's |S21| from 0.5 to 4.5 GHz against circuit theory, twice: the largest
+/// difference from the ideal, 2 Z₀ / (2 Z₀ + Z) (what the oracle test holds both solvers to), and
+/// from the part between the lines it sits on. The ideal takes the board's lines for 50 Ω; the
+/// 1 mm strip on 0.5 mm of εr 4 is the 2D field solver's 50.8 Ω, and a 50 Ω part between 5.15 mm
+/// of it on each side (from a port's reference plane, the middle of its 3 mm, to the pad's edge
+/// at the gap) reads up to 0.004 above the ideal at 4.5 GHz, which is as much as the solvers
+/// differ by. The second reference is that cascade, line, part, line, in 50 Ω: circuit theory on
+/// the field solver's Z₀ and εeff, no FDTD in it.
+fn part_accuracy(ts: &cadlab::touchstone::Touchstone, cap: Option<f64>) -> [f64; 2] {
+    use cadlab::electrical::fieldsolver::{Accuracy, Structure};
+    let strip = Structure {
+        model: cadlab::electrical::Model::Microstrip,
+        h: 0.5,
+        er: 4.0,
+        h2: 0.0,
+        er2: 4.0,
+        t: 0.0,
+        etch: 0.0,
+        broadside: None,
+        coplanar_gap: None,
+        mask: None,
+    };
+    let line = strip.line(1.0, Accuracy::default()).unwrap();
+    let (zl, length) = (C64::new(line.z0, 0.0), 5.15e-3);
+    let k = |x: f64| C64::new(x, 0.0);
+    let mut worst = [0.0f64; 2];
     for (f, s) in ts.freqs.iter().zip(&ts.data).filter(|(f, _)| (0.5e9..=4.5e9).contains(*f)) {
         let z = match cap {
-            None => C64::new(50.0, 0.0),
+            None => k(50.0),
             Some(cap) => C64::new(0.0, -1.0 / (2.0 * std::f64::consts::PI * f * cap)),
         };
-        let ideal = (C64::new(100.0, 0.0) / (C64::new(100.0, 0.0) + z)).abs();
-        worst = worst.max((c(&s[2]).abs() - ideal).abs());
+        let got = c(&s[2]).abs();
+        let ideal = (k(100.0) / (k(100.0) + z)).abs();
+        // ABCD of line, series Z, line: [[c, j Zl s], [j s / Zl, c]] on each side.
+        let theta = 2.0 * std::f64::consts::PI * f * line.er_eff.sqrt() / cadlab::openems::C0 * length;
+        let (cs, js) = (k(theta.cos()), C64::new(0.0, theta.sin()));
+        let side = [[cs, js * zl], [js / zl, cs]];
+        let mul = |a: [[C64; 2]; 2], b: [[C64; 2]; 2]| {
+            [
+                [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
+                [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]],
+            ]
+        };
+        let m = mul(mul(side, [[k(1.0), z], [k(0.0), k(1.0)]]), side);
+        let on_lines = (k(2.0) / (m[0][0] + m[0][1] / k(50.0) + m[1][0] * k(50.0) + m[1][1])).abs();
+        worst[0] = worst[0].max((got - ideal).abs());
+        worst[1] = worst[1].max((got - on_lines).abs());
     }
     worst
 }
@@ -1462,11 +1502,19 @@ fn solver_comparison() {
             "series_r" | "series_c" => {
                 let cap = (case == "series_c").then_some(1e-12);
                 let (a, b) = (part_accuracy(&e, cap), o.as_ref().map(|o| part_accuracy(o, cap)));
-                acc += &format!(
-                    "| {case} | \\|S21\\|, largest difference, 0.5 to 4.5 GHz (circuit theory) | {a:.4} | {} | {} |\n",
-                    cell(b, 4),
-                    nearer(a, b)
-                );
+                let references = [
+                    "circuit theory, the part between ideal 50 Ω lines",
+                    "circuit theory, the part between its lines as the 2D field solver has them",
+                ];
+                for (i, reference) in references.into_iter().enumerate() {
+                    let theirs = b.map(|b| b[i]);
+                    acc += &format!(
+                        "| {case} | \\|S21\\|, largest difference, 0.5 to 4.5 GHz ({reference}) | {:.4} | {} | {} |\n",
+                        a[i],
+                        cell(theirs, 4),
+                        nearer(a[i], theirs)
+                    );
+                }
             }
             _ => {
                 if let Some(o) = &o {
