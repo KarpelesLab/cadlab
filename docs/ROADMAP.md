@@ -320,9 +320,9 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       of 0.0.12 make some fifteen connections a run there and leave as many, which thirty-two nets and
       twenty-four rounds do not move), a second run that goes on from the first run's routes instead of one on a
       board where they are fixed, for the pads that cadlab's fill finds cut off a pour (corne-cherry again), the
-      D+ of a USB receptacle whose pads have those of D- between them (nrfmicro, corne-cherry), whatever closes the way between the
-      halves of sweep-v2.2 to its ground, `raw` and `vcc` (not other nets' routes: a search that shares them
-      reaches nothing), a first pass that ends within the minute on six layers
+      D+ of a USB receptacle whose pads have those of D- between them (nrfmicro, corne-cherry), a net's pads that nothing
+      joins to its first joined among themselves (sweep-v2.2, two halves that only the schematic joins: on
+      guide's branch `forest-wip`, where it costs tinytapeout-demo and buspirate5-rev10 connections), a first pass that ends within the minute on six layers
       (glasgow-revD1, where the native router's own runs are 115 to 200 open), rule areas by kind and containment
       with a track width that is routed by, and fewer vias (D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96,
       "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still blocks it")

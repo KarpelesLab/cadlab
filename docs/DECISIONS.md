@@ -4263,12 +4263,16 @@ native router's worst run; against its five it is within what the native router 
 3. *The D+ of a USB receptacle* whose pads have those of D- between them (nrfmicro 2 of its 2 to 4, one or two
    on corne-cherry): the native router joins one pair on the other layer under the pads, with a via at the end
    of each pad. guide's negotiation found it in one build and not as released.
-4. *sweep-v2.2's three nets*, and not for want of a search that ends: its ground, `raw` and `vcc` have terminals
-   in both halves of the board, and a search of a negotiation for them, with every route shared at half its
-   length's price, ends after 380 000 to 650 000 nodes with nowhere left to go. What stands between the halves
-   for them is something that does not move, at the width they are routed at, where the native router gets one
-   more connection of each across. What it is was not found; the first pass ends after 12 s and the settling
-   goes on for 26 s more to no end.
+4. *A net with pads that nothing joins to its first* (sweep-v2.2, found after the release). The board is two
+   halves that only the schematic joins, through a row of holes that no track passes: three of its
+   connections, one each of the ground, `raw` and `vcc`, are open for the native router too, and are all it has
+   open. guide grows a net's tree from its first terminal alone, so a net with terminals in both halves joins
+   those of one half and leaves every pad of the other on its own: 6, 7 and 6 for 3. A partial route that begins
+   another tree from a terminal left out is on guide's branch `forest-wip`, not released: sweep-v2.2 has 3, 3
+   and 3 with it, cynthion 35 over three orders for 52 and glasgow-revD1 373 to 408 for 421, and
+   tinytapeout-demo 40 to 51 for 21 and buspirate5-rev10 6 or 7 for 1, which is why. Kept to routes that are
+   not stubs and to eight pads left out, no board is worse (700 open on nine boards for 711; sweep-v2.2 15,
+   cynthion 44) and sweep-v2.2 is not level. What tinytapeout-demo loses by it is the next thing to find.
 5. *Six layers in a minute* (glasgow-revD1): its first pass does not end, and no negotiation is reached.
 6. *Rule areas with a routed track width*, and *vias* (twice the native router's on lumenpnp-mobo and
    tinytapeout-demo), D97's items, not touched.
