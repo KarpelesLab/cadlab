@@ -4263,8 +4263,12 @@ native router's worst run; against its five it is within what the native router 
 3. *The D+ of a USB receptacle* whose pads have those of D- between them (nrfmicro 2 of its 2 to 4, one or two
    on corne-cherry): the native router joins one pair on the other layer under the pads, with a via at the end
    of each pad. guide's negotiation found it in one build and not as released.
-4. *Searches on a wide board* (sweep-v2.2): its three long nets are routed last and spend the minute in searches
-   of 2 million nodes each; not in the searches across routes, which a limit showed.
+4. *sweep-v2.2's three nets*, and not for want of a search that ends: its ground, `raw` and `vcc` have terminals
+   in both halves of the board, and a search of a negotiation for them, with every route shared at half its
+   length's price, ends after 380 000 to 650 000 nodes with nowhere left to go. What stands between the halves
+   for them is something that does not move, at the width they are routed at, where the native router gets one
+   more connection of each across. What it is was not found; the first pass ends after 12 s and the settling
+   goes on for 26 s more to no end.
 5. *Six layers in a minute* (glasgow-revD1): its first pass does not end, and no negotiation is reached.
 6. *Rule areas with a routed track width*, and *vias* (twice the native router's on lumenpnp-mobo and
    tinytapeout-demo), D97's items, not touched.
