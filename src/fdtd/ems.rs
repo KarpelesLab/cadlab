@@ -22,7 +22,8 @@ use ems::csx::properties::{DebyeMaterial, DebyePole, LumpedElement, LumpedElemen
 use ems::csx::{ContinuousStructure, Primitive, Property};
 use ems::engine::surface::{Conductor, Roughness as EmsRoughness};
 use ems::{
-    Boundaries, Boundary, CompileOptions, CompiledModel, Cpml, EndCriteria, Fdtd, StepLimit, WarningCode, Waveform,
+    Boundaries, Boundary, CompileOptions, CompiledModel, Cpml, EndCriteria, Fdtd, Settle, StepLimit, WarningCode,
+    Waveform,
 };
 
 use super::{
@@ -252,11 +253,11 @@ fn cut_edges(sim: &ems::Simulation) -> usize {
 
 /// Sets the simulation up and checks it, without running it.
 pub(crate) fn plan(p: &Project, o: &Options) -> Result<Plan, Error> {
-    let Prepared { region, model, compile, subjects, ports, parts, mut diags, .. } = prepare(p, o)?;
+    let Prepared { region, model, compile, subjects, ports, parts, mut diags, freqs, .. } = prepare(p, o)?;
     // Compiling the model is what ems checks it with: its own warnings and timestep.
     let mut model = model;
     add_ports(&mut model, &region, &ports)?;
-    let sim = CompiledModel::new(&model, &settings(o, &region, 1), &compile)
+    let sim = CompiledModel::new(&model, &settings(o, &region, 1, freqs.first().copied()), &compile)
         .and_then(|c| c.simulation_driving(&[]))
         .map_err(solver_error)?;
     warnings(&sim.diagnostics(), &subjects, &mut diags);
@@ -338,21 +339,29 @@ fn threads(o: &Options, r: &Region) -> usize {
 }
 
 /// The solver settings of a region: the pulse, CPML of `pml_cells` on every face with its
-/// frequency shift α at f₀ (2π ε₀ f₀: at a tenth of that a line near the absorber read gain, D68),
-/// the end criterion, the step limit and the timestep: `courant` of the bound of the mesh's cells
+/// frequency shift α at f₀ (2π ε₀ f₀: at a tenth of that a line near the absorber read gain, D68)
+/// and ems's second-order convolution (its default from 0.0.18: the first-order one was a layer
+/// whose conductivity grew with the time step, D111),
+/// the end criterion (the energy's decay and then, with `settle`, ems's test that the probes'
+/// spectra at `lowest`, the lowest frequency of the result, have no more to come than a ten
+/// thousandth of the signals' size, for half as many steps again at most: `ems::Settle`, D111),
+/// the step limit and the timestep: `courant` of the bound of the mesh's cells
 /// (ems's `StepLimit::Cells`, D105 and D107: each cell with its own sizes, the permittivity of its
 /// edges, the walls and copper it lies against and the part of the edges it shares with its
 /// neighbours that leaves the largest of the cells' eigenvalues smallest, the cells conformal copper
 /// cuts among them; never less than `courant` of the Courant limit of the smallest cell sizes in
 /// vacuum, which it was until ems 0.0.15). On perfect copper that bound is the scheme's limit, so
 /// `courant` is the margin.
-fn settings(o: &Options, r: &Region, threads: usize) -> Fdtd {
+fn settings(o: &Options, r: &Region, threads: usize, lowest: Option<f64>) -> Fdtd {
     let f0 = r.f0 as f64;
     let pml = Cpml::cells(o.region.pml_cells as usize).alpha_max(2.0 * std::f64::consts::PI * EPS0 * f0);
+    let end = EndCriteria::energy_decay_db(-(o.region.end_criteria_db as f64))
+        .check_interval(32)
+        .settle(lowest.filter(|_| o.settle).map(Settle::at));
     Fdtd::new()
         .waveform(Waveform::gaussian(f0, r.fc as f64))
         .boundaries(Boundaries::all(Boundary::Pml(pml)))
-        .end_criteria(EndCriteria::energy_decay_db(-(o.region.end_criteria_db as f64)).check_interval(32))
+        .end_criteria(end)
         .max_timesteps(o.region.timesteps)
         .timestep_factor(o.courant)
         .step_limit(StepLimit::Cells)
@@ -412,7 +421,7 @@ fn spectrum(res: &ems::Results, name: &str, freqs: &[f64]) -> Result<Vec<C64>, E
 /// Simulates the region with ems and returns its S-parameters.
 pub(crate) fn sparams(p: &Project, o: &Options, hooks: &Hooks<'_>) -> Result<SParams, Error> {
     let Prepared { region: r, mut model, compile, subjects, ports: set, parts, freqs, mut diags } = prepare(p, o)?;
-    let fdtd = settings(o, &r, threads(o, &r));
+    let fdtd = settings(o, &r, threads(o, &r), freqs.first().copied());
     let np = set.ports.len();
     let excitation = Gaussian { f0: r.f0 as f64, fc: r.fc as f64 };
     let mut waves = Waves::new(np, freqs.len());

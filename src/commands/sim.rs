@@ -171,6 +171,10 @@ pub struct SParams {
     /// Worker threads (default: automatic); the result does not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<u32>,
+    /// After `end_criteria`, run on while the port signals still add to the lowest frequency, at
+    /// most half as many steps again (default true); false: the energy alone ends a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<bool>,
 }
 
 /// What a run will cost, from the plan.
@@ -237,7 +241,7 @@ pub struct Simulated {
     /// Mesh edges partly covered by diagonal or curved copper (conformal cells).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conformal_edges: usize,
-    /// The solver that ran (or would run) and its version: `ems 0.0.17`.
+    /// The solver that ran (or would run) and its version: `ems 0.0.18`.
     #[serde(default)]
     pub solver: String,
 }
@@ -381,6 +385,7 @@ impl Command for SParams {
             overrides: self.part_values.clone(),
             conformal: self.conformal.unwrap_or(true),
             threads: self.threads.unwrap_or(0) as usize,
+            settle: self.settle.unwrap_or(true),
             ..fdtd::Options::default()
         };
         let to_error = |e: fdtd::Error| {

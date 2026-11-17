@@ -1394,6 +1394,11 @@ fn magnitude_distance(a: &cadlab::touchstone::Touchstone, b: &cadlab::touchstone
     band.map(|(_, (x, y))| (c(&x[2]).abs() - c(&y[2]).abs()).abs()).fold(0.0, f64::max)
 }
 
+/// Most threads [`solver_comparison`] takes unasked: a hosted runner's count. A workstation's
+/// sixty-four are other people's, and neither solver gains past a few on these regions; more is
+/// for `CADLAB_CMP_THREADS` to ask.
+const CMP_MOST_THREADS: u32 = 4;
+
 /// The finer mesh asked for a case: `fine` is options per case name, or those of `via_same` alone.
 fn fine_of<'a>(fine: &'a Value, case: &str) -> Option<&'a Value> {
     let per_case = fine.as_object().is_some_and(|o| o.keys().all(|k| CMP_CASES.contains(&k.as_str())));
@@ -1405,7 +1410,7 @@ fn fine_of<'a>(fine: &'a Value, case: &str) -> Option<&'a Value> {
 /// line, circuit theory for the parts; the via has none, so the two are held to each other and,
 /// with `CADLAB_CMP_FINE`, to each solver's run on a finer mesh). Each run is a process of its
 /// own, one at a time, on a stated number of threads (`CADLAB_CMP_THREADS`, a list; default 1
-/// and the machine's count): ems through [`comparison_ems_run`], openEMS through the exported
+/// and the machine's count up to [`CMP_MOST_THREADS`]): ems through [`comparison_ems_run`], openEMS through the exported
 /// driver with `CADLAB_OPENEMS_THREADS`. `CADLAB_CMP_CASES` (a list) limits the cases;
 /// `CADLAB_CMP_FINE` is JSON options for a finer mesh of `via_same` (`{"max_cell": "0.4mm"}`), or
 /// such options per case (`{"via_same": {..}, "series_r": {..}}`), run by both solvers on the
@@ -1427,7 +1432,7 @@ fn solver_comparison() {
     let list = |k: &str| std::env::var(k).ok().map(|v| v.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
     let mut threads: Vec<u32> = match list("CADLAB_CMP_THREADS") {
         Some(l) => l.iter().map(|t| t.parse().expect("CADLAB_CMP_THREADS")).collect(),
-        None => vec![1, cpus],
+        None => vec![1, cpus.min(CMP_MOST_THREADS)],
     };
     threads.dedup();
     let cases: Vec<&str> = match list("CADLAB_CMP_CASES") {

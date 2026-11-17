@@ -50,7 +50,7 @@ const CELLS_ACROSS: f64 = 2.0;
 
 /// The solver of `sim.sparams`, as a result names it: the `ems` crate and the version this build
 /// depends on (`Cargo.toml` asks for exactly this one; a test holds the two together).
-pub const SOLVER: &str = "ems 0.0.17";
+pub const SOLVER: &str = "ems 0.0.18";
 
 /// A Gaussian-modulated pulse covering `f0 − fc .. f0 + fc` at −20 dB (a plain Gaussian, from
 /// DC, when `f0` is 0).
@@ -139,6 +139,10 @@ pub struct Options {
     pub conformal: bool,
     /// Worker threads (0: from the grid size and the machine). The result does not depend on it.
     pub threads: usize,
+    /// After the energy criterion, go on while the ports' signals still have something to add at
+    /// the lowest frequency of the result (at most half as many steps again); false: the energy
+    /// criterion alone ends a run.
+    pub settle: bool,
 }
 
 impl Default for Options {
@@ -156,6 +160,7 @@ impl Default for Options {
             overrides: Overrides::new(),
             conformal: true,
             threads: 0,
+            settle: true,
         }
     }
 }

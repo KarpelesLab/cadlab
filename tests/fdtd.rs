@@ -268,6 +268,7 @@ fn sim_sparams_microstrip_validation() {
     let l = 0.060;
     // Every frequency is printed before anything fails.
     let mut fails = Vec::new();
+    let (mut worst, mut sq, mut n) = (0.0f64, 0.0, 0);
     for (f, sm) in ts.freqs.iter().zip(&ts.data) {
         let (z0, gl) = line_from_s(sm, 50.0);
         let p = loss::at(&m, *f, &cond);
@@ -306,8 +307,17 @@ fn sim_sparams_microstrip_validation() {
             if (s21_db - want_db).abs() >= tol * want_db.abs() {
                 fails.push(format!("{f}: |S21| {s21_db} vs {want_db} dB"));
             }
+            worst = worst.max((s21_db - want_db).abs());
+            sq += (s21_db / want_db - 1.0).powi(2);
+            n += 1;
         }
     }
+    println!(
+        "worst |S21| {worst:.4} dB from D52, RMS {:.2} %, timestep {} s, {} steps",
+        100.0 * (sq / n as f64).sqrt(),
+        o["output"]["timestep"],
+        o["output"]["runs"][0]["steps"]
+    );
     assert!(fails.is_empty(), "{fails:#?}");
 }
 
