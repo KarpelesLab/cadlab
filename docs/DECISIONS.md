@@ -5138,7 +5138,9 @@ one outside the pad is now left out. `Joint::possible` counts the other directio
 by its projects, the fill alone: pads short of spokes 143 to 116, by necks 0/1/2/3/4+ 8/348/378/290/380 to
 2/324/284/239/555. KiCad's fill does not do this (it drops a spoke that does not reach): the oracle
 `kicad_agrees_on_starved_thermals` has the case (`turned3`), asserted on the exported fill, where KiCad must count
-the diagonal spokes, and printed for KiCad's own refill.
+the diagonal spokes, and printed for KiCad's own refill. KiCad 10.0.8 in CI: no finding on the exported fill
+(it counts the spokes cadlab placed), and on its own refill `starved_thermal` for the same pad ("zone min spoke
+count 2; actual 1"): the pad cadlab joins by two spokes or more is one KiCad's fill leaves on one.
 *Goldens:* one golden file of copper moved, `tests/golden/exchange/tiny-ipc2581.xml`: a round pad of the tiny
 board whose spokes on the diagonals do not all survive has one along +y now, 0.25 mm wide, a cutout more in the
 plane's outline. The snapshot of the command list has `zone.pad`. The Gerber cross-check against KiCad
@@ -5241,7 +5243,6 @@ for it was not looked up, so nothing was implemented); the 3D view still draws n
 not keep room for spokes; a pad's own
 setting on a footprint that comes first in an import into an empty project becomes the footprint's (the other
 placements cannot unset it and get a variant); the fab pages were read through a text relay by a research run,
-not in a browser; whether KiCad counts cadlab's diagonal spokes and the corpus comparison with these rules are
-for CI to say (below).
+not in a browser.
 
 ## Open questions
