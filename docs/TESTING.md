@@ -402,10 +402,10 @@ export CADLAB_ORACLE_FREEROUTING=$HOME/freerouting-2.5.0.jar CADLAB_ORACLE_JAVA=
 cargo build --release --example route_bench
 # 60 s, as the tables of the native router and guide; CADLAB_BENCH_FR_PLANES=1 writes the pours as planes
 CADLAB_BENCH_ROUTER=freerouting CADLAB_BENCH_FR_THREADS=4 target/release/examples/route_bench --corpus
-# 30 minutes: CADLAB_BENCH_BUDGET_MS=1800000 (CADLAB_BENCH_FR_TIMEOUT=none for no limit of its own)
+# 30 minutes: CADLAB_BENCH_BUDGET_MS=1800000 (CADLAB_BENCH_FR_TIMEOUT=none sets no limit: freerouting's own is 12 h)
 ```
 
-**In CI** (job `freerouting`, informative, about an hour, D102): Temurin 25 from `actions/setup-java`,
+**In CI** (job `freerouting`, informative, 46 minutes, D102): Temurin 25 from `actions/setup-java`,
 `freerouting-2.5.0.jar` from the project's GitHub release with its SHA-256 checked (kept in the job's cache),
 then `freerouting_oracle` (the log must show both boards routed), freerouting at 60 s on the corpus with both
 DSN variants, and the native router and guide at the same 60 s on the same runner. The four tables are in the job

@@ -29,8 +29,9 @@
 //! `route.import_ses` does and counts the result the same way: the open connections are those
 //! cadlab's DRC finds with the pours filled again, the DRC errors are split into those of rules
 //! the DSN carries and those it has no place for. The budget is freerouting's own time limit
-//! (`--router.job_timeout`; `CADLAB_BENCH_FR_TIMEOUT=none` for no limit), `CADLAB_BENCH_FR_THREADS`
-//! the processors its JVM sees and its `-mt` (default 1), `CADLAB_BENCH_FR_PASSES` its `-mp`
+//! (`--router.job_timeout`; `CADLAB_BENCH_FR_TIMEOUT=none` sets none, and freerouting's own is
+//! 12 hours), `CADLAB_BENCH_FR_THREADS` the processors its JVM sees and its `-mt` (default 1),
+//! `CADLAB_BENCH_FR_PASSES` its `-mp`
 //! (default: its own), `CADLAB_BENCH_FR_PLANES=1` writes the pours as planes
 //! (`export.dsn {planes: true}`), `CADLAB_BENCH_FR_ARGS` adds arguments and `CADLAB_BENCH_KEEP=<dir>`
 //! keeps the DSN, the session, freerouting's log and its result manifest per board
@@ -310,7 +311,7 @@ struct Freerouting {
     /// `-mp`, the most routing passes (`CADLAB_BENCH_FR_PASSES`; freerouting's own default without).
     passes: Option<u32>,
     /// freerouting's own time limit, `--router.job_timeout` (the budget of `CADLAB_BENCH_BUDGET_MS`;
-    /// `CADLAB_BENCH_FR_TIMEOUT=none` leaves it out, so freerouting runs to its own end).
+    /// `CADLAB_BENCH_FR_TIMEOUT=none` leaves it out: freerouting then has its own default, 12 hours).
     timeout: Option<Duration>,
     /// The process is killed after this long (`CADLAB_BENCH_FR_KILL_S`, default 4 h): a run that
     /// does not end has no session and no result.

@@ -352,8 +352,8 @@ jobs:
     # Informative: the table of docs/ROUTER.md, "freerouting on the corpus", made again on the
     # runner (DECISIONS D102). freerouting is GPL: its released jar is run as a separate process
     # and nothing of it is in the repository or in an uploaded artifact. Time budgets, so the
-    # numbers are the runner's and differ from run to run; about an hour (four tables of twelve
-    # boards at up to 60 s each, the plane variant running over its limit).
+    # numbers are the runner's and differ from run to run; 46 minutes as measured (four tables of
+    # twelve boards at up to 60 s each, the plane variant running over its limit).
     continue-on-error: true
     timeout-minutes: 150
     env:

@@ -3910,4 +3910,81 @@ crate (it is of the release's source, before the other changes of 0.0.10, which 
 than 60 s and 40 million nodes; cadlab's oracles; KiCad's DRC on a board guide routed.
 
 
+### D102. freerouting on the open-source corpus: 2.5.0 run on the exported DSN and counted by cadlab's DRC beside the native router and guide; pours as planes in `export.dsn`; a CI job for the table; the corpus cache path (2026-11-17)
+M6's exit asks for equal or better completion than freerouting, and D84 recorded it as met on the generated boards
+only: freerouting had never been run on the twelve corpus boards. It has now, and the numbers are in ROUTER.md
+("freerouting on the corpus"). freerouting is GPL-3.0: its released jar was run as a separate process, its
+command-line and settings documentation was read (`docs/command_line_arguments.md` and `docs/settings.md` of its
+repository at `v2.5.0`), and no source of it was read, downloaded or ported (D7).
+- **Where the measurement lives: the corpus mode of `route_bench`, not a test.** `CADLAB_BENCH_ROUTER=freerouting`
+  takes the place of the native router and guide in the one loop that imports each board, removes its routing and
+  counts the result, so open connections (`drc.unrouted` with the pours filled again), DRC errors, vias, track
+  length and wall time come from the same lines for all three. A test would have to assert something, and a
+  routing result under a time limit is not a thing to assert; what must not happen is a board silently missing
+  from the table, so the run exits with an error when freerouting writes no session for a board or the session
+  cannot be applied.
+- **freerouting 2.5.0, pinned by version and SHA-256** (`f6f51bb0…5de3c7`, the jar of the GitHub release). It
+  needs Java 25, which the jar says by refusing to load on 21; `CADLAB_ORACLE_JAVA` names the `java` to use
+  (`JAVA_HOME` and the `PATH` after it), here and in the two older places that start it. 2.4.1, which the
+  generated boards' table has, is not run again; the same boards with 2.5.0 are a second table.
+- **Its settings are its defaults, with one limit: time.** Fanout, routing and optimizer stages on, no limit of
+  passes, `--router.job_timeout` as the budget. A fixed `-mp` would have been a choice of ours about how long it
+  may try; its own limit lets it use the time as it sees fit and still write a session. The fanout stage costs it
+  the minute on the larger boards, and turning it off was tried on one board and was worse. `-da` (no usage data),
+  a data directory of the run's own (the developer's `freerouting.json` is not read), `-XX:ActiveProcessorCount`
+  and `-mt` to the thread count allowed (1 here, 4 in CI; its routing passes are single-threaded by its own log).
+- **Two budgets, so that it is neither cut short nor given an hour against a minute unremarked.** 60 s, the
+  budget every corpus table since D88 has; and 30 minutes, with 2 hours on three boards. The native router was
+  given the same 30 minutes on the boards its 60 s cut.
+- **`export.dsn {planes: true}`** writes each pour that has a net as a Specctra `plane` (its outline on each of its
+  layers). Without it the comparison had a hole anyone would point at: a router that is not told of the ground
+  pour must wire the ground. The default stays without planes, and the measurement says why: freerouting counts a
+  pad under a plane's outline as connected, cadlab's fill does not always reach it, and on these boards the result
+  with planes has more connections open by cadlab's count on nine of twelve boards and fewer on one. Teardrop zones are written as
+  planes like any pour; leaving them out is not done (a zone is a zone to the model).
+- **DRC errors are split by whether the DSN held the rule.** freerouting cannot be held to a minimum track width,
+  a hole or edge clearance, a pad's own clearance, a custom rule or a copper drawing that no DSN construct
+  carries, and it cannot be excused for them either: both counts are in every cell. A clearance error is "not
+  carried" only when its gap satisfies the clearance the DSN gave the two nets.
+- **`tests/specctra.rs` runs with 2.5.0 and allows `drc.track_width`.** 2.5.0 lays two tracks of the STM32 board
+  at 0.125 mm where the board's minimum is 0.15 mm. The test's purpose is the geometry and units of the exchange,
+  and the DSN has no minimum to give; every other error still fails it, and unrouted connections too.
+- **CI job `freerouting`,** informative (`continue-on-error`, 150 minutes at most, 46 as measured): Temurin 25,
+  the jar downloaded with its checksum checked and cached by it, `freerouting_oracle` (no other job has Java; the
+  log must show both boards routed), then the four 60 s tables on the runner. Nothing of freerouting is in the
+  repository or in the artifact, which has the tables and logs. The 30-minute runs are not in CI: twelve boards
+  at 30 minutes are six hours of runner for a table that does not change the 60 s one.
+- **The corpus cache path.** `corpus` and `corpus-route` cached `${{ github.workspace }}/../cadlab-corpus`;
+  `actions/cache` refuses a path with `..` and saved nothing (D99 noted it and left it). The three jobs that read
+  the corpus now use `${{ runner.temp }}/cadlab-corpus` with one key. Shown on the branch `ci/freerouting-corpus`:
+  the first run (https://github.com/KarpelesLab/cadlab/actions/runs/44003908234) has "Cache not found" and
+  "Cache saved with key: corpus-de1dc1aa…", the second (https://github.com/KarpelesLab/cadlab/actions/runs/44010687386)
+  "Cache restored" and "corpus cache hit: true" in all three jobs, every project "present" without a fetch. The
+  `openems` job's path is left as it is (another change's).
+**Result** (ROUTER.md has the tables). At 60 s on this machine freerouting leaves 1647 connections open on the
+twelve boards, the native router 283 and guide 0.0.9 273 (CI runner: 1702, 309, 318); it is level on the three
+small boards and behind on nine. With 30 minutes it leaves 1187, and its own count falls for a few routing
+passes at most: 2 hours on cynthion and glasgow-revC3 end where 30 minutes did (189 and 132 for 181 and 134).
+glasgow-revD1, whose 30 minutes ended in the fanout stage with 557 open, has 309 after 2 hours. The native router with 30 minutes on one thread leaves 1, 24, 30, 6 and 43 on the five boards
+its 60 s cut. freerouting is ahead in one place in completion, lumenpnp-mobo given time (0 open after 5.5 minutes
+for the native router's 10 at 60 s and 1 at 30 minutes; guide has 0 in 32 s), and in vias against guide (345 for
+713 there). Its routes break rules the DSN does not carry about 1200 times at 60 s (1061 tracks under the minimum
+width) and rules it does carry 14 times (13 tracks in nrfmicro's outline notch, a via on a ring pad).
+*Why it matters for the roadmap:* the M6 exit is met at 60 s on the whole corpus and, against freerouting given
+30 minutes, on eleven boards; lumenpnp-mobo is the board that keeps the line from being closed without a
+footnote, and the roadmap has it as an item.
+**Verification** (Linux x86-64, at most four threads, shared machine). `cargo fmt --all --check`; `cargo clippy
+--all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`;
+`cargo test --test specctra` (4 tests; `freerouting_oracle` with `CADLAB_ORACLES=1` and the 2.5.0 jar: both boards
+routed at the first attempt, 154 s). The full `cargo test --all-features` was not run here; CI ran it on the
+branch: all twelve jobs of the second run above pass (tests on Linux, Windows and macOS, MSRV 1.95, cargo-deny,
+the oracle jobs), and all twelve of a third run on the commit before this text
+(https://github.com/KarpelesLab/cadlab/actions/runs/44031677107; its four sums are 303, 328, 1689 and 2935);
+after it only comments in `route_bench.rs` and `ci.yml` and the documents changed, and no run was made of that.
+*Not established:* the spread between runs of freerouting (one run per cell; two loads and three CI runs are all
+there is); freerouting with more processors than 4; other settings of it than fanout off (one board) and
+neck-down off; whether the via on glasgow-revD1's ring pad is its reading of the slit polygon; a cache hit on
+`master` (caches are per branch: the first run after the merge saves it).
+
+
 ## Open questions

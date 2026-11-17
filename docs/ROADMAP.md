@@ -325,13 +325,29 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       still blocks it")
 
 **Exit:** equal or better completion than freerouting on the benchmark corpus, with comparable runtime.
-*Measured 2026-11-13 (D84):* met on the generated benchmark suite, where all seven comparable boards route to
-100 % with zero DRC errors (freerouting 2.4.1 as recorded in ROUTER.md: 95.0–100 % in 3.7–154 s, cadlab 100 % in 0.02–8.3 s;
-not run again here; cadlab's side is checked against `tests/golden/bench/route.json`). Not shown on the open-source
-corpus: freerouting has never been run on those boards, and cadlab's own re-route at a 200 M work budget leaves
-connections open on eight of the twelve boards (seed 1: buspirate5-rev10 2 of 538, lumenpnp-mobo 8 of 521,
-sweep-v2.2 3 of 49, corne-cherry 2 of 443, glasgow-revC3 35 of 744, glasgow-revD1 122 of 1703, cynthion 30 of 722,
-tinytapeout-demo 25 of 403; zero DRC errors), so the line stays open until that comparison exists.
+*Measured 2026-11-17 (D102; ROUTER.md, "freerouting on the corpus"), freerouting 2.5.0 run on both sets and counted by
+cadlab's DRC:*
+- *Generated benchmark suite: met.* The native router routes all seven comparable boards to 100 % with zero DRC
+  errors in 0.2 to 12 s; freerouting 2.5.0 routes six of them to 100 % and bga144-4l to 95.7 %, in 7 to 470 s (2.4.1,
+  as recorded since M6: three of seven). freerouting has fewer vias on five of the seven.
+- *Open-source corpus, at 60 s: met on all twelve boards.* freerouting leaves 1647 connections open (1702 on a CI
+  runner with four processors), the native router 283 (309) and guide 273 (318). freerouting has as few open as
+  the native router on the three small boards it completes or misses by one, and more on the nine others.
+- *Open-source corpus, freerouting given 30 minutes (2 hours on three boards): met on eleven boards, not on
+  lumenpnp-mobo.* freerouting has 1187 open (945 with the 2-hour results), and on every board but one at least as
+  many as the native router's 60 s run (as few on two small boards). The one is lumenpnp-mobo, where it closes
+  every connection after 5.5 minutes and the native router leaves 10 at 60 s and 1 with the same 30 minutes
+  (guide closes all of them there in 32 s). More time helps freerouting until its first routing passes are done
+  (glasgow-revD1: 557 open at 30 minutes, still in its fanout, 309 after 2 hours) and not after: its count falls
+  for a few passes at most and then moves around its best.
+- *What the comparison does not show:* freerouting routes from a DSN, which has no place for pours as fills, a
+  minimum track width, hole and edge clearances or the rules of single pads and areas; its results break those
+  about 1200 times at 60 s (counted apart), and 14 times the rules the DSN did carry. One run per cell.
+- [x] freerouting run on the open-source corpus under stated settings, counted by cadlab's DRC, regenerable
+      (`route_bench --corpus` with `CADLAB_BENCH_ROUTER=freerouting`, CI job `freerouting`; DECISIONS D102)
+- [ ] lumenpnp-mobo complete: the native router leaves 1 connection with 30 minutes and 10 at 60 s where
+      freerouting, given 5.5 minutes, and guide, in 32 s, leave none (D102; with 30 minutes the one left is a
+      ground pad of U5 with no way out between its neighbours, the kind of D84's "fine-pitch pad with no exit")
 
 ## M7 — KiCad import and more fabs (M)
 

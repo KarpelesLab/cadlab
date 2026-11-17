@@ -2200,3 +2200,237 @@ than max(2, 5 %) extra vias or more than 2 % extra track length, and on a large 
 recorded with `CADLAB_BLESS=1` (in release with `RAYON_NUM_THREADS=1`, like the CI job). The `bench` CI job runs
 it and uploads `route.json`/`route.md` reports; the default `cargo test` checks that the baseline lists exactly
 these boards and that `attiny-2l` routes exactly as recorded.
+
+## freerouting on the corpus (D102)
+
+The twelve boards of the open-source corpus routed by freerouting, counted by cadlab, beside the native router and
+guide 0.0.9 (measured 2026-11-17). freerouting is GPL-3.0 and is run as a separate process on a released jar,
+nothing else (the licensing rule at the top of this file).
+
+**How it is run** (`examples/route_bench.rs`, corpus mode with `CADLAB_BENCH_ROUTER=freerouting`). Each board is
+imported as for the native router and guide (circuit built from the board, the project's rules), its tracks and
+vias are removed, and the design `export.dsn` writes is given to freerouting; the session it writes is applied as
+`route.import_ses` applies it, the pours are filled again, and the result is counted by the code that counts the
+other two: open connections are `drc.unrouted` of cadlab's DRC, DRC errors are the errors the routed board has and
+the stripped board had not, vias and track length are those of the board, time is the wall time of the process
+(JVM start, reading the design and writing the session included, 2 to 4 s of it).
+
+- *freerouting 2.5.0*, `freerouting-2.5.0.jar` from the project's GitHub release `v2.5.0` (2026-10-05), SHA-256
+  `f6f51bb02245e8e717f9359bd260cc9c5c0b1bc0acc8b7cb2cd5b8ffeb5de3c7`. It is built for Java 25 (class file version
+  69: Java 21 refuses to load it); run here on Temurin 25.0.4, in CI on Temurin 25.0.5. The tables above this
+  section have 2.4.1.
+- *Command:* `java -XX:ActiveProcessorCount=<n> -Djava.awt.headless=true -jar freerouting-2.5.0.jar -de board.dsn
+  -do board.ses -mt <n> --gui.enabled=false -da --user_data_path=<dir> --router.result_json=<dir>/result.json
+  --router.job_timeout=<hh:mm:ss>`, with the JVM's home and temporary directory in the run's own directory, so no
+  settings file of the user's is read; `-da` sends no usage data.
+- *Settings:* its own defaults, read back from the settings it records in `result.json`: its fanout stage on (20
+  passes at most), its routing stage with no limit of passes (`-mp` is not given), its optimizer on (100 passes at
+  most, stopping below 2.5 % improvement), neck-down on, vias in pads off (the DSN says `via_at_smd off`, as the
+  other two routers have it). The one thing set is the time: `--router.job_timeout`, freerouting's own limit for
+  the three stages together. It writes its session when the limit ends a stage, so a cut run has a result.
+- *Threads:* `<n>` is 1 here (a shared machine, four threads for everything) and 4 in CI. freerouting's log says
+  of every run "autorouter pass is single-threaded": `-mt` sizes the pool of its optimizer, which runs only on a
+  board it has routed completely.
+- *Two time budgets.* 60 s, the budget of the tables of D88 to D97 and of a command's default; and 30 minutes, with
+  2 hours on three of the boards that cut (cynthion and glasgow-revC3, which had made two routing passes, and
+  glasgow-revD1, which had not left its fanout stage), so that what it does with time is seen. A run that ends
+  on its own before the limit is marked by its time; *cut* marks one the limit ended.
+- *Two designs.* The DSN as `export.dsn` writes it by default, without pours, and the DSN with the pours as planes
+  (`planes`, above), since a router that is not told of a ground pour has to wire the ground.
+
+**What freerouting did not see.** A DSN has places for the outline, keep-outs, pads, nets, and a width and a
+clearance per net class. The rest of what cadlab's DRC checks is not in it, and the count keeps the two apart: an
+error of the routed board is *carried* when the DSN held the rule it breaks, *not carried* when it did not
+(`not_in_dsn` in the example).
+
+| not in the DSN | on these boards | what the count does with it |
+|---|---|---|
+| pours (without `planes`) | 1 to 925 zones on eleven boards (nrfmicro has none) | freerouting wires those nets pad to pad: 655 connections on buspirate5-rev10 where cadlab's count, with the pours filled, has 473 to make. What it leaves open is counted on the board with its pours filled again, so a pad the pour reaches is connected whether freerouting wired it or not |
+| pours as fills (with `planes`) | the outline of each pour, without priorities, clearances, thermal reliefs or islands | freerouting takes a pad of the net as connected where the plane's outline covers it; cadlab's fill then reaches some of them and not others. Both counts are given |
+| the minimum track width | 0.09 to 0.2 mm | freerouting lays track narrower than the class width it is given, most of it at three quarters of it (0.1124 mm for 0.15, 0.1874 for 0.25), and not only as neck-downs at pads: with `--router.automatic_neckdown=false` it lays 723 such tracks for 846. `drc.track_width`, not carried |
+| copper to a drilled hole, hole to hole | 0.16 to 0.25 mm, 0.2 to 0.254 mm | `drc.hole_clearance`, `drc.hole_to_hole`, not carried |
+| copper to the board edge | 0.025 to 0.5 mm | freerouting's settings record 0.25 mm of its own; `drc.copper_to_edge` where the board asks for more, not carried |
+| clearances of single pads and footprints | 3 to 133 pads on eight boards | a clearance error whose gap satisfies the class clearance the DSN gave is not carried |
+| custom rules | tinytapeout-demo: 10 (9 with a clearance, 2 with a track width, 1 forbidding items in an area) | as above; the rule areas that forbid nothing by themselves are left out of the DSN (22 on five boards) |
+| copper drawings | 18 of the boards and 11 of footprints, on five boards | shorts and clearance errors with a drawing are not carried |
+| a keep-out's exception for some nets, differential pairs, length rules | none on these boards | |
+
+Carried, and so freerouting's own: the outline and cutouts, keep-outs for tracks and vias, every pad's copper, the
+nets, each class's width, clearance and via.
+
+**At 60 s, this machine** (64-core Linux x86-64, shared, load 6 to 9; the native router alone on three threads,
+seed 1, as in D88 to D97; guide 0.0.9 with no seed and the two freerouting designs each on one thread, the three
+at a time). A cell is: open connections; vias, track length, wall time. For freerouting: open connections
+(freerouting's own count); DRC errors carried + not carried; vias, track length, wall time. *cut*: the budget or
+freerouting's limit ended the run. The native router and guide have no DRC error other than unrouted on any board.
+
+| board | layers | native, 3 threads | guide 0.0.9 | freerouting | freerouting, pours as planes |
+|---|---|---|---|---|---|
+| buspirate-flash-sop | 2 | 0; 4, 460.2 mm, 0.4 s | 0; 7, 496.9 mm, 0.8 s | 0 (0); 0 + 1; 4, 607.1 mm, 7.2 s | 1 (0); 0 + 1; 4, 533.7 mm, 3.7 s |
+| buspirate-rs232 | 2 | 0; 10, 280.9 mm, 0.5 s | 0; 6, 356.2 mm, 0.7 s | 1 (1); 0 + 0; 7, 476.8 mm, 22.9 s | 1 (0); 0 + 0; 5, 370.1 mm, 7.5 s |
+| lumenpnp-ringlight | 2 | 0; 2, 180.4 mm, 0.4 s | 0; 1, 209.6 mm, 0.4 s | 0 (0); 0 + 11; 5, 331.5 mm, 18.7 s | 8 (0); 0 + 6; 0, 198.4 mm, 31.1 s |
+| nrfmicro | 2 | 0; 46, 453.6 mm, 11.6 s | 4; 62, 499.4 mm, 27.7 s | 4 (4); 13 + 32; 26, 512.9 mm, 21.2 s | 4 (4); 13 + 32; 26, 512.9 mm, 20.7 s |
+| sweep-v2.2 | 2 | 3; 21, 2160.9 mm, 53.2 s | 6; 42, 2231.0 mm, 56.0 s cut | 13 (18); 0 + 72; 11, 2175.4 mm, 52.6 s | 7 (4); 0 + 90; 15, 2233.9 mm, 35.3 s |
+| corne-cherry | 2 | 1; 483, 8275.6 mm, 30.7 s | 36; 825, 8435.7 mm, 46.7 s cut | 143 (176); 0 + 372; 291, 4431.4 mm, 64.1 s cut | 314 (814); 0 + 222; 300, 1211.3 mm, 72.5 s cut |
+| tinytapeout-demo | 4 | 8; 273, 4910.1 mm, 60.0 s | 9; 605, 5799.4 mm, 48.8 s cut | 206 (260); 0 + 24; 130, 1416.0 mm, 62.9 s cut | 340 (218); 1 + 21; 204, 939.2 mm, 78.8 s cut |
+| buspirate5-rev10 | 4 | 2; 313, 3053.2 mm, 28.6 s | 2; 501, 3815.8 mm, 38.3 s | 162 (210); 0 + 18; 236, 1891.2 mm, 62.8 s cut | 259 (189); 0 + 14; 263, 1676.0 mm, 74.6 s cut |
+| lumenpnp-mobo | 4 | 10; 347, 5423.7 mm, 64.1 s cut | 0; 713, 6544.4 mm, 32.5 s | 22 (26); 0 + 2; 357, 7358.0 mm, 66.0 s cut | 202 (159); 0 + 6; 327, 2058.3 mm, 94.8 s cut |
+| cynthion | 4 | 27; 478, 3176.5 mm, 61.4 s cut | 19; 649, 4004.4 mm, 57.8 s cut | 226 (336); 0 + 463; 325, 2256.3 mm, 64.2 s cut | 350 (277); 0 + 366; 327, 1952.7 mm, 99.4 s cut |
+| glasgow-revC3 | 4 | 35; 415, 3436.4 mm, 60.6 s cut | 35; 543, 3920.3 mm, 57.9 s cut | 243 (354); 0 + 187; 244, 1899.7 mm, 63.4 s cut | 278 (278); 0 + 124; 178, 1491.2 mm, 68.6 s cut |
+| glasgow-revD1 | 6 | 197; 1029, 8897.0 mm, 62.3 s cut | 162; 1085, 7953.6 mm, 58.0 s cut | 627 (691); 1 + 6; 487, 3326.9 mm, 66.2 s cut | 1032 (913); 0 + 4; 384, 2389.8 mm, 98.1 s cut |
+| all twelve, open | | 283 | 273 | 1647 | 2796 |
+| the eleven without glasgow-revD1, open | | 86 | 111 | 1020 | 1764 |
+
+The native router's own count of failed connections, which is the column D88 to D97 give for it, is 294 here as in
+D97 (15 on lumenpnp-mobo where the DRC finds 10 open, 3 on corne-cherry for 1); this table has the DRC's count for
+all three. guide's row is D97's first order to the connection (273).
+
+**Given time** (the same machine, load 60 to 100 from other work until the last hour; one thread each). The native
+router's column is not the 60 s run: it has the same 30 minutes as a budget, on one thread, on the five boards its
+60 s cut, and ended on its own on each of them, at the time given.
+
+| board | layers | freerouting, 30 min | freerouting, 30 min, pours as planes | freerouting, 2 h | native, 30 min, 1 thread |
+|---|---|---|---|---|---|
+| buspirate-flash-sop | 2 | 0 (0); 0 + 1; 4, 607.1 mm, 20.1 s | 1 (0); 0 + 1; 4, 533.7 mm, 6.0 s |  |  |
+| buspirate-rs232 | 2 | 1 (1); 0 + 0; 7, 476.8 mm, 59.0 s | 1 (0); 0 + 0; 5, 370.1 mm, 13.2 s |  |  |
+| lumenpnp-ringlight | 2 | 0 (0); 0 + 11; 5, 331.5 mm, 40.4 s | 8 (0); 0 + 6; 0, 198.4 mm, 51.8 s |  |  |
+| nrfmicro | 2 | 4 (4); 13 + 32; 26, 512.9 mm, 57.9 s | 4 (4); 13 + 32; 26, 512.9 mm, 37.1 s |  |  |
+| sweep-v2.2 | 2 | 13 (18); 0 + 72; 11, 2175.4 mm, 161.6 s | 7 (4); 0 + 90; 15, 2233.9 mm, 65.9 s |  |  |
+| corne-cherry | 2 | 77 (78); 0 + 554; 301, 6736.1 mm, 1811.4 s cut | 273 (728); 0 + 187; 162, 1376.3 mm, 1568.1 s |  |  |
+| tinytapeout-demo | 4 | 126 (143); 0 + 38; 151, 3314.7 mm, 1821.4 s cut | 134 (90); 0 + 17; 157, 3911.3 mm, 1820.7 s cut |  | 6; 274, 4913.3 mm, 115.5 s |
+| buspirate5-rev10 | 4 | 94 (104); 0 + 19; 170, 3078.8 mm, 1806.3 s cut | 163 (104); 0 + 6; 126, 2321.9 mm, 1813.7 s cut |  |  |
+| lumenpnp-mobo | 4 | 0 (0); 0 + 4; 345, 8792.0 mm, 1817.4 s cut | 68 (21); 0 + 6; 311, 6311.3 mm, 1586.5 s |  | 1; 366, 5500.6 mm, 1234.6 s |
+| cynthion | 4 | 181 (214); 0 + 376; 267, 3400.2 mm, 1814.2 s cut | 267 (197); 0 + 348; 284, 2578.6 mm, 1849.2 s cut | 189 (214); 0 + 386; 284, 3275.0 mm, 7208.8 s cut | 24; 471, 3233.5 mm, 458.9 s |
+| glasgow-revC3 | 4 | 134 (137); 0 + 181; 233, 3610.7 mm, 1814.8 s cut | 141 (130); 0 + 156; 259, 2901.3 mm, 1819.9 s cut | 132 (136); 0 + 116; 237, 3516.5 mm, 7209.1 s cut | 30; 453, 3593.9 mm, 824.1 s |
+| glasgow-revD1 | 6 | 557 (609); 5 + 1; 611, 3816.1 mm, 1821.0 s cut | 717 (572); 3 + 25; 661, 3544.2 mm, 1872.1 s cut | 309 (343); 3 + 3; 762, 8941.8 mm, 7209.7 s cut | 43; 1159, 9877.2 mm, 1352.2 s |
+| all twelve, open | | 1187 | 1784 |  |  |
+| the eleven without glasgow-revD1, open | | 630 | 1067 |  |  |
+
+**On a CI runner** (job `freerouting`, 4 vCPU, nothing else running; freerouting with four processors and
+`-mt 4`, the native router on its default threads; one run each;
+https://github.com/KarpelesLab/cadlab/actions/runs/44010687386; the runs before and after it,
+https://github.com/KarpelesLab/cadlab/actions/runs/44003908234 and
+https://github.com/KarpelesLab/cadlab/actions/runs/44031677107, have 300, 295, 1690 and 2954, and 303, 328, 1689
+and 2935 in the four columns):
+
+| board | layers | native | guide 0.0.9 | freerouting | freerouting, pours as planes |
+|---|---|---|---|---|---|
+| buspirate-flash-sop | 2 | 0; 4, 460.2 mm, 0.7 s | 0; 7, 496.9 mm, 1.0 s | 0 (0); 0 + 1; 4, 607.1 mm, 9.3 s | 1 (0); 0 + 1; 4, 533.7 mm, 5.2 s |
+| buspirate-rs232 | 2 | 0; 10, 280.9 mm, 0.7 s | 0; 6, 356.2 mm, 0.9 s | 0 (0); 0 + 0; 7, 491.1 mm, 15.8 s | 1 (0); 0 + 0; 5, 370.1 mm, 10.7 s |
+| lumenpnp-ringlight | 2 | 0; 2, 180.4 mm, 0.6 s | 0; 1, 209.6 mm, 0.3 s | 0 (0); 0 + 11; 5, 331.5 mm, 23.0 s | 8 (0); 0 + 6; 0, 198.4 mm, 32.5 s |
+| nrfmicro | 2 | 0; 46, 453.6 mm, 17.4 s | 4; 62, 499.4 mm, 39.1 s cut | 4 (4); 13 + 32; 26, 512.9 mm, 34.3 s | 4 (4); 13 + 32; 26, 512.9 mm, 33.8 s |
+| sweep-v2.2 | 2 | 3; 21, 2160.9 mm, 67.6 s | 6; 42, 2231.0 mm, 55.4 s cut | 13 (18); 0 + 72; 11, 2175.4 mm, 63.2 s cut | 7 (4); 0 + 90; 15, 2233.9 mm, 54.9 s |
+| corne-cherry | 2 | 1; 483, 8275.6 mm, 43.7 s | 41; 817, 8415.6 mm, 50.0 s cut | 132 (165); 0 + 377; 292, 4327.0 mm, 66.1 s cut | 319 (823); 0 + 209; 266, 1187.3 mm, 76.9 s cut |
+| tinytapeout-demo | 4 | 9; 273, 4909.0 mm, 63.2 s cut | 9; 609, 5810.0 mm, 51.1 s cut | 206 (260); 0 + 24; 130, 1416.0 mm, 63.2 s cut | 339 (217); 1 + 13; 215, 943.9 mm, 78.5 s cut |
+| buspirate5-rev10 | 4 | 2; 313, 3053.2 mm, 42.6 s | 7; 461, 3494.2 mm, 52.3 s cut | 178 (217); 0 + 27; 275, 1741.6 mm, 64.0 s cut | 259 (190); 0 + 19; 251, 1649.0 mm, 81.3 s cut |
+| lumenpnp-mobo | 4 | 22; 291, 5458.9 mm, 61.4 s cut | 0; 713, 6544.4 mm, 46.5 s | 44 (84); 0 + 2; 355, 6546.5 mm, 65.0 s cut | 202 (167); 0 + 6; 321, 2050.4 mm, 102.7 s cut |
+| cynthion | 4 | 29; 480, 3206.0 mm, 62.4 s cut | 33; 580, 3522.9 mm, 52.7 s cut | 223 (340); 0 + 380; 309, 2150.8 mm, 65.1 s cut | 350 (277); 0 + 366; 327, 1952.7 mm, 100.4 s cut |
+| glasgow-revC3 | 4 | 40; 412, 3497.4 mm, 62.0 s cut | 48; 523, 3777.5 mm, 58.1 s cut | 248 (358); 0 + 191; 235, 1880.0 mm, 64.7 s cut | 346 (345); 0 + 134; 133, 1277.5 mm, 70.7 s cut |
+| glasgow-revD1 | 6 | 203; 1005, 8676.3 mm, 64.2 s cut | 170; 1061, 7642.2 mm, 52.4 s cut | 654 (730); 1 + 5; 425, 3055.5 mm, 68.5 s cut | 1109 (1055); 0 + 1; 356, 1924.7 mm, 100.8 s cut |
+| all twelve, open | | 309 | 318 | 1702 | 2945 |
+| the eleven without glasgow-revD1, open | | 106 | 148 | 1048 | 1836 |
+
+What the numbers say:
+
+- *At 60 s freerouting is ahead in open connections on no board.* It is level with both on buspirate-flash-sop and
+  lumenpnp-ringlight (0 open), and on buspirate-rs232 in CI (0; here 1: its routing stage ended with none open and
+  its optimizer, which ran next, gave back a route with one). nrfmicro 4 (native 0, guide 4), sweep-v2.2 13 (3 and
+  6). On the seven larger boards it is cut with 22 to 627 open where the native router has 1 to 197 and guide 0 to
+  162. In sum 1647 open against 283 and 273 here, 1702 against 309 and 318 on the runner. Under a load of 80 to 100
+  on this machine, earlier the same day, the same runs had 2257 (and guide 350): a run that a limit cuts gets as
+  far as the processor lets it.
+- *Where the 60 s go.* freerouting's first stage is a fanout of every surface-mount pin, and on the larger boards
+  that stage alone takes the minute (buspirate5-rev10: 747 of 813 pins escaped at 60.7 s, the routing stage then
+  given 1.2 s; one run, under load). With the fanout off (`--router.fanout.enabled=false`) the same board had 243
+  open for 187 in runs made one after the other.
+- *The pours as planes make it worse, not better* (2796 open for 1647 at 60 s, 1784 for 1187 at 30 minutes).
+  freerouting's own count goes down on some boards (buspirate5-rev10 189 for 210, sweep-v2.2 4 for 18, with 7 open
+  by cadlab's count for 13: the one board that gains), and cadlab's count goes up: a pad the plane's outline covers
+  is connected for freerouting and not for the fill, which keeps its clearances and thermal reliefs and leaves
+  islands (lumenpnp-ringlight: 0 open by its count, 8 by cadlab's; lumenpnp-mobo at 30 minutes 21 and 68). Its
+  fanout also takes longer with planes, and the run goes up to 50 s over its limit. more than 900 of corne-cherry's 925
+  zones are teardrops, which `planes` writes as planes like any other pour; freerouting ends there on its own after 26
+  minutes with 728 open by its count.
+- *Time does not close the gap.* With 30 minutes freerouting has 1187 open, four times what the native router and
+  guide leave at 60 s, and fewer than at 60 s on every board it was cut on. Its own count after each routing pass
+  falls for a few passes at most and then moves around its best, which it goes back to: on cynthion 214 open
+  after pass 1, 350 to 439 after each of passes 2 to 7, 214 again, and never fewer over two hours and 14 passes;
+  glasgow-revC3 136 after pass 1 and 136 after pass 15; tinytapeout-demo 143 after pass 1 and after pass 13;
+  buspirate5-rev10 150, 132, 108 and then 104 to 275 over thirteen more; corne-cherry 163, 183, 106, 78 and then 78
+  to 163 over ten more. 2 hours end with 189 and 132 open where 30 minutes had 181 and 134. On glasgow-revD1 the
+  30 minutes ended in the fanout stage (2265 of 2508 pins escaped) before a routing pass ran; with 2 hours the fanout took 35 minutes, the first routing pass 38 and
+  left 343 open by its count, the next two 734 and 774, and the board ends with 309 open, where the native router
+  has 197 at 60 s and 43 with 30 minutes.
+- *The native router with the same 30 minutes* (one thread) leaves 1, 24, 30, 6 and 43 open on lumenpnp-mobo,
+  cynthion, glasgow-revC3, tinytapeout-demo and glasgow-revD1, and stops by itself after 2 to 23 minutes;
+  freerouting 0, 181, 134, 126 and 557.
+- *Where freerouting is ahead.*
+  - *lumenpnp-mobo, given time:* every connection closed after 5.5 minutes of routing (the remaining 24.5 are one
+    optimizer pass that changes nothing), where the native router has 10 open at 60 s and 1 after 20.6 minutes.
+    guide has 0 there in 32 s. freerouting's board wires the nets the pours carry (8792 mm of track for 5501 and
+    6544) and has four tracks under the minimum width.
+  - *Vias.* Fewer than guide wherever the two can be compared: 345 for 713 on lumenpnp-mobo with every connection
+    closed on both, 26 for 62 on nrfmicro with 4 open on both, 4 for 7 on buspirate-flash-sop. Against the native
+    router: 26 for 46 on nrfmicro (with 4 open for 0), 7 for 10 on buspirate-rs232 (1 open for 0), 345 for 347 to
+    366 on lumenpnp-mobo, 4 for 4 and 5 for 2 on the two boards all three complete.
+  - Nowhere in track length (607 mm for 460 and 497 on buspirate-flash-sop, 332 for 180 and 210 on
+    lumenpnp-ringlight: without the pours it wires the ground, and with them 534 and 198 with 1 and 8 open) and
+    nowhere in time (7 to 23 s on the three small boards for 0.4 to 0.8 s).
+- *What its routes break.* Of the rules the DSN carried: tracks of nrfmicro in the notch of the outline under
+  the USB receptacle, 13 or 14 in every run (the boundary written has the notch; the receptacle's pads reach into it);
+  on glasgow-revD1 a via on the ring-shaped pad of a mounting stud (written as a polygon with a slit, the one way
+  a DSN polygon holds a ring; 1 short at 60 s, 4 and a clearance error at 30 minutes); on tinytapeout-demo with
+  planes a via 0.208 mm from a via of a class that asks for 0.25 mm. Of the rules it did not carry, 1188 errors at
+  60 s on the twelve boards: 1061 tracks under the minimum width, 119 tracks or vias too close to a drilled hole,
+  5 shorts or clearance errors with copper drawings, one track too close to the edge, one hole too close to a
+  hole, one track inside a fiducial's own clearance. The native router and guide read the project, not a DSN, and
+  have none.
+
+**The generated boards with freerouting 2.5.0** (`route_bench` with `CADLAB_ORACLE_FREEROUTING`, `-mp 20 -mt 1` as
+in the table of "Benchmarks", which has 2.4.1 on another machine; this machine, one thread each, the native
+router with seed 1; DRC errors other than unrouted):
+
+| board | native: completion, vias, length, time | freerouting 2.5.0: completion, vias, length, time, DRC errors |
+|---|---|---|
+| attiny-2l | 100 %, 4, 104.1 mm, 0.2 s | 100 %, 2, 141.2 mm, 6.8 s, 0 |
+| soic24-2l | 100 %, 141, 1690.6 mm, 1.8 s | 100 %, 145, 2109.5 mm, 27.1 s, 0 |
+| stm32-2l | 100 %, 58, 970.4 mm, 0.9 s | 100 %, 41, 1115.7 mm, 82.2 s, 0 |
+| stm32-4l | 100 %, 54, 902.1 mm, 2.7 s | 100 %, 44, 1016.0 mm, 89.4 s, 0 |
+| qfp-qfn-4l | 100 %, 128, 1934.5 mm, 7.5 s | 100 %, 142, 2258.8 mm, 142.4 s, 110 tracks under the minimum width |
+| fine-4l | 100 %, 103, 818.8 mm, 1.4 s | 100 %, 98, 1007.5 mm, 92.8 s, 57 tracks under the minimum width |
+| bga144-4l | 100 %, 154, 2211.2 mm, 12.4 s | 95.7 % (6 open), 109, 2325.3 mm, 469.9 s, 111 tracks under the minimum width |
+
+2.5.0 completes six of the seven where 2.4.1 completed three; it has fewer vias than the native router on five
+boards (2 for 4, 41 for 58, 44 for 54, 98 for 103, and 109 for 154 with six connections open), 5 to 36 % more
+track on all seven, and 15 to 90 times the time.
+
+**To make the tables again.** `scripts/fetch-corpus.sh`, the jar from
+`https://github.com/freerouting/freerouting/releases/download/v2.5.0/freerouting-2.5.0.jar` (check the SHA-256
+above), a Java 25, then:
+
+```sh
+export CADLAB_ORACLE_FREEROUTING=/path/freerouting-2.5.0.jar CADLAB_ORACLE_JAVA=/path/java-25/bin/java
+cargo build --release --example route_bench
+B=target/release/examples/route_bench
+CADLAB_BENCH_ROUTER=freerouting CADLAB_BENCH_VERBOSE=1 $B --corpus                              # 60 s, no pours
+CADLAB_BENCH_ROUTER=freerouting CADLAB_BENCH_FR_PLANES=1 $B --corpus                           # pours as planes
+CADLAB_BENCH_ROUTER=freerouting CADLAB_BENCH_BUDGET_MS=1800000 $B --corpus                     # 30 minutes
+RAYON_NUM_THREADS=3 CADLAB_BENCH_SEED=1 $B --corpus                                            # native, 60 s
+RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide $B --corpus                                      # guide, 60 s
+```
+
+`CADLAB_BENCH_FR_THREADS=<n>` gives freerouting more processors, `CADLAB_BENCH_KEEP=<dir>` keeps each board's DSN,
+session, log and `result.json` (and `CADLAB_BENCH_FR_REUSE=1` then counts the kept sessions again without a run),
+`CADLAB_BENCH_FR_ARGS` adds arguments, `CADLAB_BENCH_VERBOSE=1` lists each error with its place, each open
+connection and what the DSN did not hold. The CI job `freerouting` runs the 60 s tables on every run of the
+workflow (`gh workflow run CI --ref <branch>`; about 46 minutes) and keeps them in its summary and in the
+`freerouting-corpus` artifact. Times are budgets, so no two runs give the same numbers: the three CI runs are within
+13 connections of each other in 1700 for freerouting, this machine a third apart between a quiet hour and a
+loaded one.
+
+**Not established.** One run per cell: the spread of freerouting's results between runs is known only from the three
+CI runs and the two loads. freerouting with more than one processor on this machine, and with more than 4 anywhere.
+Its settings other than the defaults, beyond the two tried (fanout off on one board, neck-down off on all:
+2137 open for 2257 under the same load, 723 tracks under the minimum width for 846). Whether the via on
+glasgow-revD1's ring pad is freerouting's reading of the slit polygon or its own error. guide in its three
+orders, and guide with more than 60 s, are in D97 and D88 and were not run again.
