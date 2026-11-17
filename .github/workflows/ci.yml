@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       openems_fine:
-        description: "openEMS job: options (JSON) of a finer mesh for the via transition, run by both solvers as a reference; empty for none"
+        description: "openEMS job: options (JSON) of a finer mesh run by both solvers as a reference, for via_same or per case; empty for none"
         type: string
         default: ""
 

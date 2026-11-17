@@ -915,8 +915,12 @@ fn lossy_microstrip_oracle() {
 // ems against openEMS: time, memory and accuracy per case of the oracle's tables (D103).
 
 /// The cases of [`solver_comparison`]: the oracle's two lossy lines, its via transition and its
-/// two lumped parts.
-const CMP_CASES: [&str; 5] = ["line_msl", "line_lumped", "via", "series_r", "series_c"];
+/// two lumped parts, and the via transition once more with the thirds rule stated (`via_same`).
+/// The oracle's via case names no `thirds`, which `sim.sparams` has on by default and
+/// `export.openems` off: its two solvers run on two meshes (D103). `via_same` gives both the
+/// rule, and so the same lines; it is last, so that a failure of openEMS on a mesh the oracle
+/// has not run costs the table nothing (it is written after every case).
+const CMP_CASES: [&str; 6] = ["line_msl", "line_lumped", "via", "series_r", "series_c", "via_same"];
 
 /// A case's board and the options both solvers run it on (the oracle tests' own; `name` is the
 /// caller's).
@@ -927,10 +931,14 @@ fn comparison_case(r: &Registry, case: &str, out: &Path) -> (tempfile::TempDir, 
             let args = line_oracle_args(out, &format!("track#{id}"), case == "line_msl");
             (dir, s, args)
         }
-        "via" => {
+        "via" | "via_same" => {
             let (dir, mut s) = new_project(r, "rf");
             via_transition(r, &mut s);
-            (dir, s, via_oracle_args(out))
+            let mut args = via_oracle_args(out);
+            if case == "via_same" {
+                args["thirds"] = json!(true);
+            }
+            (dir, s, args)
         }
         "series_r" | "series_c" => {
             let (category, params) = if case == "series_r" {
@@ -1020,6 +1028,28 @@ fn comparison_ems_run() {
         "peak_kb": peak_kb(),
     });
     println!("\n{CMP_MARK}{report}");
+    // The run against its reference, for a run made by hand with other options.
+    let ts = cadlab::touchstone::parse(&std::fs::read_to_string(x["touchstone"].as_str().unwrap()).unwrap(), Some(2));
+    match (case.as_str(), ts) {
+        ("line_msl" | "line_lumped", Ok(ts)) => {
+            let (a, rows) = line_accuracy(&ts, case == "line_msl");
+            println!(
+                "loss against D52 from 0.5 GHz: largest {:.4} dB, RMS {:.1} %, mean {:+.1} %; Z₀ {:.1} %",
+                a[0], a[1], a[2], a[3]
+            );
+            for (f, want, got) in rows {
+                println!("  {:.2} GHz: D52 {want:.4} dB, this run {got:.4} dB", f / 1e9);
+            }
+        }
+        ("series_r" | "series_c", Ok(ts)) => {
+            let worst = part_accuracy(&ts, (case == "series_c").then_some(1e-12));
+            println!("|S21| against circuit theory, 0.5 to 4.5 GHz: within {worst:.4}");
+            for (f, s) in ts.freqs.iter().zip(&ts.data) {
+                println!("  {:.2} GHz: |S21| {:.4}, |S11| {:.4}", f / 1e9, c(&s[2]).abs(), c(&s[0]).abs());
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The progress reports of a `sim.sparams` run with the time of each: message, steps done, when.
@@ -1241,15 +1271,29 @@ fn s21_distance(a: &cadlab::touchstone::Touchstone, b: &cadlab::touchstone::Touc
     from.map(|(_, (x, y))| (db(&x[2]) - db(&y[2])).abs()).fold(0.0, f64::max)
 }
 
-/// ems and openEMS side by side on the oracle's five cases, on this machine: time, steps, cells,
+/// The largest difference of |S21| between two results, from 0.5 to 4.5 GHz.
+fn magnitude_distance(a: &cadlab::touchstone::Touchstone, b: &cadlab::touchstone::Touchstone) -> f64 {
+    assert_eq!(a.freqs, b.freqs);
+    let band = a.freqs.iter().zip(a.data.iter().zip(&b.data)).filter(|(f, _)| (0.5e9..=4.5e9).contains(*f));
+    band.map(|(_, (x, y))| (c(&x[2]).abs() - c(&y[2]).abs()).abs()).fold(0.0, f64::max)
+}
+
+/// The finer mesh asked for a case: `fine` is options per case name, or those of `via_same` alone.
+fn fine_of<'a>(fine: &'a Value, case: &str) -> Option<&'a Value> {
+    let per_case = fine.as_object().is_some_and(|o| o.keys().all(|k| CMP_CASES.contains(&k.as_str())));
+    if per_case { fine.get(case) } else { (case == "via_same").then_some(fine) }
+}
+
+/// ems and openEMS side by side on the oracle's five cases (and [`CMP_CASES`]' sixth), on this machine: time, steps, cells,
 /// peak memory, and how far each is from a reference that is neither of them (D52's model of the
 /// line, circuit theory for the parts; the via has none, so the two are held to each other and,
 /// with `CADLAB_CMP_FINE`, to each solver's run on a finer mesh). Each run is a process of its
 /// own, one at a time, on a stated number of threads (`CADLAB_CMP_THREADS`, a list; default 1
 /// and the machine's count): ems through [`comparison_ems_run`], openEMS through the exported
 /// driver with `CADLAB_OPENEMS_THREADS`. `CADLAB_CMP_CASES` (a list) limits the cases;
-/// `CADLAB_CMP_FINE` is JSON options for the via's finer mesh (`{"max_cell": "0.2mm"}`), run by
-/// both solvers on the largest thread count. Without openEMS (`CADLAB_ORACLES=1` and
+/// `CADLAB_CMP_FINE` is JSON options for a finer mesh of `via_same` (`{"max_cell": "0.4mm"}`), or
+/// such options per case (`{"via_same": {..}, "series_r": {..}}`), run by both solvers on the
+/// largest thread count. Without openEMS (`CADLAB_ORACLES=1` and
 /// `CADLAB_ORACLE_OPENEMS`) the table has ems's rows only. The table goes to
 /// `$CARGO_TARGET_TMPDIR/openems_comparison/comparison.md` (and `.json`), with openEMS's console
 /// output beside it; nothing is asserted but that every run ends and converges: the tolerances
@@ -1295,7 +1339,6 @@ fn solver_comparison() {
     );
     let mut notes = Vec::new();
     let mut record = Vec::new();
-    let mut ems_version = String::new();
     for case in cases {
         let (_dir, mut s, args) = comparison_case(&r, case, &out);
         let mut ems = Vec::new();
@@ -1310,7 +1353,7 @@ fn solver_comparison() {
                 oe.push(measure_openems(python, &out, &name, n));
             }
         }
-        ems_version = ems[0].note.clone();
+        let ems_version = ems[0].note.clone();
         for (solver, runs) in [("ems", &ems), ("openEMS", &oe)] {
             for m in runs {
                 let steps: u64 = m.steps.iter().sum();
@@ -1339,6 +1382,13 @@ fn solver_comparison() {
                     runs.iter().map(|m| m.threads.to_string()).collect::<Vec<_>>().join(" and ")
                 ));
             }
+        }
+        if case == "via" && !oe.is_empty() {
+            notes.push(
+                "via: the oracle's case names no `thirds`, on by default in `sim.sparams` and off in the export: \
+                 the two solvers run on two meshes there. `via_same` states the rule for both."
+                    .into(),
+            );
         }
         if let Some(m) = oe.iter().find(|m| !m.note.is_empty()) {
             notes.push(format!("{case}, openEMS says of its threads: {}", m.note));
@@ -1425,79 +1475,87 @@ fn solver_comparison() {
                         s21_distance(&e, o)
                     );
                 }
-                if let Some(fine) = &fine {
-                    let n = *threads.last().unwrap();
-                    eprintln!("{case}: ems on the finer mesh, {n} thread(s)");
-                    let fe = measure_ems(case, &out, &format!("{case}_fine_ems"), n, Some(fine));
-                    let fo = python.as_ref().map(|python| {
-                        eprintln!("{case}: openEMS on the finer mesh, {n} thread(s)");
-                        let name = format!("{case}_fine_openems");
-                        exec(&r, &mut s, "export.openems", with(with(args.clone(), fine), &json!({"name": name})));
-                        measure_openems(python, &out, &name, n)
-                    });
-                    for (solver, m) in [("ems", Some(&fe)), ("openEMS", fo.as_ref())] {
-                        let Some(m) = m else { continue };
-                        let steps: u64 = m.steps.iter().sum();
-                        let rate =
-                            m.cells.map(|c| c as f64 * steps as f64 / m.engine_seconds.unwrap_or(m.seconds) / 1e6);
-                        time += &format!(
-                            "| {case}, finer mesh | {solver} | {} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
-                            m.threads,
-                            m.cells.map_or("?".into(), |c| c.to_string()),
-                            m.steps.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
-                            m.timestep.map_or("?".into(), |t| format!("{:.4}", t * 1e12)),
-                            m.seconds,
-                            m.engine_seconds.map_or("".into(), |e| format!("{e:.1}")),
-                            rate.map_or("?".into(), |r| format!("{r:.0}")),
-                            m.peak_mb,
-                            m.before_mb
-                        );
-                        let reference = m.data();
-                        let (a, b) = (s21_distance(&e, &reference), o.as_ref().map(|o| s21_distance(o, &reference)));
-                        acc += &format!(
-                            "| {case} | \\|S21\\|, largest difference, dB ({solver} on the finer mesh, {fine}) | {a:.3} | {} | {} |\n",
-                            cell(b, 3),
-                            nearer(a, b)
-                        );
-                    }
-                    if let Some(fo) = &fo {
-                        acc += &format!(
-                            "| {case} | \\|S21\\|, the two finer meshes apart, dB | {:.3} | | |\n",
-                            s21_distance(&fe.data(), &fo.data())
-                        );
-                    }
-                }
             }
         }
-    }
-    md += &format!(
-        "Machine: {cpu}, {cpus} logical CPUs. {ems_version}{}. One run each, one process per run, one at a time.\n\
-         Whole run: `sim.sparams` as a command (model, both ports' runs, spectra, file) for ems; the driver's process \
-         for openEMS (Python and its modules, geometry, both ports' runs, port calculation, file). Engine alone: the time \
-         stepping, as openEMS prints it at the end of each run and as ems's progress reports time it. Mcells/s: \
-         cells × steps over the engine's time. Cells: each solver's own count (openEMS counts the mesh lines, ems the cells \
-         between them; with the absorbing layer beyond the region openEMS's mesh has those cells too). Before the \
-         run: the test's process with the board for ems, Python with numpy, CSXCAD and openEMS imported for openEMS; \
-         \"of it the run\" is the peak less that.\n\n",
-        match (&python, std::env::var("OPENEMS_PROJECT_REV")) {
-            (Some(_), Ok(rev)) => format!(", openEMS-Project {rev}"),
-            (Some(_), Err(_)) => ", openEMS".into(),
-            (None, _) => ", openEMS not installed".into(),
+        // Against each solver's run on a finer mesh, where one is asked for: in dB for the lines
+        // and the via, as a magnitude from 0.5 to 4.5 GHz for the parts.
+        let part = case.starts_with("series");
+        let apart = |a: &cadlab::touchstone::Touchstone, b: &cadlab::touchstone::Touchstone| {
+            if part { magnitude_distance(a, b) } else { s21_distance(a, b) }
+        };
+        let (unit, digits) = if part { ("0.5 to 4.5 GHz", 4) } else { ("dB", 3) };
+        if let Some(fine) = fine.as_ref().and_then(|f| fine_of(f, case)) {
+            let n = *threads.last().unwrap();
+            eprintln!("{case}: ems on the finer mesh, {n} thread(s)");
+            let fe = measure_ems(case, &out, &format!("{case}_fine_ems"), n, Some(fine));
+            let fo = python.as_ref().map(|python| {
+                eprintln!("{case}: openEMS on the finer mesh, {n} thread(s)");
+                let name = format!("{case}_fine_openems");
+                exec(&r, &mut s, "export.openems", with(with(args.clone(), fine), &json!({"name": name})));
+                measure_openems(python, &out, &name, n)
+            });
+            for (solver, m) in [("ems", Some(&fe)), ("openEMS", fo.as_ref())] {
+                let Some(m) = m else { continue };
+                let steps: u64 = m.steps.iter().sum();
+                let rate = m.cells.map(|c| c as f64 * steps as f64 / m.engine_seconds.unwrap_or(m.seconds) / 1e6);
+                time += &format!(
+                    "| {case}, finer mesh | {solver} | {} | {} | {} | {} | {:.1} | {} | {} | {:.0} | {:.0} |\n",
+                    m.threads,
+                    m.cells.map_or("?".into(), |c| c.to_string()),
+                    m.steps.iter().map(u64::to_string).collect::<Vec<_>>().join(", "),
+                    m.timestep.map_or("?".into(), |t| format!("{:.4}", t * 1e12)),
+                    m.seconds,
+                    m.engine_seconds.map_or("".into(), |e| format!("{e:.1}")),
+                    rate.map_or("?".into(), |r| format!("{r:.0}")),
+                    m.peak_mb,
+                    m.before_mb
+                );
+                let reference = m.data();
+                let (a, b) = (apart(&e, &reference), o.as_ref().map(|o| apart(o, &reference)));
+                acc += &format!(
+                    "| {case} | \\|S21\\|, largest difference, {unit} ({solver} on the finer mesh, {fine}) | {a:.digits$} | {} | {} |\n",
+                    cell(b, digits),
+                    nearer(a, b)
+                );
+            }
+            if let Some(fo) = &fo {
+                acc += &format!(
+                    "| {case} | \\|S21\\|, the two finer meshes apart, {unit} | {:.digits$} | | |\n",
+                    apart(&fe.data(), &fo.data())
+                );
+            }
         }
-    );
-    if python.is_some() {
-        md += &summary;
-        md += "\n#### Every run\n\n";
+        // The table so far, after every case.
+        md.clear();
+        md += &format!(
+            "Machine: {cpu}, {cpus} logical CPUs. {ems_version}{}. One run each, one process per run, one at a time.\n\
+             Whole run: `sim.sparams` as a command (model, both ports' runs, spectra, file) for ems; the driver's process \
+             for openEMS (Python and its modules, geometry, both ports' runs, port calculation, file). Engine alone: the time \
+             stepping, as openEMS prints it at the end of each run and as ems's progress reports time it. Mcells/s: \
+             cells × steps over the engine's time. Cells: each solver's own count (openEMS counts the mesh lines, ems the cells \
+             between them; with the absorbing layer beyond the region openEMS's mesh has those cells too). Before the \
+             run: the test's process with the board for ems, Python with numpy, CSXCAD and openEMS imported for openEMS; \
+             \"of it the run\" is the peak less that.\n\n",
+            match (&python, std::env::var("OPENEMS_PROJECT_REV")) {
+                (Some(_), Ok(rev)) => format!(", openEMS-Project {rev}"),
+                (Some(_), Err(_)) => ", openEMS".into(),
+                (None, _) => ", openEMS not installed".into(),
+            }
+        );
+        if python.is_some() {
+            md += &summary;
+            md += "\n#### Every run\n\n";
+        }
+        md += &time;
+        md += "\n#### Accuracy against references that are neither solver\n\n";
+        md += &acc;
+        md += &detail;
+        md += "\n";
+        for n in &notes {
+            md += &format!("- {n}\n");
+        }
+        std::fs::write(out.join("comparison.md"), &md).unwrap();
+        std::fs::write(out.join("comparison.json"), serde_json::to_string_pretty(&record).unwrap()).unwrap();
     }
-    md += &time;
-    md += "\n#### Accuracy against references that are neither solver\n\n";
-    md += &acc;
-    md += &detail;
-    md += "\n";
-    for n in &notes {
-        md += &format!("- {n}\n");
-    }
-    std::fs::write(out.join("comparison.md"), &md).unwrap();
-    std::fs::write(out.join("comparison.json"), serde_json::to_string_pretty(&record).unwrap()).unwrap();
     eprintln!("{md}");
 }

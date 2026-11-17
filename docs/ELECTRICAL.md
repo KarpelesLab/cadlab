@@ -355,7 +355,8 @@ cadlab touchstone summary out/openems/<name>.s2p --frequencies 1GHz,5GHz
   runs it in `<name>_sim/portN/`, then computes the port waves (`CalcPort`) and S<sub>ij</sub> =
   b<sub>i</sub> / a<sub>j</sub>, and writes `<name>.sNp` (Touchstone 1.1, RI, one reference impedance;
   2.0 with `[Reference]` when the ports' impedances differ). `--postprocess` recomputes the file from earlier
-  runs.
+  runs. `CADLAB_OPENEMS_THREADS=n` in the environment runs openEMS's engine on n threads (`numThreads`); without it
+  openEMS chooses.
 
 **Region.** `nets` (the pads, tracks and vias of those nets; pours are left out, or a GND net would span the
 board), `around` (footprints such as a connector, pads, `via#N` for a via transition, `track#N`, nets) and
