@@ -6,7 +6,7 @@
 //! also routed by freerouting (external process, DSN/SES) for comparison. `CADLAB_ROUTE_RENDER=<dir>`
 //! renders cadlab's results; `CADLAB_BENCH_BUDGET_MS` sets the time budget (default 120000);
 //! `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search (default: the router's default) and
-//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108; here and in the
+//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110; here and in the
 //! corpus mode), under the same time budget or work budget (`CADLAB_BENCH_WORK`, in guide's
 //! search nodes there). `CADLAB_BENCH_VIA_IN_PAD=1` lets guide place vias in pads, as it does on
 //! its own; without it the adapter forbids them, as the native router does. With

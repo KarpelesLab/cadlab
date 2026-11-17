@@ -333,17 +333,27 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       every order, level on three, within the noise on three, behind in every order on three (nrfmicro 3, 5, 3
       against 0, where it had 4, 7, 9; sweep-v2.2 6, 7, 6 against 3; corne-cherry 31, 37, 36 against 3). The
       default stays the native router (D101)
-- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D108,
-      with guide 0.0.15: level on the three small boards and sweep-v2.2; ahead on lumenpnp-mobo and cynthion;
-      ranges that overlap on nrfmicro (0 to 1 against 0), buspirate5-rev10, glasgow-revC3, glasgow-revD1 and
-      tinytapeout-demo (medians 8.5 and 4.5); behind on corne-cherry, 15 to 23 against 0 to 4): needs, in guide, a
-      way out of corne-cherry's two QFN-56 that a minute pays for (`RouteOptions::negotiate_places` is no gain
-      at 60 s, as it is or with a faster price, fewer nodes and fewer places, D108), the last connection behind
-      nrfmicro's USB receptacle in every order, no via on a via of its net in a run after the first
-      (buspirate5-rev10, one order), a first pass that ends within the minute on six layers (glasgow-revD1), rule
-      areas by kind and containment with a track width that is routed by (tinytapeout-demo's +3V3 pins), and
-      vias: the stubs that cadlab's fill makes needless go only where a run leaves the time (lumenpnp-mobo 510
-      to 571 in three orders for 699 to 738, against the native router's 344; D108, "Gaps"; D106, "Gaps"; D104,
+- [x] guide 0.0.16 adopted in the adapter (D110): no via beside a via of its net (D108's failure: none of 48
+      runs had copper taken out by the verification); the room of the spokes of pads in pours kept, the spokes
+      given to guide as cadlab's fill makes them (`Zones::spokes`, `spoke_cost` 4; BOARD.md, "What a router
+      must be told"): 82 to 100 pads short of two necks on the twelve boards over four orders at 60 s, for
+      138 and 128 with 0.0.15 on the same fill, 154 to 170 after the native router and 116 as the projects
+      route them, with 196 to 205 connections open for 238 and 218; the connections that the board itself
+      keeps apart found once, told as such and left out of the later runs (`Cause::Apart`: sweep-v2.2's two
+      nets across its halves); a net with zones has its run on the filled board whatever the first run said
+      of it. The default stays the native router
+- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D110,
+      with guide 0.0.16: level on the three small boards and sweep-v2.2; ahead on lumenpnp-mobo, cynthion and
+      glasgow-revD1; ranges that overlap on buspirate5-rev10, glasgow-revC3, tinytapeout-demo (2 to 10 against
+      2 to 15) and nrfmicro (0 to 2 against 0); behind on corne-cherry, 15 to 21 against 0 to 4): needs, in
+      guide, a negotiation over all the nets of a part at once that a minute pays for, for corne-cherry's two
+      QFN-56 and nrfmicro's last data net (the native router plans no way out of the first QFN at all: it
+      routes every net across every other at a price on one grid; fixed ways out for the pads left shut in
+      were built and are no gain, D110), vias (lumenpnp-mobo 511 to 686 against 309 to 343: per-net cleanup
+      with the others fixed removes few, dearer vias cost connections), a first pass on six layers whose
+      third outside the searches is looked into (glasgow-revD1, timed by net, D110), a price on a spoke that
+      rises as its pad runs short of them, and rule areas with a routed track width (D110, "Gaps"; D108,
+      "Gaps"; D106, "Gaps"; D104,
       "Gaps"; D101,
       "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still
       blocks it"). Done since D106 (D108): the D+ of a USB receptacle whose pads have those of D- between them

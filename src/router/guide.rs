@@ -1,5 +1,5 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104 and D106; docs/ROUTER.md, "guide as a
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108 and D110; docs/ROUTER.md, "guide as a
 //! backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
@@ -25,7 +25,10 @@
 //! that it may move (`pcb::route_from`, [`Adapted::take_back`], D106), kept if the board then has
 //! less open, and for as long as there is time and something open, another such run has the
 //! nets in another order (D108). Once the runs are over, the stubs to a plane whose pads
-//! cadlab's fill joins without them are taken out again (D108). What guide's API cannot express is passed the stricter way and named in
+//! cadlab's fill joins without them are taken out again (D108). The spokes of the pads that the fill
+//! relieves go over as the fill makes them, and their room costs other nets' tracks (`Zones::spokes`,
+//! `RouteOptions::spoke_cost`, D110); what the board itself keeps apart is told as such and left out of the
+//! later runs (`Cause::Apart`, D110). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -38,7 +41,8 @@ use ::guide::geom::{LayerId, LayerSet, NetClass, Overrides, Point as GPoint, Rul
 use ::guide::id::NetId;
 use ::guide::pcb::{
     self, Blocker, Cause, CopperKind, CopperZone, Design, DesignItem, DiffPair, Fill, Islands, LengthConstraint,
-    NetSpec, PadConnection as GPadConnection, Phase, RunControl, Stopped, ViaSize, ZoneConnection, Zones,
+    NetSpec, PadConnection as GPadConnection, Phase, RunControl, Spoke as GSpoke, Stopped, ViaSize, ZoneConnection,
+    Zones,
 };
 
 use crate::board::{self as geo, COPPER_TOL, CopperItem, ItemRef, PlacedPad, RatLine};
@@ -498,6 +502,16 @@ pub(crate) fn adapt(
     let mut stack_own: BTreeMap<usize, Option<i64>> = BTreeMap::new();
     let mut tie_copper: Vec<(usize, Vec<String>)> = Vec::new();
     let mut zone_at: BTreeMap<u64, usize> = BTreeMap::new();
+    // By zone with a net that is no teardrop, the zone and its fill settings, for the spokes of
+    // its pads; and what each pad is for (a heat pad or a pad that is not soldered is held to no
+    // number of spokes).
+    let relief_params: Vec<(&crate::model::board::Zone, geo::zones::ZoneParams)> = board
+        .zones
+        .iter()
+        .filter(|z| z.net.is_some() && !geo::thermal::is_teardrop(z))
+        .map(|z| (z, geo::zones::zone_params(p, z)))
+        .collect();
+    let classes = geo::thermal::classes(&placed);
     for (i, it) in items.iter().enumerate() {
         let set = layer_set(&layers, &it.layers);
         // The clearance of its own: that of the last custom rule holding it, else its local one.
@@ -536,12 +550,52 @@ pub(crate) fn adapt(
                     stack_own.insert(at, custom.own[i]);
                 }
                 let th = it.local.thermal;
+                // The spokes of the pad's reliefs as cadlab's fill makes them (BOARD.md, "What a
+                // router must be told", D112): per zone of its net that holds it and per layer,
+                // where the connection in effect there is thermal and the pad is soldered, each
+                // spoke of `Relief::of` (gap, the width fitted to the pad, its directions) from
+                // the pad's anchor to its end in the pour. guide keeps their room (D110). The
+                // directions the fill falls back to (`Relief::alt`) are not given: they are
+                // what is left when these are lost.
+                let soldered = classes.get(&(refdes.clone(), number.clone())).is_none_or(|c| c.solder());
+                let mut fitted: Option<i64> = None;
+                for (z, zp) in relief_params.iter().filter(|(z, _)| soldered && z.net == it.net) {
+                    if !in_ring(&z.outline, it.anchor) {
+                        continue;
+                    }
+                    let relief = geo::zones::Relief::of(it, zp);
+                    for name in z.layers.iter().filter(|l| it.layers.contains(l)) {
+                        let Some(l) = layers.iter().position(|n| n == name) else { continue };
+                        if geo::zones::connection_on(it, name, zp.pads) != PadConnection::Thermal {
+                            continue;
+                        }
+                        fitted = Some(fitted.map_or(relief.w, |w| w.min(relief.w)));
+                        for (dir, pg) in relief.dirs.iter().zip(geo::zones::spokes(it, &relief)) {
+                            let rad = (dir.0 as f64 / 1000.0).to_radians();
+                            let (ux, uy) = (rad.cos(), rad.sin());
+                            let (cx, cy) = (it.anchor.x.0 as f64, it.anchor.y.0 as f64);
+                            let far = pg
+                                .outer
+                                .0
+                                .iter()
+                                .map(|q| (q.x as f64 - cx) * ux + (q.y as f64 - cy) * uy)
+                                .fold(0.0, f64::max);
+                            zones.spokes.push(GSpoke {
+                                pad: at,
+                                layer: LayerId(l as u8),
+                                from: gp(it.anchor),
+                                to: GPoint::new((cx + ux * far).round() as i64, (cy + uy * far).round() as i64),
+                                width: relief.w,
+                            });
+                        }
+                    }
+                }
                 zones.set_pad(
                     at,
                     GPadConnection {
                         connection: it.local.connection.map(connection),
                         thermal_gap: th.and_then(|t| t.gap).map(|g| g.0),
-                        spoke_width: th.and_then(|t| t.spoke).map(|s| s.0),
+                        spoke_width: th.and_then(|t| t.spoke).map(|s| s.0).or(fitted),
                         anchor: None,
                         // The pad's own first spoke (45° for round pads, turned with the pad).
                         spoke_direction: th.map(|t| {
@@ -874,14 +928,19 @@ struct Open {
 /// `tried` is whether the net had a search of its own in the run (`Routed::tried`): a net the
 /// run was stopped before is one it never got to, or one that had its turn and was without a
 /// way when the run stopped.
-fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>, tried: bool) -> Open {
+///
+/// `first` is whether the run was the first: only then is the board that guide found two pads
+/// apart on (`Cause::Apart`) the board itself, with none of guide's own routes as its copper.
+fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>, tried: bool, first: bool) -> Open {
     let net = ad.nets.get(o.net.index()).cloned().unwrap_or_default();
     let pad = |e: &pcb::Endpoint| e.pad.and_then(|i| ad.pads.get(i)).cloned().unwrap_or_else(|| "a pad".to_string());
     let (from, to) = (pad(&o.from), pad(&o.to));
     let mut subjects = vec![ObjectRef::Net(net.clone())];
     let mut hints: Vec<String> = Vec::new();
     let native = format!("route net {net} with the native router (`route.nets {net}`), which can move other nets");
-    let reason = match &o.cause {
+    let later_apart = o.cause == Cause::Apart && !first;
+    let cause = if later_apart { &Cause::NoPath } else { &o.cause };
+    let reason = match cause {
         Cause::NoLayer => {
             hints.push(format!("give net {net} a via (its class's via size) or a layer both pads are on"));
             format!("{to} and {from} share no copper layer net {net} may be routed on, and the net has no via")
@@ -962,6 +1021,17 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>, trie
                 format!("{why} before guide got to net {net}: {to} is apart from {from}")
             }
         }
+        // The board itself keeps the two apart (guide 0.0.16, D110): no router joins them.
+        Cause::Apart => {
+            hints.push(format!(
+                "join the two parts of the board that net {net} is on (copper across what divides them, a connector \
+                 or a wire), or change the keep-out or cutout between them"
+            ));
+            format!(
+                "the board keeps {to} apart from {from}: with no other net routed, no track or via of net {net} \
+                 gets from one to the other on any layer (its copper, keep-outs, holes and edges are between them)"
+            )
+        }
         // `Unknown`, and any cause newer than this adapter: guide has no say on the net.
         _ => {
             hints.push(format!(
@@ -971,10 +1041,12 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>, trie
             format!("guide left {to} apart from {from} on net {net} and gives no cause for it")
         }
     };
-    if !hints.contains(&native) {
-        hints.push(native);
+    if *cause != Cause::Apart {
+        if !hints.contains(&native) {
+            hints.push(native);
+        }
+        hints.push("move the parts apart or allow more layers".to_string());
     }
-    hints.push("move the parts apart or allow more layers".to_string());
     Open {
         net,
         to,
@@ -989,9 +1061,9 @@ fn explain(ad: &Adapted, o: &pcb::OpenConnection, stopped: Option<Stopped>, trie
 }
 
 /// What a run of guide says of every connection it left open.
-fn explain_all(ad: &Adapted, r: &pcb::Routed) -> Vec<Open> {
+fn explain_all(ad: &Adapted, r: &pcb::Routed, first: bool) -> Vec<Open> {
     let tried: BTreeSet<NetId> = r.tried.iter().copied().collect();
-    r.open.iter().map(|o| explain(ad, o, r.stopped, tried.contains(&o.net))).collect()
+    r.open.iter().map(|o| explain(ad, o, r.stopped, tried.contains(&o.net), first)).collect()
 }
 
 /// Whether guide can run this request at all; the refusal says what to do instead.
@@ -1056,6 +1128,11 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // default, set by name): the D+ of nrfmicro's USB receptacle, whose pads have those of D-
     // between them and a diode's pad in front (D108).
     gopts.crossings = true;
+    // The room that the spokes of a pad in a pour of its net need, from the pad's edge across
+    // its gap and into the pour, costs other nets' tracks this much more for their length
+    // (guide 0.0.16, off by default there): fewer pads are left short of two spokes after a
+    // run (D110 has the counts). A cost and no wall: a net with no other way takes it.
+    gopts.spoke_cost = 4.0;
     let layers = p.board().stackup.copper_names().len();
     // The smallest via the rules allow, for a pad trapped in its footprint: the native
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
@@ -1066,6 +1143,21 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
         gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
     }
     gopts
+}
+
+/// Whether `at` is inside the ring `ring` (by crossings).
+fn in_ring(ring: &[Point], at: Point) -> bool {
+    let mut odd = false;
+    for k in 0..ring.len() {
+        let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+        if (a.y.0 > at.y.0) != (b.y.0 > at.y.0) {
+            let t = (at.y.0 - a.y.0) as f64 / (b.y.0 - a.y.0) as f64;
+            if a.x.0 as f64 + t * (b.x.0 - a.x.0) as f64 > at.x.0 as f64 {
+                odd = !odd;
+            }
+        }
+    }
+    odd
 }
 
 /// One new item of the result: a track (index into the tracks) or a via.
@@ -1370,6 +1462,12 @@ fn first_nets(p: &Project, open: &BTreeSet<String>, wanted: &dyn Fn(&str) -> boo
     open.iter().cloned().chain(zoned).collect()
 }
 
+/// The nets that a run found apart on the board itself (`Cause::Apart`): what they have open
+/// no run joins, and the runs after it are not for them.
+fn apart_nets(ad: &Adapted, r: &pcb::Routed) -> BTreeSet<String> {
+    r.open.iter().filter(|o| o.cause == Cause::Apart).filter_map(|o| ad.nets.get(o.net.index()).cloned()).collect()
+}
+
 /// What guide says of a run, for the progress sink.
 fn said(r: &pcb::Routed) -> String {
     let gs = &r.stats;
@@ -1488,8 +1586,11 @@ pub(crate) fn route(
     opts.work.charge(routed.stats.work);
     (hooks.progress)(0, None, &said(&routed));
     let mut stopped = routed.stopped;
-    let mut opens: Vec<Open> = explain_all(&ad, &routed);
+    let mut opens: Vec<Open> = explain_all(&ad, &routed, true);
     let mut gave_up = gave_up_on(&ad, &routed);
+    // Told by the first run alone: in a later one the routes of the runs before are copper of
+    // the board, and what they keep apart another order of the nets may join.
+    let apart = apart_nets(&ad, &routed);
     let mut escapes: BTreeSet<(i64, i64)> = routed
         .vias
         .iter()
@@ -1540,7 +1641,14 @@ pub(crate) fn route(
         let left = open(&fitems, &fisl);
         let again: BTreeSet<String> = left
             .iter()
-            .filter(|l| moves || ((stopped.is_some() || poured.contains(l.net.as_str())) && !gave_up.contains(&l.net)))
+            .filter(|l| !apart.contains(&l.net))
+            .filter(|l| {
+                // A net with zones has its run on the filled board whatever the first run said
+                // of it: cadlab's fill is not the fill guide planned on, and a run that ended
+                // early has left the time (sweep-v2.2: 3 open in four orders for 4, D110).
+                let zoned = poured.contains(l.net.as_str());
+                moves || zoned || (stopped.is_some() && !gave_up.contains(&l.net))
+            })
             .map(|l| l.net.clone())
             .collect();
         if again.is_empty() {
@@ -1608,7 +1716,7 @@ pub(crate) fn route(
         );
         // What this run says of its nets replaces what the first said of them.
         opens.retain(|o| !again.contains(&o.net) && !moved.contains(o.net.as_str()));
-        opens.extend(explain_all(&ad, &more));
+        opens.extend(explain_all(&ad, &more, false));
     }
 
     // The stubs that the fill makes needless (D108): guide gives every pad of a net with a
@@ -2222,6 +2330,58 @@ mod tests {
         assert_eq!((r.stats.connections, r.stats.failed), (1, 0), "{:?}", r.connections);
     }
 
+    /// The spokes of a relieved pad go to guide as the fill makes them (D110, D112): the pin of
+    /// GND in its pour on B.Cu has four, on that layer alone, each from its anchor past the gap;
+    /// a pad set solid has none.
+    #[test]
+    fn the_spokes_of_relieved_pads_are_given_as_the_fill_makes_them() {
+        // The zone of the board joins its pads solidly (`connect_pads yes`): no spokes.
+        let solid = project();
+        assert!(adapted(&solid, &["GND", "SIG"]).design.zones.spokes.is_empty());
+        let mut p = project();
+        for z in &mut p.board_mut().zones {
+            z.pads = PadConnection::Thermal;
+        }
+        let ad = adapted(&p, &["GND", "SIG"]);
+        let pin = ad.pads.iter().position(|n| n == "J1.2").expect("J1.2");
+        let spokes = &ad.design.zones.spokes;
+        assert_eq!(spokes.len(), 4, "{spokes:?}");
+        assert!(spokes.iter().all(|s| s.pad == pin && s.layer == LayerId(1) && s.width == 350_000), "{spokes:?}");
+        // Along the axes, to the gap of 0.4 mm and the spoke's width past the pad's box
+        // (1 mm by 1.6 mm).
+        let mut reach: Vec<(i64, i64)> = spokes.iter().map(|s| (s.to.x - s.from.x, s.to.y - s.from.y)).collect();
+        reach.sort_unstable();
+        assert_eq!(reach, [(-1_250_000, 0), (0, -1_550_000), (0, 1_550_000), (1_250_000, 0)]);
+    }
+
+    /// Two pads that a keep-out across the whole board keeps apart on every layer: guide looks
+    /// once with no other net routed and says so (`Cause::Apart`, D110), in a run with a budget.
+    #[test]
+    fn a_connection_the_board_keeps_apart_is_told() {
+        let mut p = project();
+        let mut k = p.board().keepouts[0].clone();
+        k.id = p.alloc_id();
+        k.name = "moat".into();
+        k.layers = Vec::new();
+        k.no_vias = true;
+        let q = |x: i64, y: i64| Point::new(Nm(x * 1_000_000), Nm(y * 1_000_000));
+        k.outline = vec![q(-5, 4), q(35, 4), q(35, 5), q(-5, 5)];
+        p.board_mut().keepouts.push(k);
+        let dp = Scope::Nets(vec!["DP".into()]);
+        let opts = RouteOptions { budget: Some(Duration::from_secs(30)), ..Default::default() };
+        let began = Instant::now();
+        let r = route(&p, &dp, &opts, &Hooks::none()).expect("route");
+        assert_eq!((r.stats.connections, r.stats.failed), (1, 1), "{:?}", r.connections);
+        let [c] = &r.connections[..] else { panic!("{:?}", r.connections) };
+        let reason = c.reason.as_deref().unwrap_or_default();
+        assert!(reason.starts_with("the board keeps J1.5 apart from J1.3"), "{reason}");
+        assert!(c.hints.iter().any(|h| h.contains("join the two parts of the board")), "{:?}", c.hints);
+        assert!(!c.hints.iter().any(|h| h.contains("native router")), "{:?}", c.hints);
+        // Nor are the runs that move routes for it: the run is over long before its budget.
+        assert!(began.elapsed() < Duration::from_secs(15), "{:?}", began.elapsed());
+        assert_eq!(r.stats.iterations, 1);
+    }
+
     /// Budgets, cancellation, progress and the seed, on the nets SIG, DP and DM.
     #[test]
     fn a_run_keeps_its_budgets_and_hears_the_hooks() {
@@ -2423,6 +2583,9 @@ mod tests {
         let g = options(&p, &RouteOptions::default(), &[0, 1]);
         assert!(!g.fills && !g.join && !g.vias_in_pads && g.keep_partial);
         assert!(g.pour_cuts && g.settle && g.negotiate && !g.row_fanout && g.crossings && !g.negotiate_places);
+        // The room of the spokes of pads in pours costs other nets' tracks (D110), and a via
+        // what guide has it cost.
+        assert_eq!((g.spoke_cost, g.via_cost), (4.0, pcb::RouteOptions::default().via_cost));
         let four = BOARD.replace(
             r#"(0 "F.Cu" signal) (31 "B.Cu" signal)"#,
             r#"(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)"#,

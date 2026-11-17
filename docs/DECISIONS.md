@@ -5115,6 +5115,134 @@ is told; a relief minimum of their own in the fab profiles (no profile has a fie
 space stand in); IPC-2581 and the 2D render have no test of their own for the relief (they draw
 the same copper items as the Gerber layers, which have one); a second spoke direction tried where none fits.
 
+### D110. guide 0.0.16 adopted: no via beside a via of its net, the room of the spokes of pads in pours kept, what the board keeps apart found once and told; the default unchanged (2026-11-18)
+This round is for D108's gaps and for the spokes of pads in pours, which D109 and D112 measure and neither
+router kept (guide's `docs/benchmarks.md`, "PCB routing with room for spokes").
+`guide = { version = "0.0.16", default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock`
+moves. Measured with the crate from crates.io, on the fill of D112.
+**What guide 0.0.16 does:**
+- *No via beside a via of its net* (D108's failure, fixed in guide with a test that fails without it). A net
+  that is completed is searched for from the copper it keeps, and what is found is added to it. In a
+  negotiation that copper is out of guide's world for the search, so the place beside a via the net kept was
+  free: two vias of GND 0.18 mm apart on buspirate5-rev10, one run in four in one order, which the verification
+  took out. The net as it is completed now carries the vias of its copper, and its search keeps its own from
+  them.
+- *`RouteOptions::spoke_cost`*, off by default in guide, 4 here. A track of another net that ends where a spoke
+  of a pad will be costs that many times its length more: a price and no wall, so a net with no other way
+  takes it. Which spokes: those the host gives, `Zones::spokes`.
+- *`Cause::Apart`*. In a run with a budget, the first time a search for a net fails the net is looked for on the
+  board with none of guide's routes on it, on the lattice of the pass and then on the finer one where that
+  ends within 4 million nodes. The connections that has no way for are counted; a net that has all its others
+  has no more turns in the passes or the settling, and they are reported as apart. Not for a net with a plane.
+**What the adapter does with it** (`router::guide`; ROUTER.md, "guide as a backend"; BOARD.md, "What a router
+must be told"):
+- *The spokes as the fill makes them.* Per pad of a net with a zone that holds it (teardrops are no zones), per
+  layer of the zone that the pad is on, where `zones::connection_on` is thermal and `thermal::classes` says
+  the pad is soldered: each spoke of `zones::Relief::of` (the gap, the width fitted to the pad, `dirs`), from
+  the pad's anchor to the end of its rectangle (`zones::spokes`), as a `Spoke` of guide. A pad set solid on one
+  layer has none there, a heat pad or a pad that is not soldered none at all. The fitted width also goes over
+  as the pad's own spoke width.
+- *`spoke_cost` 4*, set by name.
+- *What the board keeps apart.* A connection with `Cause::Apart` from the first run reads `the board keeps
+  <pad> apart from <pad>: with no other net routed, no track or via of net N gets from one to the other on
+  any layer`, with the hint to join the two parts of the board or change what is between them, and no hint to
+  the native router, which has no way either. Its net is in no later run. Told by the first run alone: in a
+  later one the routes of the runs before are copper of the board.
+- *A net with zones has its run on the filled board whatever the first run said of it.* A first run that ended
+  on its own left such a net out of the second when its own search had found no way; cadlab's fill is not the
+  fill guide planned on, and the time is there. sweep-v2.2: 3 open in four orders for 3, 4, 4 and 4.
+**Not passed, of what BOARD.md lists:** the directions the fill falls back to (`Relief::alt`) and
+`rules.min_thermal_spokes`. guide prices every spoke of `dirs` the same, whether the pad has two to spare or
+none: a price that rises as a pad's free spokes fall below the minimum, counting the other four directions,
+needs guide to keep count per pad while it routes, and is not built. Nor a connection by layer in guide's own
+model of the zones (`PadConnection` is one a pad): guide fills nothing here, cadlab's fills go over as they
+are, and the spokes are per layer.
+**Measured** (ROUTER.md, "Native router and guide 0.0.16, D110"). With the crate from crates.io, four runs of
+each router at 60 s: the twelve boards 196 to 205 open for guide (median 200) against 323 to 386 for the native
+router (349); the eleven without glasgow-revD1 70 to 84 (78.5) against 81 to 105 (100). Zero DRC errors other
+than unrouted, no via in a pad of its net, no call over 59.5 s, and no copper taken out by the verification in
+any of the 48 runs. From 0.0.15 to 0.0.16 on the same fill, two orders: 238 and 218 open → 200 and 205. At 40
+million nodes, three orders, the nine boards a budget cuts: 782 → 732 (corne-cherry 105 → 75, sweep-v2.2 16 → 9, glasgow-revD1 454 → 433, cynthion 56 → 53, tinytapeout-demo 33 → 35, buspirate5-rev10 12 → 16, nrfmicro 2 → 5, glasgow-revC3 104 → 106, lumenpnp-mobo 0 → 0); a run that the
+budget stops is the same from source and from crates.io. guide's curated boards: 1150 of 1151 connections with
+712 vias, as before (`spoke_cost` is off there).
+**Spokes** (the same runs; `board::thermal::census`). Pads in pours short of two necks on the twelve boards:
+
+| | no neck | short of two necks | open connections |
+|---|---|---|---|
+| as routed by their projects (D112) | 2 | 116 | (their own) |
+| native router, four seeds | 36 to 49 | 154 to 170 | 323 to 386 |
+| guide 0.0.15, two orders | 1 and 3 | 138 and 128 | 238 and 218 |
+| guide 0.0.16, four orders | 2 | 82 to 100 | 196 to 205 |
+
+Fewer than the projects' own routing leaves, with fewer connections open than before: kept. Where they are
+left: buspirate5-rev10 26 to 35 and glasgow-revD1 38 to 41, whose pads in pours are close together, then
+lumenpnp-mobo 5 to 13 and tinytapeout-demo 6 to 11. Before the fill of D112, with the spokes worked out by guide
+from the zones and the pads' settings (four spokes along the axes, the zone's width), two orders had 127 and 127
+for 195 and 169 with 0.0.15: the gain is of the same size either way, and the host's spokes are the ones that
+are there.
+**Tried and not kept:**
+- In guide (its `docs/benchmarks.md`): *a via beside the net's own hole refused in guide's world* (the first
+  fix for the via on a via; six orders at 40 million nodes: nrfmicro 22 open for 1, corne-cherry 299 for 231,
+  buspirate5-rev10 40 for 15: a negotiation routes a net across its own old route); *a price on vias in the
+  room of a spoke too* (lumenpnp-mobo 3 open in one order of four, where it had none in any run before, for no
+  fewer pads short); *the price at 2 and at 12* (135 and 129 pads short at 2, and at 12 no fewer than at 4 with
+  289 and 305 open for 255 and 212); *ways out that stay for the pads of a row that the routes leave shut in*,
+  D108's first gap as it was put: a straight track out of an end of the pad to a via as fixed copper, in the
+  runs that move routes, at the place in the way of the fewest routes (corne-cherry 102 open over four orders
+  for 89 at 60 s, 84 for 84 at 120 s) or only where none is in the way (90 for 89); *more rounds of cleanup and
+  a shorter way for each net*, the others where they are (lumenpnp-mobo 657 and 680 vias for 706 and 510, in
+  27 s of cleanup for 5); *dearer vias* (2 and 3 mm of track for 1: 10 to 25 % fewer vias at 40 million nodes,
+  with buspirate5-rev10 28 and 19 open for 12 and glasgow-revD1 602 and 601 for 440); *a pass of rip-up given
+  four times as long before it ends* and *a net ripped up eight times before it is locked* (232 open for 222 on
+  five boards; buspirate5-rev10 33 for 12); *nets with a plane looked for on the bare board too* (sweep-v2.2 4
+  and 5 open for 3); *a net that goes on at the width its tracks have* in a later run (tinytapeout-demo 30 open
+  over four orders for 30).
+- In the adapter: *a via at 2 mm of track on boards of two layers* (at 60 s over four orders corne-cherry 75
+  open for 89, nrfmicro 5 for 5, sweep-v2.2 16 for 15: within their spread, and sweep-v2.2 5 and 5 with it
+  beside the rest of this round, for 3 and 3).
+**What the native router does differently on corne-cherry**, looked at pad by pad on its first QFN-56
+(`CADLAB_BENCH_DUMP=U1`, `CADLAB_BENCH_FANOUT=only`): it plans no escape for that part at all, whose pads are
+on its grid, and for the second only straight stubs with no via out of the two rows that are off the grid. Of
+the 56 pads it leaves 36 outwards and 16 inwards to a via between the row and the exposed pad, at the depths
+its grid has; guide leaves 33 outwards and 9 inwards, and 9 have nothing: nets that were routed, taken out by
+another, and found no way back past nets that are locked by then. So D108's first gap is not a plan that guide
+lacks. The native router routes every net across every other at a price, on one grid, until none is in
+another's way; guide routes a net at a time and takes others out, and its negotiations are local and cost
+four minutes to settle those pads (D106).
+**Gaps, for guide's next release**, most useful first:
+1. *corne-cherry's two QFN-56*: 15 to 21 open against 0 to 4, still the one board behind in every run. What it
+   needs is a negotiation over all the nets of a part at once that a minute pays for: congestion priced on a
+   grid, with exact geometry only for what is kept. Fixed ways out for the pads left shut in were built and
+   measured (above), and are not it.
+2. *nrfmicro's last connection*: 0 to 2 against 0. It is one of the two data nets from the receptacle to the
+   module, across the board, with the nets beside it settled in its way and not shut in anywhere: the same
+   one-net-at-a-time limit.
+3. *Vias*: lumenpnp-mobo 511 to 686 against 309 to 343, tinytapeout-demo 473 to 691 against 238 to 290. Half
+   of lumenpnp-mobo's are its other nets' and not stubs to planes (some 400 of 706 with 0.0.15); routing a net
+   again with dearer vias, the others where they are, removes few, and dearer vias while routing cost
+   connections on the boards of four and six layers.
+4. *Six layers in a minute* (glasgow-revD1): timed by net with counters in guide's passes, since this machine
+   lets no process be sampled: of 42 s of its first pass at 40 million nodes, 27 s are searches, none over
+   2.4 s, and 15 s are outside any search, in what a turn does before and after it. That third is where to
+   look.
+5. *The spokes that are still lost*: every spoke costs the same. The price that BOARD.md describes, of a neck
+   only while fewer than `min_thermal_spokes` remain among the eight directions, needs a count per pad kept
+   while routing.
+6. *Rule areas with a routed track width*: not built. tinytapeout-demo's +3V3 pins, which D108 gave it for, are
+   joined on the fill of D112 (2 to 10 open against 2 to 15).
+7. *sweep-v2.2's time*: its two nets that the board keeps apart are found after one search each, and the run
+   still ends at its deadline for the one connection of its ground that has no way, which is not looked for
+   on the bare board (a net with a plane counted there came out with more open than it has).
+**Default: unchanged.** By the ranges of four runs of each, with 0.0.16: level on four boards
+(buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, sweep-v2.2); ahead in every run on three
+(lumenpnp-mobo, cynthion, glasgow-revD1); ranges that overlap on four (buspirate5-rev10, tinytapeout-demo,
+glasgow-revC3, and nrfmicro at 0 to 2 against 0); behind in every run on one (corne-cherry). The condition, at
+least as good on every board, is not met: not on corne-cherry, and not on nrfmicro by its median. `router:
+guide` stays the second opinion, and the native router stays.
+*Not measured:* the generated boards with 0.0.16; more than four runs of either router; the native router and
+guide in the same hour (the native router's four runs came first, alone); KiCad's DRC on a board guide routed;
+cadlab's oracles; cadlab's whole test suite, which is run at the merge.
+
 ### D112. Thermal relief, second round: spokes in the directions that fit, a connection per placed pad, a repair that leaves no pad cut off, the fabs' own minimums, the DRC of a large board (2026-11-18)
 D109 left a repair that traded solid pads for cut-off ones (`zone.relieve` on the corpus: 664 solid solder pads to
 none, 161 more pads short of two spokes, 84 pad and layer pairs out of their pour), a corpus comparison that had

@@ -1575,7 +1575,8 @@ fn guide_keeps_out_of_keepouts() {
 
     // A wall across the board excepting 3V3: guide takes 3V3 through it, as the native router
     // does (`keepout_net_exceptions`), and leaves GND, which is not excepted, open there, with
-    // what it knows of why.
+    // what it knows of why: the board itself keeps its pads apart (guide 0.0.16, D110), which no
+    // router mends.
     let mut s = Session::new();
     let _d = new_project(&r, &mut s);
     ldo_board(&r, &mut s);
@@ -1593,10 +1594,11 @@ fn guide_keeps_out_of_keepouts() {
         o["output"]["connections"].as_array().unwrap().iter().filter(|c| c["status"] == "failed").collect();
     assert!(!failed.is_empty() && failed.iter().all(|c| c["net"] == "GND"), "{}", o["output"]["connections"]);
     for c in &failed {
-        assert!(c["reason"].as_str().unwrap().contains("guide found no way from"), "{c}");
+        assert!(c["reason"].as_str().unwrap().starts_with("the board keeps "), "{c}");
         assert!(c["subjects"].to_string().contains("GND"), "{c}");
         assert!(c["hints"][0].as_str().unwrap().starts_with("`route.connection "), "{c}");
-        assert!(c["hints"].to_string().contains("native router"), "{c}");
+        assert!(c["hints"].to_string().contains("join the two parts of the board"), "{c}");
+        assert!(!c["hints"].to_string().contains("native router"), "{c}");
     }
     assert_eq!(unrouted(&r, &mut s, "3V3"), 0);
     assert!(crossing(&s, 12.5, 13.5, -1.0, 16.0));
