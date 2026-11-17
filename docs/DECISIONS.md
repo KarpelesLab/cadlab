@@ -4987,4 +4987,132 @@ as they were); more than four runs of either router; the taking out of stubs by 
 with a plane (`stub_pieces` has one; the rest is measured on the corpus); cadlab's oracles; KiCad's DRC on a
 board guide routed; cadlab's whole test suite, which is run at the merge.
 
+### D109. Thermal relief held end to end: pads in pours read from the filled copper, solder pads without relief and pads short of spokes reported by the DRC and the fab check, relief by default fitted to small pads, heat pads solid on purpose, `zone.relieve` (2026-11-18)
+A pad soldered by hand or in an oven that sits solidly in a pour cannot be heated: cold joints on through-hole
+pins, worst on inner planes, and tombstoned chip parts. Boards made by an agent driving another tool had no relief
+on any ground pad; nothing told the agent. The fills had thermal reliefs since D46; nothing checked what a pad
+ended up with.
+**Audit, before.** A zone made with only a name, a net, layers and an outline was already `thermal`, gap = the
+clearance, four spokes of max(track width, 0.25 mm), on every layer, and a through-hole pin got four spokes on
+each inner plane; vias were always merged (measured: `tests/thermal_relief.rs`). What was wrong or missing:
+- the spoke width took no account of the pad: on a 0.25 mm pin of a generated QFN-16 the four 0.25 mm spokes left
+  copper on 69 % of the pad's outline;
+- the footprint generator marked no pad: an exposed pad or a tab was relieved like a pin, which is wrong the
+  other way (it is there to spread heat);
+- a zone set to `solid` or `tht_thermal`, by a command or by an imported board, was kept without a word: on the
+  twelve corpus boards as their projects route them, 664 of the 2376 pads in pours (pad and layer pairs) are
+  solder pads joined solidly, 227 of them through-hole and 148 on inner layers (cynthion 373, glasgow-revC3 96,
+  lumenpnp-mobo 109), 252 by a setting of the pad itself;
+- no rule for spokes that do not survive: KiCad's `starved_thermal` was listed as a rule only KiCad has. A pad
+  no spoke reaches was already an open connection (`drc.unrouted`); a pad on one spoke was nothing. On the
+  corpus 143 relieved pads are short of two spokes that their own footprint leaves room for;
+- nothing for copper that is no zone (a track wider than the pad, a copper drawing over it), for spokes as wide
+  as the pad, for a gap or a spoke below what can be made, for the current of a power pin through its spokes;
+- the outputs were right: the Gerber layers, IPC-2581 and the 2D render draw `copper_items`, fills included (an
+  inner plane with reliefs is larger in outline than the solid one, tested); the KiCad export carries the zone's
+  connection and the pads' own (`zone_connect`). The 3D view draws no copper at all.
+**Reading the copper, not the settings** (`board::thermal`). In a band 10 µm wide around a pad's outline, per
+layer: the pieces of zone copper (spokes that reach), the same with the net's tracks, vias and drawings (necks),
+and the share of the outline covered. So a solid zone, spokes too wide, a pad on a drawing, a wide track and a
+solid pad that other nets leave joined on one side all read as what they are. No relief = the pour on
+`thermal_max_contact` percent of the outline (67), or other copper on as much when some of it is wider than the
+pad; tracks no wider than the pad never make a pad solid (on small pads two of them take most of the outline:
+17 BGA balls and chip pads of cynthion and glasgow-revD1 read solid by their tracks alone before the width was
+asked for). Teardrop zones are tracks (corne-cherry has 921: taken as pours they put 295 more pads "in a pour",
+253 of them on one neck). A pad is in a pour when zone copper within
+its relief's reach goes on beyond it (the rim a fill leaves around a solid pad shut in by its own footprint is
+the pad).
+**What a pad is.** Through-hole pins and SMD pads are soldered. Heat pads are not held to the rules: a grid of
+paste windows, or one window or none on a pad 2.5 times the footprint's median with no other pad as large beside
+it, and same-number pads inside one. Found on the corpus: a paste window alone says nothing (an imported
+board-to-board connector had one per pin, and `zone.relieve` made its 62 pads solid), and two equal lugs with one
+number are solder pads. Not soldered: covered pads, pads without a number, non-plated holes, a one-pad footprint
+that is a pasteless SMD pad or has a hole of 0.5 mm or less. Press-fit pins have no mark in the model and are
+taken as through-hole pins.
+**Rules** (warnings, in `drc.run`; BOARD.md has the table): `drc.solid_pad`, `drc.thermal_nominal`,
+`drc.starved_thermal` (`min_thermal_spokes`, default 2; necks count, so a track into the pad is a second joint;
+against what the pad's own footprint leaves room for, so a pin in a row is not reported for having its two ends),
+`drc.thermal_size` (gap against the minimum clearance, spoke against `min_track_width`), `drc.current_spokes`
+(IPC-2152 width against the spokes and tracks of a pad, all layers of a pin together). `fab.check` carries the
+first three as `fab.*` warnings and checks the sizes against the profile's own minimum track and space
+(`fab.thermal_size`): the fab-dependent numbers come from the profiles, none is a constant here.
+*Warning, not error:* the board is connected and can be made; the other findings of that kind
+(`drc.current_width`, `drc.split_crossing`) are warnings, `fab.export` refuses on errors only and fab errors
+cannot be waived, and many imported boards are solid on purpose. An agent sees them in the counts of `drc.run`,
+in `zone.fill`, at the import and in the fab check, each with the command that repairs.
+**Solid on purpose** is said on the pad or the footprint (`zone_connection: solid`, quiet in every zone) or by a
+waiver naming a zone or a net, which covers the `fab.` finding too. `zone.add --pads solid` still works and warns.
+**Defaults changed.**
+1. *Spokes fitted to the pad*: a zone that leaves `thermal_spoke` unset gives a pad spokes no wider than half
+   its shorter side (whole micrometers, at least `min_track_width`); the shorter side is that of the rectangle
+   with the pad's area and outline length, so it holds for turned and mirrored pads. A width set on the zone, the
+   pad or the footprint is used as it is. No golden file moved (the list of commands apart): no test board had a
+   relieved pad under 0.5 mm in a zone without a width. The KiCad import leaves a zone's width unset when it is
+   cadlab's default, as it did: a file cannot say which was meant, and KiCad rewrites what cadlab exports (telling
+   a board cadlab wrote by its generator failed `kicad_saved_board_imports_the_same` in CI). So such a zone of a
+   board from KiCad is fitted too; on the corpus no pad reads differently for it.
+2. *Generated exposed pads and tabs* carry `zone_connection: solid`.
+3. *`min_thermal_spokes`* 2 and *`thermal_max_contact`* 67 in `board.rules`; KiCad's `min_resolved_spokes`
+   raises the first and never lowers it (three corpus projects accept one spoke).
+**`zone.relieve`**: zones that join pads solidly become `thermal`; `solid` settings of solder pads and their
+footprints go (listed; `keep_own` keeps them); heat pads keep theirs or get one; pads that still read solid
+through their spokes get a spoke of their own. One undo step. On the corpus (before → after, pad and layer pairs):
+
+| | pads in pours | by necks 0/1/2/3/4+ | short of spokes | solid through-hole | solid SMD | on inner layers (solid) |
+|---|---|---|---|---|---|---|
+| twelve boards, as routed by their projects | 2376 → 2292 | 8/348/378/290/380 → 19/447/501/405/612 | 143 → 304 | 227 → 0 | 437 → 0 | 436 (148) → 400 (0) |
+| cynthion | 575 → 519 | 0/56/31/27/75 → 1/91/100/92/222 | 1 → 62 | 180 → 0 | 193 → 0 | 169 (108) → 133 (0) |
+| glasgow-revC3 | 170 → 142 | 0/6/9/2/16 → 5/16/13/15/52 | 0 → 19 | 46 → 0 | 50 → 0 | 93 (40) → 93 (0) |
+| glasgow-revD1 | 361 → 361 | 7/108/92/72/33 → 5/151/106/51/41 | 80 → 114 | 0 → 0 | 42 → 0 | 20 (0) → 20 (0) |
+| lumenpnp-mobo | 612 → 612 | 0/82/76/76/90 → 7/94/97/106/129 | 0 → 43 | 1 → 0 | 108 → 0 | 68 (0) → 68 (0) |
+| buspirate5-rev10 | 235 → 235 | 0/43/66/47/13 → 0/41/79/63/14 | 36 → 39 | 0 → 0 | 28 → 0 | 30 (0) → 30 (0) |
+
+No solder pad is left solid in a pour. What it costs is said by the same table: a layout made for solid pads has
+no room for spokes everywhere, so 161 more pads are short of two (11 more with none), and 84 pad and layer pairs
+are no longer in a pour at all, 36 of them pins of cynthion on its inner planes. The command lists each such pad
+(`cut`, `zone.relieve_cut`) and each pad left starved; it cannot keep one of them solid alone, the pad settings
+being per footprint. What stays as `drc.solid_pad` afterwards is copper that is no zone (lumenpnp-mobo 80: its
+motor drivers' pads under wide tracks and drawings).
+*Time, largest board* (glasgow-revD1, six layers, 1672 connections, release): the changes with the
+fill and the reading they need 1.5 s, a fill 1.1 s, reading the pads and the five rules 0.64 s; `zone relieve`
+from the command line 5.2 s with load and save; the import with its count 1.8 s. (`drc run` on that project takes
+47 s from the command line, with a build of 14 November as with this one: not from this work, and not looked
+into.)
+**The routers** were measured, not changed. Each corpus board re-routed in 60 s, then the pads in pours counted
+(`route_bench --corpus`, `CADLAB_BENCH_THERMALS=1`):
+
+| twelve boards | pads in pours | by necks 0/1/2/3/4+ | short of spokes | solid solder pads | open connections |
+|---|---|---|---|---|---|
+| as routed by their projects | 2376 | 8/348/378/290/380 | 143 | 664 | (their own) |
+| native router | 2346 | 70/318/330/251/420 | 219 | 655 | 280 |
+| guide 0.0.14 | 2346 | 4/393/356/240/416 | 195 | 633 | 239 |
+| native router, then `zone.relieve` | 2251 | 100/401/435/348/664 | 363 | 1 | |
+| guide 0.0.14, then `zone.relieve` | 2249 | 8/437/496/341/661 | 290 | 1 | |
+
+Short of spokes, projects' routing / native / guide: buspirate5-rev10 36 / 50 / 62, glasgow-revD1 80 / 117 / 69,
+tinytapeout-demo 21 / 34 / 33, lumenpnp-mobo 0 / 3 / 21, sweep-v2.2 4 / 7 / 3, corne-cherry 0 / 4 / 5, cynthion
+1 / 2 / 0, the other five 1 / 2 / 2 together. One run each, on one thread, on a machine with other work: the
+order of size, not a ranking of the routers (D106 gives their ranges). The 61 pads with no neck of the native
+router's glasgow-revD1 are connections it leaves open at 60 s (197). The one pad left solid after `zone.relieve`
+is on glasgow-revD1 (`drc.thermal_nominal`; not looked into).
+
+The solid pads are the zones' own: their number does not rise with either router. Both leave more pads short
+of spokes than the projects' routing: a track or a via of
+another net beside a pad takes the room of a spoke, and nothing in either router's cost says so. Left open.
+guide needs no change for this work: its zones default to `thermal`, it is given cadlab's fills, and the pads'
+own connection reaches it through `Zones::set_pad` (it is told the zone's spoke width, not the fitted one).
+**Oracle.** `kicad_agrees_on_starved_thermals` (`tests/kicad_pcb_oracle.rs`): a header pin in a pour with a track
+of another net around three sides, then two; KiCad's `starved_thermal` must report the first and not the second,
+on the exported fill (cadlab's copper, no refill) and on its own refill, as `drc.starved_thermal` does. On the
+corpus the two rules stay apart (each tool counts on its own fill; cadlab counts tracks as joints and asks what
+the footprint leaves room for), and `drc.solid_pad` / `drc.thermal_nominal` have no counterpart.
+It passes with KiCad 10 in CI (job "Oracle tests" of a run on the branch `ci/thermal-relief`), as do the other
+oracle tests there; the corpus job of that run did not get as far as its tests (its KiCad installation step
+failed), so the corpus comparison with these rules is not measured.
+*Not done:* the routers (above); a setting per placed pad; the fitted spoke width in the KiCad export (KiCad's
+refill of an exported board gives small pads the zone's width; the fill written is cadlab's) and in what guide
+is told; a relief minimum of their own in the fab profiles (no profile has a field for one: the minimum track and
+space stand in); IPC-2581 and the 2D render have no test of their own for the relief (they draw
+the same copper items as the Gerber layers, which have one); a second spoke direction tried where none fits.
+
 ## Open questions
