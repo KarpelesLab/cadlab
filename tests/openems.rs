@@ -1065,6 +1065,82 @@ impl cadlab::command::Progress for Stamps {
     }
 }
 
+/// Nothing grows long after a run has ended: the oracle's five cases (the lossy line with sheet
+/// copper and with solid copper, the via transition, the two parts), each first to its own end
+/// criterion and then, on the same options, ten times as many steps (`CADLAB_LONG_FACTOR`) to a
+/// criterion no run reaches. The energy the solver reports with every progress line must stay
+/// below the criterion from the usual end on, and must not be higher at the end than at twice the
+/// usual length: a late instability, which starts from the rounding of the fields in whatever mode
+/// the time step does not hold, shows as energy coming back. (ems's own tests fill such models
+/// with noise, which has every mode in it, and step them without a source: `tests/step_limit.rs`
+/// there; this is the pulse of a run on cadlab's meshes.) `CADLAB_LONG_CASES` limits the cases.
+#[test]
+#[ignore]
+fn long_runs_stay_bounded() {
+    let r = Registry::with_builtins();
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("long_runs");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+    let factor: u64 = std::env::var("CADLAB_LONG_FACTOR").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+    let only = std::env::var("CADLAB_LONG_CASES").ok();
+    for case in ["line_msl", "line_lumped", "via", "series_r", "series_c"] {
+        if only.as_ref().is_some_and(|l| !l.split(',').any(|c| c.trim() == case)) {
+            continue;
+        }
+        let (_dir, mut s, mut args) = comparison_case(&r, case, &out);
+        args["name"] = json!(case);
+        let criterion: f64 = args["end_criteria"].as_str().unwrap().trim_end_matches("dB").parse().unwrap();
+        let o = exec(&r, &mut s, "sim.sparams", args.clone());
+        let runs = o["output"]["runs"].as_array().unwrap();
+        assert!(runs.iter().all(|x| x["converged"] == true), "{case}");
+        let usual = runs.iter().map(|x| x["steps"].as_u64().unwrap()).max().unwrap();
+        args["name"] = json!(format!("{case}_long"));
+        args["end_criteria"] = json!("300dB");
+        args["timesteps"] = json!(factor * usual);
+        let stamps = Stamps(std::sync::Mutex::new(Vec::new()));
+        let t = std::time::Instant::now();
+        let o = r
+            .execute_with(
+                &mut s,
+                "sim.sparams",
+                args,
+                RunOptions::default(),
+                &stamps,
+                &cadlab::command::CancelToken::new(),
+            )
+            .unwrap_or_else(|f| panic!("{case}: sim.sparams failed: {}", f.error));
+        let o = serde_json::to_value(&o).unwrap();
+        let timestep = o["output"]["timestep"].as_f64().unwrap();
+        let stamps = stamps.0.into_inner().unwrap();
+        for port in 1..=runs.len() {
+            // (steps, energy in dB) of this port's reports.
+            let series: Vec<(u64, f64)> = stamps
+                .iter()
+                .filter(|s| s.0.starts_with(&format!("port {port}/")))
+                .filter_map(|s| {
+                    let db = s.0.split("energy ").nth(1)?.split(" dB").next()?.parse::<f64>().ok()?;
+                    Some((s.1, db))
+                })
+                .collect();
+            let at = |steps: u64| series.iter().find(|x| x.0 >= steps).unwrap_or_else(|| series.last().unwrap()).1;
+            let (last_steps, last) = *series.last().unwrap();
+            assert!(last_steps >= factor * usual - 64, "{case}, port {port}: ended after {last_steps} steps");
+            let worst = series.iter().filter(|x| x.0 > usual).map(|x| x.1).fold(f64::NEG_INFINITY, f64::max);
+            eprintln!(
+                "{case}, port {port}: time step {:.4} ps, {usual} steps to -{criterion} dB; {last_steps} steps: \
+                 {:.1} dB at twice the usual length, {last:.1} dB at the end, at most {worst:.1} dB after the usual end \
+                 ({:.0} s for both ports)",
+                timestep * 1e12,
+                at(2 * usual),
+                t.elapsed().as_secs_f64()
+            );
+            assert!(series.iter().all(|x| x.1.is_finite() || x.1 == f64::NEG_INFINITY), "{case}, port {port}");
+            assert!(worst <= -criterion + 0.5, "{case}, port {port}: {worst:.1} dB after the usual end");
+            assert!(last <= at(2 * usual) + 0.5, "{case}, port {port}: {last:.1} dB at the end");
+        }
+    }
+}
+
 /// The Python program that runs an exported driver for [`solver_comparison`]: the driver's own
 /// imports first (the process's peak before any simulation), then the driver as `__main__`, then
 /// the times and the peak resident set (its own and its children's) as JSON in a file.

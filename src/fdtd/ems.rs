@@ -21,7 +21,9 @@ use ems::csx::primitives::{BoxShape, Cylinder, LinPoly, Polygon};
 use ems::csx::properties::{DebyeMaterial, DebyePole, LumpedElement, LumpedElementType, ProbeBox, ProbeType};
 use ems::csx::{ContinuousStructure, Primitive, Property};
 use ems::engine::surface::{Conductor, Roughness as EmsRoughness};
-use ems::{Boundaries, Boundary, CompileOptions, CompiledModel, Cpml, EndCriteria, Fdtd, WarningCode, Waveform};
+use ems::{
+    Boundaries, Boundary, CompileOptions, CompiledModel, Cpml, EndCriteria, Fdtd, StepLimit, WarningCode, Waveform,
+};
 
 use super::{
     Error, Extracted, Gaussian, Hooks, LumpedPort, Measure, Options, Plan, PortSet, Probe, SParams, Waves, parts,
@@ -337,7 +339,10 @@ fn threads(o: &Options, r: &Region) -> usize {
 
 /// The solver settings of a region: the pulse, CPML of `pml_cells` on every face with its
 /// frequency shift α at f₀ (2π ε₀ f₀: at a tenth of that a line near the absorber read gain, D68),
-/// the end criterion, the step limit and the Courant fraction.
+/// the end criterion, the step limit and the timestep: `courant` of the bound of the mesh's cells
+/// (ems's `StepLimit::Cells`, D105: each cell with its own sizes, the permittivity of its edges
+/// and the walls and copper it lies against; never less than `courant` of the Courant limit of
+/// the smallest cell sizes in vacuum, which it was until ems 0.0.15).
 fn settings(o: &Options, r: &Region, threads: usize) -> Fdtd {
     let f0 = r.f0 as f64;
     let pml = Cpml::cells(o.region.pml_cells as usize).alpha_max(2.0 * std::f64::consts::PI * EPS0 * f0);
@@ -347,6 +352,7 @@ fn settings(o: &Options, r: &Region, threads: usize) -> Fdtd {
         .end_criteria(EndCriteria::energy_decay_db(-(o.region.end_criteria_db as f64)).check_interval(32))
         .max_timesteps(o.region.timesteps)
         .timestep_factor(o.courant)
+        .step_limit(StepLimit::Cells)
         .threads(threads)
 }
 
