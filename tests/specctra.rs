@@ -187,6 +187,44 @@ fn ldo_board(r: &Registry, s: &mut Session) {
     exec(r, s, "place.set", json!({"refdes": "C2", "at": ["15mm", "9mm"], "rotation": 90}));
 }
 
+/// Pours as planes (`export.dsn {planes: true}`): one `plane` per pour and layer, with the pour's
+/// net and outline, read back as written; without the option the design has none.
+#[test]
+fn dsn_planes() {
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    let dir = new_project(&r, &mut s, "ldo");
+    ldo_board(&r, &mut s);
+    exec(&r, &mut s, "board.setup", json!({"layers": 4}));
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "gnd", "net": "GND", "layers": ["In1.Cu", "B.Cu"], "outline": "board"}),
+    );
+    let o = exec(&r, &mut s, "export.dsn", json!({"path": "plain"}));
+    assert!(o["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "export.dsn_incomplete"));
+    let plain = Dsn::parse(&std::fs::read_to_string(dir.path().join("ldo/plain.dsn")).unwrap()).unwrap();
+    assert!(plain.planes.is_empty());
+
+    exec(&r, &mut s, "export.dsn", json!({"path": "planes", "planes": true}));
+    let text = std::fs::read_to_string(dir.path().join("ldo/planes.dsn")).unwrap();
+    let d = Dsn::parse(&text).unwrap();
+    let p = s.project.as_ref().unwrap();
+    assert_eq!(d, export(p, "ldo", &Options { planes: true, ..Options::default() }).dsn);
+    let layers: Vec<&str> = d.planes.iter().map(|pl| pl.shape.layer()).collect();
+    assert_eq!(layers, ["In1.Cu", "B.Cu"]);
+    let zone = &p.board().zones[0];
+    for pl in &d.planes {
+        assert_eq!(pl.net, "GND");
+        let cadlab::specctra::dsn::Shape::Polygon { points, .. } = &pl.shape else { panic!("a polygon") };
+        assert_eq!(points, &zone.outline);
+    }
+    assert!(text.contains("(plane GND (polygon In1.Cu 0 "), "{text}");
+    // Everything else is the design without planes.
+    assert_eq!(Dsn { planes: Vec::new(), ..d }, plain);
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
@@ -254,10 +292,15 @@ fn ses_import_hand_written() {
 }
 
 /// Runs freerouting (`CADLAB_ORACLE_FREEROUTING`: a jar, run with `java -jar`, or a launcher)
-/// headless on `dsn`, writing `ses`.
+/// headless on `dsn`, writing `ses`. The jar runs with `CADLAB_ORACLE_JAVA`, else
+/// `$JAVA_HOME/bin/java`, else `java` (freerouting 2.5 needs Java 25).
 fn freerouting(tool: &Path, dsn: &Path, ses: &Path) -> Option<u64> {
     let (program, mut args): (PathBuf, Vec<String>) = if tool.extension().is_some_and(|e| e == "jar") {
-        (PathBuf::from("java"), vec!["-jar".into(), tool.display().to_string()])
+        let java = std::env::var_os("CADLAB_ORACLE_JAVA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("JAVA_HOME").map(|h| PathBuf::from(h).join("bin/java")))
+            .unwrap_or_else(|| PathBuf::from("java"));
+        (java, vec!["-jar".into(), tool.display().to_string()])
     } else {
         (tool.to_path_buf(), vec![])
     };
@@ -272,6 +315,8 @@ fn freerouting(tool: &Path, dsn: &Path, ses: &Path) -> Option<u64> {
             "-mt",
             "1",
             "--gui.enabled=false",
+            // No usage data is sent.
+            "-da",
         ]
         .map(String::from),
     );
@@ -312,7 +357,9 @@ const ATTEMPTS: usize = 5;
 
 /// Routes the session's board with freerouting and imports the result: cadlab DRC must find no
 /// clearance, short, edge or hole problem in what freerouting routed, and everything must be
-/// connected. freerouting (2.1, multi-pass with optimization) now and then reports a complete
+/// connected. Tracks under the minimum width are reported and allowed: the DSN gives each class
+/// its width and has no place for a minimum, and freerouting 2.5 necks a track down at a pad
+/// narrower than it (0.125 mm at the STM32's 0.5 mm pitch, D102). freerouting (2.1, multi-pass with optimization) now and then reports a complete
 /// route but leaves a net out of its session; such a run is retried (after ripping the
 /// imported routing), up to [`ATTEMPTS`] times. `CADLAB_SPECCTRA_KEEP=<dir>` keeps the DSN, SES and a
 /// render of the last attempt.
@@ -335,10 +382,16 @@ fn route_with_freerouting(tool: &Path, r: &Registry, s: &mut Session, dir: &Path
             std::fs::copy(&ses, keep.join(format!("{name}.ses"))).unwrap();
             exec(r, s, "render.board", json!({"path": keep.join(format!("{name}.png")), "px_per_mm": 30}));
         }
-        let errors: Vec<String> = drc_errors(s).into_iter().filter(|e| !e.starts_with("drc.unrouted")).collect();
-        assert_eq!(errors, Vec::<String>::new(), "{name}");
+        let (narrow, errors): (Vec<String>, Vec<String>) =
+            drc_errors(s).into_iter().partition(|e| e.starts_with("drc.track_width"));
+        if !narrow.is_empty() {
+            eprintln!("{name} (attempt {attempt}): {} track(s) necked down under the minimum width", narrow.len());
+        }
+        let routed: Vec<String> = errors.iter().filter(|e| !e.starts_with("drc.unrouted")).cloned().collect();
+        assert_eq!(routed, Vec::<String>::new(), "{name}");
         if o["output"]["unrouted"] == 0 || attempt == ATTEMPTS {
-            assert_eq!(drc_errors(s), Vec::<String>::new(), "{name}");
+            assert_eq!(errors, Vec::<String>::new(), "{name}");
+            eprintln!("oracle: freerouting routed {name}: {}", o["summary"]);
             return o;
         }
     }

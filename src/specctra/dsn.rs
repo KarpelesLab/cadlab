@@ -110,6 +110,16 @@ pub struct Keepout {
     pub shape: Shape,
 }
 
+/// A plane: copper of a net filling an area of a layer (`(plane <net> <shape>)`), which a
+/// router connects the net's pins to instead of wiring them to each other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plane {
+    /// Net.
+    pub net: String,
+    /// Area (its layer is the plane's).
+    pub shape: Shape,
+}
+
 /// Width and clearance rules.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rule {
@@ -238,6 +248,8 @@ pub struct Dsn {
     pub boundary: Vec<Point>,
     /// Keep-outs (cutouts, keep-out areas).
     pub keepouts: Vec<Keepout>,
+    /// Planes (pours written as such).
+    pub planes: Vec<Plane>,
     /// Via padstacks the router may use.
     pub vias: Vec<String>,
     /// Default rules.
@@ -347,6 +359,7 @@ impl Dsn {
                 [shape_sx(&Shape::Path { layer: PCB.into(), width: Nm::ZERO, points: closed })],
             ));
         }
+        st.extend(self.planes.iter().map(|p| Sx::list("plane", [Sx::string(&p.net), shape_sx(&p.shape)])));
         st.extend(self.keepouts.iter().map(keepout_sx));
         if !self.vias.is_empty() {
             st.push(Sx::list("via", self.vias.iter().map(Sx::string)));
@@ -474,6 +487,7 @@ impl Dsn {
             layers: Vec::new(),
             boundary: Vec::new(),
             keepouts: Vec::new(),
+            planes: Vec::new(),
             vias: Vec::new(),
             rule: Rule::default(),
             places: Vec::new(),
@@ -499,6 +513,10 @@ impl Dsn {
                 d.boundary = shape_points(b);
             }
             d.keepouts = read_keepouts(st, sc)?;
+            for pl in st.children("plane") {
+                let Some(shape) = pl.args().iter().find(|a| matches!(a, Sx::List(_))) else { continue };
+                d.planes.push(Plane { net: arg_text(pl, 0)?, shape: read_shape(shape, sc)? });
+            }
             for v in st.children("via") {
                 d.vias.extend(v.args().iter().filter_map(Sx::text).map(str::to_string));
             }

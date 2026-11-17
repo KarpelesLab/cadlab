@@ -244,8 +244,6 @@ jobs:
     # Informative for now, like the oracle job (docs/TESTING.md, "Open-source corpus").
     continue-on-error: true
     timeout-minutes: 60
-    env:
-      CADLAB_CORPUS_DIR: ${{ github.workspace }}/../cadlab-corpus
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -261,14 +259,22 @@ jobs:
           kicad-cli version
           gerbv --version
       # The projects are fetched at their pinned commits (never vendored); the cache key is the
-      # manifest, so changing a pin refetches.
+      # manifest, so changing a pin refetches. The directory is under the runner's temporary
+      # directory: actions/cache refuses a path with `..` in it and then caches nothing, which
+      # `${{ github.workspace }}/../cadlab-corpus` was (DECISIONS D102). The three jobs that
+      # read the corpus share the key and the path, so one of them fills the cache for all.
+      - name: Corpus directory
+        run: echo "CADLAB_CORPUS_DIR=$RUNNER_TEMP/cadlab-corpus" >> "$GITHUB_ENV"
       - name: Cache the corpus
+        id: cache-corpus
         uses: actions/cache@v4
         with:
-          path: ${{ env.CADLAB_CORPUS_DIR }}
+          path: ${{ runner.temp }}/cadlab-corpus
           key: corpus-${{ hashFiles('tests/corpus/projects.toml', 'scripts/fetch-corpus.sh') }}
       - name: Fetch the corpus
-        run: scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
+        run: |
+          echo "corpus cache hit: ${{ steps.cache-corpus.outputs.cache-hit || 'false' }}"
+          scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
       - name: Corpus tests
         env:
           CADLAB_ORACLES: "1"
@@ -303,7 +309,6 @@ jobs:
     continue-on-error: true
     timeout-minutes: 120
     env:
-      CADLAB_CORPUS_DIR: ${{ github.workspace }}/../cadlab-corpus
       CADLAB_BENCH_WORK: "200000000"
     steps:
       - uses: actions/checkout@v6
@@ -311,13 +316,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: corpus-route
+      - name: Corpus directory
+        run: echo "CADLAB_CORPUS_DIR=$RUNNER_TEMP/cadlab-corpus" >> "$GITHUB_ENV"
       - name: Cache the corpus
+        id: cache-corpus
         uses: actions/cache@v4
         with:
-          path: ${{ env.CADLAB_CORPUS_DIR }}
+          path: ${{ runner.temp }}/cadlab-corpus
           key: corpus-${{ hashFiles('tests/corpus/projects.toml', 'scripts/fetch-corpus.sh') }}
       - name: Fetch the corpus
-        run: scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
+        run: |
+          echo "corpus cache hit: ${{ steps.cache-corpus.outputs.cache-hit || 'false' }}"
+          scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
       - name: Route (seeds 1, 2, 3)
         run: |
           cargo build --release --example route_bench
@@ -335,6 +345,128 @@ jobs:
           path: |
             route.md
             route-*.log
+
+  freerouting:
+    name: freerouting on the corpus (60 s, beside the native router and guide)
+    runs-on: ubuntu-24.04
+    # Informative: the table of docs/ROUTER.md, "freerouting on the corpus", made again on the
+    # runner (DECISIONS D102). freerouting is GPL: its released jar is run as a separate process
+    # and nothing of it is in the repository or in an uploaded artifact. Time budgets, so the
+    # numbers are the runner's and differ from run to run; about an hour (four tables of twelve
+    # boards at up to 60 s each, the plane variant running over its limit).
+    continue-on-error: true
+    timeout-minutes: 150
+    env:
+      FREEROUTING_VERSION: 2.5.0
+      FREEROUTING_SHA256: f6f51bb02245e8e717f9359bd260cc9c5c0b1bc0acc8b7cb2cd5b8ffeb5de3c7
+      CADLAB_BENCH_BUDGET_MS: "60000"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: freerouting
+      # freerouting 2.5.0 is built for Java 25 (class file version 69).
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Cache the freerouting jar
+        id: cache-jar
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/freerouting/freerouting.jar
+          key: freerouting-jar-${{ env.FREEROUTING_SHA256 }}
+      - name: Fetch the freerouting jar
+        if: steps.cache-jar.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/freerouting"
+          curl --fail --silent --show-error --location --retry 3 --max-time 600 \
+            --output "$RUNNER_TEMP/freerouting/freerouting.jar" \
+            "https://github.com/freerouting/freerouting/releases/download/v$FREEROUTING_VERSION/freerouting-$FREEROUTING_VERSION.jar"
+      - name: Check the jar
+        run: |
+          echo "$FREEROUTING_SHA256  $RUNNER_TEMP/freerouting/freerouting.jar" | sha256sum --check
+          java -version
+          echo "CADLAB_ORACLE_FREEROUTING=$RUNNER_TEMP/freerouting/freerouting.jar" >> "$GITHUB_ENV"
+      - name: Corpus directory
+        run: echo "CADLAB_CORPUS_DIR=$RUNNER_TEMP/cadlab-corpus" >> "$GITHUB_ENV"
+      - name: Cache the corpus
+        id: cache-corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/cadlab-corpus
+          key: corpus-${{ hashFiles('tests/corpus/projects.toml', 'scripts/fetch-corpus.sh') }}
+      - name: Fetch the corpus
+        run: |
+          echo "corpus cache hit: ${{ steps.cache-corpus.outputs.cache-hit || 'false' }}"
+          scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
+      - name: Build
+        run: cargo build --release --example route_bench
+      # The oracle of tests/specctra.rs, which no other job runs (they have no Java): two boards
+      # through DSN, freerouting and session, DRC-clean and complete. With CADLAB_ORACLES=1 a
+      # missing jar fails the test, and the log must show both boards routed.
+      - name: freerouting oracle (DSN and session end to end)
+        env:
+          CADLAB_ORACLES: "1"
+        run: |
+          set -o pipefail
+          cargo test --release --test specctra -- --nocapture 2>&1 | tee specctra.log
+          test "$(grep -c '^oracle: freerouting routed' specctra.log)" -eq 2
+      # route_bench fails when a board has no session of freerouting to count, so nothing is
+      # skipped silently; `pipefail` carries that through `tee`.
+      - name: freerouting, the DSN without pours
+        env:
+          CADLAB_BENCH_ROUTER: freerouting
+          CADLAB_BENCH_FR_THREADS: "4"
+          CADLAB_BENCH_VERBOSE: "1"
+        run: |
+          set -o pipefail
+          echo "### freerouting $FREEROUTING_VERSION, 60 s, the DSN without pours" | tee -a freerouting.md
+          target/release/examples/route_bench --corpus 2> freerouting-plain.log | tee -a freerouting.md
+      - name: freerouting, the pours as planes
+        if: always()
+        env:
+          CADLAB_BENCH_ROUTER: freerouting
+          CADLAB_BENCH_FR_THREADS: "4"
+          CADLAB_BENCH_FR_PLANES: "1"
+          CADLAB_BENCH_VERBOSE: "1"
+        run: |
+          set -o pipefail
+          echo "### freerouting $FREEROUTING_VERSION, 60 s, the pours as planes" | tee -a freerouting.md
+          target/release/examples/route_bench --corpus 2> freerouting-planes.log | tee -a freerouting.md
+      - name: Native router
+        if: always()
+        env:
+          CADLAB_BENCH_SEED: "1"
+        run: |
+          set -o pipefail
+          echo "### native router, 60 s, seed 1" | tee -a freerouting.md
+          target/release/examples/route_bench --corpus 2> native.log | tee -a freerouting.md
+      - name: guide
+        if: always()
+        env:
+          CADLAB_BENCH_ROUTER: guide
+        run: |
+          set -o pipefail
+          echo "### guide, 60 s, no seed" | tee -a freerouting.md
+          target/release/examples/route_bench --corpus 2> guide.log | tee -a freerouting.md
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f freerouting.md ]; then cat freerouting.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: freerouting-corpus
+          path: |
+            freerouting.md
+            freerouting-*.log
+            native.log
+            guide.log
+            specctra.log
+          if-no-files-found: ignore
 
   bench:
     name: Benchmarks (router regression, large-board timings)

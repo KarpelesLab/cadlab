@@ -907,6 +907,11 @@ pub struct ExportDsn {
     /// Router resolution in steps per micrometer (default 10: 0.1 µm).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<u32>,
+    /// Write each pour that has a net as a plane (its outline on each of its layers), so the
+    /// router connects the net's pads to the pour instead of wiring them to each other
+    /// (default: pours are left out and the router wires those nets).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub planes: bool,
 }
 
 /// Result of `export.dsn`.
@@ -951,6 +956,7 @@ impl Command for ExportDsn {
         let opts = crate::specctra::export::Options {
             resolution: self.resolution.unwrap_or(10),
             protect_all: self.protect_existing,
+            planes: self.planes,
         };
         let out = crate::specctra::export::export(p, &name, &opts);
         let mut path = resolve(ctx, self.path.as_deref(), Path::new("out").join("route").join(format!("{name}.dsn")));

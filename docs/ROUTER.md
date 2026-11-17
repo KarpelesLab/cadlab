@@ -705,7 +705,7 @@ java -jar freerouting.jar -de out/route/board.dsn -do out/route/board.ses -mp 20
 cadlab route import-ses out/route/board.ses     # then: cadlab drc run
 ```
 
-**`export.dsn {path?, protect_existing?, resolution?}`** (`specctra::export`): `(resolution um 10)` by default
+**`export.dsn {path?, protect_existing?, resolution?, planes?}`** (`specctra::export`): `(resolution um 10)` by default
 (the router's grid; coordinates themselves are written in µm with up to three decimals, i.e. exact nm). Written:
 
 | DSN | from |
@@ -713,6 +713,7 @@ cadlab route import-ses out/route/board.ses     # then: cadlab drc run
 | `structure/layer` | copper layers, all `signal`, top to bottom |
 | `boundary (path pcb 0 …)` | outer contour, arcs as chords within 1 µm |
 | `keepout` on layer `signal` | each cutout (`cutout1`, ...) |
+| `structure/plane` | with `planes`: each pour that has a net, as `(plane <net> (polygon <layer> 0 …))` of its outline on each of its copper layers (D102); without it pours are left out |
 | `keepout` / `wire_keepout` / `via_keepout` | keep-outs forbidding tracks and vias / tracks / vias, one per layer (`signal` when all); pour- or footprint-only keep-outs are left out with a warning; net exceptions are not written (the external router keeps those nets out too, `export.keepout_net_exception`, D76) |
 | `structure/via`, `structure/rule` | via padstacks in use (rules default first); rules track width and clearance |
 | `placement` | each footprint: image = footprint name, position, `front`/`back`, rotation, `lock_type position` when locked, `PN` = part; mounting holes as components `H1`… (locked) |
@@ -723,8 +724,13 @@ cadlab route import-ses out/route/board.ses     # then: cadlab drc run
 
 Back-side parts: Specctra mirrors the image across its Y axis and then rotates counter-clockwise by the
 placement angle, which is cadlab's own transform, so rotations are written unchanged
-(`specctra::dsn::place_point`). Zones are not written: they are refilled after import. Netless or unplaced
-items stay out.
+(`specctra::dsn::place_point`). Zones are not written by default: the router wires their nets pad to pad, and
+the pours are filled again after the import. With `planes` each pour with a net is written as a plane, by its
+outline: the router then takes a pad of that net as connected where it reaches the plane (freerouting 2.5 does,
+and lets other nets cross it), which is what cadlab's own routers do with a pour. The outline is not the fill:
+priorities, clearances, thermal reliefs and the islands a fill leaves are not written, so a pad the router
+counts as connected can be one the filled pour does not reach (`drc.unrouted` after the import says so).
+Netless or unplaced items stay out.
 
 **`route.import_ses {path, keep_existing?}`** (`specctra::ses`): session coordinates are integers in steps of the
 session's `(resolution <unit> <n>)` and convert exactly to nanometers (any unit: inch, mil, cm, mm, µm). Every
@@ -746,8 +752,12 @@ tested without the oracle: a golden DSN, the reader round trip (equal data, ever
 `place_point`, nets complete), and a hand-written session (`tests/fixtures/ldo.ses`).
 
 Limits: no DSN-to-project import (the reader is a library function used by tests); arcs (`qarc`) and polygon
-wires in sessions are skipped; Specctra strings cannot contain `"` (written as `'`, with a warning); zones,
-copper-to-edge and hole-to-hole rules are not expressed in the DSN (cadlab's DRC checks them after import).
+wires in sessions are skipped; Specctra strings cannot contain `"` (written as `'`, with a warning). Not
+expressed in the DSN, and checked by cadlab's DRC after the import: zone fills (outlines only, with `planes`),
+the minimum track width, the copper-to-edge, hole-to-hole and copper-to-hole clearances, custom rules (a
+clearance or a track width for an area, a net, a footprint or a pair of them, items forbidden in an area), the
+clearances of single pads and footprints, a keep-out's exception for some nets, differential pairs and length
+rules. What that costs an external router on real boards is measured under "freerouting on the corpus" below.
 
 ## v2: gridless (M6)
 

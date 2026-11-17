@@ -609,7 +609,7 @@ pub fn freerouting_tool() -> Option<PathBuf> {
 }
 
 /// Routes a case with freerouting (external process, `-mp 20`, one thread; a jar runs with
-/// `$JAVA_HOME/bin/java` when `JAVA_HOME` is set) through the DSN/SES exchange and measures the imported result with cadlab's DRC.
+/// `CADLAB_ORACLE_JAVA`, else `$JAVA_HOME/bin/java`, else `java`) through the DSN/SES exchange and measures the imported result with cadlab's DRC.
 pub fn run_freerouting(case: &Case, tool: &Path) -> Metrics {
     let (d, r, mut s) = (case.build)();
     let before = drc_errors(s.project.as_ref().unwrap());
@@ -617,7 +617,10 @@ pub fn run_freerouting(case: &Case, tool: &Path) -> Metrics {
     let ses = d.path().join(format!("{}.ses", case.name));
     exec(&r, &mut s, "export.dsn", json!({"path": dsn}));
     let (program, mut args): (PathBuf, Vec<String>) = if tool.extension().is_some_and(|e| e == "jar") {
-        let java = std::env::var_os("JAVA_HOME").map_or(PathBuf::from("java"), |h| PathBuf::from(h).join("bin/java"));
+        let java = std::env::var_os("CADLAB_ORACLE_JAVA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("JAVA_HOME").map(|h| PathBuf::from(h).join("bin/java")))
+            .unwrap_or_else(|| PathBuf::from("java"));
         (java, vec!["-jar".into(), tool.display().to_string()])
     } else {
         (tool.to_path_buf(), vec![])
@@ -633,6 +636,8 @@ pub fn run_freerouting(case: &Case, tool: &Path) -> Metrics {
             "-mt",
             "1",
             "--gui.enabled=false",
+            // No usage data is sent.
+            "-da",
         ]
         .map(String::from),
     );

@@ -23,6 +23,18 @@
 //! `CADLAB_BENCH_WORK=<units>` replaces it by a work budget, which gives the same result on any machine,
 //! under any load and with any number of threads, so two builds can be compared exactly (with
 //! `CADLAB_BENCH_SEED=<n>` for the seed, default 1: negotiation is chaotic, so compare several).
+//! `CADLAB_BENCH_ROUTER=freerouting` hands each board to freerouting instead (an external process
+//! on the DSN `export.dsn` writes, `CADLAB_ORACLE_FREEROUTING=/path/freerouting.jar`, run with
+//! `CADLAB_ORACLE_JAVA`, else `$JAVA_HOME/bin/java`, else `java`), applies its session as
+//! `route.import_ses` does and counts the result the same way: the open connections are those
+//! cadlab's DRC finds with the pours filled again, the DRC errors are split into those of rules
+//! the DSN carries and those it has no place for. The budget is freerouting's own time limit
+//! (`--router.job_timeout`; `CADLAB_BENCH_FR_TIMEOUT=none` for no limit), `CADLAB_BENCH_FR_THREADS`
+//! the processors its JVM sees and its `-mt` (default 1), `CADLAB_BENCH_FR_PASSES` its `-mp`
+//! (default: its own), `CADLAB_BENCH_FR_PLANES=1` writes the pours as planes
+//! (`export.dsn {planes: true}`), `CADLAB_BENCH_FR_ARGS` adds arguments and `CADLAB_BENCH_KEEP=<dir>`
+//! keeps the DSN, the session, freerouting's log and its result manifest per board. The run fails
+//! when a board has no result (docs/ROUTER.md, "freerouting on the corpus"; D102).
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets. `CADLAB_BENCH_ORIGINAL=1` lists the connections
 //! the projects' own routing leaves open instead (the reference for residual failures).
@@ -84,7 +96,9 @@ fn search_kind() -> Option<SearchKind> {
         "gridless" => Some(SearchKind::Gridless),
         "auto" => Some(SearchKind::Auto),
         "guide" => Some(SearchKind::Guide),
-        other => panic!("CADLAB_BENCH_ROUTER: unknown router `{other}` (grid, gridless, auto, guide)"),
+        // Not a search of cadlab's: the corpus mode hands the board to freerouting instead.
+        "freerouting" => None,
+        other => panic!("CADLAB_BENCH_ROUTER: unknown router `{other}` (grid, gridless, auto, guide, freerouting)"),
     }
 }
 
@@ -100,15 +114,21 @@ fn corpus(filters: &[String]) {
     let guide = search_kind() == Some(SearchKind::Guide);
     let work: Option<u64> = std::env::var("CADLAB_BENCH_WORK").ok().and_then(|v| v.parse().ok());
     let verbose = std::env::var_os("CADLAB_BENCH_VERBOSE").is_some();
+    let fr =
+        std::env::var("CADLAB_BENCH_ROUTER").is_ok_and(|v| v == "freerouting").then(|| Freerouting::from_env(budget));
     println!(
         "| board | layers | connections | completion | failed | DRC unrouted | vias | length | time | work | budget out | DRC errors |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
     );
+    // Boards without a result where one is required: with freerouting (an oracle: nothing is
+    // skipped silently) a board that is not fetched, or a run without a session it can import.
+    let mut missing = 0;
     for e in
         manifest.project.iter().filter(|e| filters.is_empty() || filters.iter().any(|f| e.name.contains(f.as_str())))
     {
         let pcb = dir.join(&e.name).join(&e.pcb);
         let Ok(text) = std::fs::read_to_string(&pcb) else {
             eprintln!("{}: {} missing (run scripts/fetch-corpus.sh)", e.name, pcb.display());
+            missing += 1;
             continue;
         };
         let read = |ext: &str| std::fs::read_to_string(pcb.with_extension(ext)).ok();
@@ -152,6 +172,14 @@ fn corpus(filters: &[String]) {
                     }
                 }
                 Err(err) => eprintln!("{}: {err}", e.name),
+            }
+            continue;
+        }
+        // `CADLAB_BENCH_ROUTER=freerouting`: the external router on the exported DSN, counted the
+        // same way.
+        if let Some(fr) = &fr {
+            if !freerouting_row(fr, &e.name, e.layers, &p, verbose) {
+                missing += 1;
             }
             continue;
         }
@@ -261,6 +289,256 @@ fn corpus(filters: &[String]) {
             eprintln!("  {}: {n}× {k}", e.name);
         }
     }
+    if fr.is_some() && missing > 0 {
+        eprintln!("{missing} board(s) without a result of freerouting");
+        std::process::exit(1);
+    }
+}
+
+/// freerouting as an external process (`CADLAB_BENCH_ROUTER=freerouting` in the corpus mode;
+/// docs/ROUTER.md, "freerouting on the corpus"). It is run on the DSN `export.dsn` writes and its
+/// session is applied as `route.import_ses` applies it, so the result is counted by cadlab's
+/// DRC like the native router's and guide's.
+struct Freerouting {
+    /// `java` (`CADLAB_ORACLE_JAVA`, else `$JAVA_HOME/bin/java`, else `java`).
+    java: PathBuf,
+    /// The released jar (`CADLAB_ORACLE_FREEROUTING`).
+    jar: PathBuf,
+    /// Processors the JVM may use and freerouting's `-mt` (`CADLAB_BENCH_FR_THREADS`, default 1).
+    threads: u32,
+    /// `-mp`, the most routing passes (`CADLAB_BENCH_FR_PASSES`; freerouting's own default without).
+    passes: Option<u32>,
+    /// freerouting's own time limit, `--router.job_timeout` (the budget of `CADLAB_BENCH_BUDGET_MS`;
+    /// `CADLAB_BENCH_FR_TIMEOUT=none` leaves it out, so freerouting runs to its own end).
+    timeout: Option<Duration>,
+    /// The process is killed after this long (`CADLAB_BENCH_FR_KILL_S`, default 4 h): a run that
+    /// does not end has no session and no result.
+    kill: Duration,
+    /// Pours written as planes (`CADLAB_BENCH_FR_PLANES=1`, `export.dsn {planes: true}`).
+    planes: bool,
+    /// More arguments, split at spaces (`CADLAB_BENCH_FR_ARGS`).
+    extra: Vec<String>,
+    /// Where the DSN, the session and freerouting's log are kept (`CADLAB_BENCH_KEEP`).
+    keep: Option<PathBuf>,
+}
+
+impl Freerouting {
+    fn from_env(budget_ms: u64) -> Freerouting {
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let jar = PathBuf::from(
+            var("CADLAB_ORACLE_FREEROUTING").expect("CADLAB_BENCH_ROUTER=freerouting needs CADLAB_ORACLE_FREEROUTING"),
+        );
+        assert!(jar.is_file(), "CADLAB_ORACLE_FREEROUTING={} is not a file", jar.display());
+        let java = var("CADLAB_ORACLE_JAVA")
+            .map(PathBuf::from)
+            .or_else(|| var("JAVA_HOME").map(|h| PathBuf::from(h).join("bin/java")))
+            .unwrap_or_else(|| PathBuf::from("java"));
+        Freerouting {
+            java,
+            jar,
+            threads: var("CADLAB_BENCH_FR_THREADS").and_then(|v| v.parse().ok()).unwrap_or(1),
+            passes: var("CADLAB_BENCH_FR_PASSES").and_then(|v| v.parse().ok()),
+            timeout: (var("CADLAB_BENCH_FR_TIMEOUT").as_deref() != Some("none"))
+                .then(|| Duration::from_millis(budget_ms)),
+            kill: Duration::from_secs(var("CADLAB_BENCH_FR_KILL_S").and_then(|v| v.parse().ok()).unwrap_or(4 * 3600)),
+            planes: var("CADLAB_BENCH_FR_PLANES").is_some_and(|v| v != "0"),
+            extra: var("CADLAB_BENCH_FR_ARGS")
+                .map(|v| v.split_whitespace().map(String::from).collect())
+                .unwrap_or_default(),
+            keep: var("CADLAB_BENCH_KEEP").map(PathBuf::from),
+        }
+    }
+
+    /// Runs freerouting on `dsn`: the wall time of the process (JVM start, reading the design
+    /// and writing the session included), its console output, and whether it had to be killed.
+    fn run(&self, dir: &std::path::Path, dsn: &std::path::Path, ses: &std::path::Path) -> (Duration, String, bool) {
+        let mut cmd = std::process::Command::new(&self.java);
+        cmd.arg(format!("-XX:ActiveProcessorCount={}", self.threads))
+            // Its settings and logs go to the run's own directory, not the user's.
+            .arg(format!("-Duser.home={}", dir.display()))
+            .arg(format!("-Djava.io.tmpdir={}", dir.display()))
+            .arg("-Djava.awt.headless=true")
+            .arg("-jar")
+            .arg(&self.jar)
+            .arg("-de")
+            .arg(dsn)
+            .arg("-do")
+            .arg(ses)
+            .arg("-mt")
+            .arg(self.threads.to_string())
+            .arg("--gui.enabled=false")
+            // No usage data leaves the machine, and no settings file of the user's is read.
+            .arg("-da")
+            .arg(format!("--user_data_path={}", dir.join("freerouting-data").display()))
+            .arg(format!("--router.result_json={}", dir.join("result.json").display()));
+        if let Some(n) = self.passes {
+            cmd.arg("-mp").arg(n.to_string());
+        }
+        if let Some(t) = self.timeout {
+            let s = t.as_secs();
+            cmd.arg(format!("--router.job_timeout={:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60));
+        }
+        cmd.args(&self.extra).current_dir(dir);
+        let log = dir.join("freerouting.log");
+        let out = std::fs::File::create(&log).expect("log file");
+        cmd.stdout(out.try_clone().expect("log file")).stderr(out).stdin(std::process::Stdio::null());
+        let t = Instant::now();
+        let mut child = cmd.spawn().unwrap_or_else(|e| panic!("running {}: {e}", self.java.display()));
+        let mut killed = false;
+        loop {
+            match child.try_wait().expect("waiting for freerouting") {
+                Some(_) => break,
+                None if t.elapsed() > self.kill => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    killed = true;
+                    break;
+                }
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        (t.elapsed(), std::fs::read_to_string(&log).unwrap_or_default(), killed)
+    }
+}
+
+/// DRC errors a router cannot be held to through a DSN, because the design file has no place
+/// for what they check (docs/ROUTER.md, "Specctra DSN/SES", limits): they are counted apart.
+fn not_in_dsn(code: &str) -> bool {
+    NOT_IN_DSN.contains(&code)
+}
+
+/// See [`not_in_dsn`]: the minimum track width (the DSN gives each class its width, and a router
+/// that necks a track down at a narrow pad has no lower bound to keep), the clearances of
+/// drilled holes to copper and to each other, the copper-to-edge clearance, and a keep-out's
+/// exception for some nets.
+const NOT_IN_DSN: &[&str] =
+    &["drc.track_width", "drc.hole_clearance", "drc.hole_to_hole", "drc.copper_to_edge", "drc.keepout_net"];
+
+/// Routes one corpus board (its routing already removed) with freerouting and prints its row;
+/// `false` when there is no result to count (no session, or one that cannot be imported).
+fn freerouting_row(fr: &Freerouting, name: &str, layers: u8, p: &Project, verbose: bool) -> bool {
+    use cadlab::specctra::export::{Options, export};
+    use cadlab::specctra::ses::{ImportOptions, Session, plan};
+    let tmp = tempfile::tempdir().expect("temporary directory");
+    let dir = match &fr.keep {
+        Some(k) => {
+            let d = k.join(name);
+            std::fs::create_dir_all(&d).expect("CADLAB_BENCH_KEEP");
+            d
+        }
+        None => tmp.path().to_path_buf(),
+    };
+    let unrouted = |p: &Project| cadlab::drc::check(p).iter().filter(|d| d.code == "drc.unrouted").count();
+    let connections = unrouted(p);
+    let before = routebench::drc_codes(p);
+    let x = export(p, name, &Options { planes: fr.planes, ..Options::default() });
+    for w in &x.warnings {
+        eprintln!("  {name}: DSN: {w}");
+    }
+    for (k, nets) in &x.net_exceptions {
+        eprintln!("  {name}: DSN: keep-out `{k}` written without its exception for {}", nets.join(", "));
+    }
+    let (dsn, ses) = (dir.join(format!("{name}.dsn")), dir.join(format!("{name}.ses")));
+    std::fs::write(&dsn, x.dsn.write()).expect("writing the DSN");
+    let _ = std::fs::remove_file(&ses);
+    let (time, log, killed) = fr.run(&dir, &dsn, &ses);
+    if verbose {
+        for l in log.lines() {
+            eprintln!("  freerouting: {l}");
+        }
+    }
+    let secs = time.as_secs_f64();
+    let Ok(text) = std::fs::read_to_string(&ses) else {
+        println!(
+            "| {name} | {layers} | {connections} | - | - | - | - | - | {secs:.1} s | - | {} | no session |",
+            if killed { "killed" } else { "-" }
+        );
+        return false;
+    };
+    let session = match Session::parse(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("| {name} | {layers} | {connections} | - | - | - | - | - | {secs:.1} s | - | - | session: {e} |");
+            return false;
+        }
+    };
+    let import = match plan(p, &session, &ImportOptions::default()) {
+        Ok(i) => i,
+        Err(e) => {
+            println!("| {name} | {layers} | {connections} | - | - | - | - | - | {secs:.1} s | - | - | import: {e} |");
+            return false;
+        }
+    };
+    for w in &import.warnings {
+        eprintln!("  {name}: session: {}: {}", w.code, w.message);
+    }
+    // As `route.import_ses` applies it.
+    let mut q = p.clone();
+    q.board_mut().tracks.retain(|t| !import.remove_tracks.contains(&t.id));
+    q.board_mut().vias.retain(|v| !import.remove_vias.contains(&v.id));
+    for mut t in import.tracks {
+        t.id = q.alloc_id();
+        q.board_mut().tracks.push(t);
+    }
+    for mut v in import.vias {
+        v.id = q.alloc_id();
+        q.board_mut().vias.push(v);
+    }
+    let open = unrouted(&q);
+    let length: f64 = q.board().tracks.iter().map(|t| cadlab::board::track_length(t).0 as f64).sum::<f64>() / 1e6;
+    let mut by_code = routebench::drc_codes(&q);
+    for (code, n) in &before {
+        if let Some(m) = by_code.get_mut(code) {
+            *m = m.saturating_sub(*n);
+        }
+    }
+    by_code.retain(|_, n| *n > 0);
+    let list = |unseen: bool| {
+        let c: Vec<String> =
+            by_code.iter().filter(|(c, _)| not_in_dsn(c) == unseen).map(|(c, n)| format!("{n}× {c}")).collect();
+        let n: usize = by_code.iter().filter(|(c, _)| not_in_dsn(c) == unseen).map(|(_, n)| n).sum();
+        if c.is_empty() { n.to_string() } else { format!("{n} ({})", c.join(", ")) }
+    };
+    if verbose {
+        let had: std::collections::BTreeSet<String> = drc_messages(p).into_iter().collect();
+        for m in drc_messages(&q).into_iter().filter(|m| !had.contains(m)) {
+            eprintln!("  DRC: {m}");
+        }
+        for l in cadlab::board::ratsnest(&q) {
+            eprintln!("  open: {} {} -> {} ({:.2} mm)", l.net, l.from, l.to, l.length.0 as f64 / 1e6);
+        }
+        eprintln!("  {name}: {} of {} via(s) in SMD pads", routebench::vias_in_pads(&q), q.board().vias.len());
+    }
+    if let Some(dir) = std::env::var_os("CADLAB_ROUTE_RENDER").map(PathBuf::from) {
+        render(&q, &dir.join(format!("{name}.png")), std::env::var("CADLAB_BENCH_AROUND").ok());
+    }
+    let own = own_count(&dir.join("result.json"));
+    if let Some((end, routed, state)) = &own {
+        eprintln!(
+            "  {name}: freerouting's own count: {end} open at the end, {} after its routing stage; job {state}",
+            routed.map_or("-".to_string(), |n| n.to_string())
+        );
+    }
+    let state = own.as_ref().map_or("-".to_string(), |o| o.2.clone());
+    let own = own.map_or("-".to_string(), |o| o.0.to_string());
+    println!(
+        "| {name} | {layers} | {connections} | {:.1}% | {own} | {open} | {} | {length:.1} mm | {secs:.1} s | - | {} | {}; not in the DSN: {} |",
+        if connections == 0 { 100.0 } else { 100.0 * (connections.saturating_sub(open)) as f64 / connections as f64 },
+        q.board().vias.len(),
+        if killed { "killed" } else { state.as_str() },
+        list(false),
+        list(true),
+    );
+    true
+}
+
+/// What freerouting says of its own run, from the manifest it writes (`--router.result_json`):
+/// the connections it counts open at the end and after its routing stage alone (its
+/// optimization comes after), and how the job ended (`COMPLETED`, `TIMED_OUT`, ...).
+fn own_count(manifest: &std::path::Path) -> Option<(u64, Option<u64>, String)> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(manifest).ok()?).ok()?;
+    let open = |v: &serde_json::Value| v["board_statistics"]["connections"]["incomplete_count"].as_u64();
+    Some((open(&v)?, open(&v["phases"]["autorouter"]["after"]), v["final_state"].as_str().unwrap_or("-").to_string()))
 }
 
 /// `CADLAB_BENCH_DUMP=<refdes>[.<pad>][,<margin mm>]`: the pads, tracks and vias of the routed

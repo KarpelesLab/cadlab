@@ -21,8 +21,8 @@
 use std::collections::BTreeMap;
 
 use super::dsn::{
-    ALL_SIGNAL, Class, Dsn, Image, ImagePin, Keepout, KeepoutKind, Layer, Net, Padstack, Place, Rule, Shape, Wire,
-    WireVia,
+    ALL_SIGNAL, Class, Dsn, Image, ImagePin, Keepout, KeepoutKind, Layer, Net, Padstack, Place, Plane, Rule, Shape,
+    Wire, WireVia,
 };
 use super::{Scale, Unit};
 use crate::board::{self as geo};
@@ -39,11 +39,14 @@ pub struct Options {
     pub resolution: u32,
     /// Mark every existing track and via `protect` (default: only locked ones).
     pub protect_all: bool,
+    /// Write each pour with a net as a `plane` of its outline on each of its layers, so the
+    /// router connects the net's pins to it instead of wiring them (default: pours are left out).
+    pub planes: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { resolution: 10, protect_all: false }
+        Options { resolution: 10, protect_all: false, planes: false }
     }
 }
 
@@ -422,7 +425,34 @@ pub fn export(p: &Project, name: &str, opts: &Options) -> DsnExport {
             });
         }
     }
-    if !board.zones.is_empty() {
+    let mut planes = Vec::new();
+    if opts.planes {
+        // The outline, not the fill: the router sees where the pour may be, connects the net's
+        // pins to it and is free to cross it; the fill is made again after the import.
+        let mut without_net = 0;
+        for z in &board.zones {
+            let Some(net) = z.net.as_ref().filter(|_| z.outline.len() > 2) else {
+                without_net += 1;
+                continue;
+            };
+            for layer in z.layers.iter().filter(|l| index_of(l).is_some()) {
+                planes.push(Plane {
+                    net: net.clone(),
+                    shape: Shape::Polygon { layer: layer.clone(), width: Nm::ZERO, points: z.outline.clone() },
+                });
+            }
+        }
+        if without_net > 0 {
+            warnings.push(format!("{without_net} zone(s) without a net or an outline are not written"));
+        }
+        if !planes.is_empty() {
+            warnings.push(format!(
+                "{} zone(s) are written as planes by their outlines: priorities, clearances, thermal reliefs and the \
+                 islands a fill leaves are not, so check the connections after `route.import_ses`",
+                board.zones.len() - without_net
+            ));
+        }
+    } else if !board.zones.is_empty() {
         warnings.push(format!(
             "{} zone(s) are not written: they are refilled around the routing after `route.import_ses`",
             board.zones.len()
@@ -529,6 +559,7 @@ pub fn export(p: &Project, name: &str, opts: &Options) -> DsnExport {
         layers: copper.iter().map(|l| Layer { name: l.clone(), kind: "signal".into() }).collect(),
         boundary,
         keepouts,
+        planes,
         vias,
         rule: Rule { width: Some(rules.track_width), clearance: Some(rules.clearance) },
         places,
