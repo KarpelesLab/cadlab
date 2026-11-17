@@ -297,7 +297,7 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       the noise on three, behind on three (corne-cherry 36, 35, 38 against 3; nrfmicro 4, 7, 9 against 0;
       sweep-v2.2 6, 7, 6 against 3); 111, 114 and 114 against 93 on the eleven without glasgow-revD1, of which
       corne-cherry alone is more than the difference. The default stays the native router (D97)
-- [x] guide 0.0.10 adopted in the adapter: its passes of rip-up end where they have stopped gaining, and what
+- [x] guide 0.0.10 and 0.0.11 adopted in the adapter: its passes of rip-up end where they have stopped gaining, and what
       they leave open is settled by chains (a route for an open connection across other nets' routes, the nets
       it crosses cut and joined up again around it at once, kept only if the board then has less open, counting
       the pads that routes cut off their pours, and undone to the track if not); `settle` on, and `row_fanout`
@@ -307,9 +307,14 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       with 0.0.9 (corne-cherry 140 for 169), and with the rows nrfmicro 11 for 20 and corne-cherry 130. At 60 s
       on a machine with 68 to 75 runnable threads on its 64, where the native router has 370 open for D97's 294:
       412, 408 and 343 for 419, 468 and 362 with 0.0.9 in the same queue; behind the native router in two orders
-      of three in that hour, and in every order on nrfmicro (3, 5, 3 against 0), sweep-v2.2 (6, 8, 6 against 3),
-      buspirate5-rev10 (9, 8, 10 against 2) and corne-cherry (36, 38, 40 against 3). The default stays the
-      native router (D101)
+      of three in that hour. guide 0.0.11 is 0.0.10 without its chains for the pads cut off their pours, which
+      kept a board with every net routed from coming back in time on that machine. With it, on the machine as
+      D97 had it (ROUTER.md, "Native router and guide 0.0.11, D101"): 263, 249 and 234 open on the twelve
+      boards where 0.0.9 has 273, 249 and 243 in the same queue, against the native router's 290, ahead in
+      every order; 101, 113 and 110 against 90 on the eleven without glasgow-revD1; ahead on three boards in
+      every order, level on three, within the noise on three, behind in every order on three (nrfmicro 3, 5, 3
+      against 0, where it had 4, 7, 9; sweep-v2.2 6, 7, 6 against 3; corne-cherry 31, 37, 36 against 3). The
+      default stays the native router (D101)
 - [ ] `router: guide` level with the native router on the corpus: needs, in guide, a way out of the pads of a
       fine row on two layers that the routes of the pads beside it leave open (corne-cherry's two QFN-56 and
       its USB receptacles, nrfmicro's receptacle: the chains of 0.0.10 are undone seven times in eight there),
