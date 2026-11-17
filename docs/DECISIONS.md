@@ -5177,7 +5177,7 @@ pads: cynthion's 180 solid through-hole pairs were those, set solid on the pad):
 
 What it did: 225 pads a narrower relief of their own (glasgow-revD1 93, cynthion 35, lumenpnp-mobo 33,
 glasgow-revC3 26, buspirate5-rev10 21, tinytapeout-demo 11, sweep-v2.2 5, buspirate-rs232 1), 9 tracks (0.65 to
-1.6 mm: cynthion C11.2, C16.2, C63.2, J3.1; tinytapeout-demo C39.2, C45.2, L1.1; lumenpnp-mobo U16.2;
+1.95 mm long: cynthion C11.2, C16.2, C63.2, J3.1; tinytapeout-demo C39.2, C45.2, L1.1; lumenpnp-mobo U16.2;
 glasgow-revC3 R50.2), 43 pads kept solid on one layer, all of them where the pour joined the pad through copper
 no spoke and no track fits in: cynthion 31 (26 balls of the BGA `IC1` in the pours under it, C14.2, C18.2, R73.2,
 R77.2, R120.1) and glasgow-revC3 12 (U8 and U36 pins 1, 2, 5, 6, C27.1, C28.1, R28.2, R34.2). 23 of those 43 read
@@ -5194,8 +5194,9 @@ For all but those eight balls the reason given is the same: a relief at the mini
 and no track of the net reaches the pour within 2.5 mm (the places were not looked at one by one). The pad D109
 found nominal on glasgow-revD1 after the repair is no longer reported (which step took it was not looked into). What stays as `drc.solid_pad` is copper that is no zone, as in D109.
 The DRC errors of cynthion (17), tinytapeout-demo (18) and glasgow-revD1 (3) are the same before and after the
-repair: the tracks added keep every clearance. They are `min_track_width` wide, so a net class with a wider
-track reports them (`drc.track_width_class`: 3 on tinytapeout-demo).
+repair: the tracks added keep every clearance. A track takes the width the net's class asks of its tracks
+when one that wide fits and is no wider than the pad, else `min_track_width` (at the minimum alone, the three of
+tinytapeout-demo were three `drc.track_width_class` warnings; at 0.25 mm they are none).
 *Time* (release, three threads, from the command line with load and save): `zone relieve` on glasgow-revD1 13.9 s
 (D109: 5.2 s), cynthion 11.2 s, tinytapeout-demo 5.1 s: up to seven fills and readings instead of two.
 **Fab profiles and IPC.** `[thermal_relief]` in every fab's profile (`published`, `verified_at`, `min_spoke`,
@@ -5232,7 +5233,7 @@ segments near the hole: 4.5 s, the same findings (the fill is 3.1 s of it).
 relieved there in guide's own zones until it is told.
 *Not done:* press-fit pins (decided: a pad attribute, solid by default, not held to the rules; KiCad's own mark
 for it was not looked up, so nothing was implemented); the 3D view still draws no copper; the native router does
-not keep room for spokes; the tracks of the repair take the minimum track width, not the net class's; a pad's own
+not keep room for spokes; a pad's own
 setting on a footprint that comes first in an import into an empty project becomes the footprint's (the other
 placements cannot unset it and get a variant); the fab pages were read through a text relay by a research run,
 not in a browser; whether KiCad counts cadlab's diagonal spokes and the corpus comparison with these rules are

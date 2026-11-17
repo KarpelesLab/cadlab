@@ -230,7 +230,8 @@ setting), `heat`, `bare`. `zone.relieve` brings a board to relieved pads in one 
      `clearance`) and spokes at `min_track_width`, kept when the pad has fewer layers without a joint or
      fewer spokes missing with it, else taken back;
    - *tracks of its net into the pour* (`tracks`): straight from the pad's middle in one of 16 directions,
-     `min_track_width` wide, at most 2.5 mm beyond the pad, inside the copper the pour would have with every
+     as wide as the net's class asks of its tracks when that fits and is no wider than the pad, else
+     `min_track_width`, at most 2.5 mm beyond the pad, inside the copper the pour would have with every
      pad solid (which keeps every clearance of the net, so the track does), ending in the pour as it is,
      crossing the pad's outline clear of the necks it has; the shortest first, a second one at a right angle
      or more from the first; a track that turns out to be no neck of its own is removed again. They are

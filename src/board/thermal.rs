@@ -1296,12 +1296,20 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
                 jobs.entry((net, s.layer.clone())).or_default().push((it, k.clone(), s.want - s.necks));
             }
         }
-        let mut add: Vec<(Key3, String, Reach, Point)> = Vec::new();
+        let mut add: Vec<(Key3, String, Reach, Point, Nm)> = Vec::new();
         for ((net, layer), pads) in &jobs {
+            let circuit = p.circuit();
+            let class_w = circuit
+                .nets
+                .get(net)
+                .and_then(|n| n.class.as_ref())
+                .and_then(|k| circuit.netclasses.get(k))
+                .and_then(|c| c.track_width)
+                .unwrap_or(min_w);
             let windows: Vec<Polygon> = pads
                 .iter()
                 .filter_map(|(it, ..)| it.shape.bbox())
-                .map(|b| rect(&b.expand(b.width().max(b.height()) / 2 + TRACK_REACH + min_w.0)))
+                .map(|b| rect(&b.expand(b.width().max(b.height()) / 2 + TRACK_REACH + class_w.max(min_w).0)))
                 .collect();
             let local = |set: PolygonSet| -> PolygonSet {
                 if set.is_empty() {
@@ -1338,19 +1346,25 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
             let allowed_index = RTree::new(allowed.iter().map(|q| q.bbox()));
             for (it, k, need) in pads {
                 let Some(b) = it.shape.bbox() else { continue };
-                let w = b.expand(b.width().max(b.height()) / 2 + TRACK_REACH + min_w.0);
+                let w = b.expand(b.width().max(b.height()) / 2 + TRACK_REACH + class_w.max(min_w).0);
                 let pick = |set: &PolygonSet, index: &RTree| -> PolygonSet {
                     let mut near = index.query(&w);
                     near.sort_unstable();
                     near.into_iter().map(|i| set[i as usize].clone()).collect()
                 };
-                let found = reaches(
-                    it,
-                    &pick(&allowed, &allowed_index),
-                    &pick(&pour, &pour_index),
-                    min_w.0,
-                    usize::from(*need),
-                );
+                // At the width the net's class asks of its tracks when one that wide fits (and
+                // is no wider than the pad), else at the minimum track width.
+                let (allowed, pour) = (pick(&allowed, &allowed_index), pick(&pour, &pour_index));
+                let mut width = min_w;
+                let mut found = Vec::new();
+                if class_w > min_w && class_w.0 <= zones::short_side(&it.shape) {
+                    found = reaches(it, &allowed, &pour, class_w.0, usize::from(*need));
+                    width = class_w;
+                }
+                if found.is_empty() {
+                    found = reaches(it, &allowed, &pour, min_w.0, usize::from(*need));
+                    width = min_w;
+                }
                 if found.is_empty() {
                     tried.entry(k.clone()).or_default().push(format!(
                         "no track of the net {min_w} wide reaches the pour on {layer} within {} of the pad",
@@ -1358,7 +1372,7 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
                     ));
                 }
                 for r in found {
-                    add.push(((k.0.clone(), k.1.clone(), layer.clone()), net.clone(), r, it.anchor));
+                    add.push(((k.0.clone(), k.1.clone(), layer.clone()), net.clone(), r, it.anchor, width));
                 }
             }
         }
@@ -1366,19 +1380,19 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
             let necks = |js: &[Joint]| -> BTreeMap<Key3, u8> { js.iter().map(|j| (key3(j), j.necks)).collect() };
             let before = necks(&js);
             let mut ids: Vec<(Key3, crate::id::ObjectId, String)> = Vec::new();
-            for (k, net, r, from) in add {
+            for (k, net, r, from, width) in add {
                 let id = p.alloc_id();
                 p.board_mut().tracks.push(crate::model::board::Track {
                     id,
                     layer: k.2.clone(),
-                    width: min_w,
+                    width,
                     net: Some(net),
                     start: from,
                     end: r.end.into(),
                     mid: None,
                     locked: false,
                 });
-                ids.push((k.clone(), id, format!("{}.{} on {}: {min_w} wide, {} long", k.0, k.1, k.2, Nm(r.len))));
+                ids.push((k.clone(), id, format!("{}.{} on {}: {width} wide, {} long", k.0, k.1, k.2, Nm(r.len))));
             }
             let (_, js1) = measure(p);
             let after = necks(&js1);

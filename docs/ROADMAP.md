@@ -144,8 +144,7 @@ no `-o`.)
       install of the CI jobs retries
 - [ ] Thermal relief, left open (D112): the native router does not keep room for the spokes of relieved pads
       (guide: the adapter must pass what BOARD.md "What a router must be told" lists); press-fit pins as a pad
-      attribute (decided, not implemented); the repair's tracks take the minimum track width, not the net
-      class's; the 3D view draws no copper; `zone.relieve` takes 14 s on glasgow-revD1
+      attribute (decided, not implemented); the 3D view draws no copper; `zone.relieve` takes 14 s on glasgow-revD1
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
 - [x] Legible silkscreen (D82): `drc.silk_edge` and `drc.silk_overlap` (rules `silk_to_edge`, `silk_clearance`),
