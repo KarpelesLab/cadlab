@@ -231,7 +231,10 @@ Per project, on a copy of the checkout:
 Allowances, each with its reason, on top of the cross-check's (`drc_compare::ALLOW`):
 
 - rules only one tool has (`ONE_SIDED_RULES` in `tests/corpus.rs`): KiCad's
-  `text_height`, `text_thickness`, `solder_mask_bridge`, `footprint_type_mismatch`, `starved_thermal`,
+  `text_height`, `text_thickness`, `solder_mask_bridge`, `footprint_type_mismatch`, `starved_thermal` (and
+  cadlab's `drc.starved_thermal`: each tool counts the spokes of its own fill, D109; on one fill they agree,
+  `kicad_agrees_on_starved_thermals` in `tests/kicad_pcb_oracle.rs`), cadlab's `drc.solid_pad` and
+  `drc.thermal_nominal`,
   `copper_sliver`, `nonmirrored_text_on_back_layer`, `npth_inside_courtyard`, `pth_inside_courtyard`;
   cadlab's `drc.footprint_outside` (KiCad's `hole_clearance` pairs with `drc.hole_clearance` since D56);
 - KiCad `silk_over_copper` on board texts (cadlab checks silkscreen drawings, not texts);

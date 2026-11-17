@@ -38,6 +38,10 @@
 //! (`CADLAB_BENCH_FR_REUSE=1` then counts the kept sessions again without running it). The run fails
 //! when a board has no result (docs/ROUTER.md, "freerouting on the corpus"; D102).
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
+//! `CADLAB_BENCH_THERMALS=1` adds, on stderr, the pads in pours of each board as it stands
+//! (`board::thermal`: by the necks that reach them, solid pads by kind, the thermal relief
+//! findings by code; with `CADLAB_BENCH_ORIGINAL=1` of the project's own routing), and
+//! `CADLAB_BENCH_THERMALS=relieve` the same after `zone.relieve`'s changes, with their time.
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets. `CADLAB_BENCH_ORIGINAL=1` lists the connections
 //! the projects' own routing leaves open instead (the reference for residual failures).
 //! For looking at one place: `CADLAB_BENCH_DUMP=<refdes>[.<pad>][,<margin mm>]` lists the pads,

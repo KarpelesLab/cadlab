@@ -210,7 +210,8 @@ pub fn short_side(shape: &PolygonSet) -> i64 {
         })
         .sum::<f64>()
         / 2.0;
-    let area = poly::area2(shape) as f64 / 2.0;
+    // Unsigned: a mirrored pad's outline runs the other way.
+    let area = poly::area2(shape).abs() as f64 / 2.0;
     let disc = (half * half - 4.0 * area).max(0.0);
     let bound = shape.bbox().map_or(i64::MAX, |b| b.width().min(b.height()));
     (((half - disc.sqrt()) / 2.0).round() as i64).clamp(0, bound.max(0))

@@ -17,7 +17,7 @@
 //! | `min_hole_to_hole` | `hole_to_hole` |
 //! | `min_hole_clearance` | `hole_clearance` |
 //! | `min_copper_edge_clearance` | `copper_to_edge` |
-//! | `min_resolved_spokes` | `min_thermal_spokes` (zero included: not checked) |
+//! | `min_resolved_spokes` | `min_thermal_spokes`, when larger than the board's (cadlab's default is 2) |
 //! | `defaults.silk_line_width` | `min_silk_width` |
 //! | `min_silk_clearance` | `silk_to_pad`, `silk_to_edge`, `silk_clearance` (zero included: overlaps only) |
 //! | other classes | net classes (values equal to the board defaults are inherited) |
@@ -576,8 +576,10 @@ pub fn apply(p: &mut Project, k: &KicadRules) -> (RulesReport, Vec<Diagnostic>) 
             report.rules.insert(f.clone(), *v);
         }
     }
+    // Taken when it asks for more than the board does: a project that accepts a single spoke
+    // (KiCad files with 1 are common) does not lower cadlab's minimum.
     if let Some(n) = k.min_thermal_spokes {
-        rules.min_thermal_spokes = n;
+        rules.min_thermal_spokes = rules.min_thermal_spokes.max(n);
     }
     p.board_mut().rules = rules.clone();
     p.board_mut().custom_rules = k.custom.clone();
@@ -664,6 +666,19 @@ mod tests {
         assert_eq!(dru_len("0.4mm"), Some(Nm::from_um(400)));
         assert_eq!(dru_len("8mil"), Some(Nm::from_mil(8)));
         assert_eq!(dru_len("0.2"), Some(Nm::from_um(200)));
+    }
+
+    /// `min_resolved_spokes` raises `min_thermal_spokes`, never lowers it.
+    #[test]
+    fn minimum_spokes() {
+        let pro = |n: u8| format!(r#"{{"board": {{"design_settings": {{"rules": {{"min_resolved_spokes": {n}}}}}}}}}"#);
+        for (kicad, want) in [(1, 2), (2, 2), (3, 3)] {
+            let (k, _) = parse(Some(&pro(kicad)), None).unwrap();
+            assert_eq!(k.min_thermal_spokes, Some(kicad));
+            let mut p = Project::new("t");
+            apply(&mut p, &k);
+            assert_eq!(p.board().rules.min_thermal_spokes, want, "KiCad's {kicad}");
+        }
     }
 
     #[test]

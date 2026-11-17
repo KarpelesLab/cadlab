@@ -862,6 +862,10 @@ pub struct RelieveReport {
     pub changes: thermal::Relieved,
     /// Pads that still need a look: fewer spokes than the minimum, or no effective relief.
     pub left: Vec<PadJoint>,
+    /// Pads the pour joined on a layer before and no longer does (`J1.3 on In1.Cu`): where
+    /// no spoke fits, relieving a pad takes its joint to the pour away.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cut: Vec<String>,
 }
 
 impl Command for ZoneRelieve {
@@ -879,23 +883,60 @@ impl Command for ZoneRelieve {
             .map(|n| zone_index(p, n).map(|i| p.board().zones[i].name.clone()))
             .collect::<Result<_, _>>()?;
         let max = p.board().rules.thermal_max_contact;
-        let before = thermal::census(p, &thermal::joints(p, &geo::copper_items(p)), max);
+        let joined = |js: &[Joint]| -> std::collections::BTreeSet<(String, String, String)> {
+            js.iter()
+                .filter(|j| j.zone_contact.0 > 0)
+                .map(|j| (j.refdes.clone(), j.number.clone(), j.layer.clone()))
+                .collect()
+        };
+        let js = thermal::joints(p, &geo::copper_items(p));
+        let before = thermal::census(p, &js, max);
+        let joined_before = joined(&js);
         let p = ctx.project_mut()?;
         let changes = thermal::relieve(p, (!names.is_empty()).then_some(names.as_slice()), self.keep_own);
         let rules = p.board().rules.clone();
         let js = thermal::joints(p, &geo::copper_items(p));
         let after = thermal::census(p, &js, max);
         let left: Vec<PadJoint> = js.iter().map(|j| pad_joint(j, &rules)).filter(attention).collect();
+        let joined_after = joined(&js);
+        let lost: Vec<&(String, String, String)> = joined_before.difference(&joined_after).collect();
+        let cut: Vec<String> = lost.iter().map(|(r, n, l)| format!("{r}.{n} on {l}")).collect();
         let p = ctx.project()?;
-        for d in census_warnings(p, &after) {
+        let mut diags = census_warnings(p, &after);
+        if !cut.is_empty() {
+            const SHOWN: usize = 10;
+            let mut d = Diagnostic::warning(
+                "zone.relieve_cut",
+                format!(
+                    "{} pad(s) are no longer joined to their pour on a layer, no spoke fits where they were solid: {}{}",
+                    cut.len(),
+                    cut.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", "),
+                    if cut.len() > SHOWN { ", ..." } else { "" }
+                ),
+            )
+            .with_hint(
+                "check drc.run for open connections (drc.unrouted); give each a track of its net into the pour, \
+                 turn its spokes (`footprint.set <footprint> --pads <n> --thermal-angle 45deg`) or keep it solid \
+                 (`--zone-connection solid`, for every part with that footprint); history.undo takes the repair back",
+            );
+            for (r, n, _) in lost.iter().take(SHOWN) {
+                d = d.with_subject(ObjectRef::Pin { component: r.clone(), pin: n.clone() });
+            }
+            diags.push(d);
+        }
+        for d in diags {
             ctx.report(d);
         }
-        Ok(RelieveReport { before, after, changes, left })
+        Ok(RelieveReport { before, after, changes, left, cut })
     }
 
     fn summarize(o: &RelieveReport) -> String {
         let c = &o.changes;
-        let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
+        let list = |v: &[String]| match v.len() {
+            0 => "none".to_string(),
+            n if n > 12 => format!("{}, ... {} more", v[..12].join(", "), n - 12),
+            _ => v.join(", "),
+        };
         let mut s = format!(
             "before: {}\nafter:  {}\nzones set to thermal: {}\nsolid settings removed: {}\nsolid kept or set on purpose: {}\nspokes narrowed: {}",
             o.before.text(),
@@ -905,6 +946,9 @@ impl Command for ZoneRelieve {
             list(&c.kept),
             list(&c.narrowed),
         );
+        if !o.cut.is_empty() {
+            s += &format!("\nno longer joined to their pour ({}): {}", o.cut.len(), list(&o.cut));
+        }
         if !o.left.is_empty() {
             s += &format!("\nleft to look at ({}):\n{}", o.left.len(), joints_text(&o.left, 20));
         }

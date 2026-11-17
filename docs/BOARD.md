@@ -161,10 +161,11 @@ of it is wider than the pad (a track wider than the pad's shorter side, a copper
 the pad are how a pad is connected, however much of a small pad's outline they take. Teardrop zones (KiCad's
 `$teardrop_…$`) count as tracks.
 
-**What a pad is.** `through`: a plated through-hole pin. `smd`: a surface-mount solder pad. `heat`: a pad with
-paste windows of its own (exposed pads), an SMD pad at least 2.5 times the footprint's median pad area with no
-pad of another number nearly as large (tabs; the two lugs of a connector are solder pads), and pads of the same
-number inside one (thermal via pads). `bare`: not soldered: covered by solder mask, without a number, non-plated,
+**What a pad is.** `through`: a plated through-hole pin. `smd`: a surface-mount solder pad. `heat`: an SMD pad
+with a grid of paste windows (exposed pads; one window counts on a pad at least 2.5 times the footprint's median
+pad area: an imported pin with a paste aperture of its own has one too), an SMD pad that large with no other pad
+nearly as large beside it (tabs; the two lugs of a connector are solder pads), and pads of the same number inside
+one (thermal via pads). `bare`: not soldered: covered by solder mask, without a number, non-plated,
 or alone on its footprint as an SMD pad without paste (test point) or with a plated hole of 0.5 mm or less (a
 stitching via drawn as a footprint). Only `through` and `smd` pads are held to the rules below.
 
@@ -196,11 +197,14 @@ pads solidly (`solid`, `tht_thermal`) become `thermal`; `solid` settings on sold
 are removed and listed (`keep_own` keeps them); heat pads and pads that are not soldered keep theirs, and heat
 pads without one get it, so they stay solid; pads that still read solid through spokes too wide for them get a
 spoke of their own, half their shorter side and at least `min_track_width`. It reports the counts before and
-after and every pad left starved or solid.
+after, every pad left starved or solid, and the pads the pour joined on a layer before and no longer does
+(`cut`, warning `zone.relieve_cut`): where no spoke fits, a relieved pad has no joint at all, and the pad
+settings are per footprint, so the command cannot keep that one pad solid. Such a pad is an open connection in
+`drc.run` unless a track or another layer joins it.
 
 Not covered: the routers do not keep the sides of relieved pads free for their spokes (what they leave is
-counted in [ROUTER.md](ROUTER.md)'s terms by `route_bench` with `CADLAB_BENCH_THERMALS=1` and reported by the
-DRC), and the KiCad export writes one spoke width per zone, so KiCad's own refill gives small pads the zone's
+counted by `route_bench --corpus` with `CADLAB_BENCH_THERMALS=1`, numbers in D109, and reported by the DRC), and
+the KiCad export writes one spoke width per zone, so KiCad's own refill gives small pads the zone's
 width where cadlab fits it (the exported fill is cadlab's).
 
 ## Keep-outs and net exceptions (D76)
@@ -415,7 +419,8 @@ own clearance from non-plated holes, the conservative former behaviour. The KiCa
 
 `min_thermal_spokes` (default 2; 0: not checked) and `thermal_max_contact` (percent, default 67; 0: not checked)
 are the two numbers of the thermal relief check ("Thermal relief"); the KiCad import takes the first from
-`min_resolved_spokes` and the export writes it there.
+`min_resolved_spokes` when that asks for more (a project that accepts one spoke does not lower the minimum:
+`board.rules --min-thermal-spokes 1` does) and the export writes it there.
 
 Net classes (`netclass.*`) override per net: track width, clearance, via drill and diameter, diff pair width and
 gap. Unset values are inherited from `board.rules`; `netclass.show` / `netclass.list` give the values in

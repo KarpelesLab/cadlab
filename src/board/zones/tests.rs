@@ -234,6 +234,11 @@ fn default_spokes_fit_small_pads() {
         vec![Polygon::new(vec![turn(-3e5, -2.5e5), turn(3e5, -2.5e5), turn(3e5, 2.5e5), turn(-3e5, 2.5e5)], vec![])];
     assert!((short_side(&turned.shape) - 500_000).abs() <= 2, "vertex rounding only");
     assert_eq!(Relief::of(&turned, &prm).w, 250_000);
+    // Mirrored (a footprint on the bottom side), its outline runs clockwise: the same pad.
+    let mut mirrored = pad("GND", 0, 0, 300_000, 250_000);
+    mirrored.shape[0].outer.0.reverse();
+    assert_eq!(short_side(&mirrored.shape), 500_000);
+    assert_eq!(Relief::of(&mirrored, &prm).w, 250_000);
     // A width given on the zone, or on the pad, is used as it is.
     prm.spoke_floor = None;
     assert_eq!(Relief::of(&pad("GND", 0, 0, 125_000, 400_000), &prm).w, 500_000);

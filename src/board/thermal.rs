@@ -52,8 +52,9 @@ pub enum PadClass {
     Through,
     /// A surface-mount solder pad.
     Smd,
-    /// A pad that spreads heat on purpose: an exposed pad (own paste windows), the tab of a
-    /// power package, or a pad inside one with its number (thermal via pads). Solid is right.
+    /// A pad that spreads heat on purpose: an exposed pad (a grid of paste windows, or one
+    /// window on a pad far larger than the others), the tab of a power package, or a pad
+    /// inside one with its number (thermal via pads). Solid is right.
     Heat,
     /// Not soldered: covered by solder mask, a pad without a number (mounting hole), or the
     /// pad of a one-pad footprint that is an SMD pad without paste (test point, fiducial) or
@@ -87,24 +88,36 @@ pub fn classes(pads: &[PlacedPad]) -> BTreeMap<(String, String), PadClass> {
     }
     let mut out = BTreeMap::new();
     for (refdes, pads) in by_fp {
-        let area = |pp: &PlacedPad| poly::area2(&pp.shape);
+        // Unsigned: the pads of a footprint on the bottom side are mirrored, their outlines
+        // run the other way.
+        let area = |pp: &PlacedPad| poly::area2(&pp.shape).abs();
         let smd: Vec<&&PlacedPad> = pads.iter().filter(|pp| matches!(pp.pad.kind, PadKind::Smd)).collect();
         let mut areas: Vec<i128> = smd.iter().map(|pp| area(pp)).collect();
         areas.sort_unstable();
         let median = areas.get(areas.len() / 2).copied().unwrap_or(0);
         let numbers: BTreeSet<&str> = pads.iter().map(|pp| pp.number.as_str()).filter(|n| !n.is_empty()).collect();
-        // Heat pads: own paste windows, or by size: far larger than the footprint's pads, and
-        // no pad of another number as large (the lugs of a connector come in several).
+        // Heat pads: far larger than the footprint's pads, and either with a grid of paste
+        // windows (two or more), or with no other pad as large outside it (the lugs of a
+        // connector come in several, whether they share a number or not; the pieces of a split
+        // exposed pad lie inside it). One paste window alone says nothing: an imported pin
+        // with a paste aperture of its own has one.
         let heat: Vec<&PlacedPad> = smd
             .iter()
             .filter(|pp| {
-                if matches!(pp.pad.paste, Some(Paste::Windows { .. })) {
+                let a = area(pp);
+                let large = a * 10 >= median * HEAT_RATIO_TENTHS;
+                if let Some(Paste::Windows { at, .. }) = &pp.pad.paste
+                    && (at.len() >= 2 || (large && smd.len() >= 2))
+                {
                     return true;
                 }
-                let a = area(pp);
                 numbers.len() >= 3
-                    && a * 10 >= median * HEAT_RATIO_TENTHS
-                    && !smd.iter().any(|o| o.number != pp.number && area(o) * 10 >= a * 8)
+                    && large
+                    && !smd.iter().any(|o| {
+                        !std::ptr::eq::<PlacedPad>(**o, ***pp)
+                            && area(o) * 10 >= a * 8
+                            && !poly::intersects(&o.shape, &pp.shape)
+                    })
             })
             .map(|pp| **pp)
             .collect();
@@ -911,7 +924,7 @@ pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> Reli
             && j.solid(rules.thermal_max_contact) == Some(Solid::Pour)
             && let Some(fp) = super::footprint_for(p, &j.refdes)
         {
-            let w = Nm(j.short.0 / 2).max(rules.min_track_width);
+            let w = Nm(j.short.0 / 2 / 1_000 * 1_000).max(rules.min_track_width);
             if w < j.spoke {
                 let e = widths.entry((fp.name.clone(), j.number.clone())).or_insert(w);
                 *e = (*e).min(w);
@@ -991,26 +1004,43 @@ mod tests {
             placed("J2", "3", (20 * mm, 2 * mm), (mm / 3, mm), smd),
             placed("J2", "S1", (18 * mm, mm), (2 * mm, 2 * mm), smd),
             placed("J2", "S2", (22 * mm, mm), (2 * mm, 2 * mm), smd),
+            placed("J3", "1", (50 * mm, 0), (mm / 3, mm), smd),
+            placed("J3", "2", (50 * mm, mm), (mm / 3, mm), smd),
+            placed("J3", "3", (50 * mm, 2 * mm), (mm / 3, mm), smd),
+            placed("J3", "MP", (48 * mm, mm), (2 * mm, 2 * mm), smd),
+            placed("J3", "MP", (52 * mm, mm), (2 * mm, 2 * mm), smd),
             placed("V1", "1", (30 * mm, 0), (600_000, 600_000), PadKind::Tht { drill: Nm(300_000) }),
             placed("TP1", "1", (32 * mm, 0), (mm, mm), smd),
             placed("H1", "1", (34 * mm, 0), (6 * mm, 6 * mm), PadKind::Tht { drill: Nm(3 * mm) }),
             placed("C1", "1", (40 * mm, 0), (mm / 2, mm / 2), smd),
             placed("C1", "2", (41 * mm, 0), (mm / 2, mm / 2), smd),
         ];
-        pads[14].pad.paste = Some(Paste::None);
-        pads[17].pad.mask = MaskOpening::None;
+        let at = |r: &str, n: &str| pads.iter().position(|pp| pp.refdes == r && pp.number == n).unwrap();
+        let (tp, c2) = (at("TP1", "1"), at("C1", "2"));
+        pads[tp].pad.paste = Some(Paste::None);
+        pads[c2].pad.mask = MaskOpening::None;
+        // A footprint on the bottom side is mirrored: its outlines run clockwise, and its pads
+        // are what they are all the same.
+        for pp in pads.iter_mut().filter(|pp| pp.refdes == "J2") {
+            pp.shape.outer.0.reverse();
+        }
         assert_eq!(class_of(&pads, "U1", "1"), PadClass::Smd);
         assert_eq!(class_of(&pads, "U1", "4"), PadClass::Heat);
         assert_eq!(class_of(&pads, "J1", "1"), PadClass::Through);
         assert_eq!(class_of(&pads, "J1", ""), PadClass::Bare);
         assert_eq!(class_of(&pads, "J2", "S1"), PadClass::Smd);
+        assert_eq!(class_of(&pads, "J3", "MP"), PadClass::Smd, "two lugs of one number");
         assert_eq!(class_of(&pads, "V1", "1"), PadClass::Bare);
         assert_eq!(class_of(&pads, "TP1", "1"), PadClass::Bare);
         assert_eq!(class_of(&pads, "H1", "1"), PadClass::Through, "a 3 mm plated hole takes a lead or a screw");
         assert_eq!(class_of(&pads, "C1", "1"), PadClass::Smd);
         assert_eq!(class_of(&pads, "C1", "2"), PadClass::Bare, "covered by mask");
-        // An exposed pad says so by its paste windows, whatever its size.
-        pads[0].pad.paste = Some(Paste::Windows { size: (Nm(1), Nm(1)), at: vec![] });
+        // A grid of paste windows says exposed pad, whatever the size; one window on a pin
+        // (an imported pad with a paste aperture of its own) does not.
+        let w = |n: usize| Some(Paste::Windows { size: (Nm(1), Nm(1)), at: vec![Point::default(); n] });
+        pads[0].pad.paste = w(1);
+        assert_eq!(class_of(&pads, "U1", "1"), PadClass::Smd);
+        pads[0].pad.paste = w(4);
         assert_eq!(class_of(&pads, "U1", "1"), PadClass::Heat);
     }
 

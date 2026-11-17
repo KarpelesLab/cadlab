@@ -127,6 +127,20 @@ no `-o`.)
 - [x] Manual routing commands: tracks through coordinates or pins (net inferred, shorts refused), vias; net
       class widths and via sizes
 - [x] Copper zones with fill (thermal reliefs, clearances, islands removal, priorities, keep-outs)
+- [x] Thermal relief held end to end (D109, BOARD.md "Thermal relief"): relief by default on every layer with
+      spokes fitted to small pads, exposed pads and tabs of generated footprints solid on purpose, vias solid;
+      pads in pours read from the filled copper (`board::thermal`); `drc.solid_pad`, `drc.thermal_nominal`,
+      `drc.starved_thermal` (`min_thermal_spokes`), `drc.thermal_size`, `drc.current_spokes` in `drc.run` and as
+      `fab.*` warnings in `fab.check` / `fab.export`; counts in `zone.fill` and at `board.import_kicad`;
+      `zone.thermals`; `zone.relieve` to repair a board; KiCad's `starved_thermal` as the oracle of the spoke
+      count (`tests/kicad_pcb_oracle.rs`)
+- [ ] Thermal relief, left open (D109): the routers do not keep room for the spokes of relieved pads (both leave
+      more pads short of spokes than the projects' own routing, counted by `route_bench` with
+      `CADLAB_BENCH_THERMALS=1`); a pad `zone.relieve` leaves without any spoke is reported, not repaired (a
+      setting per placed pad, where today's are per footprint, would let it stay solid alone); the KiCad export
+      writes one spoke width per zone, not the width fitted to each small pad; guide is told the zone's spoke
+      width, not the fitted one; `fab.thermal_size` uses the fab's minimum track and space, no fab profile lists
+      a relief minimum of its own
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
 - [x] Legible silkscreen (D82): `drc.silk_edge` and `drc.silk_overlap` (rules `silk_to_edge`, `silk_clearance`),

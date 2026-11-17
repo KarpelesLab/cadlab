@@ -388,3 +388,65 @@ fn outputs_carry_the_relief() {
     );
     assert!(text.contains("(zone_connect 2)"), "the exposed pad and the tab are solid in KiCad too");
 }
+
+/// Where no spoke fits, relieving a solid pad takes its joint away: `zone.relieve` says which
+/// pads (`cut`, `zone.relieve_cut`) instead of leaving them to be found later. The pin here is
+/// fenced by another net on three sides and half of the fourth: the solid pour reaches it past
+/// the end of the fence, where the spoke along the pad's axis has no room.
+#[test]
+fn relieve_reports_the_pads_it_cuts_off() {
+    let (_d, r, mut s) = setup();
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board", "pads": "solid"}),
+    );
+    let at = joint(&joints(&s), "J1.1", "B.Cu").at;
+    let (x, y) = (at.x.0, at.y.0);
+    let nm = |v: i64| format!("{v}nm");
+    let d = 1_500_000;
+    let fence = [(x + 300_000, y - d), (x - d, y - d), (x - d, y + d), (x + d, y + d), (x + d, y - d)];
+    let pts: Vec<Value> = fence.iter().map(|(a, b)| json!([nm(*a), nm(*b)])).collect();
+    exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}));
+    let before = joints(&s);
+    assert!(joint(&before, "J1.1", "B.Cu").zone_contact.0 > 0, "the solid pour reaches the pin");
+    let o = exec(&r, &mut s, "zone.relieve", json!({}));
+    assert_eq!(o["output"]["cut"], json!(["J1.1 on B.Cu"]), "{}", o["output"]);
+    let cut = findings(&o, "zone.relieve_cut");
+    assert_eq!(cut.len(), 1);
+    assert!(cut[0].contains("J1.1 on B.Cu"), "{}", cut[0]);
+    // The pad is reported as one no spoke reaches, too.
+    assert!(o["output"]["left"].as_array().unwrap().iter().any(|j| j["pad"] == "J1.1" && j["spokes"] == 0));
+}
+
+/// Parts on the bottom side are mirrored (their outlines run the other way): their pads are
+/// classed, measured and relieved like those on top.
+#[test]
+fn bottom_side_parts() {
+    let (_d, r, mut s) = setup();
+    exec(&r, &mut s, "place.flip", json!({"refdes": ["C1", "C2", "U1"]}));
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board", "pads": "solid"}),
+    );
+    let js = joints(&s);
+    for pad in ["C1.2", "C2.2"] {
+        let j = joint(&js, pad, "B.Cu");
+        assert_eq!(j.class, PadClass::Smd, "{pad}");
+        assert!(j.perimeter.0 > 1_000_000 && j.solid(67).is_some(), "{pad}: {j:?}");
+        assert!((400_000..700_000).contains(&j.short.0), "{pad}: short side {}", j.short);
+    }
+    assert_eq!(joint(&js, "U1.4", "B.Cu").class, PadClass::Heat);
+    let classes = thermal::classes(&cadlab::board::placed_pads(s.project.as_ref().unwrap()));
+    assert_eq!(classes[&("U1".to_string(), "1".to_string())], PadClass::Smd);
+    let solid = findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.solid_pad");
+    assert!(solid.iter().any(|m| m.contains("C1.2")) && solid.iter().any(|m| m.contains("C2.2")), "{solid:#?}");
+    assert!(!solid.iter().any(|m| m.contains("U1.4")), "the tab is a heat pad on either side: {solid:#?}");
+    let o = exec(&r, &mut s, "zone.relieve", json!({}));
+    assert_eq!(o["output"]["after"]["solid_smd"], 0, "{}", o["output"]);
+    let js = joints(&s);
+    assert!(joint(&js, "C1.2", "B.Cu").spokes >= 2 && joint(&js, "U1.4", "B.Cu").share() > 90);
+}
