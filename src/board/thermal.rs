@@ -15,7 +15,7 @@
 //! ```
 //!
 //! so a pad in a zone set to `solid`, a pad whose spokes are as wide as its sides, a pad on a
-//! filled copper drawing and a pad entered by a track as wide as itself all read as what they
+//! filled copper drawing and a pad entered by a track wider than itself all read as what they
 //! are, and a pad of a `solid` zone that other nets leave joined at one end only reads as the
 //! neck it is. [`joints`] gives the measure per pad and layer, [`check`] the DRC findings,
 //! [`census`] the counts, [`relieve`] the changes that bring a board to relieved pads.
@@ -211,8 +211,8 @@ pub struct Joint {
 }
 
 impl Joint {
-    /// Whether the pad is in a pour of its net on this layer: the zone connects pads and its
-    /// copper reaches the pad or its relief.
+    /// Whether the pad is in a pour of its net on this layer: the zone connects pads and a
+    /// pour is at the pad ([`Joint::near`]).
     pub fn in_pour(&self) -> bool {
         self.zone.is_some() && self.style != Some(PadConnection::None) && self.near
     }
@@ -657,7 +657,7 @@ pub fn check(p: &Project, rules: &Rules, items: &[CopperItem], currents: bool) -
                         "`zone.relieve` gives every solder pad thermal spokes (`zone.set {z} --pads thermal` for \
                          this zone); if this pad is solid on purpose, say so on the pad or footprint \
                          (`footprint.set <footprint> --pads {number} --zone-connection solid`) or waive it \
-                         (`drc.waive drc.solid_pad zone:{z} --reason ..`)"
+                         (`drc.waive drc.solid_pad --subjects zone:{z} --reason ..`)"
                     )
                 })
             } else {

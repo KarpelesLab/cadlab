@@ -226,7 +226,7 @@ fn warn_solid(ctx: &mut Context<'_>, z: &Zone) {
         .with_hint(format!(
             "keep `pads: thermal` (the default) and make single pads solid on purpose (`footprint.set <footprint> \
              --pads <n> --zone-connection solid`: exposed pads and tabs of generated footprints are already); if the \
-             whole zone is meant solid, waive the finding (`drc.waive drc.solid_pad zone:{} --reason ..`)",
+             whole zone is meant solid, waive the finding (`drc.waive drc.solid_pad --subjects zone:{} --reason ..`)",
             z.name
         )),
     );

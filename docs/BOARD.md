@@ -185,7 +185,7 @@ imported board whose designer meant its pads solid.
 
 **Solid on purpose.** Say it where it holds: on the pad or the footprint (`footprint.set <footprint> --pads 4
 --zone-connection solid`; the check is then quiet for that pad, in every zone), or as a waiver for a whole zone
-or net (`drc.waive drc.solid_pad zone:GND --reason ..`, which covers the `fab.` finding too). A zone can still be
+or net (`drc.waive drc.solid_pad --subjects zone:GND --reason ..`, which covers the `fab.` finding too). A zone can still be
 made `solid`; `zone.add` and `zone.set` then warn (`zone.solid_pads`).
 
 **Looking and repairing.** `zone.fill` adds the count of the pads in pours to its report (by necks 0/1/2/3/4+,
