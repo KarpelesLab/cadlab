@@ -4495,7 +4495,7 @@ frozen coefficients and long runs (no proof for the graded layer is known to me)
 cadlab's own regions (cadlab's long runs are pulses; the noise runs are ems's boards); times on an unshared
 machine.
 
-### D106. guide 0.0.13 adopted: a route that keeps what it reaches begins another tree from a terminal it leaves out; level or ahead is said by ranges of four runs; the default unchanged (2026-11-17)
+### D106. guide 0.0.13 and 0.0.14 adopted: a route that keeps what it reaches begins another tree from a terminal it leaves out; a last run takes the routes of the runs before back as routes that move; level or ahead is said by ranges of four runs; the default unchanged (2026-11-17)
 This round is for D104's gaps, a release of guide at a time (guide's `docs/benchmarks.md`, "PCB routing of a board
 in two parts"; its `docs/architecture.md`). `guide = { version = "0.0.13", default-features = false, features =
 ["pcb"] }`; nothing else in `Cargo.lock` moves.
@@ -4549,5 +4549,88 @@ that had room, on a board where every net has a way with them out of it.
 *Not measured:* the native router over more than four seeds; guide over more than four orders at 60 s on the
 whole corpus; the generated boards (a run with no budget begins no second tree); cadlab's oracles; KiCad's DRC on
 a board guide routed.
+
+**Second release of the round: guide 0.0.14** (guide's `docs/benchmarks.md`, "PCB routing from an earlier run's
+routes"). `guide = { version = "0.0.14", ... }`; nothing else in `Cargo.lock` moves. It is for D104's second gap,
+and has what was built for its first.
+**What guide 0.0.14 adds:**
+- *`pcb::route_from`*: a run that begins with the tracks and vias of an earlier run as routes of their nets,
+  which it may move. A net that they join whole has no turn until another net moves it; one in pieces is
+  completed from them with the turns of a first pass (nothing moved until every net has had one). The stubs of
+  a net with a plane are taken back with a place in the fill for each end that a piece of it still holds. A
+  track of another width than its net's, an arc, a via of another size or a net with nothing to join stays
+  fixed; `Routed::taken_back` lists the nets taken. A net that the run does not move is not cleaned up again.
+- *`RouteOptions::negotiate_places`*, off by default: after the first pass, each place where two pads or more
+  with nothing joined to them are within twelve pitches of each other has one negotiation among all the nets of
+  at most eight terminals there. Each loses all it has in the place in every round that it is in another's way
+  in, and the price rises by a quarter a round, for forty-eight rounds at most. This is D104's first gap as it
+  was put there: whole routes again, a price that rises slowly, kept to the place. It settles.
+**What the adapter takes from it** (`router::guide`; ROUTER.md, "guide as a backend", "A last run that moves
+routes"):
+- *A third run*, after the second on the fixed board, in what time or work that leaves (3 s at least): every net
+  left open, and the routes of the runs before handed back as routes (`Adapted::take_back`). Its result stands
+  in place of the routes of the nets guide took back; kept if the board has fewer connections open.
+- *`negotiate_places` left off*: no gain at 60 s (below).
+**Measured** (ROUTER.md, "Native router and guide 0.0.14, D106"), 60 s, four orders, 0.0.13 behind the adapter
+with two runs and 0.0.14's source behind the one with three, six runs at a time: 923 open over the four orders on
+the twelve boards → 890 (259, 227, 218 and 219 → 241, 223, 205 and 221); the eleven without glasgow-revD1 97, 91,
+94 and 98 → 79, 87, 81 and 97. corne-cherry 107 → 87, buspirate5-rev10 9 → 1, tinytapeout-demo 37 → 33, cynthion
+67 → 64, lumenpnp-mobo 2 → 1; nrfmicro 13, sweep-v2.2 12 and glasgow-revC3 133 the same; glasgow-revD1 543 → 546,
+three more in one order of its first run. No board has more open in an order for the third run: it is only kept
+if it leaves less. Zero DRC errors other than unrouted, no via in a pad of its net, nothing taken out by the
+verification, no call over 59.1 s. At 40 million nodes a run that the budget stops is the same to the track
+(corne-cherry 38, 38 and 32 with the released crate), and the runs after one that ends within it go on within
+the budget (tinytapeout-demo 16, 19 and 1 for 16, 19 and 5). guide's curated boards: 1150 of 1151 connections
+with 712 vias, as before.
+**Both routers over four runs in one hour, with 0.0.14** (the same table): the twelve boards 215 to 244 open for
+guide (median 228) against 197 to 292 for the native router (285); the eleven without glasgow-revD1 82 to 104
+(89) against 82 to 92 (88.5).
+**Tried and not kept** (guide's `docs/benchmarks.md`), at 60 s over four orders, where the corpus has 923 open
+with 0.0.13:
+- *The second run itself from the first run's routes*, in place of the run on the fixed board: sweep-v2.2 15 to
+  21 over the four orders for 12 (searches across routes for its three connections that no route makes, and
+  the deadline before it has joined what the run on the fixed board joins), lumenpnp-mobo 5 for 2.
+- *Every net cleaned up again at the end of such a run*: lumenpnp-mobo 5 to 10 over four orders for 1. A route
+  pulled tight lies where cadlab's fill has copper, and the fill after it is cut where it was whole.
+- *Only the nets without a plane taken back*: corne-cherry 114 for 88 to 92 with all of them, whose zones are
+  tracks as wide as a pad; 926 on the nine boards.
+- *The nets completed as nets that are mended are*, across other nets' routes at once: sweep-v2.2 21 for 16.
+- *The negotiations for places at 60 s*: corne-cherry 71, 84 and 87 in three builds for 87 without, cynthion 75
+  for 64, sweep-v2.2 14 for 12, nrfmicro 10 for 13. Three or four places take the nodes of the first run. With
+  four minutes: corne-cherry 9 and 11 open in two orders for 13 and 16, 8 in an earlier build.
+- *A place's nets kept to its window*: the nets with a pad open have their other pad far off and stay open
+  through every round. *Sixteen nets more than it begins with* at most: ended in the second round, as nets
+  routed over the board run into others.
+**Gaps, for guide's next release**, most useful first:
+1. *A negotiation for a place that a minute can pay for.* corne-cherry has 15 to 27 open against 0 to 4. A place
+   has thirty nets, each routed again in every round it is in another's way in: 300 000 to 450 000 nodes a round
+   at first, three to eight million a place, where the whole first run has thirty to forty. What would make it
+   cheaper was not built: searches kept to the place for nets that are whole (their ends at its edge are where
+   to join), a price that rises faster once few nets are left, and the places before the first pass has laid
+   the fans that they then take apart.
+2. *The D+ of a USB receptacle* whose pads have those of D- between them (nrfmicro, all of its 2 to 5; one or two
+   on corne-cherry): not touched. A place's negotiation takes two nets of two pads as it takes any, and the
+   receptacle's pads are a place only when two of them are open.
+3. *Six layers in a minute* (glasgow-revD1): not touched; its first pass does not end, so no negotiation and
+   no run after the first has a turn that counts. The range is 125 to 162 against the native router's 115 to 207.
+4. *Vias* (lumenpnp-mobo 712 against 347, tinytapeout-demo 605 against 274) and *rule areas with a routed track
+   width*: not touched.
+5. *sweep-v2.2 at its deadline*: 3 in every order on a machine with four runs at a time, 3, 4, 4 and 4 with ten
+   threads beside it. Its first pass spends its time on three connections that no route makes; a run that knew
+   a board in two parts would not look for them.
+**Default: unchanged.** By the ranges of four runs of each in one hour, with 0.0.14: level on three boards
+(buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight) and on sweep-v2.2 off a loaded machine; ahead in every
+run on two (lumenpnp-mobo 0 to 1 against 4 to 24; cynthion 15 to 23 against 28 to 32); ranges that overlap on four
+(buspirate5-rev10 0 to 2 against 0 to 5; glasgow-revC3 30 to 38 against 31 to 35; glasgow-revD1 125 to 162 against
+115 to 207; tinytapeout-demo 1 to 16 against 3 to 6, medians 8 and 4.5); behind in every run on two (nrfmicro 2
+to 5 against 0; corne-cherry 15 to 27 against 0 to 4). The condition is not met. `router: guide` stays the second
+opinion, and the native router stays.
+*Why a third run and not a second that moves:* the run on the fixed board is what repairs the pads that the
+first run's routes cut off a pour, which only cadlab's fill sees, and it is cheap; a run that moves routes makes
+such cuts again and has no run after it to repair them. So it comes last, and only counts if cadlab's own count
+is better for it.
+*Not measured:* `negotiate_places` on other boards than corne-cherry with more than a minute; the generated
+boards with 0.0.14 (a run with no budget is as it was: the curated boards are); the three runs under a work
+budget on the whole corpus; cadlab's oracles; KiCad's DRC on a board guide routed.
 
 ## Open questions

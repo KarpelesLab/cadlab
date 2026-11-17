@@ -797,7 +797,8 @@ open by chains of moves kept only if the board has less open for them, 0.0.11 th
 the pads cut off their pours, which cost a board with every net routed a third of its time (D101), 0.0.12 the one
 that negotiates for each connection its passes leave open before its chains, every net near it giving way a
 little (D104), 0.0.13 the one whose routes that keep what they reach begin another tree from a terminal left out,
-for a net's pads that nothing joins to its first (D106); what this
+for a net's pads that nothing joins to its first, 0.0.14 the one that goes on from an earlier run's routes and may
+move them (D106); what this
 section says of 0.0.2 is in D85.
 
 **What goes to guide** (`router::guide::adapt`):
@@ -860,6 +861,18 @@ exports and the count all read cadlab's fill). The result is then treated as the
   what cadlab's fill of the routed board still leaves apart, 15 connections of 182 on glasgow-revD1 where it
   made 111 of 325, and one of lumenpnp-mobo's ground where it was asked for 220 stubs (D97; one run alone was
   not measured again).
+- *A last run that moves routes* (guide 0.0.14, D106). In the second run the first run's routes are copper that
+  does not move: a pad that the fill no longer reaches gets a stub if there is room as the routes lie, and a pad
+  that the first run left shut in stays so. In what time (or work) the second run leaves, guide is given every
+  net the board still has open and the routes of the runs before as *routes of their nets*
+  (`pcb::route_from`, `Adapted::take_back`): a net they join whole has no turn until another moves it, one in
+  pieces is completed from them, and any of them may be moved as in a first run. guide says whose routes it took
+  back (`Routed::taken_back`: not a track of another width than its net's, an arc, a via of another size or a
+  net with nothing to join); its result stands in place of those, the others stay as they were, and a net that
+  it did not move comes back as it was given, so that the fill is cut where it was. Kept when the board has
+  fewer connections open for it, so no board ends with more than the two runs before it left; at least 3 s must
+  be left for it (`stats.iterations` is 1 to 3). On sweep-v2.2, whose second run is cut by the deadline, there is
+  no third.
 - *The count is the board's* (D80). Completion is read from the board with its pours filled again: failed
   connections are the ratsnest lines the board has left for the nets in scope, pads the routing cut off from a
   pour included; routed ones are counted per island of the result (an island holding `k` of the planned islands
@@ -2313,6 +2326,66 @@ What the numbers say:
   released crates; the same on any machine): the nine boards that a budget cuts have 814 → 801 open: corne-cherry
   118 → 108, glasgow-revC3 109 → 104, sweep-v2.2 19 → 16 (its first pass is cut by that budget), buspirate5-rev10
   9 → 12, nrfmicro 9 → 10, cynthion 55 → 56, tinytapeout-demo 40, lumenpnp-mobo 1 and glasgow-revD1 454 the same.
+
+The default is unchanged (DECISIONS D106).
+
+**Native router and guide 0.0.14, D106** (guide 0.0.14's source behind the adapter with three runs; the corpus at
+the default 60 s; four runs of the native router, seeds 1 to 4, three threads, two at a time, and four orders of
+guide, one thread, four at a time, side by side in one hour, ten threads of this work beside the machine's other
+load):
+
+| board | layers | native: open by run (min / median / max); vias, length, time | guide 0.0.14: open by run (min / median / max); vias, length, time |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 7, 496.9 mm, 0.9 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 6, 356.2 mm, 0.8 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 2, 180.4 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 1, 209.6 mm, 0.3 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 11.4 s | 5, 2, 3, 3 (2 / 3 / 5); 44, 494.3 mm, 23.5 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 52.7 s | 3, 4, 4, 4 (3 / 4 / 4); 48, 2290.1 mm, 57.6 s cut |
+| corne-cherry | 2 | 3, 4, 0, 3 (0 / 3 / 4); 483, 8275.6 mm, 30.4 s | 15, 27, 19, 26 (15 / 22.5 / 27); 529, 6907.1 mm, 59.0 s cut |
+| tinytapeout-demo | 4 | 6, 3, 6, 3 (3 / 4.5 / 6); 274, 4913.3 mm, 61.4 s | 9, 7, 1, 16 (1 / 8 / 16); 605, 5799.4 mm, 58.3 s cut |
+| buspirate5-rev10 | 4 | 2, 3, 5, 0 (0 / 2.5 / 5); 313, 3053.2 mm, 29.6 s | 0, 2, 2, 0 (0 / 1 / 2); 484, 3792.0 mm, 37.6 s |
+| lumenpnp-mobo | 4 | 15, 8, 4, 24 (4 / 11.5 / 24); 347, 5423.7 mm, 62.5 s cut | 0, 1, 0, 0 (0 / 0 / 1); 712, 6538.5 mm, 32.3 s |
+| cynthion | 4 | 29, 32, 29, 28 (28 / 29 / 32); 480, 3206.0 mm, 61.8 s cut | 17, 15, 23, 21 (15 / 19 / 23); 515, 3556.2 mm, 55.1 s cut |
+| glasgow-revC3 | 4 | 34, 32, 35, 31 (31 / 33 / 35); 413, 3426.4 mm, 60.8 s cut | 33, 30, 38, 34 (30 / 33.5 / 38); 560, 4014.4 mm, 57.9 s cut |
+| glasgow-revD1 | 6 | 192, 207, 115, 194 (115 / 193 / 207); 1046, 8967.0 mm, 60.8 s cut | 162, 139, 125, 125 (125 / 132 / 162); 1085, 7953.6 mm, 57.7 s cut |
+| all twelve | | 284, 292, 197, 286 (197 / 285 / 292) | 244, 227, 215, 229 (215 / 228 / 244) |
+| the eleven without glasgow-revD1 | | 92, 85, 82, 92 (82 / 88.5 / 92) | 82, 88, 90, 104 (82 / 89 / 104) |
+
+Zero DRC errors other than unrouted on every run, no via in a pad of its net, nothing taken out by the
+verification; no call of guide over 59.1 s.
+
+What the numbers say:
+
+- *From 0.0.13 to 0.0.14*, the two measured one after the other with six runs at a time and nothing else of
+  this work running (0.0.13 behind the adapter with two runs → 0.0.14's source behind the one with three): the
+  twelve boards 259, 227, 218 and 219 open → 241, 223, 205 and 221, 923 → 890 over the four orders (the eleven
+  without glasgow-revD1 97, 91, 94 and 98 → 79, 87, 81 and 97). corne-cherry
+  33, 27, 21 and 26 → 15, 27, 19 and 26; buspirate5-rev10 0, 5, 4 and 0 → 0, 1, 0 and 0; tinytapeout-demo 9, 7,
+  5 and 16 → 9, 7, 1 and 16; cynthion 14, 15, 23 and 15 → 14, 15, 20 and 15; lumenpnp-mobo 0, 1, 0 and 1 → 0,
+  1, 0 and 0; nrfmicro, sweep-v2.2 (3 in every order) and glasgow-revC3 the same; glasgow-revD1 three more in
+  one order, in its first run. A third run is only kept if the board has less open for it.
+- *Against the native router, by the ranges of the table*: level on the three small boards; ahead in every run
+  on two (lumenpnp-mobo 0 to 1 against 4 to 24, cynthion 15 to 23 against 28 to 32); ranges that overlap on four
+  (buspirate5-rev10 0 to 2 against 0 to 5, medians 1 and 2.5; glasgow-revC3 30 to 38 against 31 to 35;
+  glasgow-revD1 125 to 162 against 115 to 207, medians 132 and 193; tinytapeout-demo 1 to 16 against 3 to 6,
+  medians 8 and 4.5); behind in every run on two (nrfmicro 2 to 5 against 0, corne-cherry 15 to 27 against 0 to
+  4). sweep-v2.2 has 3, 4, 4 and 4 against 3 in this hour, and 3 in each of the four orders with the released
+  crate and four runs at a time: its second run is cut by the deadline while it joins the last pad, and ten
+  threads of other runs beside it are enough to lose that. The twelve boards: 215 to 244 (median 228) against
+  197 to 292 (285); the eleven without glasgow-revD1: 82 to 104 (89) against 82 to 92 (88.5).
+- *Vias and track*, first run, guide 0.0.14 against the native router: lumenpnp-mobo 712 vias against 347,
+  tinytapeout-demo 605 against 274, buspirate5-rev10 484 against 313, glasgow-revC3 560 against 413, sweep-v2.2
+  48 against 21, corne-cherry 529 against 483, cynthion 515 against 480, glasgow-revD1 1085 against 1046,
+  nrfmicro 44 against 46. Nothing in this release is for vias.
+- *At a budget of work*, 40 million of guide's nodes, three orders: a run that the budget stops is the same to
+  the track as with 0.0.13 (corne-cherry 38, 38 and 32 with the released crate; cynthion 14, 17 and 25), and
+  after one that ends within it the runs after go on within the budget: tinytapeout-demo 16, 19 and 1 for 16, 19
+  and 5, nrfmicro 5, 2 and 3 as before.
+- *The negotiations for places* (`RouteOptions::negotiate_places`, which the adapter leaves off): with a budget
+  of four minutes, corne-cherry's runs end on their own after 114 to 142 s with 9 and 11 connections open in two
+  orders with them (8 in an earlier build) for 13 and 16 without. At 60 s they are no gain: corne-cherry 71, 84
+  and 87 over four orders in three builds for 87 without, cynthion 75 for 64, sweep-v2.2 14 for 12, nrfmicro 10
+  for 13.
 
 The default is unchanged (DECISIONS D106).
 

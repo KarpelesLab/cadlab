@@ -1,5 +1,6 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97 and D101; docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104 and D106; docs/ROUTER.md, "guide as a
+//! backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -19,7 +20,10 @@
 //! to a second run. The first run has the nets with zones among its nets, open or not
 //! ([`first_nets`]), and guide joins the pads its routes cut off those fills again itself
 //! (`RouteOptions::pour_cuts`, D97) and settles what its passes of rip-up leave open (`RouteOptions::settle`,
-//! D101), each open connection by a negotiation before its chains (`RouteOptions::negotiate`, D104). What guide's API cannot express is passed the stricter way and named in
+//! D101), each open connection by a negotiation before its chains (`RouteOptions::negotiate`, D104). After the run
+//! on the board with the first run's routes fixed, a last run has those routes back as routes
+//! that it may move (`pcb::route_from`, [`Adapted::take_back`], D106), kept if the board then has
+//! less open. What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -115,6 +119,9 @@ pub(crate) struct Adapted {
     pub copper: Vec<String>,
     /// Copper drawings without a net by position in the design's obstacles.
     pub obstacles: Vec<String>,
+    /// The routes of an earlier run that guide may move ([`Adapted::take_back`]); empty for a
+    /// first run.
+    pub earlier: pcb::Earlier,
 }
 
 fn gp(q: Point) -> GPoint {
@@ -772,10 +779,50 @@ pub(crate) fn adapt(
         keepouts: keepout_names,
         copper: copper_names,
         obstacles: obstacle_names,
+        earlier: pcb::Earlier::default(),
     })
 }
 
 impl Adapted {
+    /// Hands the tracks and vias `mine` of the board, an earlier run's, to guide as routes of
+    /// their nets that this run may move (`pcb::route_from`, D106) in place of fixed copper,
+    /// and has those nets routed. Returns the items handed over; which of their nets guide
+    /// took back is in its result (`Routed::taken_back`).
+    fn take_back(&mut self, mine: &BTreeSet<ObjectId>) -> BTreeSet<ObjectId> {
+        let moves = |net: Option<NetId>, id: &ObjectId| net.is_some() && mine.contains(id);
+        let mut taken = BTreeSet::new();
+        let board = &mut self.design.board;
+        let (mut tracks, mut track_ids) = (Vec::new(), Vec::new());
+        for (t, id) in std::mem::take(&mut board.tracks).into_iter().zip(std::mem::take(&mut self.tracks)) {
+            if moves(t.net, &id) {
+                taken.insert(id);
+                self.earlier.tracks.push(t);
+            } else {
+                tracks.push(t);
+                track_ids.push(id);
+            }
+        }
+        (board.tracks, self.tracks) = (tracks, track_ids);
+        let (mut vias, mut via_ids) = (Vec::new(), Vec::new());
+        for (v, id) in std::mem::take(&mut board.vias).into_iter().zip(std::mem::take(&mut self.vias)) {
+            if moves(v.net, &id) {
+                taken.insert(id);
+                self.earlier.vias.push(v);
+            } else {
+                vias.push(v);
+                via_ids.push(id);
+            }
+        }
+        (board.vias, self.vias) = (vias, via_ids);
+        for n in self.earlier.tracks.iter().filter_map(|t| t.net).chain(self.earlier.vias.iter().filter_map(|v| v.net))
+        {
+            if let Some(spec) = self.design.nets.get_mut(n.index()) {
+                spec.route = true;
+            }
+        }
+        taken
+    }
+
     /// An item of the design as the board names it, with the object to point at.
     fn item(&self, item: DesignItem) -> (String, Option<ObjectRef>) {
         let named = |names: &[String], i: usize, what: &str| match names.get(i) {
@@ -1059,8 +1106,13 @@ fn pieces(tracks: &[Track], vias: &[Via]) -> Vec<usize> {
     (0..n).map(|i| find(&mut root, i)).collect()
 }
 
-/// Most runs after the first ([`route`], "A second run").
-const POUR_ROUNDS: usize = 1;
+/// Most runs after the first ([`route`], "A second run"): one on the board with the first run's
+/// routes fixed, and one that takes them back to move them (D106).
+const POUR_ROUNDS: usize = 2;
+
+/// The least time a run that takes the routes back is begun with: it places every route
+/// before it routes anything.
+const MOVE_MIN: Duration = Duration::from_secs(3);
 
 fn phase(p: Phase) -> &'static str {
     match p {
@@ -1105,7 +1157,7 @@ fn call(
     control.progress_interval = PROGRESS_INTERVAL;
     // cadlab refills the zones itself, so a stopped run does not wait for guide's fill.
     control.fill_on_stop = false;
-    let run = std::panic::AssertUnwindSafe(|| pcb::route_with(&ad.design, options, &control));
+    let run = std::panic::AssertUnwindSafe(|| pcb::route_from(&ad.design, &ad.earlier, options, &control));
     let routed = match std::panic::catch_unwind(run) {
         Ok(Ok(r)) => r,
         Ok(Err(pcb::RouteError::Item { item, error })) => {
@@ -1318,6 +1370,14 @@ fn said(r: &pcb::Routed) -> String {
 /// after a run that its deadline stopped for every net it has open. It is kept when it leaves
 /// fewer connections open. Not after a run that the work budget stopped: nothing is left of
 /// it.
+///
+/// **A last run that moves routes** (D106). In what time or work the second run leaves, guide
+/// is given every net the board still has open and the routes of the runs before as routes of
+/// their nets (`pcb::route_from`), not as fixed copper: a pad that the first run left shut in,
+/// or that a pour no longer reaches, can then have a route moved for it. guide says which
+/// nets' routes it took back (`Routed::taken_back`); what it returns stands in place of
+/// those, and the others stay as they were. Kept when it leaves fewer connections open, so
+/// that no board ends with more than the two runs before it left.
 pub(crate) fn route(
     p: &Project,
     scope: &Scope,
@@ -1400,7 +1460,7 @@ pub(crate) fn route(
 
     // A second run: the nets with zones that cadlab's fill around the routes leaves open, less
     // those a run that ended found no way for, and after a run that its deadline stopped every
-    // net left open.
+    // net left open. And a last one, which takes the routes back to move them.
     let poured: BTreeSet<&str> = p.board().zones.iter().filter_map(|z| z.net.as_deref()).collect();
     let open = |items: &[CopperItem], isl: &[usize]| -> Vec<RatLine> {
         geo::ratsnest_from(items, isl).into_iter().filter(|l| wanted(&l.net)).collect()
@@ -1412,24 +1472,41 @@ pub(crate) fn route(
         .zip(deadline)
         .map(|(b, d)| (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + REPORT).map_or(d, |t| t.max(d)));
     for round in 1..=POUR_ROUNDS {
-        if stopped == Some(Stopped::WorkBudget) || second.is_some_and(|d| Instant::now() + SECOND_MIN >= d) {
+        // The last run is the one that moves routes: it has what time the run before it
+        // leaves, and every net left open, those that a run on the fixed board found no way
+        // for among them.
+        let moves = round == POUR_ROUNDS;
+        let least = if moves { MOVE_MIN } else { SECOND_MIN };
+        if stopped == Some(Stopped::WorkBudget) || second.is_some_and(|d| Instant::now() + least >= d) {
             break;
         }
         let left = open(&fitems, &fisl);
         let again: BTreeSet<String> = left
             .iter()
-            .filter(|l| (stopped.is_some() || poured.contains(l.net.as_str())) && !gave_up.contains(&l.net))
+            .filter(|l| moves || ((stopped.is_some() || poured.contains(l.net.as_str())) && !gave_up.contains(&l.net)))
             .map(|l| l.net.clone())
             .collect();
         if again.is_empty() {
-            break;
+            if left.is_empty() {
+                break;
+            }
+            continue;
         }
         (hooks.progress)(
             0,
             None,
             &format!("guide: run {}, {} net(s) open on the filled board", round + 1, again.len()),
         );
-        let ad = adapt(&proj, &fitems, &again, opts)?;
+        let mut ad = adapt(&proj, &fitems, &again, opts)?;
+        // The routes of the runs before are this run's to move (D106): a pad that the fill
+        // no longer reaches, or one that the first run left shut in, can then have a route
+        // moved for it, where on a board with them fixed it had none.
+        let handed = if moves {
+            let mine: BTreeSet<ObjectId> = tracks.iter().map(|t| t.id).chain(vias.iter().map(|v| v.id)).collect();
+            ad.take_back(&mine)
+        } else {
+            BTreeSet::new()
+        };
         gopts.work_budget = opts.work.left();
         let more = call(&ad, &gopts, second, hooks)?;
         opts.work.charge(more.stats.work);
@@ -1438,17 +1515,28 @@ pub(crate) fn route(
         (hooks.progress)(0, None, &said(&more));
         let (t, v) = convert(&ad, &more);
         if t.is_empty() && v.is_empty() {
-            break;
+            continue;
         }
+        // What guide took back is in its result as it is now; what it left where it was
+        // (`Routed::taken_back` has the nets it took) stays as the first run had it.
+        let moved: BTreeSet<&str> =
+            more.taken_back.iter().filter_map(|n| ad.nets.get(n.index())).map(String::as_str).collect();
+        let stays = |id: &ObjectId, net: &Option<String>| {
+            !(handed.contains(id) && net.as_deref().is_some_and(|n| moved.contains(n)))
+        };
         let (mut tracks2, mut vias2) = (tracks.clone(), vias.clone());
+        tracks2.retain(|t| stays(&t.id, &t.net));
+        vias2.retain(|v| stays(&v.id, &v.net));
         tracks2.extend(t);
         vias2.extend(v);
         let (mut reasons, mut removed) = (drc_reason.clone(), stats.drc_removed);
         let proj2 = verify(p, &mut tracks2, &mut vias2, &mut reasons, &mut removed);
         let items2 = geo::copper_items(&proj2);
         let isl2 = geo::islands(&items2);
+        // A run that leaves no less open is as if it had not been: the board stays as the
+        // runs before left it.
         if open(&items2, &isl2).len() >= left.len() {
-            break;
+            continue;
         }
         (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
         (drc_reason, stats.drc_removed) = (reasons, removed);
@@ -1462,7 +1550,7 @@ pub(crate) fn route(
                 .map(|(v, _)| (v.at.x, v.at.y)),
         );
         // What this run says of its nets replaces what the first said of them.
-        opens.retain(|o| !again.contains(&o.net));
+        opens.retain(|o| !again.contains(&o.net) && !moved.contains(o.net.as_str()));
         opens.extend(explain_all(&ad, &more));
     }
 
@@ -2062,6 +2150,49 @@ mod tests {
         assert_eq!(gave_up_on(&ad, &r).into_iter().collect::<Vec<_>>(), ["SIG"]);
         r.stopped = Some(Stopped::Deadline);
         assert!(gave_up_on(&ad, &r).is_empty());
+    }
+
+    /// The routes of a run, on the board, are handed to guide as routes that it may move
+    /// (`pcb::route_from`): they leave the fixed copper, their net is routed, and a run from
+    /// them returns them as they were when nothing is in their way, as the net's own again.
+    #[test]
+    fn a_run_s_routes_are_handed_back_as_routes_that_move() {
+        let p = project();
+        let r = route(&p, &Scope::Nets(vec!["SIG".into()]), &RouteOptions::default(), &Hooks::none()).expect("route");
+        assert!(!r.tracks.is_empty());
+        let mut q = p.clone();
+        let mut mine = BTreeSet::new();
+        for t in &r.tracks {
+            let mut t = t.clone();
+            t.id = q.alloc_id();
+            mine.insert(t.id);
+            q.board_mut().tracks.push(t);
+        }
+        for v in &r.vias {
+            let mut v = v.clone();
+            v.id = q.alloc_id();
+            mine.insert(v.id);
+            q.board_mut().vias.push(v);
+        }
+        // As copper of the board, SIG is whole and not routed; handed back, it is a net to
+        // route with its routes as the earlier run's.
+        let mut ad = adapted(&q, &[]);
+        let sig = ad.nets.iter().position(|n| n == "SIG").expect("SIG");
+        let fixed = ad.design.board.tracks.len();
+        assert!(!ad.design.nets[sig].route);
+        let handed = ad.take_back(&mine);
+        assert_eq!(handed, mine);
+        assert_eq!(ad.earlier.tracks.len(), r.tracks.len());
+        assert_eq!(ad.earlier.vias.len(), r.vias.len());
+        assert_eq!(ad.design.board.tracks.len(), fixed - r.tracks.len());
+        assert_eq!(ad.tracks.len(), ad.design.board.tracks.len());
+        assert!(ad.design.nets[sig].route);
+        let gopts = options(&q, &RouteOptions::default(), &[0, 1]);
+        let again = call(&ad, &gopts, None, &Hooks::none()).expect("route");
+        assert_eq!(again.taken_back, [NetId(sig as u32)]);
+        assert!(again.open.is_empty() && again.unrouted.is_empty(), "{:?}", again.open);
+        let (t, v) = convert(&ad, &again);
+        assert_eq!((t.len(), v.len()), (r.tracks.len(), r.vias.len()));
     }
 
     /// The first run has the nets with zones in scope beside those with open connections.
