@@ -285,6 +285,23 @@ impl Command for ExportKicad {
             "it is written without the exception, so KiCad's DRC reports their copper inside it",
             &excepted,
         );
+        for (pad, layers) in &out.pad_layers {
+            let mut d = crate::Diagnostic::warning(
+                "export.pad_layer_connection",
+                format!(
+                    "{pad} has a zone connection of its own on {layers} only: KiCad has one connection per pad, the \
+                     file has the pad's connection for every layer"
+                ),
+            )
+            .with_hint(
+                "the zone fills written are cadlab's and right; a refill in KiCad relieves the pad on those layers \
+                 too: keep the fills, or set the pad solid on every layer (`zone.pad <pad> --connection solid`)",
+            );
+            if let Ok(r) = crate::ObjectRef::parse(pad) {
+                d = d.with_subject(r);
+            }
+            ctx.report(d);
+        }
         Ok(KicadExported {
             pcb: path.display().to_string(),
             project: pro.display().to_string(),

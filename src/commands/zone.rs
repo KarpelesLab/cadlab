@@ -9,7 +9,7 @@ use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::Diagnostic;
 use crate::geom::{BBox, Point};
 use crate::model::Project;
-use crate::model::board::{Keepout, PadConnection, Zone};
+use crate::model::board::{Keepout, PadConnection, PadJoin, Zone};
 use crate::refs::ObjectRef;
 use crate::suggest::did_you_mean;
 use crate::units::{Angle, Nm};
@@ -22,6 +22,7 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<ZoneFill>()
         .register::<ZoneThermals>()
         .register::<ZoneRelieve>()
+        .register::<ZonePad>()
         .register::<KeepoutAdd>()
         .register::<KeepoutSet>()
         .register::<KeepoutRemove>()
@@ -718,6 +719,15 @@ pub struct PadJoint {
     /// (spokes too wide to relieve), meant (solid by the pad's or footprint's own setting),
     /// heat or bare.
     pub state: String,
+    /// Why: the reason written with the pad's own setting (`zone.pad`, `zone.relieve`), or
+    /// what `zone.relieve` tried for a pad it leaves short of spokes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The reason stored with a placed pad's own connection, if any.
+fn own_reason(p: &Project, j: &Joint) -> Option<String> {
+    p.board().footprints.get(&j.refdes)?.pads.get(&j.number)?.reason.clone()
 }
 
 fn pad_joint(j: &Joint, rules: &crate::model::board::Rules) -> PadJoint {
@@ -744,6 +754,7 @@ fn pad_joint(j: &Joint, rules: &crate::model::board::Rules) -> PadJoint {
         possible: j.possible,
         share: j.share(),
         state: state.into(),
+        reason: None,
     }
 }
 
@@ -759,7 +770,7 @@ fn joints_text(pads: &[PadJoint], shown: usize) -> String {
         .take(shown)
         .map(|j| {
             format!(
-                "{} {} on {}{}: {} ({} of {} spoke(s), {} % of its outline, {})",
+                "{} {} on {}{}: {} ({} of {} spoke(s), {} % of its outline, {}){}",
                 j.pad,
                 j.net,
                 j.layer,
@@ -768,7 +779,8 @@ fn joints_text(pads: &[PadJoint], shown: usize) -> String {
                 j.spokes,
                 j.planned,
                 j.share,
-                j.class.name()
+                j.class.name(),
+                j.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default()
             )
         })
         .collect();
@@ -818,7 +830,11 @@ impl Command for ZoneThermals {
                 && only.as_ref().is_none_or(|z| j.zone.as_ref() == Some(z))
         });
         let census = thermal::census(p, &js, rules.thermal_max_contact);
-        let pads: Vec<PadJoint> = js.iter().map(|j| pad_joint(j, rules)).filter(|j| self.all || attention(j)).collect();
+        let pads: Vec<PadJoint> = js
+            .iter()
+            .map(|j| PadJoint { reason: own_reason(p, j), ..pad_joint(j, rules) })
+            .filter(|j| self.all || attention(j) || (j.state == "meant" && j.reason.is_some()))
+            .collect();
         Ok(ThermalReport { census, pads })
     }
 
@@ -837,7 +853,13 @@ impl Command for ZoneThermals {
 /// solder pads and their footprints are removed; exposed pads, tabs and pads that are not
 /// soldered keep or get a `solid` setting of their own; pads whose spokes at the zone's width
 /// would cover their outline get a narrower spoke of their own. Vias stay solid (they always
-/// are). The zones are filled again and the pads counted before and after.
+/// are). Then each pad still short of spokes is taken alone, in this order: a narrower relief
+/// of its own (gap and spokes at the board's minimum clearance and track width) when that
+/// brings it more spokes; a short track of the net from the pad into the pour where copper
+/// of the pour would be allowed; and, for a pad the pour joined before and that nothing joins
+/// now, solid on that layer for that one pad, with the reason (`zone.pad` shows and changes
+/// it). No pad a pour joined is left without a joint. The zones are filled again and the pads
+/// counted before and after; every pad left short of spokes is listed with what was tried.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ZoneRelieve {
@@ -860,7 +882,8 @@ pub struct RelieveReport {
     /// What changed: zones, settings removed, kept and narrowed.
     #[serde(flatten)]
     pub changes: thermal::Relieved,
-    /// Pads that still need a look: fewer spokes than the minimum, or no effective relief.
+    /// Pads that still need a look: fewer spokes than the minimum, or no effective relief,
+    /// each with what was tried (`reason`).
     pub left: Vec<PadJoint>,
     /// Pads the pour joined on a layer before and no longer does (`J1.3 on In1.Cu`): where
     /// no spoke fits, relieving a pad takes its joint to the pour away.
@@ -883,24 +906,21 @@ impl Command for ZoneRelieve {
             .map(|n| zone_index(p, n).map(|i| p.board().zones[i].name.clone()))
             .collect::<Result<_, _>>()?;
         let max = p.board().rules.thermal_max_contact;
-        let joined = |js: &[Joint]| -> std::collections::BTreeSet<(String, String, String)> {
-            js.iter()
-                .filter(|j| j.zone_contact.0 > 0)
-                .map(|j| (j.refdes.clone(), j.number.clone(), j.layer.clone()))
-                .collect()
-        };
         let js = thermal::joints(p, &geo::copper_items(p));
         let before = thermal::census(p, &js, max);
-        let joined_before = joined(&js);
         let p = ctx.project_mut()?;
-        let changes = thermal::relieve(p, (!names.is_empty()).then_some(names.as_slice()), self.keep_own);
+        let (changes, js) = thermal::relieve(p, (!names.is_empty()).then_some(names.as_slice()), self.keep_own);
         let rules = p.board().rules.clone();
-        let js = thermal::joints(p, &geo::copper_items(p));
         let after = thermal::census(p, &js, max);
-        let left: Vec<PadJoint> = js.iter().map(|j| pad_joint(j, &rules)).filter(attention).collect();
-        let joined_after = joined(&js);
-        let lost: Vec<&(String, String, String)> = joined_before.difference(&joined_after).collect();
-        let cut: Vec<String> = lost.iter().map(|(r, n, l)| format!("{r}.{n} on {l}")).collect();
+        let left: Vec<PadJoint> = js
+            .iter()
+            .map(|j| PadJoint {
+                reason: changes.reasons.get(&format!("{}.{}", j.refdes, j.number)).cloned(),
+                ..pad_joint(j, &rules)
+            })
+            .filter(attention)
+            .collect();
+        let cut: Vec<String> = changes.cut.clone();
         let p = ctx.project()?;
         let mut diags = census_warnings(p, &after);
         if !cut.is_empty() {
@@ -908,19 +928,21 @@ impl Command for ZoneRelieve {
             let mut d = Diagnostic::warning(
                 "zone.relieve_cut",
                 format!(
-                    "{} pad(s) are no longer joined to their pour on a layer, no spoke fits where they were solid: {}{}",
+                    "{} pad(s) are no longer joined to their pour on a layer, neither a spoke nor a track fits and \
+                     they could not be kept solid: {}{}",
                     cut.len(),
                     cut.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", "),
                     if cut.len() > SHOWN { ", ..." } else { "" }
                 ),
             )
             .with_hint(
-                "check drc.run for open connections (drc.unrouted); give each a track of its net into the pour, \
-                 turn its spokes (`footprint.set <footprint> --pads <n> --thermal-angle 45deg`) or keep it solid \
-                 (`--zone-connection solid`, for every part with that footprint); history.undo takes the repair back",
+                "check drc.run for open connections (drc.unrouted); give each a track of its net into the pour or \
+                 keep it solid (`zone.pad <pad> --connection solid`); history.undo takes the repair back",
             );
-            for (r, n, _) in lost.iter().take(SHOWN) {
-                d = d.with_subject(ObjectRef::Pin { component: r.clone(), pin: n.clone() });
+            for c in cut.iter().take(SHOWN) {
+                if let Some(r) = c.split(' ').next().and_then(|pin| ObjectRef::parse(pin).ok()) {
+                    d = d.with_subject(r);
+                }
             }
             diags.push(d);
         }
@@ -946,6 +968,15 @@ impl Command for ZoneRelieve {
             list(&c.kept),
             list(&c.narrowed),
         );
+        if !c.fitted.is_empty() {
+            s += &format!("\nnarrower relief on single pads ({}): {}", c.fitted.len(), list(&c.fitted));
+        }
+        if !c.tracks.is_empty() {
+            s += &format!("\ntracks added from pads into their pour ({}): {}", c.tracks.len(), list(&c.tracks));
+        }
+        if !c.solid.is_empty() {
+            s += &format!("\nkept solid on purpose, pad by pad ({}): {}", c.solid.len(), list(&c.solid));
+        }
         if !o.cut.is_empty() {
             s += &format!("\nno longer joined to their pour ({}): {}", o.cut.len(), list(&o.cut));
         }
@@ -953,6 +984,219 @@ impl Command for ZoneRelieve {
             s += &format!("\nleft to look at ({}):\n{}", o.left.len(), joints_text(&o.left, 20));
         }
         s
+    }
+}
+
+/// Set how single placed pads join the pours of their net.
+///
+/// The settings of `footprint.set` (zone connection, thermal gap, spoke width and angle) for
+/// one pad of one placed part, without touching the footprint that other parts share: a pin
+/// kept solid on purpose (`connection: solid`, with a `reason`), on some layers only
+/// (`layers`), or relieved differently. A value set here goes before the pad's and the
+/// footprint's own, which go before the zone's. Without any setting, the pads' own settings
+/// are listed. `zone.relieve` writes these for the pads it treats alone.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ZonePad {
+    /// The pads, each as designator and pad number (`J1.3`).
+    pub pads: Vec<String>,
+    /// Zone connection: thermal, solid, none or tht_thermal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<PadConnection>,
+    /// Copper layers the `connection` is for (default: every layer of the pad).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
+    /// Thermal relief gap, instead of the footprint's or the zone's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_gap: Option<Nm>,
+    /// Thermal relief spoke width, instead of the footprint's or the zone's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_spoke: Option<Nm>,
+    /// Direction of the first thermal spoke relative to the pad (`45deg`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_angle: Option<Angle>,
+    /// Why (kept with the setting and shown by `zone.thermals`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Settings to reset to inherited: connection, layers, thermal_gap, thermal_spoke,
+    /// thermal_angle, or all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unset: Vec<String>,
+}
+
+/// A placed pad's own settings.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PadOwn {
+    /// The pad (`J1.3`).
+    pub pad: String,
+    /// Its settings.
+    #[serde(flatten)]
+    pub join: PadJoin,
+}
+
+/// The placed pads with settings of their own.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PadOwns {
+    /// The pads named, or with nothing named every pad that has settings.
+    pub pads: Vec<PadOwn>,
+}
+
+impl Command for ZonePad {
+    const NAME: &'static str = "zone.pad";
+    const SUMMARY: &'static str =
+        "Zone connection and thermal relief of single placed pads (one pin solid on purpose, per layer if needed)";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["pads"];
+    type Output = PadOwns;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<PadOwns, CommandError> {
+        check_len(self.thermal_gap, "thermal_gap", false)?;
+        check_len(self.thermal_spoke, "thermal_spoke", true)?;
+        const FIELDS: [&str; 6] = ["connection", "layers", "thermal_gap", "thermal_spoke", "thermal_angle", "all"];
+        for u in &self.unset {
+            if !FIELDS.contains(&u.as_str()) {
+                return Err(CommandError::invalid_args(
+                    "zone.invalid_value",
+                    format!("unknown setting `{u}` in unset"),
+                )
+                .with_suggestions(&did_you_mean(u, FIELDS, 3))
+                .with_hint_if_none(format!("one of: {}", FIELDS.join(", "))));
+            }
+        }
+        let p = ctx.project()?;
+        let copper = p.board().stackup.copper_names();
+        for l in &self.layers {
+            if !copper.contains(l) {
+                return Err(CommandError::invalid_args("zone.unknown_layer", format!("`{l}` is not a copper layer"))
+                    .with_suggestions(&did_you_mean(l, copper.iter().map(String::as_str), 3))
+                    .with_hint_if_none(format!("copper layers: {}", copper.join(", "))));
+            }
+        }
+        if !self.layers.is_empty() && self.connection.is_none() {
+            return Err(CommandError::invalid_args(
+                "zone.invalid_value",
+                "`layers` says where a `connection` holds: give the connection too",
+            )
+            .with_hint("e.g. `zone.pad J1.3 --connection solid --layers In1.Cu`"));
+        }
+        // Each pad as (designator, pad number).
+        let placed = geo::placed_pads(p);
+        let mut keys: Vec<(String, String)> = Vec::new();
+        for name in &self.pads {
+            let key = match ObjectRef::parse(name) {
+                Ok(ObjectRef::Pin { component, pin }) => (component, pin),
+                _ => {
+                    return Err(CommandError::invalid_args(
+                        "zone.unknown_pad",
+                        format!("`{name}` is not a pad: write designator and pad, as `J1.3`"),
+                    )
+                    .with_hint("`zone.thermals --all` lists the pads in pours"));
+                }
+            };
+            if !placed.iter().any(|pp| pp.refdes == key.0 && pp.number == key.1) {
+                return Err(CommandError::not_found(
+                    "zone.unknown_pad",
+                    format!("no placed pad `{name}` on the board"),
+                )
+                .with_hint("`zone.thermals --all` lists the pads in pours; `place.list` the placed parts"));
+            }
+            keys.push(key);
+        }
+        let change = self.connection.is_some()
+            || self.thermal_gap.is_some()
+            || self.thermal_spoke.is_some()
+            || self.thermal_angle.is_some()
+            || self.reason.is_some()
+            || !self.unset.is_empty();
+        if change {
+            if keys.is_empty() {
+                return Err(CommandError::invalid_args("zone.invalid_value", "name the pads to change")
+                    .with_hint("e.g. `zone.pad J1.3 --connection solid --reason \"carries 10 A\"`"));
+            }
+            let p = ctx.project_mut()?;
+            for (refdes, number) in &keys {
+                let Some(pf) = p.board_mut().footprints.get_mut(refdes) else { continue };
+                let join = pf.pads.entry(number.clone()).or_default();
+                for u in &self.unset {
+                    match u.as_str() {
+                        "connection" => join.zone_connection = None,
+                        "layers" => join.layers.clear(),
+                        "thermal_gap" => join.thermal_gap = None,
+                        "thermal_spoke" => join.thermal_spoke = None,
+                        "thermal_angle" => join.thermal_angle = None,
+                        _ => *join = PadJoin::default(),
+                    }
+                }
+                match (self.connection, self.layers.is_empty()) {
+                    (Some(c), true) => join.zone_connection = Some(c),
+                    (Some(c), false) => {
+                        for l in &self.layers {
+                            join.layers.insert(l.clone(), c);
+                        }
+                    }
+                    (None, _) => {}
+                }
+                join.thermal_gap = self.thermal_gap.or(join.thermal_gap);
+                join.thermal_spoke = self.thermal_spoke.or(join.thermal_spoke);
+                join.thermal_angle = self.thermal_angle.map(Angle::normalized).or(join.thermal_angle);
+                if self.reason.is_some() {
+                    join.reason = self.reason.clone();
+                }
+                if join.is_empty() {
+                    pf.pads.remove(number);
+                }
+            }
+        }
+        let p = ctx.project()?;
+        let mut pads = Vec::new();
+        for (refdes, pf) in &p.board().footprints {
+            for (number, join) in &pf.pads {
+                if keys.is_empty() || keys.iter().any(|(r, n)| r == refdes && n == number) {
+                    pads.push(PadOwn { pad: format!("{refdes}.{number}"), join: join.clone() });
+                }
+            }
+        }
+        Ok(PadOwns { pads })
+    }
+
+    fn summarize(o: &PadOwns) -> String {
+        if o.pads.is_empty() {
+            return "no pad has a zone connection of its own".into();
+        }
+        o.pads
+            .iter()
+            .map(|p| {
+                let j = &p.join;
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(c) = j.zone_connection {
+                    parts.push(format!("connection {}", connection_name(c)));
+                }
+                for (l, c) in &j.layers {
+                    parts.push(format!("{} on {l}", connection_name(*c)));
+                }
+                if let Some(v) = j.thermal_gap {
+                    parts.push(format!("gap {v}"));
+                }
+                if let Some(v) = j.thermal_spoke {
+                    parts.push(format!("spoke {v}"));
+                }
+                if let Some(v) = j.thermal_angle {
+                    parts.push(format!("angle {v}"));
+                }
+                let why = j.reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default();
+                format!("{}: {}{why}", p.pad, parts.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn connection_name(c: PadConnection) -> &'static str {
+    match c {
+        PadConnection::Thermal => "thermal",
+        PadConnection::Solid => "solid",
+        PadConnection::None => "none",
+        PadConnection::ThtThermal => "tht_thermal",
     }
 }
 

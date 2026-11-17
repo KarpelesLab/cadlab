@@ -935,6 +935,7 @@ pub fn import(
         }
     }
     normalize_zones(p);
+    unset_fitted_spokes(p);
     normalize_texts(p);
 
     // The project's DRC exclusions, as waivers of the findings they match.
@@ -1779,6 +1780,30 @@ fn zone_regions(rings: &[Vec<Point>]) -> Result<Vec<Vec<Point>>, crate::geom::po
 /// left unset is fitted to small pads (`zones::Relief::of`), on a board from KiCad as on any
 /// other: the file cannot say which of the two was meant, and KiCad rewrites what cadlab
 /// exports, so a zone whose width is cadlab's default is one that leaves it to cadlab.
+/// A pad whose `thermal_width` is the width cadlab fits to it (half its shorter side) leaves
+/// the width to cadlab, when no zone of the board sets a spoke width: the KiCad export writes
+/// the fitted width on such pads so that KiCad's refill is cadlab's (`kicad_pcb`), and the
+/// file cannot say which was meant, as with a zone's default width.
+fn unset_fitted_spokes(p: &mut Project) {
+    use crate::board::{thermal, zones};
+    if p.board().zones.iter().any(|z| !thermal::is_teardrop(z) && z.thermal_spoke.is_some()) {
+        return;
+    }
+    let lib = p.library_mut();
+    for fp in lib.footprints.values_mut() {
+        if fp.overrides.thermal_spoke.is_some() {
+            continue;
+        }
+        for pad in &mut fp.pads {
+            let Some(w) = pad.overrides.thermal_spoke else { continue };
+            let Ok(shape) = crate::board::pad_shape_local(&pad.shape) else { continue };
+            if w.0 == zones::fitted_spoke(zones::short_side(&vec![shape])) {
+                pad.overrides.thermal_spoke = None;
+            }
+        }
+    }
+}
+
 fn normalize_zones(p: &mut Project) {
     let zones = p.board().zones.clone();
     let mut out = Vec::with_capacity(zones.len());

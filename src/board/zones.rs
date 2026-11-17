@@ -99,11 +99,16 @@ pub fn zone_params(p: &Project, z: &Zone) -> ZoneParams {
         min_width: z.min_width.unwrap_or(rules.zone_min_width),
         pads: z.pads,
         thermal_gap: z.thermal_gap.unwrap_or(clearance),
-        thermal_spoke: z.thermal_spoke.unwrap_or(track.max(Nm::from_um(250))),
+        thermal_spoke: z.thermal_spoke.unwrap_or(default_spoke(track)),
         thermal_angle: z.thermal_angle,
         thermal_spokes: z.thermal_spokes.unwrap_or(DEFAULT_SPOKES).clamp(1, MAX_SPOKES),
         spoke_floor: z.thermal_spoke.is_none().then_some(rules.min_track_width),
     }
+}
+
+/// The spoke width of a zone that sets none, for a net with tracks of width `track`.
+pub fn default_spoke(track: Nm) -> Nm {
+    track.max(Nm::from_um(250))
 }
 
 /// Copper-allowed board area: outer contour (approximated inward) minus cutouts (outward),
@@ -156,6 +161,10 @@ pub struct Relief {
     pub w: i64,
     /// Board directions of the spokes.
     pub dirs: Vec<Angle>,
+    /// Directions tried for the spokes that do not survive in `dirs`: the same ones turned by
+    /// half a step (for four spokes, the other four of the eight directions), when neither
+    /// the pad nor the zone sets an angle; else none (D112).
+    pub alt: Vec<Angle>,
 }
 
 impl Relief {
@@ -174,13 +183,16 @@ impl Relief {
         let w = t.spoke.map_or_else(zone_w, |s| s.0);
         let first = t.first_spoke(prm.thermal_angle);
         let n = prm.thermal_spokes.clamp(1, MAX_SPOKES) as i64;
-        let dirs = (0..n).map(|k| (first + Angle(((k * 360_000) / n) as i32)).normalized()).collect();
-        Relief { gap, w, dirs }
+        let dirs: Vec<Angle> = (0..n).map(|k| (first + Angle(((k * 360_000) / n) as i32)).normalized()).collect();
+        let free = t.angle.is_none() && prm.thermal_angle.is_none();
+        let alt =
+            if free { dirs.iter().map(|d| (*d + Angle((180_000 / n) as i32)).normalized()).collect() } else { vec![] };
+        Relief { gap, w, dirs, alt }
     }
 
-    /// Whether every spoke runs along an axis.
+    /// Whether every spoke, the alternatives included, runs along an axis.
     fn axis_aligned(&self) -> bool {
-        self.dirs.iter().all(|a| a.quarter_turns().is_some())
+        self.dirs.iter().chain(&self.alt).all(|a| a.quarter_turns().is_some())
     }
 
     /// How far beyond the pad's bounding box the relief reaches.
@@ -227,13 +239,48 @@ pub fn short_side(shape: &PolygonSet) -> i64 {
 /// Axis directions end `gap + w` beyond the pad's bounding box; slanted ones `gap + w` beyond
 /// the farthest crossing of the pad's outline.
 pub fn spokes(item: &CopperItem, r: &Relief) -> Vec<Polygon> {
+    spokes_along(item, r, &r.dirs)
+}
+
+/// The spokes of the relief's other directions ([`Relief::alt`]), as [`spokes`].
+pub fn alt_spokes(item: &CopperItem, r: &Relief) -> Vec<Polygon> {
+    spokes_along(item, r, &r.alt)
+}
+
+/// Smallest turn between two directions, in millidegrees (0 to 180 000).
+fn turn(a: Angle, b: Angle) -> i32 {
+    let d = (a.0 - b.0).rem_euclid(360_000);
+    d.min(360_000 - d)
+}
+
+/// Of the directions `cand` (indices into it are returned), up to `want` that spread best
+/// around those already `taken`: each time the one farthest from its nearest taken direction,
+/// then farthest from all of them together, then the first.
+pub fn spread(taken: &[Angle], cand: &[Angle], want: usize) -> Vec<usize> {
+    let mut taken = taken.to_vec();
+    let mut left: Vec<usize> = (0..cand.len()).collect();
+    let mut out = Vec::new();
+    while out.len() < want && !left.is_empty() {
+        let key = |&i: &usize| {
+            let nearest = taken.iter().map(|t| turn(*t, cand[i])).min().unwrap_or(180_000);
+            let sum: i64 = taken.iter().map(|t| i64::from(turn(*t, cand[i]))).sum();
+            (nearest, sum, std::cmp::Reverse(i))
+        };
+        let best = *left.iter().max_by_key(|i| key(i)).expect("non-empty");
+        left.retain(|i| *i != best);
+        taken.push(cand[best]);
+        out.push(best);
+    }
+    out
+}
+
+fn spokes_along(item: &CopperItem, r: &Relief, dirs: &[Angle]) -> Vec<Polygon> {
     let Some(b) = item.shape.bbox() else { return vec![] };
     let (gap, w) = (r.gap, r.w);
     let (cx, cy) = (item.anchor.x.0, item.anchor.y.0);
     let h = w / 2;
     let reach = gap + w;
-    r.dirs
-        .iter()
+    dirs.iter()
         .map(|&a| match a.quarter_turns() {
             Some(0) => rect(cx - h, cy - h, b.max.x + reach, cy + (w - h)),
             Some(1) => rect(cx - h, cy - h, cx + (w - h), b.max.y + reach),
@@ -326,6 +373,20 @@ pub fn trimmed_spoke(
 /// resolves to thermal reliefs for plated through-hole pads and solid for the rest.
 pub fn connection(it: &CopperItem, zone: PadConnection) -> PadConnection {
     match it.local.connection.unwrap_or(zone) {
+        PadConnection::ThtThermal if it.local.through => PadConnection::Thermal,
+        PadConnection::ThtThermal => PadConnection::Solid,
+        c => c,
+    }
+}
+
+/// A pad's own connection on `layer`: the one set for that layer alone, else the pad's.
+pub fn own_connection(it: &CopperItem, layer: &str) -> Option<PadConnection> {
+    it.local.connection_on.iter().find(|(l, _)| l == layer).map(|(_, c)| *c).or(it.local.connection)
+}
+
+/// [`connection`] on one layer ([`own_connection`]).
+pub fn connection_on(it: &CopperItem, layer: &str, zone: PadConnection) -> PadConnection {
+    match own_connection(it, layer).unwrap_or(zone) {
         PadConnection::ThtThermal if it.local.through => PadConnection::Thermal,
         PadConnection::ThtThermal => PadConnection::Solid,
         c => c,
@@ -487,17 +548,23 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
         for (k, (it, r)) in thermal.iter().enumerate() {
             // A spoke whose end would cross another item's clearance is trimmed instead of
             // dropped when the rest still joins the pour (`trimmed_spoke`).
-            for s in spokes(it, r) {
+            let mut taken: Vec<Angle> = Vec::new();
+            let mut mine: Vec<Polygon> = Vec::new();
+            for (s, dir) in spokes(it, r).into_iter().zip(&r.dirs) {
                 let b = s.bbox().expect("spoke");
                 if fits(&s) {
+                    mine.push(s.clone());
                     kept.push(s);
                     joined[k] = true;
+                    taken.push(*dir);
                     continue;
                 }
                 let t = trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?;
                 if !t.is_empty() {
+                    mine.extend(t.iter().cloned());
                     kept.extend(t);
                     joined[k] = true;
+                    taken.push(*dir);
                     continue;
                 }
                 if !poly::contains(&near(&local_avail, &b), &s) {
@@ -508,9 +575,46 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
                 for o in others {
                     let o = o as usize;
                     if o != k && poly::intersects(&thermal[o].0.shape, &s) {
+                        mine.push(s.clone());
                         pad_to_pad.push((k, o, s));
+                        taken.push(*dir);
                         break;
                     }
+                }
+            }
+            // Spokes that did not survive are tried in the relief's other directions, whole
+            // or trimmed as above, and the ones that spread best around the pad are kept, up
+            // to the spoke count (D112). One that meets a kept spoke outside the pad is left
+            // out: on a small pad it would close the gap between two spokes, and the pad
+            // would have more copper on its outline, not another neck.
+            if taken.len() < r.dirs.len() && !r.alt.is_empty() {
+                let apart = |t: &PolygonSet| -> Result<bool, poly::Error> {
+                    if mine.is_empty() {
+                        return Ok(true);
+                    }
+                    let both = Boolean::new()
+                        .subject(t, FillRule::NonZero)
+                        .clip(&mine, FillRule::NonZero)
+                        .op(Op::Intersection)
+                        .execute()?;
+                    Ok(both.iter().all(|q| poly::contains(&it.shape, q)))
+                };
+                let mut found: Vec<(Angle, PolygonSet)> = Vec::new();
+                for (s, dir) in alt_spokes(it, r).into_iter().zip(&r.alt) {
+                    let b = s.bbox().expect("spoke");
+                    let t = if fits(&s) {
+                        vec![s]
+                    } else {
+                        trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?
+                    };
+                    if !t.is_empty() && apart(&t)? {
+                        found.push((*dir, t));
+                    }
+                }
+                let cand: Vec<Angle> = found.iter().map(|(d, _)| *d).collect();
+                for i in spread(&taken, &cand, r.dirs.len() - taken.len()) {
+                    kept.extend(found[i].1.iter().cloned());
+                    joined[k] = true;
                 }
             }
         }
@@ -708,11 +812,23 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
         jobs.sort_by_key(|&(zi, _)| (std::cmp::Reverse(board.zones[zi].priority), zi));
     }
     let fill_one_layer = |layer: &str, jobs: &[(usize, usize)]| -> Vec<(usize, usize, ZoneFill)> {
+        // A pad whose connection is set for this layer alone is filled as a pad with that
+        // connection of its own.
+        let on_layer: Vec<Option<CopperItem>> = base
+            .iter()
+            .map(|it| {
+                let c = it.local.connection_on.iter().find(|(l, _)| l == layer)?.1;
+                let mut own = it.clone();
+                own.local.connection = Some(c);
+                Some(own)
+            })
+            .collect();
         let items_on: Vec<(&CopperItem, Nm)> = base
             .iter()
+            .zip(&on_layer)
             .zip(item_c)
-            .filter(|(it, _)| it.layers.iter().any(|l| l == layer))
-            .map(|(it, c)| (it, *c))
+            .filter(|((it, _), _)| it.layers.iter().any(|l| l == layer))
+            .map(|((it, own), c)| (own.as_ref().unwrap_or(it), *c))
             .collect();
         let index = RTree::new(items_on.iter().map(|(it, _)| it.shape.bbox()));
         let max_c = items_on.iter().map(|(_, c)| c.0).max().unwrap_or(0);

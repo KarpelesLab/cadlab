@@ -667,7 +667,7 @@ fn convert_at(e: &Sexpr, ctx: &Ctx, notes: &mut Notes, at_k: K, orient: Angle, l
         refdes,
         value,
         lib_id,
-        placement: PlacedFootprint { at, rotation, side, locked, footprint: None, ref_text },
+        placement: PlacedFootprint { at, rotation, side, locked, footprint: None, ref_text, pads: Default::default() },
         fp,
         props,
         attrs,

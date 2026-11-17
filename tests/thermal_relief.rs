@@ -260,9 +260,11 @@ fn solid_on_purpose_is_quiet() {
     assert!(joint(&js, "J1.1", "F.Cu").solid(67).is_none());
 }
 
-/// Spokes that do not survive: tracks of another net on three sides of the header pin leave it
-/// one spoke (`drc.starved_thermal`, a warning naming pad and zone); on all four sides it is
-/// cut off its pour and the DRC also reports the connection open.
+/// Spokes that do not survive in the default directions are placed in the others: a U of
+/// track of another net around the header pin takes three of its four spokes, and the fill
+/// gives it the diagonals that fit beside the one left (D112). Where the U is tight, one spoke
+/// is all there is room for (`drc.starved_thermal`, a warning naming pad and zone); closed on
+/// all four sides the pad is cut off its pour and the DRC also reports the connection open.
 #[test]
 fn starved_thermal() {
     let (_d, r, mut s) = setup();
@@ -270,11 +272,25 @@ fn starved_thermal() {
     let at = joint(&joints(&s), "J1.1", "B.Cu").at;
     let (x, y) = (at.x.0, at.y.0);
     let mm = |v: i64| format!("{v}nm");
-    let d = 1_500_000;
-    // A U of VIN track around the pin: left, top and right.
-    let u = [(x - d, y - d), (x - d, y + d), (x + d, y + d), (x + d, y - d)];
-    let pts: Vec<Value> = u.iter().map(|(a, b)| json!([mm(*a), mm(*b)])).collect();
-    exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}));
+    let fence = |r: &Registry, s: &mut Session, d: i64, leg: i64| {
+        // A U of VIN track around the pin: left, top and right, its legs `leg` long.
+        let u = [(x - d, y - leg), (x - d, y + d), (x + d, y + d), (x + d, y - leg)];
+        let pts: Vec<Value> = u.iter().map(|(a, b)| json!([mm(*a), mm(*b)])).collect();
+        exec(r, s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}))
+    };
+    fence(&r, &mut s, 1_500_000, 1_500_000);
+    let js = joints(&s);
+    let j = joint(&js, "J1.1", "B.Cu");
+    assert!(j.spokes >= 2, "one spoke of the four along the axes survives, diagonals are added: {j:?}");
+    assert!(findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.starved_thermal").is_empty());
+    // A zone with an angle of its own keeps to it: one spoke.
+    exec(&r, &mut s, "zone.set", json!({"name": "GND", "thermal_angle": "90deg"}));
+    assert_eq!(joint(&joints(&s), "J1.1", "B.Cu").spokes, 1);
+    exec(&r, &mut s, "history.undo", json!({}));
+    exec(&r, &mut s, "history.undo", json!({}));
+    // The tight U, with long legs: the diagonals have no room either.
+    let d = 1_300_000;
+    fence(&r, &mut s, d, 3_000_000);
     let js = joints(&s);
     let j = joint(&js, "J1.1", "B.Cu");
     assert_eq!((j.spokes, j.planned), (1, 4), "{j:?}");
@@ -285,7 +301,7 @@ fn starved_thermal() {
     let diag = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "drc.starved_thermal").unwrap();
     assert_eq!(diag["severity"], "warning");
     assert!(diag["subjects"].as_array().unwrap().iter().any(|s| s == "zone:GND"));
-    assert!(diag["hint"].as_str().unwrap().contains("thermal-angle"));
+    assert!(diag["hint"].as_str().unwrap().contains("zone.relieve"), "{}", diag["hint"]);
     assert_eq!(findings(&exec(&r, &mut s, "fab.check", json!({"fab": "generic"})), "fab.starved_thermal").len(), 1);
     // A minimum of one accepts it; zero turns the check off.
     exec(&r, &mut s, "board.rules", json!({"min_thermal_spokes": 1}));
@@ -394,35 +410,136 @@ fn outputs_carry_the_relief() {
     assert!(text.contains("(zone_connect 2)"), "the exposed pad and the tab are solid in KiCad too");
 }
 
-/// Where no spoke fits, relieving a solid pad takes its joint away: `zone.relieve` says which
-/// pads (`cut`, `zone.relieve_cut`) instead of leaving them to be found later. The pin here is
-/// fenced by another net on three sides and half of the fourth: the solid pour reaches it past
-/// the end of the fence, where the spoke along the pad's axis has no room.
+/// Where no spoke fits, relieving a solid pad would take its joint away: `zone.relieve` treats
+/// such a pad alone (D112). The pin here is fenced by another net on three sides and most of
+/// the fourth; the solid pour reaches it through the slot the fence leaves. A track of the net
+/// through the slot joins it when one fits; when none does (the minimum track width set above
+/// the slot), that one pad is kept solid on that layer, with the reason, and nothing else is.
 #[test]
-fn relieve_reports_the_pads_it_cuts_off() {
+fn relieve_leaves_no_pad_cut_off() {
     let (_d, r, mut s) = setup();
     exec(
         &r,
         &mut s,
         "zone.add",
-        json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board", "pads": "solid"}),
+        json!({"name": "GND", "net": "GND", "layers": ["B.Cu", "In1.Cu"], "outline": "board", "pads": "solid"}),
     );
     let at = joint(&joints(&s), "J1.1", "B.Cu").at;
     let (x, y) = (at.x.0, at.y.0);
     let nm = |v: i64| format!("{v}nm");
-    let d = 1_500_000;
-    let fence = [(x + 300_000, y - d), (x - d, y - d), (x - d, y + d), (x + d, y + d), (x + d, y - d)];
+    let d = 1_300_000;
+    let fence = [(x + 100_000, y - d), (x - d, y - d), (x - d, y + d), (x + d, y + d), (x + d, y - d)];
     let pts: Vec<Value> = fence.iter().map(|(a, b)| json!([nm(*a), nm(*b)])).collect();
     exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}));
     let before = joints(&s);
     assert!(joint(&before, "J1.1", "B.Cu").zone_contact.0 > 0, "the solid pour reaches the pin");
+    let tracks = |s: &Session| s.project.as_ref().unwrap().board().tracks.len();
+    let n = tracks(&s);
+    // 1. A track fits through the slot.
     let o = exec(&r, &mut s, "zone.relieve", json!({}));
-    assert_eq!(o["output"]["cut"], json!(["J1.1 on B.Cu"]), "{}", o["output"]);
-    let cut = findings(&o, "zone.relieve_cut");
-    assert_eq!(cut.len(), 1);
-    assert!(cut[0].contains("J1.1 on B.Cu"), "{}", cut[0]);
-    // The pad is reported as one no spoke reaches, too.
-    assert!(o["output"]["left"].as_array().unwrap().iter().any(|j| j["pad"] == "J1.1" && j["spokes"] == 0));
+    assert_eq!(o["output"]["cut"], Value::Null, "{}", o["output"]);
+    assert!(findings(&o, "zone.relieve_cut").is_empty());
+    assert_eq!(o["output"]["tracks"].as_array().map_or(0, Vec::len), 1, "{}", o["output"]);
+    assert_eq!(tracks(&s), n + 1);
+    let js = joints(&s);
+    let j = joint(&js, "J1.1", "B.Cu");
+    assert!(j.necks >= 1 && j.solid(67).is_none(), "{j:?}");
+    assert_eq!(joint(&js, "J1.1", "In1.Cu").spokes, 4, "the inner plane has room for all four");
+    let o = exec(&r, &mut s, "drc.run", json!({"unrouted": "each"}));
+    let codes: Vec<&str> = o["output"]["by_code"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["severity"] == "error")
+        .map(|c| c["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.iter().all(|c| *c == "drc.unrouted"), "the added track keeps every clearance: {codes:?}");
+    assert!(
+        !findings(&o, "drc.unrouted").iter().any(|m| m.contains("J1.1") && m.contains("GND") && m.contains("zone")),
+        "{o}"
+    );
+    // One undo step takes the whole repair back, the track included.
+    exec(&r, &mut s, "history.undo", json!({}));
+    assert_eq!(tracks(&s), n);
+    // 2. No track fits: the pad is kept solid on that layer alone.
+    exec(&r, &mut s, "board.rules", json!({"min_track_width": "0.5mm"}));
+    let o = exec(&r, &mut s, "zone.relieve", json!({}));
+    assert_eq!(o["output"]["cut"], Value::Null, "{}", o["output"]);
+    let solid = o["output"]["solid"].as_array().unwrap();
+    assert_eq!(solid.len(), 1, "{}", o["output"]);
+    assert!(solid[0].as_str().unwrap().starts_with("J1.1: kept solid") && solid[0].as_str().unwrap().contains("B.Cu"));
+    assert_eq!(tracks(&s), n);
+    let js = joints(&s);
+    assert!(joint(&js, "J1.1", "B.Cu").solid(67).is_some());
+    assert_eq!(joint(&js, "J1.1", "In1.Cu").spokes, 4, "solid on B.Cu only");
+    let o = exec(&r, &mut s, "zone.pad", json!({"pads": ["J1.1"]}));
+    assert_eq!(o["output"]["pads"][0]["layers"], json!({"B.Cu": "solid"}), "{}", o["output"]);
+    assert!(o["output"]["pads"][0]["reason"].as_str().unwrap().contains("zone.relieve"));
+    // Said on the pad: the DRC is quiet, zone.thermals shows it with its reason.
+    assert!(findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.solid_pad").is_empty());
+    let o = exec(&r, &mut s, "zone.thermals", json!({}));
+    let kept = o["output"]["pads"].as_array().unwrap().iter().find(|j| j["pad"] == "J1.1").expect("listed");
+    assert_eq!(kept["state"], "meant");
+    assert!(kept["reason"].as_str().unwrap().contains("no thermal spoke"), "{kept}");
+}
+
+/// `zone.pad`: the connection of one placed pad, without touching the footprint that other
+/// parts share; saved with the board, exported to KiCad on that pad, undone as one step.
+#[test]
+fn one_placed_pad_alone() {
+    let (d, r, mut s) = setup();
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "GND", "net": "GND", "layers": ["F.Cu", "In1.Cu"], "outline": "board"}),
+    );
+    let relieved = joint(&joints(&s), "C1.2", "F.Cu").spokes;
+    assert!(relieved >= 2);
+    let other = joint(&joints(&s), "C2.2", "F.Cu").spokes;
+    let o = exec(
+        &r,
+        &mut s,
+        "zone.pad",
+        json!({"pads": ["C1.2"], "connection": "solid", "reason": "carries the return current"}),
+    );
+    assert_eq!(o["output"]["pads"][0]["zone_connection"], "solid", "{}", o["output"]);
+    let js = joints(&s);
+    assert!(joint(&js, "C1.2", "F.Cu").solid(67).is_some() && joint(&js, "C1.2", "F.Cu").own);
+    assert_eq!(joint(&js, "C2.2", "F.Cu").spokes, other, "the same footprint elsewhere is untouched");
+    assert!(findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.solid_pad").is_empty(), "said on the pad");
+    // Per layer, and the relief sizes.
+    exec(&r, &mut s, "zone.pad", json!({"pads": ["J1.1"], "connection": "solid", "layers": ["In1.Cu"]}));
+    exec(&r, &mut s, "zone.pad", json!({"pads": ["J1.1"], "thermal_spoke": "0.4mm", "thermal_gap": "0.3mm"}));
+    let js = joints(&s);
+    assert!(joint(&js, "J1.1", "In1.Cu").solid(67).is_some());
+    let j = joint(&js, "J1.1", "F.Cu");
+    assert_eq!((j.spokes, j.spoke.0, j.gap.0), (4, 400_000, 300_000), "{j:?}");
+    // Saved and loaded.
+    exec(&r, &mut s, "project.save", json!({}));
+    let mut s2 = Session::new();
+    exec(&r, &mut s2, "project.open", json!({"path": d.path().join("p")}));
+    let o = exec(&r, &mut s2, "zone.pad", json!({"pads": []}));
+    assert_eq!(o["output"]["pads"].as_array().unwrap().len(), 2, "{}", o["output"]);
+    assert!(joint(&joints(&s2), "C1.2", "F.Cu").solid(67).is_some());
+    // The KiCad export writes it on that pad only.
+    let pcb = d.path().join("out.kicad_pcb");
+    let o = exec(&r, &mut s, "board.export_kicad", json!({"path": pcb}));
+    let text = std::fs::read_to_string(&pcb).unwrap();
+    assert_eq!(text.matches("(thermal_gap 0.3)").count(), 1, "J1.1 alone");
+    assert!(
+        findings(&o, "export.pad_layer_connection").iter().any(|m| m.contains("J1.1")),
+        "KiCad has no connection per layer: {o}"
+    );
+    // Unset, and undo.
+    let o = exec(&r, &mut s, "zone.pad", json!({"pads": ["C1.2"], "unset": ["all"]}));
+    assert_eq!(o["output"]["pads"], json!([]));
+    assert_eq!(joint(&joints(&s), "C1.2", "F.Cu").spokes, relieved);
+    exec(&r, &mut s, "history.undo", json!({}));
+    assert!(joint(&joints(&s), "C1.2", "F.Cu").solid(67).is_some());
+    // Unknown pads and layers are refused with a hint.
+    let err = r.execute(&mut s, "zone.pad", json!({"pads": ["J9.1"], "connection": "solid"}), RunOptions::default());
+    assert_eq!(err.err().unwrap().error.diagnostic.code, "zone.unknown_pad");
 }
 
 /// Parts on the bottom side are mirrored (their outlines run the other way): their pads are

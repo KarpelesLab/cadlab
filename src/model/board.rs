@@ -553,13 +553,69 @@ pub struct PlacedFootprint {
     /// courtyard (`silk.arrange`, `silk.set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_text: Option<RefText>,
+    /// How single pads of this placement join the pours of their net, by pad number, where
+    /// that differs from the footprint's own settings (`zone.pad`, `zone.relieve`): one pin
+    /// of one part kept solid or given a narrower relief without touching the land pattern
+    /// that every other placement shares (D112).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pads: BTreeMap<String, PadJoin>,
+}
+
+/// How one placed pad joins the pours of its net (`PlacedFootprint::pads`): each value set
+/// here goes before the pad's and the footprint's own (`footprint.set`), which go before the
+/// zone's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PadJoin {
+    /// Connection to zones of the pad's net.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_connection: Option<PadConnection>,
+    /// Thermal relief gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_gap: Option<Nm>,
+    /// Thermal relief spoke width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_spoke: Option<Nm>,
+    /// Direction of the first thermal spoke relative to the pad.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_angle: Option<Angle>,
+    /// Connection on single copper layers, before `zone_connection`: a through-hole pin kept
+    /// solid in the one plane where no spoke fits and relieved in the others.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layers: BTreeMap<String, PadConnection>,
+    /// Why (free text): `zone.relieve` says here why it kept a pad solid or narrowed its
+    /// relief, and reports carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl PadJoin {
+    /// Whether nothing is set (the entry is then removed).
+    pub fn is_empty(&self) -> bool {
+        self.zone_connection.is_none()
+            && self.thermal_gap.is_none()
+            && self.thermal_spoke.is_none()
+            && self.thermal_angle.is_none()
+            && self.layers.is_empty()
+    }
+
+    /// These settings over a pad's resolved ones.
+    pub fn over(&self, o: &crate::model::footprint::Overrides) -> crate::model::footprint::Overrides {
+        crate::model::footprint::Overrides {
+            zone_connection: self.zone_connection.or(o.zone_connection),
+            thermal_gap: self.thermal_gap.or(o.thermal_gap),
+            thermal_spoke: self.thermal_spoke.or(o.thermal_spoke),
+            thermal_angle: self.thermal_angle.or(o.thermal_angle),
+            ..o.clone()
+        }
+    }
 }
 
 impl PlacedFootprint {
     /// A placement with every optional setting at its default: unlocked, the part's preferred
     /// footprint, the reference designator above the courtyard.
     pub fn new(at: Point, rotation: Angle, side: BoardSide) -> PlacedFootprint {
-        PlacedFootprint { at, rotation, side, locked: false, footprint: None, ref_text: None }
+        PlacedFootprint { at, rotation, side, locked: false, footprint: None, ref_text: None, pads: BTreeMap::new() }
     }
 
     /// Drops an arranged reference text position (`silk.arrange` chose it for another

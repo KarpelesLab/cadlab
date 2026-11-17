@@ -63,6 +63,10 @@ pub struct KicadExport {
     pub rules: String,
     /// Things that could not be exported faithfully.
     pub warnings: Vec<String>,
+    /// Placed pads whose zone connection is set for single layers (pad, layers): KiCad has
+    /// one connection per pad, so the file has the pad's connection for every layer (the
+    /// fill written is cadlab's; KiCad's own refill differs on those layers).
+    pub pad_layers: Vec<(String, String)>,
     /// Footprints written.
     pub footprints: usize,
     /// UUID of every written object → the cadlab object it comes from (`track#4`, `via#2`,
@@ -295,6 +299,40 @@ struct Writer<'a> {
     layers: BTreeSet<String>,
     warnings: Vec<String>,
     uuids: std::cell::RefCell<BTreeMap<String, String>>,
+    /// Pads whose spokes cadlab fits to the pad ([`fitted_widths`]).
+    fitted: BTreeMap<(String, String), Nm>,
+    /// Placed pads whose connection is set per layer, with the layers: KiCad has one
+    /// connection per pad.
+    pad_layers: Vec<(String, String)>,
+}
+
+/// The spoke width cadlab fits to small pads (half the shorter side, `zones::Relief::of`), per
+/// placed pad, so that KiCad's own refill gives them the same spokes: written as the pad's
+/// `thermal_width`. Only when no zone of the board sets a spoke width (a zone's width goes
+/// before the fit in cadlab, a pad's before the zone's in KiCad), for pads without a width of
+/// their own, narrower than twice the default spoke width of the rules' track width (a net
+/// class with wider tracks fits larger pads too; those keep the zone's width in KiCad) and
+/// not below the minimum track width. The import takes such a width as unset again
+/// (`kicad_import`: KiCad rewrites what cadlab exports).
+fn fitted_widths(p: &Project) -> BTreeMap<(String, String), Nm> {
+    use crate::board::{thermal, zones};
+    let board = p.board();
+    let pours: Vec<&crate::model::board::Zone> = board.zones.iter().filter(|z| !thermal::is_teardrop(z)).collect();
+    let mut out = BTreeMap::new();
+    if pours.is_empty() || pours.iter().any(|z| z.thermal_spoke.is_some()) {
+        return out;
+    }
+    let default = zones::default_spoke(board.rules.track_width);
+    for pp in geo::placed_pads(p) {
+        if pp.overrides.thermal_spoke.is_some() || pp.layers.is_empty() {
+            continue;
+        }
+        let w = Nm(zones::fitted_spoke(zones::short_side(&vec![pp.shape.clone()])));
+        if w < default && w >= board.rules.min_track_width && w > Nm::ZERO {
+            out.entry((pp.refdes.clone(), pp.number.clone())).or_insert(w);
+        }
+    }
+    out
 }
 
 impl Writer<'_> {
@@ -378,6 +416,8 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
         layers: layer_table(&copper).into_iter().map(|l| l.1).collect(),
         warnings: Vec::new(),
         uuids: Default::default(),
+        fitted: fitted_widths(p),
+        pad_layers: Vec::new(),
     };
 
     let _ = writeln!(
@@ -445,7 +485,15 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
     let project = to_kicad_pro(p, name);
     let (rules, rule_warnings) = dru(p);
     w.warnings.extend(rule_warnings);
-    KicadExport { pcb: w.s, project, rules, warnings: w.warnings, footprints, uuids: w.uuids.into_inner() }
+    KicadExport {
+        pcb: w.s,
+        project,
+        rules,
+        warnings: w.warnings,
+        pad_layers: w.pad_layers,
+        footprints,
+        uuids: w.uuids.into_inner(),
+    }
 }
 
 /// The `.kicad_pcb` board text.
@@ -645,16 +693,31 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
     let pins = pad_pins(p, refdes);
     for (pi, pad) in fp.pads.iter().enumerate() {
         // KiCad has no footprint-level spoke angle: each pad without its own gets the
-        // footprint's.
-        let with_angle;
-        let pad = match (pad.overrides.thermal_angle, fp.overrides.thermal_angle) {
-            (None, Some(a)) => {
-                let mut c = pad.clone();
-                c.overrides.thermal_angle = Some(a);
-                with_angle = c;
-                &with_angle
+        // footprint's. The placed pad's own settings (`zone.pad`) are written on the pad, and
+        // the spoke width cadlab fits to a small pad as its own width.
+        let join = pf.pads.get(&pad.number);
+        let fitted = w.fitted.get(&(refdes.to_string(), pad.number.clone())).copied();
+        let with_own;
+        let pad = if join.is_some()
+            || fitted.is_some()
+            || (pad.overrides.thermal_angle.is_none() && fp.overrides.thermal_angle.is_some())
+        {
+            let mut c = pad.clone();
+            if let Some(j) = join {
+                c.overrides = j.over(&c.overrides);
+                if !j.layers.is_empty() {
+                    let layers: Vec<&str> = j.layers.keys().map(String::as_str).collect();
+                    w.pad_layers.push((format!("{refdes}.{}", pad.number), layers.join(", ")));
+                }
             }
-            _ => pad,
+            c.overrides.thermal_angle = c.overrides.thermal_angle.or(fp.overrides.thermal_angle);
+            if c.overrides.thermal_spoke.is_none() && fp.overrides.thermal_spoke.is_none() {
+                c.overrides.thermal_spoke = fitted;
+            }
+            with_own = c;
+            &with_own
+        } else {
+            pad
         };
         write_pad(w, &f, refdes, &format!("{key}/pad{pi}"), pad, &nets, &pins);
     }

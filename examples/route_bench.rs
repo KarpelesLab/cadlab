@@ -140,7 +140,7 @@ fn thermals(name: &str, what: &str, p: &Project) {
     if mode == "relieve" {
         let mut q = p.clone();
         let t = Instant::now();
-        let r = cadlab::board::thermal::relieve(&mut q, None, false);
+        let (r, _) = cadlab::board::thermal::relieve(&mut q, None, false);
         let changed = t.elapsed();
         let (c, codes, fill, t) = count(&q);
         eprintln!(
@@ -152,6 +152,22 @@ fn thermals(name: &str, what: &str, p: &Project) {
             r.kept.len(),
             r.narrowed.len()
         );
+        eprintln!(
+            "{name} {what} relieved, per pad: {} fitted, {} track(s), {} kept solid, {} left short, {} cut",
+            r.fitted.len(),
+            r.tracks.len(),
+            r.solid.len(),
+            r.reasons.len(),
+            r.cut.len()
+        );
+        if std::env::var_os("CADLAB_BENCH_VERBOSE").is_some() {
+            for l in r.fitted.iter().chain(&r.tracks).chain(&r.solid).chain(&r.cut) {
+                eprintln!("  {l}");
+            }
+            for (k, v) in &r.reasons {
+                eprintln!("  left {k}: {v}");
+            }
+        }
     }
 }
 

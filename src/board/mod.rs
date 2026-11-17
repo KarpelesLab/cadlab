@@ -279,7 +279,7 @@ pub fn pad_outline_local(shape: &PadShape) -> Vec<Point> {
 }
 
 /// Local pad outline as a curved shape centered at the origin (before pad rotation).
-fn pad_shape_local(shape: &PadShape) -> Result<Polygon, polyclip::Error> {
+pub(crate) fn pad_shape_local(shape: &PadShape) -> Result<Polygon, polyclip::Error> {
     let rect_round = |w: Nm, h: Nm, r: Nm| -> Result<Polygon, polyclip::Error> {
         let (hw, hh) = (w.0 / 2, h.0 / 2);
         let r = r.0.clamp(0, hw.min(hh));
@@ -443,7 +443,10 @@ pub fn placed_pads(p: &Project) -> Vec<PlacedPad> {
                 pad: pad.clone(),
                 side: pf.side,
                 pad_side: ps,
-                overrides: fp.pad_overrides(pad),
+                overrides: {
+                    let o = fp.pad_overrides(pad);
+                    pf.pads.get(&pad.number).map_or(o.clone(), |j| j.over(&o))
+                },
                 slot,
                 tie: fp.tie_group(&pad.number),
             });
@@ -576,6 +579,9 @@ pub struct ItemLocal {
     pub stack: Option<usize>,
     /// Zone connection override (pads).
     pub connection: Option<PadConnection>,
+    /// Zone connection override on single layers (a placed pad's own, `PadJoin::layers`),
+    /// before `connection`.
+    pub connection_on: Vec<(String, PadConnection)>,
     /// A plated through-hole pad.
     pub through: bool,
     /// The net-tie group of its footprint it belongs to: (designator, group).
@@ -671,6 +677,13 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
                 clearance: pp.overrides.clearance,
                 stack,
                 connection: pp.overrides.zone_connection,
+                connection_on: p
+                    .board()
+                    .footprints
+                    .get(&pp.refdes)
+                    .and_then(|f| f.pads.get(&pp.number))
+                    .map(|j| j.layers.iter().map(|(l, c)| (l.clone(), *c)).collect())
+                    .unwrap_or_default(),
                 through: pp.plated(),
                 tie: pp.tie.map(|g| (pp.refdes.clone(), g)),
                 tie_nets: Vec::new(),
