@@ -124,6 +124,8 @@ expression: names
   "zone.remove",
   "zone.list",
   "zone.fill",
+  "zone.thermals",
+  "zone.relieve",
   "keepout.add",
   "keepout.set",
   "keepout.remove",

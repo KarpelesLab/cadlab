@@ -912,7 +912,9 @@ pub fn generate(spec: &PackageSpec, opts: &GenOptions) -> Result<Footprint, GenE
                 .collect();
             let tab_at = Point::new(Nm((tab.outer.0 + tab.inner.0) / 2), Nm::ZERO);
             let number = tab_number.unwrap_or(leads + 1).to_string();
-            pads.push(smd_pad(&number, tab_at, tab.outer - tab.inner, tab.width, opts));
+            let mut tab_pad = smd_pad(&number, tab_at, tab.outer - tab.inner, tab.width, opts);
+            solid_in_pours(&mut tab_pad);
+            pads.push(tab_pad);
             let body = Body::centered(body_width.nominal(), body_length.nominal(), *height);
             let mut fp = draw::finish(name, Mount::Smd, pads, body, f.courtyard(opts.density), true, opts)?;
             if tab_protrusion.is_some() {
@@ -1278,7 +1280,14 @@ fn exposed(ep: &ExposedPad, default_number: u32, opts: &GenOptions) -> Pad {
         }
     }
     pad.paste = Some(Paste::Windows { size, at });
+    solid_in_pours(&mut pad);
     pad
+}
+
+/// Marks a pad that spreads heat (exposed pad, tab): a pour of its net joins it solidly, on
+/// purpose, where the other pads get thermal spokes (docs/BOARD.md, "Thermal relief").
+fn solid_in_pours(pad: &mut Pad) {
+    pad.overrides.zone_connection = Some(crate::model::board::PadConnection::Solid);
 }
 
 #[cfg(test)]

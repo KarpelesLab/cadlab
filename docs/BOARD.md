@@ -82,7 +82,9 @@ For each zone and each of its layers, in priority order (higher first, ties in b
 3. Same-net pads, by the pad's own zone connection (`footprint.set --zone-connection`, pad then
    footprint), else the zone's: `solid` merges them; `thermal` keeps a `thermal_gap` around the pad
    (default: the clearance) and adds `thermal_spokes` spokes (default 4, evenly spaced) of width
-   `thermal_spoke` (default: max(net track width, 0.25 mm)); `none` keeps a clearance gap;
+   `thermal_spoke` (default: max(net track width, 0.25 mm), and on a pad narrower than twice that, half the
+   pad's shorter side, never below `min_track_width`: four spokes as wide as a small pad's sides would be no
+   relief; a width set on the zone, the pad or the footprint is used as it is, D109); `none` keeps a clearance gap;
    `tht_thermal` is `thermal` for plated through-hole pads and `solid` for the others. Same-net tracks
    and vias are always solid. Gap, spoke width and the first spoke's direction (`thermal_angle`) can be
    set per pad or footprint (`footprint.set`; pad, then footprint, then zone). The angle is relative to
@@ -127,6 +129,79 @@ base copper with its local settings, NPTH holes and slots, and the clearance res
 also depends on library footprints through custom rules and local clearances, D40) and reuses one only when every input compares equal (the board first by pointer: an
 unchanged project shares it), so repeated queries on the same state in one MCP or batch session cost a few
 milliseconds (5 ms on the synthetic board below, the NPTH list included).
+
+## Thermal relief (D109, `src/board/thermal.rs`)
+
+A pad soldered by hand, by wave or in an oven that sits solidly in a large copper area cannot be heated
+properly: the copper carries the heat away, which gives cold joints on through-hole pins (worst where a pin
+meets inner planes) and tombstoned chip parts (one pad in a pour, the other on a thin track). What cadlab holds
+to:
+
+1. **Relief is the default.** A zone connects pads through thermal spokes unless it is told otherwise
+   (`zone.add` with only a name, a net, layers and an outline: `pads: thermal`, gap = the clearance, four
+   spokes, their width fitted to small pads as in "Zone fill" step 3), on every layer the zone has, inner layers
+   included: a through-hole pin gets its spokes on each plane it meets.
+2. **What must be solid is solid without being asked.** Vias and tracks of the net are always merged into the
+   pour (stitching and thermal vias are never relieved). The footprint generator marks the pads that spread heat
+   with `zone_connection: solid` of their own: the exposed pad of `QFN`/`DFN`/`QFP`/gull-wing packages and the
+   tab of `SOT-223`/`DPAK`/`D2PAK` (`landpattern`, so `footprint.generate` and `part.create --package`).
+3. **A solder pad without relief is reported**, whatever made it so: a zone set to `solid` or `tht_thermal`
+   (also one that came with an imported board), spokes too wide for the pad, a track wider than the pad, a
+   copper drawing over it. The check reads the copper, not the settings.
+4. **A relieved pad short of spokes is reported**, and one that no spoke reaches is an open connection.
+5. **One command repairs a board** (`zone.relieve`), and the check runs in `drc.run`, in `zone.fill`, at
+   `board.import_kicad` and in `fab.check` / `fab.export`.
+
+**How a pad is read.** In a band 10 µm wide around the pad's outline on each layer: the separate pieces of zone
+copper in it (the spokes that reach the pad), the same with the net's tracks, vias and copper drawings (its
+*necks*), and the share of the outline that copper of its net covers. A pad is **in a pour** when zone copper
+lies within its relief's reach and goes on beyond it. It has **no relief** when the pour covers
+`thermal_max_contact` percent of its outline or more (default 67), or when copper that is no pour does and some
+of it is wider than the pad (a track wider than the pad's shorter side, a copper drawing); tracks no wider than
+the pad are how a pad is connected, however much of a small pad's outline they take. Teardrop zones (KiCad's
+`$teardrop_…$`) count as tracks.
+
+**What a pad is.** `through`: a plated through-hole pin. `smd`: a surface-mount solder pad. `heat`: a pad with
+paste windows of its own (exposed pads), an SMD pad at least 2.5 times the footprint's median pad area with no
+pad of another number nearly as large (tabs; the two lugs of a connector are solder pads), and pads of the same
+number inside one (thermal via pads). `bare`: not soldered: covered by solder mask, without a number, non-plated,
+or alone on its footprint as an SMD pad without paste (test point) or with a plated hole of 0.5 mm or less (a
+stitching via drawn as a footprint). Only `through` and `smd` pads are held to the rules below.
+
+| Code | Severity | Finding |
+|---|---|---|
+| `drc.solid_pad` | warning | a solder pad joined solidly to a pour of its net (pad and zone as subjects, its layers listed, the tombstoning risk named when the other pad of a two-pad part is not), or with wide tracks or copper drawings on its outline |
+| `drc.thermal_nominal` | warning | a solder pad whose zone gives it spokes that cover its outline all the same (spokes as wide as its sides) |
+| `drc.starved_thermal` | warning | a relieved pad joined by fewer necks than `min_thermal_spokes` (default 2), or than the other pads of its own footprint leave room for when that is less (a pin in a row has its ends only; never fewer than one). With none, the DRC also reports the open connection (`drc.unrouted`, error) |
+| `drc.thermal_size` | warning | a relief gap below the minimum clearance (`min_clearance`, else `clearance`) or a spoke below `min_track_width`: one per zone and value, with the pads |
+| `drc.current_spokes` | warning | a net with a `current`: pads whose spokes and tracks, all layers of a through-hole pin together, add up to less than the width IPC-2152 asks on the layer (one per net and layer, [ELECTRICAL.md](ELECTRICAL.md)) |
+
+They are warnings, as the other findings that leave the board correct and connected (`drc.current_width`,
+`drc.split_crossing`): `drc.run` counts them, `fab.check` carries them as `fab.solid_pad`,
+`fab.thermal_nominal`, `fab.starved_thermal` and, against the fab's own minimum track and space,
+`fab.thermal_size`, and `fab.export` writes the files and says so. An error would refuse the export of every
+imported board whose designer meant its pads solid.
+
+**Solid on purpose.** Say it where it holds: on the pad or the footprint (`footprint.set <footprint> --pads 4
+--zone-connection solid`; the check is then quiet for that pad, in every zone), or as a waiver for a whole zone
+or net (`drc.waive drc.solid_pad zone:GND --reason ..`, which covers the `fab.` finding too). A zone can still be
+made `solid`; `zone.add` and `zone.set` then warn (`zone.solid_pads`).
+
+**Looking and repairing.** `zone.fill` adds the count of the pads in pours to its report (by necks 0/1/2/3/4+,
+solid through-hole and SMD, heat pads, pads on inner layers) and warns `zone.solid_pads` / `zone.starved_pads`;
+`board.import_kicad` gives the same two warnings for what the board brings. `zone.thermals` lists the pads that
+need a look (or `all`), each with its state: `relieved`, `starved`, `solid`, `nominal`, `meant` (solid by its
+own setting), `heat`, `bare`. `zone.relieve` brings a board to relieved pads in one undo step: zones that join
+pads solidly (`solid`, `tht_thermal`) become `thermal`; `solid` settings on solder pads and their footprints
+are removed and listed (`keep_own` keeps them); heat pads and pads that are not soldered keep theirs, and heat
+pads without one get it, so they stay solid; pads that still read solid through spokes too wide for them get a
+spoke of their own, half their shorter side and at least `min_track_width`. It reports the counts before and
+after and every pad left starved or solid.
+
+Not covered: the routers do not keep the sides of relieved pads free for their spokes (what they leave is
+counted in [ROUTER.md](ROUTER.md)'s terms by `route_bench` with `CADLAB_BENCH_THERMALS=1` and reported by the
+DRC), and the KiCad export writes one spoke width per zone, so KiCad's own refill gives small pads the zone's
+width where cadlab fits it (the exported fill is cadlab's).
 
 ## Keep-outs and net exceptions (D76)
 
@@ -311,7 +386,7 @@ courtyard; `drc.run` says when that is clipped or overlapping, and names `silk.a
 | `silk` | `arrange` (move the reference designators not set by hand to free positions, all or the given `refdes`; reports what moved and what had to be hidden), `set` (one designator by hand: `at` on the board, `rotation`, `size`, `stroke`, `hidden`; never moved afterwards), `reset` (hand designators back: above the courtyard, arranged again by the next `arrange`), `list` (every designator as printed: position, rotation, size, stroke, layer, hidden, `default` / `arranged` / `manual`); see "Silkscreen and reference designators" |
 | `track` | `add` (polyline through points on a layer, width from net class/rules), `remove`, `list` |
 | `via` | `add`, `remove` |
-| `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split) |
+| `zone` | `add` (outline: points, `{"rect": {from, to}}` or `"board"`), `set` (also `thermal_angle`, `thermal_spokes`), `remove`, `list`, `fill` (report area/islands, warn empty or split; the pads in pours by spokes and kind), `thermals` (the pads short of spokes or without relief, or all), `relieve` (every solder pad to thermal spokes, heat pads kept solid; counts before and after), see "Thermal relief" |
 | `keepout` | `add` (forbid tracks, vias, pours, footprints; all when none given; `rule_area`: forbid nothing, a named area for custom rules; `allow_nets`: nets excepted, see "Keep-outs and net exceptions"), `set` (`allow_nets` adds exceptions, `forbid_nets` removes them), `remove`, `list` (with the exceptions) |
 | `drc` | `run` (plus `fab.check` warnings for the manifest `targets`; `unrouted`: `auto` lists up to 10 unrouted connections and summarizes more in one finding, `each`, `summary`; `severity`, `codes` (a code or a prefix: `fab.silk`), `limit` and `offset` select what is listed, never the counts; `by_code` counts errors and warnings per code; `show_waived`), `waive` (code, subjects, reason), `unwaive`, `waivers` |
 | `board` (stackup) | `stackup` (copper, dielectrics, line model per layer), `dielectric` (thickness, εr, material per gap; [ELECTRICAL.md](ELECTRICAL.md)) |
@@ -337,6 +412,10 @@ copper, so with it set zone fills keep `hole_clearance` from non-plated holes in
 (and from plated holes of other nets), and the DRC checks it (`drc.hole_clearance`); unset, fills keep their
 own clearance from non-plated holes, the conservative former behaviour. The KiCad import takes it from
 `min_hole_clearance` (KiCad's copper-to-hole clearance, which its fills keep from copper-less holes).
+
+`min_thermal_spokes` (default 2; 0: not checked) and `thermal_max_contact` (percent, default 67; 0: not checked)
+are the two numbers of the thermal relief check ("Thermal relief"); the KiCad import takes the first from
+`min_resolved_spokes` and the export writes it there.
 
 Net classes (`netclass.*`) override per net: track width, clearance, via drill and diameter, diff pair width and
 gap. Unset values are inherited from `board.rules`; `netclass.show` / `netclass.list` give the values in
@@ -735,6 +814,7 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.split_crossing` | warning | a signal net (not a ground, not a supply rail: no power pins, not `driven`) whose tracks on a layer run over the fills of two different ground nets on an adjacent copper layer (AGND and GND of a split plane): one per net, layer and plane layer, at the first change of ground (D66) |
 | `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |
 | `drc.impedance` | warning | tracks of a net whose class has an `impedance` target more than 10 % off on their layer |
+| `drc.solid_pad`, `drc.thermal_nominal`, `drc.starved_thermal`, `drc.thermal_size`, `drc.current_spokes` | warning | thermal relief of the pads in pours: see "Thermal relief" |
 
 **Waivers** (`drc.waive`, D58): a finding whose code a waiver names, and whose subjects (as the finding prints
 them: `J1`, `net:GND`, `graphic#208`) include all of the waiver's, is left out of the errors and warnings and

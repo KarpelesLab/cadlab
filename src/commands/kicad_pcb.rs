@@ -103,6 +103,16 @@ impl Command for ImportKicad {
         for d in diags {
             ctx.report(d);
         }
+        // What the board brings as thermal relief: solder pads its zones join solidly and pads
+        // short of spokes are said at once, with the command that repairs them.
+        let p = ctx.project()?;
+        if !p.board().zones.is_empty() {
+            let js = crate::board::thermal::joints(p, &crate::board::copper_items(p));
+            let census = crate::board::thermal::census(p, &js, p.board().rules.thermal_max_contact);
+            for d in super::zone::census_warnings(p, &census) {
+                ctx.report(d);
+            }
+        }
         Ok(report)
     }
 

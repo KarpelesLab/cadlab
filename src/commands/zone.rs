@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::board::thermal::{self, Census, Joint, PadClass, Solid};
 use crate::board::{self as geo, zones};
 use crate::command::{Command, CommandError, CommandKind, Context, Registry};
 use crate::diag::Diagnostic;
@@ -19,6 +20,8 @@ pub(crate) fn register(r: &mut Registry) {
         .register::<ZoneRemove>()
         .register::<ZoneList>()
         .register::<ZoneFill>()
+        .register::<ZoneThermals>()
+        .register::<ZoneRelieve>()
         .register::<KeepoutAdd>()
         .register::<KeepoutSet>()
         .register::<KeepoutRemove>()
@@ -203,6 +206,32 @@ fn zones_text(o: &Zones) -> String {
         .join("\n")
 }
 
+/// Says what a zone that joins solder pads solidly costs, when a command sets one so.
+fn warn_solid(ctx: &mut Context<'_>, z: &Zone) {
+    let what = match z.pads {
+        PadConnection::Solid => "every pad of its net",
+        PadConnection::ThtThermal => "the surface-mount pads of its net",
+        PadConnection::Thermal | PadConnection::None => return,
+    };
+    ctx.report(
+        Diagnostic::warning(
+            "zone.solid_pads",
+            format!(
+                "zone:{} joins {what} solidly: a pad in solid copper cannot be heated for soldering (cold joints by \
+                 hand, tombstoned chip parts in reflow); drc.run reports each such solder pad (drc.solid_pad)",
+                z.name
+            ),
+        )
+        .with_subject(ObjectRef::Named { kind: "zone".into(), name: z.name.clone() })
+        .with_hint(format!(
+            "keep `pads: thermal` (the default) and make single pads solid on purpose (`footprint.set <footprint> \
+             --pads <n> --zone-connection solid`: exposed pads and tabs of generated footprints are already); if the \
+             whole zone is meant solid, waive the finding (`drc.waive drc.solid_pad zone:{} --reason ..`)",
+            z.name
+        )),
+    );
+}
+
 /// Add a copper zone (pour) on one or more copper layers.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -224,13 +253,17 @@ pub struct ZoneAdd {
     /// Minimum copper width (default: the rules' zone_min_width).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_width: Option<Nm>,
-    /// Pad connection: thermal (default), solid or none.
+    /// Pad connection: thermal (default: spokes, so that pads can be soldered), solid, none,
+    /// or tht_thermal (spokes for through-hole pads only). Solid solder pads are reported by
+    /// drc.run (drc.solid_pad).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pads: Option<PadConnection>,
     /// Thermal relief gap (default: the clearance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_gap: Option<Nm>,
-    /// Thermal spoke width (default: max(track width, 0.25mm)).
+    /// Thermal spoke width (default: max(track width, 0.25mm), and no wider than half the
+    /// pad's shorter side down to the minimum track width, so small pads are relieved too;
+    /// a width given here applies to every pad as is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_spoke: Option<Nm>,
     /// Direction of the first thermal spoke relative to each pad's orientation, e.g. `45deg`
@@ -283,6 +316,7 @@ impl Command for ZoneAdd {
             thermal_spokes: self.thermal_spokes,
         };
         p.board_mut().zones.push(z.clone());
+        warn_solid(ctx, &z);
         Ok(Zones { zones: vec![z] })
     }
 
@@ -399,7 +433,11 @@ impl Command for ZoneSet {
         if self.thermal_spokes.is_some() {
             z.thermal_spokes = self.thermal_spokes;
         }
-        Ok(Zones { zones: vec![z.clone()] })
+        let z = z.clone();
+        if self.pads.is_some() {
+            warn_solid(ctx, &z);
+        }
+        Ok(Zones { zones: vec![z] })
     }
 
     fn summarize(o: &Zones) -> String {
@@ -488,6 +526,52 @@ pub struct LayerFill {
 pub struct FillReport {
     /// Per zone and layer, in board order.
     pub fills: Vec<LayerFill>,
+    /// The pads in pours of their net (every zone of the board), by the spokes that reach
+    /// them and by kind; `zone.thermals` lists them.
+    #[serde(default, skip_serializing_if = "census_is_empty")]
+    pub pads: Census,
+}
+
+fn census_is_empty(c: &Census) -> bool {
+    c.pads == 0
+}
+
+/// Warnings for what a census finds: solder pads without relief, pads short of spokes.
+pub(crate) fn census_warnings(p: &Project, c: &Census) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if c.solid() > 0 {
+        out.push(
+            Diagnostic::warning(
+                "zone.solid_pads",
+                format!(
+                    "{} solder pad(s) are joined to a pour without thermal relief ({} through-hole, {} on inner \
+                     layers): they cannot be heated for soldering",
+                    c.solid(),
+                    c.solid_through,
+                    c.inner_solid
+                ),
+            )
+            .with_hint(
+                "`zone.relieve` gives them thermal spokes and keeps exposed pads and tabs solid; `zone.thermals` \
+                 lists them",
+            ),
+        );
+    }
+    if c.starved > 0 {
+        out.push(
+            Diagnostic::warning(
+                "zone.starved_pads",
+                format!(
+                    "{} pad(s) are joined to their pour by fewer than {} thermal spoke(s) ({} by none)",
+                    c.starved,
+                    p.board().rules.min_thermal_spokes,
+                    c.relieved[0]
+                ),
+            )
+            .with_hint("`zone.thermals` lists them; drc.run reports each with what to do (drc.starved_thermal)"),
+        );
+    }
+    out
 }
 
 impl Command for ZoneFill {
@@ -563,16 +647,23 @@ impl Command for ZoneFill {
                 error: f.error,
             });
         }
+        let p = ctx.project()?;
+        let mut items = base;
+        items.extend(zones::zone_items(p, &items));
+        let rules = &p.board().rules;
+        let pads = thermal::census(p, &thermal::joints(p, &items), rules.thermal_max_contact);
+        diags.extend(census_warnings(p, &pads));
         for d in diags {
             ctx.report(d);
         }
-        Ok(FillReport { fills: out })
+        Ok(FillReport { fills: out, pads })
     }
 
     fn summarize(o: &FillReport) -> String {
         if o.fills.is_empty() {
             return "no zones".into();
         }
+        let pads = if o.pads.pads == 0 { String::new() } else { format!("\n{}", o.pads.text()) };
         o.fills
             .iter()
             .map(|f| {
@@ -588,6 +679,236 @@ impl Command for ZoneFill {
             })
             .collect::<Vec<_>>()
             .join("\n")
+            + &pads
+    }
+}
+
+// ---- thermal relief ----
+
+/// How a pad joins a pour of its net on one layer.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PadJoint {
+    /// The pad (`U1.3`).
+    pub pad: String,
+    /// Net.
+    pub net: String,
+    /// Copper layer.
+    pub layer: String,
+    /// Zone it lies in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// What the pad is: through (plated through-hole pin), smd, heat (exposed pad, tab) or
+    /// bare (not soldered).
+    pub class: PadClass,
+    /// The connection in effect (pad, else footprint, else zone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<PadConnection>,
+    /// The connection is set on the pad or its footprint.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
+    /// Necks of copper reaching the pad: spokes of the pour, tracks of the net.
+    pub spokes: u8,
+    /// Spokes asked for.
+    pub planned: u8,
+    /// Spokes the pad's own footprint leaves room for.
+    pub possible: u8,
+    /// Share of the pad's outline joined to copper of its net, percent.
+    pub share: u32,
+    /// relieved, starved (too few spokes), solid (no effective relief, not meant), nominal
+    /// (spokes too wide to relieve), meant (solid by the pad's or footprint's own setting),
+    /// heat or bare.
+    pub state: String,
+}
+
+fn pad_joint(j: &Joint, rules: &crate::model::board::Rules) -> PadJoint {
+    let solid = j.solid(rules.thermal_max_contact);
+    let state = match (j.class, solid) {
+        (PadClass::Bare, _) => "bare",
+        (PadClass::Heat, _) => "heat",
+        (_, Some(_)) if j.own && j.style == Some(PadConnection::Solid) => "meant",
+        (_, Some(Solid::Pour)) if j.style == Some(PadConnection::Thermal) => "nominal",
+        (_, Some(_)) => "solid",
+        (_, None) if j.starved(rules.min_thermal_spokes, rules.thermal_max_contact) => "starved",
+        (_, None) => "relieved",
+    };
+    PadJoint {
+        pad: format!("{}.{}", j.refdes, j.number),
+        net: j.net.clone(),
+        layer: j.layer.clone(),
+        zone: j.zone.clone(),
+        class: j.class,
+        connection: j.style,
+        own: j.own,
+        spokes: j.necks,
+        planned: j.planned,
+        possible: j.possible,
+        share: j.share(),
+        state: state.into(),
+    }
+}
+
+/// The joints that need a look: solder pads without relief that nothing marks as meant, and
+/// pads short of spokes.
+fn attention(j: &PadJoint) -> bool {
+    matches!(j.state.as_str(), "starved" | "solid" | "nominal")
+}
+
+fn joints_text(pads: &[PadJoint], shown: usize) -> String {
+    let mut lines: Vec<String> = pads
+        .iter()
+        .take(shown)
+        .map(|j| {
+            format!(
+                "{} {} on {}{}: {} ({} of {} spoke(s), {} % of its outline, {})",
+                j.pad,
+                j.net,
+                j.layer,
+                j.zone.as_ref().map(|z| format!(" in zone:{z}")).unwrap_or_default(),
+                j.state,
+                j.spokes,
+                j.planned,
+                j.share,
+                j.class.name()
+            )
+        })
+        .collect();
+    if pads.len() > shown {
+        lines.push(format!("... {} more", pads.len() - shown));
+    }
+    lines.join("\n")
+}
+
+/// List how the pads in pours of their net are joined: thermal spokes that reach, solid pads.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ZoneThermals {
+    /// Only pads in this zone (default: every zone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Every pad in a pour, not only those that need a look (starved, solid, nominal).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+}
+
+/// The pads in pours.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ThermalReport {
+    /// Counts over every pad in a pour (pad and layer pairs).
+    pub census: Census,
+    /// The pads, in board order: those that need a look, or all of them.
+    pub pads: Vec<PadJoint>,
+}
+
+impl Command for ZoneThermals {
+    const NAME: &'static str = "zone.thermals";
+    const SUMMARY: &'static str =
+        "Thermal relief of the pads in pours: spokes that reach each pad, solid and starved pads, counts";
+    const KIND: CommandKind = CommandKind::Query;
+    const POSITIONAL: &'static [&'static str] = &["name"];
+    type Output = ThermalReport;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<ThermalReport, CommandError> {
+        let p = ctx.project()?;
+        let only =
+            self.name.as_deref().map(|n| zone_index(p, n).map(|i| p.board().zones[i].name.clone())).transpose()?;
+        let rules = &p.board().rules;
+        let mut js = thermal::joints(p, &geo::copper_items(p));
+        js.retain(|j| {
+            (j.in_pour() || j.solid(rules.thermal_max_contact).is_some())
+                && only.as_ref().is_none_or(|z| j.zone.as_ref() == Some(z))
+        });
+        let census = thermal::census(p, &js, rules.thermal_max_contact);
+        let pads: Vec<PadJoint> = js.iter().map(|j| pad_joint(j, rules)).filter(|j| self.all || attention(j)).collect();
+        Ok(ThermalReport { census, pads })
+    }
+
+    fn summarize(o: &ThermalReport) -> String {
+        if o.census.pads == 0 && o.pads.is_empty() {
+            return "no pads in pours".into();
+        }
+        let list = joints_text(&o.pads, 40);
+        if list.is_empty() { o.census.text() } else { format!("{}\n{list}", o.census.text()) }
+    }
+}
+
+/// Bring the board to thermally relieved solder pads.
+///
+/// Zones that join pads solidly (`solid`, `tht_thermal`) become `thermal`; `solid` settings on
+/// solder pads and their footprints are removed; exposed pads, tabs and pads that are not
+/// soldered keep or get a `solid` setting of their own; pads whose spokes at the zone's width
+/// would cover their outline get a narrower spoke of their own. Vias stay solid (they always
+/// are). The zones are filled again and the pads counted before and after.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ZoneRelieve {
+    /// Only these zones (default: every zone).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<String>,
+    /// Keep the `solid` settings that solder pads and footprints have of their own (default:
+    /// removed and listed; exposed pads, tabs and pads that are not soldered always keep theirs).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_own: bool,
+}
+
+/// What `zone.relieve` did.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RelieveReport {
+    /// The pads in pours before.
+    pub before: Census,
+    /// The pads in pours after.
+    pub after: Census,
+    /// What changed: zones, settings removed, kept and narrowed.
+    #[serde(flatten)]
+    pub changes: thermal::Relieved,
+    /// Pads that still need a look: fewer spokes than the minimum, or no effective relief.
+    pub left: Vec<PadJoint>,
+}
+
+impl Command for ZoneRelieve {
+    const NAME: &'static str = "zone.relieve";
+    const SUMMARY: &'static str = "Give every solder pad in a pour thermal spokes (zones to thermal, exposed pads kept solid); counts before/after";
+    const KIND: CommandKind = CommandKind::Mutation;
+    const POSITIONAL: &'static [&'static str] = &["zones"];
+    type Output = RelieveReport;
+
+    fn run(self, ctx: &mut Context<'_>) -> Result<RelieveReport, CommandError> {
+        let p = ctx.project()?;
+        let names: Vec<String> = self
+            .zones
+            .iter()
+            .map(|n| zone_index(p, n).map(|i| p.board().zones[i].name.clone()))
+            .collect::<Result<_, _>>()?;
+        let max = p.board().rules.thermal_max_contact;
+        let before = thermal::census(p, &thermal::joints(p, &geo::copper_items(p)), max);
+        let p = ctx.project_mut()?;
+        let changes = thermal::relieve(p, (!names.is_empty()).then_some(names.as_slice()), self.keep_own);
+        let rules = p.board().rules.clone();
+        let js = thermal::joints(p, &geo::copper_items(p));
+        let after = thermal::census(p, &js, max);
+        let left: Vec<PadJoint> = js.iter().map(|j| pad_joint(j, &rules)).filter(attention).collect();
+        let p = ctx.project()?;
+        for d in census_warnings(p, &after) {
+            ctx.report(d);
+        }
+        Ok(RelieveReport { before, after, changes, left })
+    }
+
+    fn summarize(o: &RelieveReport) -> String {
+        let c = &o.changes;
+        let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
+        let mut s = format!(
+            "before: {}\nafter:  {}\nzones set to thermal: {}\nsolid settings removed: {}\nsolid kept or set on purpose: {}\nspokes narrowed: {}",
+            o.before.text(),
+            o.after.text(),
+            list(&c.zones.iter().map(|(z, was)| format!("{z} (was {was})")).collect::<Vec<_>>()),
+            list(&c.removed),
+            list(&c.kept),
+            list(&c.narrowed),
+        );
+        if !o.left.is_empty() {
+            s += &format!("\nleft to look at ({}):\n{}", o.left.len(), joints_text(&o.left, 20));
+        }
+        s
     }
 }
 

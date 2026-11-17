@@ -97,6 +97,7 @@ pub fn check(p: &Project, profile: &FabProfile, process: Option<&str>) -> Report
     let choices = ctx.board_options(&mut out);
     ctx.board_size(&mut out);
     ctx.limits(&mut out);
+    ctx.thermals(&mut out);
     ctx.holes(&mut out);
     ctx.silk(&mut out);
     ctx.assembly(&mut out);
@@ -269,6 +270,44 @@ impl Ctx<'_> {
             d.code = code.into();
             d.message = format!("{} ({who})", d.message);
             d.hint = Some(format!("{hint}, {}", self.hint_other()));
+            out.push(d);
+        }
+    }
+
+    /// Thermal relief, as the board goes to be soldered: solder pads joined solidly to a pour
+    /// and pads short of spokes (the board's own rules), and relief spokes and gaps below the
+    /// profile's minimum track and space. Warnings: the fab can make the board, soldering it is
+    /// what suffers, and a pad that is solid on purpose is waived on the board (`drc.waive`
+    /// covers the `fab.` finding of the same subjects through its `drc.` code).
+    fn thermals(&self, out: &mut Vec<Diagnostic>) {
+        let q = self.process;
+        let own = &self.p.board().rules;
+        let rules = Rules {
+            min_track_width: q.min_track.unwrap_or(Nm::ZERO),
+            clearance: q.min_space.unwrap_or(Nm::ZERO),
+            min_clearance: Nm::ZERO,
+            min_thermal_spokes: own.min_thermal_spokes,
+            thermal_max_contact: own.thermal_max_contact,
+            ..Rules::default()
+        };
+        let items = geo::copper_items(self.p);
+        let who = self.who();
+        for mut d in geo::thermal::check(self.p, &rules, &items, false) {
+            let code = match d.code.as_ref() {
+                "drc.solid_pad" => "fab.solid_pad",
+                "drc.thermal_nominal" => "fab.thermal_nominal",
+                "drc.starved_thermal" => "fab.starved_thermal",
+                "drc.thermal_size" => {
+                    d.message = format!("{} ({who})", d.message);
+                    d.hint = Some(format!(
+                        "widen the spokes or the gap (zone.set --thermal-spoke / --thermal-gap), {}",
+                        self.hint_other()
+                    ));
+                    "fab.thermal_size"
+                }
+                _ => continue,
+            };
+            d.code = code.into();
             out.push(d);
         }
     }

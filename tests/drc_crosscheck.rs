@@ -167,3 +167,29 @@ fn kicad_drc_of_export_matches_cadlab_drc_of_import() {
     drc_compare::unused_entries(&allow, &used, &mut problems);
     assert!(problems.is_empty(), "DRC cross-check differences (imported boards):\n{}", problems.join("\n"));
 }
+
+/// The cross-check boards raise no thermal relief finding (docs/BOARD.md, "Thermal relief"):
+/// their pours relieve every solder pad with two spokes or more, so the comparison with KiCad
+/// needs no allowance for these rules, which are cadlab's own.
+#[test]
+fn cases_have_no_thermal_findings() {
+    for case in crosscheck::cases() {
+        let (_d, _r, s) = crosscheck::build(&case);
+        let p = crosscheck::project(&s);
+        let found: Vec<String> = cadlab::drc::check(p)
+            .into_iter()
+            .filter(|d| {
+                [
+                    "drc.solid_pad",
+                    "drc.thermal_nominal",
+                    "drc.starved_thermal",
+                    "drc.thermal_size",
+                    "drc.current_spokes",
+                ]
+                .contains(&d.code.as_ref())
+            })
+            .map(|d| format!("{}: {}", d.code, d.message))
+            .collect();
+        assert!(found.is_empty(), "{}: {found:#?}", case.name);
+    }
+}

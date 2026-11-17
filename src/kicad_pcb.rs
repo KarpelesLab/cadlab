@@ -1332,7 +1332,7 @@ pub fn to_kicad_pro(p: &Project, name: &str) -> String {
                     "min_hole_to_hole": mmf(r.hole_to_hole),
                     "min_microvia_diameter": 0.2,
                     "min_microvia_drill": 0.1,
-                    "min_resolved_spokes": 2,
+                    "min_resolved_spokes": r.min_thermal_spokes,
                     // KiCad's silkscreen clearance applies between silkscreen items and to the
                     // board edge (its silk_over_copper only reports overlaps of mask openings).
                     "min_silk_clearance": mmf(r.silk_clearance),

@@ -435,6 +435,15 @@ pub struct SetRules {
     /// default) or copper (`silk_to_pad` from exposed pad copper only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub silk_check: Option<crate::model::board::SilkCheck>,
+    /// Fewest thermal spokes that must join a relieved pad to its pour (drc.starved_thermal;
+    /// default 2, 0: not checked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_thermal_spokes: Option<u8>,
+    /// Largest share of a solder pad's outline, in percent, that copper of its own net may join
+    /// before the pad counts as having no thermal relief (drc.solid_pad, drc.thermal_nominal;
+    /// default 67, 0: not checked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_max_contact: Option<u8>,
 }
 
 /// A rule value that changed.
@@ -582,6 +591,22 @@ impl Command for SetRules {
         r.paste_margin = self.paste_margin.unwrap_or(r.paste_margin);
         r.paste_ratio = self.paste_ratio.unwrap_or(r.paste_ratio);
         r.silk_check = self.silk_check.unwrap_or(r.silk_check);
+        if self.min_thermal_spokes.is_some_and(|n| n > crate::board::zones::MAX_SPOKES) {
+            return Err(CommandError::invalid_args(
+                "board.invalid_rule",
+                format!("`min_thermal_spokes` is 0 to {}", crate::board::zones::MAX_SPOKES),
+            )
+            .with_hint("2 is the usual minimum; 0 turns the check off"));
+        }
+        if self.thermal_max_contact.is_some_and(|n| n > 100) {
+            return Err(CommandError::invalid_args(
+                "board.invalid_rule",
+                "`thermal_max_contact` is a percentage, 0 to 100",
+            )
+            .with_hint("67 is the default; 0 turns the check off"));
+        }
+        r.min_thermal_spokes = self.min_thermal_spokes.unwrap_or(r.min_thermal_spokes);
+        r.thermal_max_contact = self.thermal_max_contact.unwrap_or(r.thermal_max_contact);
 
         if r.via_drill >= r.via_diameter {
             return Err(CommandError::invalid_args("board.invalid_rule", "via diameter must exceed via drill"));

@@ -64,6 +64,11 @@ pub struct ZoneParams {
     pub thermal_angle: Option<Angle>,
     /// Spokes per pad.
     pub thermal_spokes: u8,
+    /// `Some` when the zone leaves the spoke width to cadlab: a pad narrower than twice
+    /// `thermal_spoke` then gets spokes half its shorter side wide, never below this (the
+    /// rules' minimum track width), so that small pads are relieved too ([`Relief::of`]).
+    /// `None`: the zone's width as given, for every pad.
+    pub spoke_floor: Option<Nm>,
 }
 
 /// Default number of thermal spokes per pad.
@@ -83,7 +88,7 @@ pub fn class_clearance(p: &Project, net: Option<&str>) -> Option<Nm> {
 
 /// Resolves a zone's settings: clearance defaults to the larger of the rules' and its net
 /// class's; min width to the rules' zone minimum; thermal gap to the clearance; spoke width to
-/// max(track width of the net, 0.25 mm).
+/// max(track width of the net, 0.25 mm), narrower on small pads (`ZoneParams::spoke_floor`).
 pub fn zone_params(p: &Project, z: &Zone) -> ZoneParams {
     let rules = &p.board().rules;
     let net = z.net.as_deref();
@@ -97,6 +102,7 @@ pub fn zone_params(p: &Project, z: &Zone) -> ZoneParams {
         thermal_spoke: z.thermal_spoke.unwrap_or(track.max(Nm::from_um(250))),
         thermal_angle: z.thermal_angle,
         thermal_spokes: z.thermal_spokes.unwrap_or(DEFAULT_SPOKES).clamp(1, MAX_SPOKES),
+        spoke_floor: z.thermal_spoke.is_none().then_some(rules.min_track_width),
     }
 }
 
@@ -154,11 +160,21 @@ pub struct Relief {
 
 impl Relief {
     /// The relief of a pad in a zone: the pad's (or its footprint's) gap, width and angle,
-    /// else the zone's, with the zone's spoke count.
+    /// else the zone's, with the zone's spoke count. A zone that leaves the spoke width to
+    /// cadlab gives a pad spokes no wider than half its shorter side (whole micrometers, at
+    /// least the zone's `spoke_floor`): four spokes as wide as a small pad's sides would be no
+    /// relief.
     pub fn of(it: &CopperItem, prm: &ZoneParams) -> Relief {
         let t = it.local.thermal.unwrap_or_default();
         let gap = t.gap.unwrap_or(prm.thermal_gap).0;
-        let w = t.spoke.unwrap_or(prm.thermal_spoke).0;
+        let zone_w = || match prm.spoke_floor {
+            Some(floor) => {
+                let half = short_side(&it.shape) / 2 / 1_000 * 1_000;
+                prm.thermal_spoke.0.min(half.max(floor.0)).max(1)
+            }
+            None => prm.thermal_spoke.0,
+        };
+        let w = t.spoke.map_or_else(zone_w, |s| s.0);
         let first = t.first_spoke(prm.thermal_angle);
         let n = prm.thermal_spokes.clamp(1, MAX_SPOKES) as i64;
         let dirs = (0..n).map(|k| (first + Angle(((k * 360_000) / n) as i32)).normalized()).collect();
@@ -175,6 +191,29 @@ impl Relief {
         // A slanted spoke's end corner can stick out by up to its half width beyond its length.
         self.gap + self.w + if self.axis_aligned() { 0 } else { self.w }
     }
+}
+
+/// The shorter side of a pad: of the rectangle with the area and the outline length of its
+/// copper (the pad's own short side whatever its rotation; 0.79 of a disc's diameter). Floating
+/// point only for the lengths of the outline's edges, rounded to the nanometer.
+pub fn short_side(shape: &PolygonSet) -> i64 {
+    let half: f64 = shape
+        .iter()
+        .map(|pg| {
+            let pts = &pg.outer.0;
+            (0..pts.len())
+                .map(|k| {
+                    let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+                    ((b.x - a.x) as f64).hypot((b.y - a.y) as f64)
+                })
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / 2.0;
+    let area = poly::area2(shape) as f64 / 2.0;
+    let disc = (half * half - 4.0 * area).max(0.0);
+    let bound = shape.bbox().map_or(i64::MAX, |b| b.width().min(b.height()));
+    (((half - disc.sqrt()) / 2.0).round() as i64).clamp(0, bound.max(0))
 }
 
 /// The spokes of a thermal relief around a pad, from the pad center along each direction.

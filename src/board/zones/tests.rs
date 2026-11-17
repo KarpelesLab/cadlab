@@ -75,6 +75,7 @@ fn params(pads: PadConnection) -> ZoneParams {
         thermal_spoke: Nm(250_000),
         thermal_angle: None,
         thermal_spokes: 4,
+        spoke_floor: None,
     }
 }
 
@@ -212,6 +213,39 @@ fn spoke_angle_count_and_pad_overrides() {
     assert!(!inside(&f5, c + h + 400_000, c + h + 400_000), "inside the 0.6 mm gap");
     assert!(inside(&f5, c + h + 300_000, c + 150_000), "a 0.4 mm spoke");
     assert!(inside(&four, c + h + 400_000, c + h + 400_000), "outside the zone's 0.3 mm gap");
+}
+
+/// A zone that leaves the spoke width to cadlab gives small pads narrower spokes: half the
+/// pad's shorter side, never below the floor; a width set on the zone or the pad stays.
+#[test]
+fn default_spokes_fit_small_pads() {
+    let mut prm = params(PadConnection::Thermal);
+    prm.thermal_spoke = Nm(500_000);
+    prm.spoke_floor = Some(Nm(150_000));
+    // 2 x 2 mm: the zone's width. 0.6 x 0.5 mm: half the shorter side. 0.25 x 0.8 mm: the floor.
+    assert_eq!(Relief::of(&pad("GND", 0, 0, MM, MM), &prm).w, 500_000);
+    assert_eq!(Relief::of(&pad("GND", 0, 0, 300_000, 250_000), &prm).w, 250_000);
+    assert_eq!(Relief::of(&pad("GND", 0, 0, 125_000, 400_000), &prm).w, 150_000);
+    // Rotated by 45 degrees the pad is as narrow as before.
+    let mut turned = pad("GND", 0, 0, 300_000, 250_000);
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let turn = |x: f64, y: f64| pp(((x - y) * h).round() as i64, ((x + y) * h).round() as i64);
+    turned.shape =
+        vec![Polygon::new(vec![turn(-3e5, -2.5e5), turn(3e5, -2.5e5), turn(3e5, 2.5e5), turn(-3e5, 2.5e5)], vec![])];
+    assert!((short_side(&turned.shape) - 500_000).abs() <= 2, "vertex rounding only");
+    assert_eq!(Relief::of(&turned, &prm).w, 250_000);
+    // A width given on the zone, or on the pad, is used as it is.
+    prm.spoke_floor = None;
+    assert_eq!(Relief::of(&pad("GND", 0, 0, 125_000, 400_000), &prm).w, 500_000);
+    prm.spoke_floor = Some(Nm(150_000));
+    let mut own = pad("GND", 0, 0, 125_000, 400_000);
+    own.local.thermal = Some(crate::board::PadThermal { spoke: Some(Nm(300_000)), ..Default::default() });
+    assert_eq!(Relief::of(&own, &prm).w, 300_000);
+    // The small pad in a pour: four spokes reach it and leave most of its outline free.
+    let items = [(pad("GND", 5 * MM, 5 * MM, 300_000, 250_000), Nm(200_000))];
+    let fill = run(&square(0, 0, 10 * MM, 10 * MM), &items, prm);
+    assert!(inside(&fill, 5 * MM + 450_000, 5 * MM), "spoke");
+    assert!(!inside(&fill, 5 * MM + 450_000, 5 * MM + 200_000), "gap beside the spoke");
 }
 
 #[test]

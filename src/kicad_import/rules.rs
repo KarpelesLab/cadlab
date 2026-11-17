@@ -17,6 +17,7 @@
 //! | `min_hole_to_hole` | `hole_to_hole` |
 //! | `min_hole_clearance` | `hole_clearance` |
 //! | `min_copper_edge_clearance` | `copper_to_edge` |
+//! | `min_resolved_spokes` | `min_thermal_spokes` (zero included: not checked) |
 //! | `defaults.silk_line_width` | `min_silk_width` |
 //! | `min_silk_clearance` | `silk_to_pad`, `silk_to_edge`, `silk_clearance` (zero included: overlaps only) |
 //! | other classes | net classes (values equal to the board defaults are inherited) |
@@ -65,6 +66,8 @@ pub struct KicadRules {
     /// DRC findings the KiCad project excludes (`board.design_settings.drc_exclusions`), in
     /// file order; the board import turns them into waivers ([`super::exclusions`]).
     pub exclusions: Vec<super::exclusions::Exclusion>,
+    /// `min_resolved_spokes`: the fewest thermal spokes that must join a pad to its zone.
+    pub min_thermal_spokes: Option<u8>,
 }
 
 /// What a rules import changed.
@@ -157,6 +160,7 @@ fn parse_pro(text: &str, k: &mut KicadRules, diags: &mut Vec<Diagnostic>) -> Res
             k.rules.insert(f.into(), v);
         }
     }
+    k.min_thermal_spokes = r.get("min_resolved_spokes").and_then(Value::as_u64).map(|n| n.min(8) as u8);
     let min_clearance = json_mm(r.get("min_clearance"));
 
     let ns = &pro["net_settings"];
@@ -571,6 +575,9 @@ pub fn apply(p: &mut Project, k: &KicadRules) -> (RulesReport, Vec<Diagnostic>) 
             *slot = *v;
             report.rules.insert(f.clone(), *v);
         }
+    }
+    if let Some(n) = k.min_thermal_spokes {
+        rules.min_thermal_spokes = n;
     }
     p.board_mut().rules = rules.clone();
     p.board_mut().custom_rules = k.custom.clone();

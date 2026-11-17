@@ -934,7 +934,7 @@ pub fn import(
             notes.push(d);
         }
     }
-    normalize_zones(p);
+    normalize_zones(p, report.generator.as_deref() == Some("cadlab"));
     normalize_texts(p);
 
     // The project's DRC exclusions, as waivers of the findings they match.
@@ -1775,8 +1775,10 @@ fn zone_regions(rings: &[Vec<Point>]) -> Result<Vec<Vec<Point>>, crate::geom::po
     set.iter().map(|pg| poly::fracture(pg).map(|ring| ring.0.iter().map(|&q| q.into()).collect())).collect()
 }
 
-/// Leaves unset the zone settings equal to what cadlab would use by default.
-fn normalize_zones(p: &mut Project) {
+/// Leaves unset the zone settings equal to what cadlab would use by default. The spoke width
+/// only on a board cadlab wrote (`own`): left unset, small pads get narrower spokes than the
+/// zone's (`zones::Relief::of`), which a board from KiCad was not made with.
+fn normalize_zones(p: &mut Project, own: bool) {
     let zones = p.board().zones.clone();
     let mut out = Vec::with_capacity(zones.len());
     for mut z in zones {
@@ -1792,7 +1794,7 @@ fn normalize_zones(p: &mut Project) {
         if z.thermal_gap == Some(d.thermal_gap) {
             z.thermal_gap = None;
         }
-        if z.thermal_spoke == Some(d.thermal_spoke) {
+        if own && z.thermal_spoke == Some(d.thermal_spoke) {
             z.thermal_spoke = None;
         }
         out.push(z);

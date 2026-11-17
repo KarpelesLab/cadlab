@@ -104,6 +104,53 @@ fn search_kind() -> Option<SearchKind> {
     }
 }
 
+/// `CADLAB_BENCH_THERMALS=1`: the pads in pours of their net on stderr, by the necks that reach
+/// them and by kind (`board::thermal::census`), and the thermal relief findings by code; with
+/// `=relieve` also after `board::thermal::relieve` on a copy, with the time of both.
+fn thermals(name: &str, what: &str, p: &Project) {
+    let Ok(mode) = std::env::var("CADLAB_BENCH_THERMALS") else { return };
+    let count = |p: &Project| {
+        let t = Instant::now();
+        let items = cadlab::board::copper_items(p);
+        let fill = t.elapsed();
+        let t = Instant::now();
+        let rules = &p.board().rules;
+        let js = cadlab::board::thermal::joints(p, &items);
+        let c = cadlab::board::thermal::census(p, &js, rules.thermal_max_contact);
+        if std::env::var_os("CADLAB_BENCH_VERBOSE").is_some() {
+            for j in js.iter().filter(|j| j.solid(rules.thermal_max_contact).is_some()) {
+                eprintln!("  joint {j:?}");
+            }
+        }
+        let mut codes: std::collections::BTreeMap<String, usize> = Default::default();
+        for d in cadlab::board::thermal::check(p, rules, &items, true) {
+            *codes.entry(d.code.to_string()).or_default() += 1;
+            if std::env::var_os("CADLAB_BENCH_VERBOSE").is_some() {
+                eprintln!("  {}: {}", d.code, d.message);
+            }
+        }
+        (c, codes, fill, t.elapsed())
+    };
+    let (c, codes, fill, t) = count(p);
+    eprintln!("{name} {what}: {} [{codes:?}] (fill {fill:.2?}, joints and checks {t:.2?})", c.text());
+    if mode == "relieve" {
+        let mut q = p.clone();
+        let t = Instant::now();
+        let r = cadlab::board::thermal::relieve(&mut q, None, false);
+        let changed = t.elapsed();
+        let (c, codes, fill, t) = count(&q);
+        eprintln!(
+            "{name} {what} relieved: {} [{codes:?}] ({} zone(s) changed, {} setting(s) removed, {} kept, {} narrowed; \
+             change {changed:.2?}, fill {fill:.2?}, joints and checks {t:.2?})",
+            c.text(),
+            r.zones.len(),
+            r.removed.len(),
+            r.kept.len(),
+            r.narrowed.len()
+        );
+    }
+}
+
 /// Re-routes the corpus boards (see the module docs).
 fn corpus(filters: &[String]) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -146,6 +193,7 @@ fn corpus(filters: &[String]) {
         // `CADLAB_BENCH_ORIGINAL=1`: the connections the project's own routing leaves open, instead
         // of a re-route (what no router is asked to do better than the designer did).
         if std::env::var_os("CADLAB_BENCH_ORIGINAL").is_some() {
+            thermals(&e.name, "original", &p);
             let open = cadlab::board::ratsnest(&p);
             println!("{}: {} connections open in the original routing", e.name, open.len());
             for l in &open {
@@ -245,6 +293,7 @@ fn corpus(filters: &[String]) {
         if let Ok(spec) = std::env::var("CADLAB_BENCH_DUMP") {
             dump(&q, &spec);
         }
+        thermals(&e.name, "routed", &q);
         println!(
             "| {} | {} | {} | {:.1}% | {} | {} | {} | {:.1} mm | {:.1} s | {:.1} M | {} | {}{} |",
             e.name,

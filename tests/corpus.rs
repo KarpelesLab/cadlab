@@ -130,7 +130,24 @@ const ONE_SIDED_RULES: &[(Side, &str, &str)] = &[
         "cadlab has no solder mask web/bridge rule (mask openings of different nets merging)",
     ),
     (Side::Kicad, "footprint_type_mismatch", "cadlab has no footprint attribute (SMD/THT) consistency rule"),
-    (Side::Kicad, "starved_thermal", "cadlab has no minimum thermal spoke count rule"),
+    (
+        Side::Kicad,
+        "starved_thermal",
+        "counted on another fill and another way: KiCad on its own refill, by the spokes of the zone; cadlab on \
+         its fill, by the necks that reach the pad (tracks of the net included) against what the pad's own \
+         footprint leaves room for (drc.starved_thermal, docs/BOARD.md \"Thermal relief\")",
+    ),
+    (Side::Cadlab, "drc.starved_thermal", "see KiCad's starved_thermal: the two tools count spokes on their own fills"),
+    (
+        Side::Cadlab,
+        "drc.solid_pad",
+        "KiCad has no rule for solder pads joined solidly to a pour (docs/BOARD.md \"Thermal relief\")",
+    ),
+    (
+        Side::Cadlab,
+        "drc.thermal_nominal",
+        "KiCad has no rule for thermal spokes that cover a pad's outline (docs/BOARD.md \"Thermal relief\")",
+    ),
     (Side::Kicad, "copper_sliver", "cadlab has no copper sliver rule"),
     (Side::Kicad, "nonmirrored_text_on_back_layer", "cadlab has no text mirroring rule"),
     (Side::Kicad, "npth_inside_courtyard", "cadlab has no rule for holes inside courtyards"),

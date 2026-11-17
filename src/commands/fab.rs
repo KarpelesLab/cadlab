@@ -268,7 +268,15 @@ fn run_check(
     let before = report.diagnostics.len();
     report.diagnostics.retain(|d| {
         let subjects: Vec<String> = d.subjects.iter().map(ToString::to_string).collect();
-        d.severity != Severity::Warning || !waivers.iter().any(|w| w.covers(&d.code, &subjects))
+        // The thermal relief findings are the DRC's under a `fab.` code: its waivers cover them.
+        let drc = match d.code.as_ref() {
+            "fab.solid_pad" => "drc.solid_pad",
+            "fab.thermal_nominal" => "drc.thermal_nominal",
+            "fab.starved_thermal" => "drc.starved_thermal",
+            _ => "",
+        };
+        d.severity != Severity::Warning
+            || !waivers.iter().any(|w| w.covers(&d.code, &subjects) || w.covers(drc, &subjects))
     });
     let waived = before - report.diagnostics.len();
     if waived > 0 {

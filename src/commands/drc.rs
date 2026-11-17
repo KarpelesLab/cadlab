@@ -160,7 +160,7 @@ fn unrouted_summary(each: &[Diagnostic]) -> Diagnostic {
 
 impl Command for Run {
     const NAME: &'static str = "drc.run";
-    const SUMMARY: &'static str = "Design rule check: clearance, shorts, widths, drills, annular rings, edges, courtyards, silk, keep-outs, unrouted";
+    const SUMMARY: &'static str = "Design rule check: clearance, shorts, widths, drills, annular rings, edges, courtyards, silk, keep-outs, thermal relief of pads in pours, unrouted";
     const KIND: CommandKind = CommandKind::Query;
     type Output = DrcReport;
 

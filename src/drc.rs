@@ -76,6 +76,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     split_crossings(p, &items, &mut out);
     out.extend(netclass_conflicts(p));
     out.extend(crate::electrical::current_check(p));
+    out.extend(geo::thermal::check(p, ctx.rules, &items, true));
     out.extend(crate::electrical::impedance_check(p));
     out.extend(crate::lengths::checks(p, &items));
     out.sort_by(|a, b| {

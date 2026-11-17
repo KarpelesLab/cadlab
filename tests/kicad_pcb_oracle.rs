@@ -661,3 +661,87 @@ fn kicad_loads_every_feature() {
         assert_eq!(a, b, "`{token}`: {a} written, {b} after KiCad re-saved the board");
     }
 }
+
+/// A 1x04 pin header whose pin 1 is on GND, in a GND pour on the bottom layer, with a track of
+/// another net around the pin: on three sides (`sides = 3`: one spoke reaches the pour) or on
+/// two (two spokes reach it).
+fn fenced_pin(sides: usize) -> (tempfile::TempDir, Registry, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    let r = Registry::with_builtins();
+    let mut s = Session::new();
+    exec(&r, &mut s, "project.new", json!({"path": dir.path().join("p")}));
+    let pins: Vec<Value> = ["GND", "A", "B", "SIG"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| json!({"number": (i + 1).to_string(), "name": n, "kind": "passive"}))
+        .collect();
+    exec(
+        &r,
+        &mut s,
+        "part.create",
+        json!({"category": "connector", "mpn": "HDR-1x04", "package": "PinHeader 1x04", "pins": pins}),
+    );
+    exec(&r, &mut s, "circuit.add", json!({"part": "HDR-1x04", "count": 2}));
+    exec(&r, &mut s, "net.connect", json!({"net": "GND", "pins": ["J1.1", "J2.1"]}));
+    exec(&r, &mut s, "net.connect", json!({"net": "SIG", "pins": ["J1.4", "J2.4"]}));
+    exec(&r, &mut s, "board.outline", json!({"width": "30mm", "height": "20mm"}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J1", "at": ["8mm", "10mm"]}));
+    exec(&r, &mut s, "place.set", json!({"refdes": "J2", "at": ["22mm", "10mm"]}));
+    exec(&r, &mut s, "zone.add", json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
+    let at = {
+        let p = s.project.as_ref().unwrap();
+        cadlab::board::placed_pads(p).into_iter().find(|pp| pp.refdes == "J1" && pp.number == "1").unwrap().center
+    };
+    let (x, y) = (at.x.0 as f64 / 1e6, at.y.0 as f64 / 1e6);
+    let d = 1.5;
+    let fence = [mm(x - d, y - d), mm(x - d, y + d), mm(x + d, y + d), mm(x + d, y - d)];
+    exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "SIG", "points": fence[..=sides].to_vec()}));
+    (dir, r, s)
+}
+
+/// KiCad's `starved_thermal` as the oracle of `drc.starved_thermal`: on the exported fill
+/// (cadlab's copper, no refill) and on KiCad's own refill, it reports the pad one spoke
+/// reaches, as cadlab does, and nothing on the pad two spokes reach.
+#[test]
+fn kicad_agrees_on_starved_thermals() {
+    for (sides, starved) in [(3, true), (2, false)] {
+        let (_d, r, mut s) = fenced_pin(sides);
+        let ours: Vec<String> = cadlab::drc::check(s.project.as_ref().unwrap())
+            .into_iter()
+            .filter(|d| d.code == "drc.starved_thermal")
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(ours.len(), usize::from(starved), "cadlab, fence on {sides} sides: {ours:#?}");
+        if starved {
+            assert!(ours[0].contains("J1.1") && ours[0].contains("1 on B.Cu of 4"), "{}", ours[0]);
+        }
+        let Some(cli) = oracle::require(Oracle::KicadCli) else { continue };
+        let name = format!("starved{sides}");
+        let pcb = export(&r, &mut s, &name);
+        let stored = pcb.with_extension("stored.json");
+        oracle::run(
+            &cli,
+            &[
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--severity-all",
+                "-o",
+                stored.to_str().unwrap(),
+                pcb.to_str().unwrap(),
+            ],
+        );
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&stored).unwrap()).unwrap();
+        let refilled = kicad_drc(&cli, &pcb);
+        keep(&pcb, &name);
+        for (what, report) in [("the exported fill", &stored), ("KiCad's refill", &refilled)] {
+            let theirs: Vec<String> =
+                violations(report).into_iter().filter(|(ty, _)| ty == "starved_thermal").map(|(_, d)| d).collect();
+            assert_eq!(theirs.len(), usize::from(starved), "KiCad on {what}, fence on {sides} sides: {theirs:#?}");
+            if starved {
+                assert!(theirs[0].contains("J1"), "KiCad names the pad of J1: {}", theirs[0]);
+            }
+        }
+    }
+}

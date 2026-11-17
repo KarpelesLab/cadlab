@@ -9,6 +9,7 @@ pub mod holes;
 pub mod place;
 pub mod prepared;
 pub mod silk;
+pub mod thermal;
 pub mod zones;
 
 use polyclip::{ArcTol, Circle, Curve, EndCap, Geometry, Join, Path, Polygon, PolygonSet, Rect, Shape, Side};

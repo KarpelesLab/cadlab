@@ -248,6 +248,28 @@ pub struct Rules {
     /// drawings: no overlap, as fabs clip the legend there), or the exposed pad copper alone.
     #[serde(skip_serializing_if = "SilkCheck::is_default")]
     pub silk_check: SilkCheck,
+    /// Fewest thermal spokes that must join a relieved pad to its pour (`drc.starved_thermal`;
+    /// tracks of the net entering the pad count). 0: not checked.
+    #[serde(skip_serializing_if = "is_default_thermal_spokes")]
+    pub min_thermal_spokes: u8,
+    /// Largest share of a solder pad's outline, in percent, that copper of its own net may
+    /// join before the pad counts as having no thermal relief (`drc.solid_pad`,
+    /// `drc.thermal_nominal`). 0: not checked.
+    #[serde(skip_serializing_if = "is_default_thermal_contact")]
+    pub thermal_max_contact: u8,
+}
+
+/// Default `min_thermal_spokes` (left out of saved rules at this value).
+pub const DEFAULT_MIN_THERMAL_SPOKES: u8 = 2;
+/// Default `thermal_max_contact`, percent (left out of saved rules at this value).
+pub const DEFAULT_THERMAL_MAX_CONTACT: u8 = 67;
+
+fn is_default_thermal_spokes(n: &u8) -> bool {
+    *n == DEFAULT_MIN_THERMAL_SPOKES
+}
+
+fn is_default_thermal_contact(n: &u8) -> bool {
+    *n == DEFAULT_THERMAL_MAX_CONTACT
 }
 
 /// What silkscreen is checked against (`board.rules` `silk_check`).
@@ -316,6 +338,8 @@ impl Default for Rules {
             paste_margin: Nm::ZERO,
             paste_ratio: Scale(0),
             silk_check: SilkCheck::Mask,
+            min_thermal_spokes: DEFAULT_MIN_THERMAL_SPOKES,
+            thermal_max_contact: DEFAULT_THERMAL_MAX_CONTACT,
         }
     }
 }
