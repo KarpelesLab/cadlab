@@ -573,7 +573,7 @@ pure-Rust FDTD solver (MIT, with its geometry crate `csx`; no further dependenci
 from crates.io and a dependency of every build (DECISIONS D86, D94, D100). cadlab builds the model, places the
 ports and reads the waves; ems does the time stepping. There is no solver to choose: until D100 cadlab also had
 an FDTD engine of its own (D59) behind `solver: builtin`, and the parameter went with it. The result names what
-ran, `solver: "ems 0.0.17"` in the output and `(solver: ems 0.0.17)` in the Touchstone file's first line.
+ran, `solver: "ems 0.0.18"` in the output and `(solver: ems 0.0.18)` in the Touchstone file's first line.
 
 ```
 cadlab sim sparams --f-max 10GHz --around track#12 --copper sheet \
@@ -664,11 +664,34 @@ lossy `solid` copper stays metal volumes, where the export writes two conducting
   matched (a microstrip port's source on a line of another impedance) does not bias the result. Written as
   Touchstone 1.1 (RI, the ports' z0, 2.0 when they differ), 7 significant digits.
 - Timestep: 0.95 of ems's limit for the mesh and its cut cells (`plan` reports it); each run stops when the
-  energy of the fields has decayed by `end_criteria` (60 dB) below its peak, checked every 32 steps, or at
+  energy of the fields has decayed by `end_criteria` (60 dB) below its peak, checked every 32 steps, and the
+  ports' signals have no more to add at the lowest frequency of the result (`settle`, below), or at
   `timesteps` (100000, `sim.not_converged` warning). 40 dB (the default before D63) leaves a tail of about 1 %
   in amplitude, whose truncation biased |S| by a few hundredths of a dB below f_max / 10 (|S₂₁| above 0 dB on
   short lossy lines); 60 dB costs about a quarter more steps. Progress is reported with the timestep and the
   energy in dB, and the run can be cancelled.
+- `settle` (default true; ems's `Settle`, D111): the energy of the whole field says little about the lowest
+  frequency, whose spectrum lacks what the signals do after the run's end, and a slow tail of little energy
+  is large there (a lossy 20 mm line run to −50 dB: 0.008 dB from its reference at 0.06 GHz, 0.002 dB at
+  −60 dB, where the energy has a knee and 10 dB more cost 1.7 times the steps). Once the energy criterion is
+  met after N₀ steps the run goes on while, for a voltage or current probe of the ports, twice the change of
+  its running spectrum at the result's lowest frequency over the last eighth of the run, divided by the fall
+  of the energy's logarithm over the same window, is more than 10⁻⁴ of the sum of the signal's absolute
+  values: that is what the spectrum still lacks if the signal goes on as the window has it and decays as the
+  fields do. A part's region, whose energy falls 30 dB in a third of a run, ends at once (a series resistor:
+  1.01 times the steps; a capacitor 1.35 times, at −81 dB); a line past its knee goes on, and the cap of
+  half as many steps again (1.5 N₀) ends it: 1.50 times the steps of a run to −50 dB for 0.003 and 0.004 dB
+  at 0.06 GHz, and at the default 60 dB 1.2 to 1.35 times, where the test itself ends the lines (0.0001 and
+  0.0002 dB). `settle: false` is the energy criterion alone, as until ems 0.0.17. The tolerance is of the
+  signal's size, not of its spectrum at that frequency, so a frequency the pulse hardly excites is held less
+  tightly: a lossless bent line's Σ|S|² at its lowest frequency reads 1.0005 where the runs to −70 dB alone
+  read 1.0001 to 1.0003.
+- Absorbing layers: CPML of `pml_cells` cells on every face, its frequency shift α at f₀, and from ems 0.0.18
+  its convolution second order in the time step (D111). The first-order recursion of the CPML's authors is,
+  in a layer whose cells set the step, a layer of the conductivity σ/(1 − σ Δt/(2ε₀)), larger with a longer
+  step; the near field of a line that runs beside a layer felt it, and the loss a lossless 60 mm line read
+  at 9 GHz was 0.027 dB + 0.082 dB/ps·Δt (0.038 dB at ems 0.0.17's step). It reads 0.0278 dB at any step now,
+  and the 64 mm lossy line's worst point is 0.082 dB from D52 where it was 0.090 to 0.092.
 - Mesh: the export's, with the thirds rule on by default (`thirds`): at each axis-aligned copper edge, a mesh
   line a third of a fine cell inside the copper and one two thirds outside instead of one on the edge (a
   perfect conductor ending on a mesh line behaves about a third of a cell wider: without the rule a microstrip

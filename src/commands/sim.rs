@@ -172,7 +172,7 @@ pub struct SParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<u32>,
     /// After `end_criteria`, run on while the port signals still add to the lowest frequency, at
-    /// most half as many steps again (default true); false: the energy alone ends a run.
+    /// most as many steps again (default true); false: the energy alone ends a run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settle: Option<bool>,
 }

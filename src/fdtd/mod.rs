@@ -140,7 +140,7 @@ pub struct Options {
     /// Worker threads (0: from the grid size and the machine). The result does not depend on it.
     pub threads: usize,
     /// After the energy criterion, go on while the ports' signals still have something to add at
-    /// the lowest frequency of the result (at most half as many steps again); false: the energy
+    /// the lowest frequency of the result (at most as many steps again); false: the energy
     /// criterion alone ends a run.
     pub settle: bool,
 }

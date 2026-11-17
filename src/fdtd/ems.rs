@@ -41,6 +41,10 @@ use crate::refs::ObjectRef;
 const UNIT: f64 = 1e-3;
 /// Most solver warnings passed on one by one.
 const MAX_WARNINGS: usize = 12;
+/// Most steps a run goes on past its energy criterion, as a part of the steps that took (ems's
+/// own cap is a half: a lossy line run to 50 dB then ends 0.004 dB from its reference at 1 % of
+/// `f_max`, where openEMS's longer run reads 0.0035 to 0.005; D111).
+const SETTLE_MOST: f64 = 1.0;
 /// Name prefix of this module's probes.
 const PROBE: &str = "cadlab_probe_";
 
@@ -344,7 +348,8 @@ fn threads(o: &Options, r: &Region) -> usize {
 /// whose conductivity grew with the time step, D111),
 /// the end criterion (the energy's decay and then, with `settle`, ems's test that the probes'
 /// spectra at `lowest`, the lowest frequency of the result, have no more to come than a ten
-/// thousandth of the signals' size, for half as many steps again at most: `ems::Settle`, D111),
+/// thousandth of the signals' size, for [`SETTLE_MOST`] times as many steps again at most:
+/// `ems::Settle`, D111),
 /// the step limit and the timestep: `courant` of the bound of the mesh's cells
 /// (ems's `StepLimit::Cells`, D105 and D107: each cell with its own sizes, the permittivity of its
 /// edges, the walls and copper it lies against and the part of the edges it shares with its
@@ -357,7 +362,7 @@ fn settings(o: &Options, r: &Region, threads: usize, lowest: Option<f64>) -> Fdt
     let pml = Cpml::cells(o.region.pml_cells as usize).alpha_max(2.0 * std::f64::consts::PI * EPS0 * f0);
     let end = EndCriteria::energy_decay_db(-(o.region.end_criteria_db as f64))
         .check_interval(32)
-        .settle(lowest.filter(|_| o.settle).map(Settle::at));
+        .settle(lowest.filter(|_| o.settle).map(|f| Settle::at(f).max_extension(SETTLE_MOST)));
     Fdtd::new()
         .waveform(Waveform::gaussian(f0, r.fc as f64))
         .boundaries(Boundaries::all(Boundary::Pml(pml)))
