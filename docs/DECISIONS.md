@@ -5125,7 +5125,9 @@ answered 503 for the PPA index, `apt-get update` only warned, and `apt-get insta
 KiCad 7.0.11, whose `kicad-cli` has no `pcb drc`. Nothing of D109 was at fault, and nothing of it was compared.
 `scripts/ci-install-kicad.sh` (jobs `oracles` and `corpus`) adds the PPA and fetches its index again until apt's
 candidate is a 10.x (eight tries, waiting longer each time), installs that version and fails unless `kicad-cli
-version` is 10. The jobs `oracles`, Windows and macOS of that run passed.
+version` is 10. The jobs `oracles`, Windows and macOS of that run passed. With the script, the `corpus` job
+ran for the first time with these rules (branch `ci/thermal-2`, KiCad 10.0.8, the fill and the repair of this
+decision): all twelve projects `ok`, no finding without an allowance on either side, every allowance used.
 **The fill** (`zones::fill_layer`). A pad left with fewer spokes than its relief has gets the missing ones in the
 relief's other directions (`Relief::alt`: the same directions turned by half a step, the other four of the eight
 for four spokes), whole or trimmed as the others, when neither pad, footprint nor zone sets an angle. Of those
@@ -5137,8 +5139,11 @@ by its projects, the fill alone: pads short of spokes 143 to 116, by necks 0/1/2
 2/324/284/239/555. KiCad's fill does not do this (it drops a spoke that does not reach): the oracle
 `kicad_agrees_on_starved_thermals` has the case (`turned3`), asserted on the exported fill, where KiCad must count
 the diagonal spokes, and printed for KiCad's own refill.
-*Goldens:* no golden file of copper moved in the tests run here (`fab` goldens, `render_board`, `zone`, `drc`,
-`local_settings`, `kicad_pcb_import`); the snapshot of the command list has `zone.pad`. `tests/thermal_relief.rs`:
+*Goldens:* one golden file of copper moved, `tests/golden/exchange/tiny-ipc2581.xml`: a round pad of the tiny
+board whose spokes on the diagonals do not all survive has one along +y now, 0.25 mm wide, a cutout more in the
+plane's outline. The snapshot of the command list has `zone.pad`. The Gerber cross-check against KiCad
+(`tests/gerber_crosscheck.rs`) has one difference that is meant and listed as such (`KNOWN`): pin J1.1 of the
+features board, near the board edge, gets its fourth spoke on a diagonal (0.064 mm² on `B.Cu`); KiCad drops it. `tests/thermal_relief.rs`:
 the U of track that left a pin one spoke now leaves it two or more, so the starved case is a tighter U with long
 legs, and the case of a pad cut off by the repair is now one of a pad that is not.
 **One placed pad** (`PlacedFootprint::pads`, `PadJoin`, command `zone.pad`). Zone connection, the same per copper
