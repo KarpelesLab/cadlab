@@ -4192,6 +4192,100 @@ than the pinned one; whether the 4 % of loss ems reads over D52 on the solid lin
 ports' or the model's.
 
 
+### D104. guide 0.0.12 adopted: each connection its passes leave open is negotiated for before its chains, every net near it giving way a little; the rows of fine pitch planned on no board again; the default unchanged (2026-11-17)
+guide 0.0.12 is for the first of D101's gaps, the pads of a fine row that the routes round them shut in (guide's
+`docs/benchmarks.md`, "PCB routing negotiated"; its `docs/architecture.md`). `guide = { version = "0.0.12",
+default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock` moves.
+**What guide 0.0.12 does** in a run that settles (`RouteOptions::negotiate`, its default):
+- *Rounds*: the net with the open connection is completed across the routes in its way, a step within a clearance
+  of another net's route costing its length again times a price, half at first. The nets it runs into each lose
+  what they have within twelve pitches of where they are in another's way and are joined up again there, within
+  twenty-four pitches, across the others at that price or around them; what that runs into has its turn in the
+  next round. The price rises by 1.6 a round to a thousand, and each step that is in another's way at the end of
+  a round makes tracks and shared room there dearer from then on, by cell of two pitches. This is negotiated
+  congestion on exact geometry: what is shared is room within a clearance, not a resource.
+- *An end with nothing shared*: after twenty-four rounds, thirty-two nets or three million nodes, each net gives
+  up the steps it has in another's way, the net the negotiation is for last, and those left in pieces are joined
+  up again with nothing shared.
+- *Kept or undone as a chain is*: kept if no route is in another's way and the board has less open, by the count
+  of D101 (connections and pieces of fill cut off); if not, every net has the copper back that it had, and the
+  connection is left to the chains. After eight undone in a row a settling has no more.
+- *After each pass*: the settling comes after the first pass and after each pass on the finer lattice, the chains
+  after the last alone.
+**What the adapter takes from it** (`router::guide`; ROUTER.md, "guide as a backend"):
+- *`negotiate` on*, guide's default, set by name.
+- *`row_fanout` off on every board again.* D101 turned it on for two layers. With the negotiations it makes no
+  more: at 60 s over six orders corne-cherry has 160 open without the rows and 155 with, nrfmicro 19 and 18, and
+  the generated stm32-2l has its 72 vias and 1146 mm back for 126 and 1300 mm. `ROW_FANOUT_LAYERS` is gone:
+  D101's sixth gap is closed by not needing the rule.
+**Measured** (ROUTER.md, "Native router and guide 0.0.12, D104"), 60 s, three orders, 0.0.11 behind D101's adapter
+and 0.0.12 behind this one by turns in one queue: 267, 247 and 224 open on the twelve boards → 256, 235 and 217;
+the eleven without glasgow-revD1 105, 111 and 101 → 94, 100 and 94. corne-cherry 31, 36 and 33 → 29, 28 and 26;
+buspirate5-rev10 0, 6 and 3 → 0, 2 and 0; nrfmicro 3, 5 and 3 → 2, 4 and 3; tinytapeout-demo 13, 7 and 5 → 9, 7
+and 5; cynthion 17, 14 and 17 → 13, 15 and 20; glasgow-revC3 one more in one order; the others the same. Zero DRC
+errors other than unrouted on every run, no via in a pad of its net, nothing taken out by the verification, no
+call over 58.4 s. At 40 million nodes, one run of guide, three orders: 831 → 814 on the nine boards a budget cuts
+(corne-cherry 127 → 118, cynthion 63 → 55, buspirate5-rev10 11 → 9, nrfmicro 11 → 9, tinytapeout-demo 38 → 40,
+glasgow-revC3 107 → 109). The generated boards: all eight complete with no DRC error with both, seven with the
+same routes, stm32-2l with 72 vias for 126.
+**The native router's own spread.** The same binary of the native router, three threads, 60 s: glasgow-revD1 had
+200 open in D101's hour and 115, 130, 192 and 122 in four runs of this evening, lumenpnp-mobo 15, 9 and 15: where
+its minute ends in its negotiation decides. Its twelve boards are 290 in D101 and 200 and 215 here. guide's runs
+of glasgow-revD1 are 162, 135 or 136 and 123 every time. "Ahead on glasgow-revD1" in D97 and D101 was against the
+native router's worst run; against its five it is within what the native router differs from itself by.
+**Tried and not kept**, in guide (its `docs/benchmarks.md`), at 60 s on corne-cherry unless said:
+- *The nets in the way routed again whole*, as an FPGA router negotiates: after one net of nrfmicro had crossed
+  four, twenty of its forty-one nets were in each other's way, and no fewer at any price.
+- *Joined up again from the ends a crossing leaves*, nothing more taken out: no more connections, and tracks that
+  keep every bend they ever made.
+- *A window of twelve pitches* for twenty-four: 217 over six orders for 159.
+- *The rounds ended once the same nets are in each other's way twice in a row*: 82 over three orders for 62.
+  *20 000 nodes a search* for 60 000: 84. *A price from one, rising by 2.2*: 83. *Forty rounds*: 77.
+- *Two more negotiations for a connection whose first was undone*, each another way: 166 over six orders for 159.
+  *The negotiations tried again after each pass*: 152 for 155.
+- *A negotiation for each net with pads cut off its fill*: 174 over six orders for 161.
+- *The whole board negotiated from nothing in place of the first pass*: 394 of 432 connections after 36 million
+  nodes, where the first pass has 390 after 3.4 million.
+- *Chains after every pass*: glasgow-revC3 112 at 40 million nodes for 109.
+- *A limit of 100 000 or 300 000 nodes on the first pass's searches across routes*, for sweep-v2.2's three nets
+  to come to their negotiations: the same 6, 7 and 6.
+**Gaps, for guide's next release**, most useful first:
+1. *The pads of a QFN of 0.4 mm on two layers with a fan beside them*: corne-cherry has 29, 28 and 26 against 3.
+   Some fifteen in an order are pads of its two QFN-56 whose way out needs a dozen parallel tracks moved over by
+   one; a negotiation passes that on by one net a round, and its price is at its most after seventeen. The native
+   router has every net negotiate from the first iteration, so the fan is spread before it is laid; guide's
+   first pass lays it greedily. A negotiated first pass for the nets of such a package, with whole nets routed
+   again and a price that rises slowly, is what was not built; the one tried here used the cut-and-join of the
+   later negotiations and did not converge.
+2. *A second run that goes on from the first run's routes.* Five to ten of corne-cherry's open pads are pads that
+   routes cut off a pour, found by cadlab's fill and given to a second run in which nothing moves. guide needs to
+   take a run's routes back as routes of their nets, to move, with the host's new fill.
+3. *The D+ of a USB receptacle* whose pads have those of D- between them (nrfmicro 2 of its 2 to 4, one or two
+   on corne-cherry): the native router joins one pair on the other layer under the pads, with a via at the end
+   of each pad. guide's negotiation found it in one build and not as released.
+4. *Searches on a wide board* (sweep-v2.2): its three long nets are routed last and spend the minute in searches
+   of 2 million nodes each; not in the searches across routes, which a limit showed.
+5. *Six layers in a minute* (glasgow-revD1): its first pass does not end, and no negotiation is reached.
+6. *Rule areas with a routed track width*, and *vias* (twice the native router's on lumenpnp-mobo and
+   tinytapeout-demo), D97's items, not touched.
+**Default: unchanged.** The condition is that guide be at least as good as the native router on every board.
+With 0.0.12, three orders against the native router's run of the table: level on three (buspirate-flash-sop,
+buspirate-rs232, lumenpnp-ringlight); ahead in every order on two (lumenpnp-mobo 0, 1 and 0 against 15; cynthion
+13, 15 and 20 against 28); within what runs differ by on four (buspirate5-rev10 0, 2 and 0 against 2;
+tinytapeout-demo 9, 7 and 5 against 6; glasgow-revC3 35, 36 and 34 against 36; glasgow-revD1 162, 135 and 123
+against 115 to 200); behind in every order on three (nrfmicro 2, 4 and 3 against 0; sweep-v2.2 6, 7 and 6 against
+3; corne-cherry 29, 28 and 26 against 3). 94, 100 and 94 against 93 on the eleven without glasgow-revD1, behind
+by 1, 7 and 1 where D101 had 11, 23 and 20; corne-cherry alone is behind by 26, 25 and 23. `router: guide` stays
+the second opinion.
+*Why:* a chain is a search over orders of moving one net at a time, and what a walled-in pad needs is several
+nets each moved a little, which no order of whole moves gives. Negotiation prices that instead of searching it.
+It is local and after the fact here, seeded by one connection on routes that are already legal, because that is
+what could be added without a run ever ending with less than it had; the cost is that what the first pass laid
+greedily is only ever moved by what a single connection can push.
+*Not measured:* the native router over seeds; 60 s with the rows on the boards of four layers and the
+negotiations; budgets other than 60 s and 40 million nodes; the work-budget table with the released crate (it is
+of the release's source); cadlab's oracles; KiCad's DRC on a board guide routed.
+
 ### D105. ems 0.0.15: the time step from a bound over the cells, proven part by part and tested from noise; 1.00 to 1.31 times the Courant step on the oracle's regions, where an estimate had read 1.35 to 1.5; the comparison and the corpus tables out of every push (2026-11-17)
 D103 left the time step as the largest thing in time: ems took `courant` of the Courant limit of the smallest
 cell sizes at the vacuum speed, openEMS's criterion gave 2 to 16 % more on four cases, and "the stability

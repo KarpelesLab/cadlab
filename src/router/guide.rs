@@ -18,9 +18,8 @@
 //! (`RouteOptions::join`): zone filling stays cadlab's, and what cadlab's fill leaves apart goes
 //! to a second run. The first run has the nets with zones among its nets, open or not
 //! ([`first_nets`]), and guide joins the pads its routes cut off those fills again itself
-//! (`RouteOptions::pour_cuts`, D97), settles what its passes of rip-up leave open (`RouteOptions::settle`,
-//! D101) and plans the ways out of rows of fine pitch on a board of two layers
-//! (`RouteOptions::row_fanout`, D101). What guide's API cannot express is passed the stricter way and named in
+//! (`RouteOptions::pour_cuts`, D97) and settles what its passes of rip-up leave open (`RouteOptions::settle`,
+//! D101), each open connection by a negotiation before its chains (`RouteOptions::negotiate`, D104). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -75,10 +74,6 @@ const PLANE_COVERAGE: f64 = 0.0;
 /// at 27 s nearly what its two runs had, and the board is the same with either share (465
 /// and 422 over the three orders), so the eleven others decide: 452 with 0.45, 361 with 0.7.
 const FIRST_SHARE: f64 = 0.7;
-
-/// How many copper layers a board has for guide to plan the ways out of its rows of fine
-/// pitch row by row (`RouteOptions::row_fanout`): two. See [`options`].
-const ROW_FANOUT_LAYERS: usize = 2;
 
 /// How many times what the first run needed after it (the verification and the refill) is
 /// kept for after a second run, whose board has more copper.
@@ -995,15 +990,19 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // a route across other nets' routes, with the nets it crosses joined up again around it
     // at once, kept only if the board has less open for it. D101.
     gopts.settle = true;
-    let layers = p.board().stackup.copper_names().len();
+    // And before its chains, by a negotiation (guide 0.0.12, its default): the connection is
+    // routed across the routes in its way at a price by the length shared, the nets it runs
+    // into are routed again the same way near there, in rounds at a rising price with a
+    // history of where routes were in each other's way, and the routes are kept if a round
+    // ends with none in another's way and the board has less open. D104.
+    gopts.negotiate = true;
     // The ways out of a row of fine pitch planned for the whole row (guide 0.0.8, off by
-    // default), on a board of two layers: a pad of such a row has no inner layer to drop a
-    // via to, and the vias of its row have to be staggered on the two layers that the routes
-    // are on too. With guide 0.0.10, at 40 million nodes over three orders, nrfmicro has 11
-    // connections open with them for 20 and corne-cherry 130 for 140, and on four layers
-    // buspirate5-rev10 15 for 11, tinytapeout-demo 43 for 38, glasgow-revC3 109 for 107
-    // (D101; with 0.0.8 on every board, 367 for 358 on eleven boards, D97).
-    gopts.row_fanout = layers == ROW_FANOUT_LAYERS;
+    // default) are left off again: they were on for boards of two layers with 0.0.10 and
+    // 0.0.11 (D101), and with the negotiations of 0.0.12 they make no more: at 60 s over
+    // six orders corne-cherry has 160 connections open without them for 155 with, and
+    // nrfmicro 19 for 18 (D104).
+    gopts.row_fanout = false;
+    let layers = p.board().stackup.copper_names().len();
     // The smallest via the rules allow, for a pad trapped in its footprint: the native
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
     let (dia, drill) = super::smallest_via(&p.board().rules);
@@ -2081,7 +2080,7 @@ mod tests {
 
     /// What guide is told beside the board: no fill of its own at the end and no joining of zones'
     /// pieces on it, the pads its routes cut off the fills joined again, what its passes leave
-    /// open settled, the rows of fine pitch planned on a board of two layers and on no other,
+    /// open settled, by negotiations first, the rows of fine pitch not planned on any board,
     /// no via in a pad, and for the escapes of trapped pads the smallest via the rules allow,
     /// the native fanout's.
     #[test]
@@ -2091,7 +2090,7 @@ mod tests {
         p.board_mut().rules.min_annular_ring = Nm(100_000);
         let g = options(&p, &RouteOptions::default(), &[0, 1]);
         assert!(!g.fills && !g.join && !g.vias_in_pads && g.keep_partial);
-        assert!(g.pour_cuts && g.settle && g.row_fanout);
+        assert!(g.pour_cuts && g.settle && g.negotiate && !g.row_fanout);
         let four = BOARD.replace(
             r#"(0 "F.Cu" signal) (31 "B.Cu" signal)"#,
             r#"(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)"#,
