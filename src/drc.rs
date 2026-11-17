@@ -834,6 +834,15 @@ fn hole_clearance(ctx: &Ctx, items: &[CopperItem], pads: &[geo::PlacedPad], out:
     }
     let index = RTree::new(items.iter().map(|it| it.shape.bbox()));
     let limit = (min - TOLERANCE.0).max(1);
+    // Large shapes (zone fills) are indexed once, as in `copper_pairs`: every hole of the board
+    // is tested against every pour of another net, and an unprepared query visits all of a
+    // pour's segments each time (D112: 35 of the 38 s of a DRC of glasgow-revD1).
+    let prep: Vec<Option<Prepared>> = items
+        .iter()
+        .map(|it| {
+            (prepared::segment_count(&it.shape) >= prepared::PREPARE_MIN_SEGMENTS).then(|| Prepared::new(&it.shape))
+        })
+        .collect();
     // The copper item of each pad and via (the first of a pad stack's), for net ties.
     let mut owners: BTreeMap<(String, Point), usize> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
@@ -866,6 +875,17 @@ fn hole_clearance(ctx: &Ctx, items: &[CopperItem], pads: &[geo::PlacedPad], out:
             if h.plated && h.net.is_some() && it.net == h.net {
                 continue;
             }
+            // The hole's polygon lies inside the hole (1 µm): candidates within the clearance
+            // plus that, then the exact outline decides when the copper has one. First, as the
+            // cheapest test that leaves most candidates out: a pour's box covers the board, so
+            // every hole meets every pour.
+            let near = match &prep[i as usize] {
+                Some(big) => big.distance_less_than(&shape, min + 1_000),
+                None => polyclip::distance_less_than(&shape, &it.shape, min + 1_000),
+            };
+            if !near {
+                continue;
+            }
             // Copper joined to the hole's own pad or via by a net tie is that net's copper, and
             // copper touching it is a short (`drc.short`), not a hole clearance.
             if h.plated
@@ -873,17 +893,26 @@ fn hole_clearance(ctx: &Ctx, items: &[CopperItem], pads: &[geo::PlacedPad], out:
                 && owners.get(&(owner.to_string(), *center)).is_some_and(|&k| {
                     let o = &items[k];
                     geo::tied(it, o)
-                        || (it.layers.iter().any(|l| o.layers.contains(l)) && polyclip::intersects(&o.shape, &it.shape))
+                        || (it.layers.iter().any(|l| o.layers.contains(l))
+                            && match &prep[i as usize] {
+                                Some(big) => big.intersects(&o.shape),
+                                None => polyclip::intersects(&o.shape, &it.shape),
+                            })
                 })
             {
                 continue;
             }
-            // The hole's polygon lies inside the hole (1 µm): candidates within the clearance
-            // plus that, then the exact outline decides when the copper has one.
-            if !polyclip::distance_less_than(&shape, &it.shape, min + 1_000) {
-                continue;
-            }
-            let (mut dist, at) = gap(&shape, &it.shape).unwrap_or((0.0, h.at));
+            // Against a pour, only its segments near the hole: a pour keeps the hole clearance
+            // from every hole of another net, so each of them is this near, and the distance
+            // to the whole outline would visit all its segments for each.
+            let measured = match &prep[i as usize] {
+                Some(big) => gap(
+                    &shape,
+                    &big.view(hb.expand(1_000 + polyclip::ArcTol::new(1_000, polyclip::Side::Inside).tolerance)),
+                ),
+                None => gap(&shape, &it.shape),
+            };
+            let (mut dist, at) = measured.unwrap_or((0.0, h.at));
             match geo::exact::item_core(ctx.p, it) {
                 Some(c) => {
                     let exact = geo::exact::distance(&core, &c);
