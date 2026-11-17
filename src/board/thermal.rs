@@ -924,7 +924,7 @@ pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> Reli
             && j.solid(rules.thermal_max_contact) == Some(Solid::Pour)
             && let Some(fp) = super::footprint_for(p, &j.refdes)
         {
-            let w = Nm(j.short.0 / 2 / 1_000 * 1_000).max(rules.min_track_width);
+            let w = Nm(zones::fitted_spoke(j.short.0)).max(rules.min_track_width);
             if w < j.spoke {
                 let e = widths.entry((fp.name.clone(), j.number.clone())).or_insert(w);
                 *e = (*e).min(w);

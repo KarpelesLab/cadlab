@@ -168,10 +168,7 @@ impl Relief {
         let t = it.local.thermal.unwrap_or_default();
         let gap = t.gap.unwrap_or(prm.thermal_gap).0;
         let zone_w = || match prm.spoke_floor {
-            Some(floor) => {
-                let half = short_side(&it.shape) / 2 / 1_000 * 1_000;
-                prm.thermal_spoke.0.min(half.max(floor.0)).max(1)
-            }
+            Some(floor) => prm.thermal_spoke.0.min(fitted_spoke(short_side(&it.shape)).max(floor.0)).max(1),
             None => prm.thermal_spoke.0,
         };
         let w = t.spoke.map_or_else(zone_w, |s| s.0);
@@ -193,9 +190,17 @@ impl Relief {
     }
 }
 
+/// The widest spoke fitted to a pad with this shorter side: half of it, in whole micrometers.
+/// The side is taken to the nearest micrometer first, so the nanometer by which a turned pad's
+/// rounded corners move its measure does not move the width.
+pub fn fitted_spoke(short_side: i64) -> i64 {
+    (short_side + 500) / 1_000 * 1_000 / 2 / 1_000 * 1_000
+}
+
 /// The shorter side of a pad: of the rectangle with the area and the outline length of its
 /// copper (the pad's own short side whatever its rotation; 0.79 of a disc's diameter). Floating
-/// point only for the lengths of the outline's edges, rounded to the nanometer.
+/// point only for the lengths of the outline's edges (products, sums and square roots, the same
+/// on every platform), rounded to the nanometer.
 pub fn short_side(shape: &PolygonSet) -> i64 {
     let half: f64 = shape
         .iter()
@@ -204,7 +209,8 @@ pub fn short_side(shape: &PolygonSet) -> i64 {
             (0..pts.len())
                 .map(|k| {
                     let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
-                    ((b.x - a.x) as f64).hypot((b.y - a.y) as f64)
+                    let (dx, dy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+                    (dx * dx + dy * dy).sqrt()
                 })
                 .sum::<f64>()
         })
