@@ -4,10 +4,15 @@ on:
   push:
     branches: [master]
   pull_request:
+  # The tables that take long and say nothing about a single change (ems beside openEMS,
+  # freerouting on the corpus) run here and by hand only: jobs `openems-comparison` and
+  # `freerouting-corpus` (D105). One dispatch makes both again: `gh workflow run CI --ref master`.
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
     inputs:
       openems_fine:
-        description: "openEMS job: options (JSON) of a finer mesh run by both solvers as a reference, for via_same or per case; empty for none"
+        description: "openems-comparison job: options (JSON) of a finer mesh run by both solvers as a reference, for via_same or per case; empty for none"
         type: string
         default: ""
 
@@ -94,8 +99,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Informative, like the other oracle jobs: openEMS is built from source (no Ubuntu package or
     # Linux wheel), pinned to an openEMS-Project commit and cached (docs/TESTING.md).
+    # The comparison of the two solvers is the job after this one, not on every push (D105).
     continue-on-error: true
-    timeout-minutes: 120
+    timeout-minutes: 60
     env:
       OPENEMS_PROJECT_REV: 1c6e5c11017a24a0a821aaaa18f7628ebc7540e2
     steps:
@@ -137,9 +143,78 @@ jobs:
           export LD_LIBRARY_PATH="$OPENEMS_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           "$CADLAB_ORACLE_PYTHON" -c "import CSXCAD, openEMS, numpy; print('openEMS Python modules ok')"
           cargo test --release --all-features --test openems -- --nocapture
-      # Both solvers on the same cases, one process per run and one at a time, on one thread and on
-      # the runner's count: time, steps, cells, peak memory, and each against D52 or circuit theory
-      # (D103). Informative: the tolerances are the tests' above.
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f target/tmp/openems_oracle/summary.md ]; then
+            { echo '### openEMS against sim.sparams (lossy microstrip)'; cat target/tmp/openems_oracle/summary.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f target/tmp/openems_via/summary_via.md ]; then
+            { echo '### openEMS against sim.sparams (via transition)'; cat target/tmp/openems_via/summary_via.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f target/tmp/openems_parts/summary_parts.md ]; then
+            { echo '### openEMS against sim.sparams and theory (lumped parts)'; cat target/tmp/openems_parts/summary_parts.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Keep the comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openems-oracle
+          path: |
+            target/tmp/openems_oracle/*.md
+            target/tmp/openems_oracle/*.s2p
+            target/tmp/openems_oracle/*.xml
+            target/tmp/openems_oracle/*.py
+            target/tmp/openems_via/*.md
+            target/tmp/openems_via/*.s2p
+            target/tmp/openems_parts/*.md
+            target/tmp/openems_parts/*.s2p
+            target/tmp/openems_parts/*.xml
+          if-no-files-found: ignore
+
+  openems-comparison:
+    name: ems against openEMS (time, memory, accuracy; weekly and by hand)
+    # Both solvers on the oracle's cases, one process per run and one at a time, on one thread and
+    # on the runner's count: time, steps, cells, peak memory, and each against D52 or circuit
+    # theory (D103). 30 to 45 minutes, more with a finer mesh (`openems_fine`), and nothing in it
+    # is asserted but that every run ends: on the weekly schedule and on a manual dispatch only
+    # (D105). Uses the openEMS installation the `openems` job caches, or builds it.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 150
+    env:
+      OPENEMS_PROJECT_REV: 1c6e5c11017a24a0a821aaaa18f7628ebc7540e2
+    steps:
+      - uses: actions/checkout@v6
+      # Under `runner.temp`: `actions/cache` saves nothing for a path with `..` in it (D99, D103),
+      # and the `runner` context is not there for a job's `env`.
+      - name: Where openEMS is installed
+        run: echo "OPENEMS_PREFIX=$RUNNER_TEMP/openEMS" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: openems
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential cmake git libhdf5-dev \
+            libboost-all-dev libtinyxml-dev zlib1g-dev libcgal-dev python3-pip python3-venv \
+            python3-setuptools python3-setuptools-scm python3-numpy python3-matplotlib python3-h5py cython3
+      - name: Cache openEMS
+        id: cache-openems
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openEMS
+          key: openems-${{ env.OPENEMS_PROJECT_REV }}-ubuntu-24.04-temp
+      - name: Build openEMS (headless, Python modules)
+        if: steps.cache-openems.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive https://github.com/thliebig/openEMS-Project.git "$RUNNER_TEMP/openEMS-Project"
+          cd "$RUNNER_TEMP/openEMS-Project"
+          git checkout "$OPENEMS_PROJECT_REV"
+          git submodule update --init --recursive
+          ./update_openEMS.sh "$OPENEMS_PREFIX" --python --disable-GUI
       - name: ems against openEMS (time, memory, accuracy)
         env:
           CADLAB_ORACLES: "1"
@@ -156,34 +231,16 @@ jobs:
           if [ -f target/tmp/openems_comparison/comparison.md ]; then
             { echo '### ems against openEMS: time, memory, accuracy'; cat target/tmp/openems_comparison/comparison.md; } >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ -f target/tmp/openems_oracle/summary.md ]; then
-            { echo '### openEMS against sim.sparams (lossy microstrip)'; cat target/tmp/openems_oracle/summary.md; } >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f target/tmp/openems_via/summary_via.md ]; then
-            { echo '### openEMS against sim.sparams (via transition)'; cat target/tmp/openems_via/summary_via.md; } >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f target/tmp/openems_parts/summary_parts.md ]; then
-            { echo '### openEMS against sim.sparams and theory (lumped parts)'; cat target/tmp/openems_parts/summary_parts.md; } >> "$GITHUB_STEP_SUMMARY"
-          fi
       - name: Keep the comparison
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: openems-oracle
+          name: openems-comparison
           path: |
             target/tmp/openems_comparison/*.md
             target/tmp/openems_comparison/*.json
             target/tmp/openems_comparison/*.log
             target/tmp/openems_comparison/*.s2p
-            target/tmp/openems_oracle/*.md
-            target/tmp/openems_oracle/*.s2p
-            target/tmp/openems_oracle/*.xml
-            target/tmp/openems_oracle/*.py
-            target/tmp/openems_via/*.md
-            target/tmp/openems_via/*.s2p
-            target/tmp/openems_parts/*.md
-            target/tmp/openems_parts/*.s2p
-            target/tmp/openems_parts/*.xml
           if-no-files-found: ignore
 
   exchange:
@@ -375,13 +432,72 @@ jobs:
             route-*.log
 
   freerouting:
-    name: freerouting on the corpus (60 s, beside the native router and guide)
+    name: freerouting oracle (DSN and session end to end)
     runs-on: ubuntu-24.04
+    # Informative. freerouting is GPL: its released jar is run as a separate process and nothing of
+    # it is in the repository or in an uploaded artifact. Two boards through DSN, freerouting and
+    # session (`tests/specctra.rs`), a few minutes; the tables on the corpus are the job after
+    # this one, weekly and by hand (D102, D105).
+    continue-on-error: true
+    timeout-minutes: 45
+    env:
+      FREEROUTING_VERSION: 2.5.0
+      FREEROUTING_SHA256: f6f51bb02245e8e717f9359bd260cc9c5c0b1bc0acc8b7cb2cd5b8ffeb5de3c7
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: freerouting
+      # freerouting 2.5.0 is built for Java 25 (class file version 69).
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Cache the freerouting jar
+        id: cache-jar
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/freerouting/freerouting.jar
+          key: freerouting-jar-${{ env.FREEROUTING_SHA256 }}
+      - name: Fetch the freerouting jar
+        if: steps.cache-jar.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/freerouting"
+          curl --fail --silent --show-error --location --retry 3 --max-time 600 \
+            --output "$RUNNER_TEMP/freerouting/freerouting.jar" \
+            "https://github.com/freerouting/freerouting/releases/download/v$FREEROUTING_VERSION/freerouting-$FREEROUTING_VERSION.jar"
+      - name: Check the jar
+        run: |
+          echo "$FREEROUTING_SHA256  $RUNNER_TEMP/freerouting/freerouting.jar" | sha256sum --check
+          java -version
+          echo "CADLAB_ORACLE_FREEROUTING=$RUNNER_TEMP/freerouting/freerouting.jar" >> "$GITHUB_ENV"
+      # The oracle of tests/specctra.rs, which no other job runs (they have no Java): two boards
+      # through DSN, freerouting and session, DRC-clean and complete. With CADLAB_ORACLES=1 a
+      # missing jar fails the test, and the log must show both boards routed.
+      - name: freerouting oracle (DSN and session end to end)
+        env:
+          CADLAB_ORACLES: "1"
+        run: |
+          set -o pipefail
+          cargo test --release --test specctra -- --nocapture 2>&1 | tee specctra.log
+          test "$(grep -c '^oracle: freerouting routed' specctra.log)" -eq 2
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: freerouting-oracle
+          path: specctra.log
+          if-no-files-found: ignore
+
+  freerouting-corpus:
+    name: freerouting on the corpus (60 s, beside the native router and guide; weekly and by hand)
     # Informative: the table of docs/ROUTER.md, "freerouting on the corpus", made again on the
-    # runner (DECISIONS D102). freerouting is GPL: its released jar is run as a separate process
-    # and nothing of it is in the repository or in an uploaded artifact. Time budgets, so the
-    # numbers are the runner's and differ from run to run; 46 minutes as measured (four tables of
-    # twelve boards at up to 60 s each, the plane variant running over its limit).
+    # runner (DECISIONS D102). Time budgets, so the numbers are the runner's and differ from run
+    # to run; 46 minutes as measured (four tables of twelve boards at up to 60 s each, the plane
+    # variant running over its limit): on the weekly schedule and on a manual dispatch only (D105).
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
     continue-on-error: true
     timeout-minutes: 150
     env:
@@ -431,16 +547,6 @@ jobs:
           scripts/fetch-corpus.sh "$CADLAB_CORPUS_DIR"
       - name: Build
         run: cargo build --release --example route_bench
-      # The oracle of tests/specctra.rs, which no other job runs (they have no Java): two boards
-      # through DSN, freerouting and session, DRC-clean and complete. With CADLAB_ORACLES=1 a
-      # missing jar fails the test, and the log must show both boards routed.
-      - name: freerouting oracle (DSN and session end to end)
-        env:
-          CADLAB_ORACLES: "1"
-        run: |
-          set -o pipefail
-          cargo test --release --test specctra -- --nocapture 2>&1 | tee specctra.log
-          test "$(grep -c '^oracle: freerouting routed' specctra.log)" -eq 2
       # route_bench fails when a board has no session of freerouting to count, so nothing is
       # skipped silently; `pipefail` carries that through `tee`.
       - name: freerouting, the DSN without pours
@@ -493,7 +599,6 @@ jobs:
             freerouting-*.log
             native.log
             guide.log
-            specctra.log
           if-no-files-found: ignore
 
   bench:
