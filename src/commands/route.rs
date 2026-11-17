@@ -196,7 +196,7 @@ fn summary(o: &Routed) -> String {
         out.push_str(&format!(
             "
 thermal relief: {} pad(s) in pours short of spokes, {} solder pad(s) without relief: `zone.relieve` \
-             repairs them (`zone.thermals` lists them)",
+             repairs what it can and lists the rest with the reason",
             o.starved_pads, o.solid_pads
         ));
     }

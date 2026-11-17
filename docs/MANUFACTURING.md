@@ -275,6 +275,10 @@ included) replace. Code: `src/fab/` (types, loading, `check`, `export`).
 ```
 FabProfile                               fab-profiles/<id>.toml, deny_unknown_fields
 ├── id, name, website, verified_at ("YYYY-MM-DD"), sources[], notes
+├── [thermal_relief]                     what the fab publishes about thermal relief of pads in pours (D112):
+│   ├── published (bool), verified_at    false: the pages read give no value; min_track / min_space stand in
+│   ├── min_spoke, min_gap, min_spokes   the fab's own values, each optional; `fab.thermal_size` holds to them
+│   └── note, pages[]                    what the fab says, and the pages read for it
 ├── [[process]]                          preferred first; the first offering the board's layer count is used
 │   ├── id, name, layers[]
 │   ├── thickness[], outer_copper[], inner_copper[]       lengths (35um = 1 oz); empty = not checked

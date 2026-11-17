@@ -249,3 +249,15 @@ side_names = ["Top", "Bottom"]
 coordinate_suffix = "mm"      # as in the sample file
 # JLCPCB asks for one common origin for the Gerber and the placement files.
 origin = "board"              # same coordinates as the Gerber files
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "The capabilities page has no thermal relief, spoke or antipad value (its only row near it is for hatched pours: grid width and spacing 0.25 mm). A JLCPCB blog article gives spoke and gap ranges as advice, not as a capability."
+pages = [
+    "https://jlcpcb.com/capabilities/pcb-capabilities",
+    "https://jlcpcb.com/blog/thermal-relief-pad-design",
+]

@@ -5115,4 +5115,127 @@ is told; a relief minimum of their own in the fab profiles (no profile has a fie
 space stand in); IPC-2581 and the 2D render have no test of their own for the relief (they draw
 the same copper items as the Gerber layers, which have one); a second spoke direction tried where none fits.
 
+### D112. Thermal relief, second round: spokes in the directions that fit, a connection per placed pad, a repair that leaves no pad cut off, the fabs' own minimums, the DRC of a large board (2026-11-18)
+D109 left a repair that traded solid pads for cut-off ones (`zone.relieve` on the corpus: 664 solid solder pads to
+none, 161 more pads short of two spokes, 84 pad and layer pairs out of their pour), a corpus comparison that had
+never run, no setting for one pad, and a DRC of 47 s on the largest board.
+**CI of D109.** The `corpus` job of master at ce2f40e failed at its first KiCad call, with nothing on stderr; so did
+two runs of the release branch the same day, and the run before D109 passed. The log has the cause: Launchpad
+answered 503 for the PPA index, `apt-get update` only warned, and `apt-get install kicad` took Ubuntu 24.04's own
+KiCad 7.0.11, whose `kicad-cli` has no `pcb drc`. Nothing of D109 was at fault, and nothing of it was compared.
+`scripts/ci-install-kicad.sh` (jobs `oracles` and `corpus`) adds the PPA and fetches its index again until apt's
+candidate is a 10.x (eight tries, waiting longer each time), installs that version and fails unless `kicad-cli
+version` is 10. The jobs `oracles`, Windows and macOS of that run passed.
+**The fill** (`zones::fill_layer`). A pad left with fewer spokes than its relief has gets the missing ones in the
+relief's other directions (`Relief::alt`: the same directions turned by half a step, the other four of the eight
+for four spokes), whole or trimmed as the others, when neither pad, footprint nor zone sets an angle. Of those
+that fit, the ones that spread best are kept (`zones::spread`), up to the spoke count. One rule came from the
+corpus: with every fitting diagonal kept, the pads without effective relief of buspirate5-rev10 went from 28 to
+73, a diagonal spoke on an 0402 pad closing the gap between two spokes along the axes; a spoke that meets a kept
+one outside the pad is now left out. `Joint::possible` counts the other directions too. On the corpus as routed
+by its projects, the fill alone: pads short of spokes 143 to 116, by necks 0/1/2/3/4+ 8/348/378/290/380 to
+2/324/284/239/555. KiCad's fill does not do this (it drops a spoke that does not reach): the oracle
+`kicad_agrees_on_starved_thermals` has the case (`turned3`), asserted on the exported fill, where KiCad must count
+the diagonal spokes, and printed for KiCad's own refill.
+*Goldens:* no golden file of copper moved in the tests run here (`fab` goldens, `render_board`, `zone`, `drc`,
+`local_settings`, `kicad_pcb_import`); the snapshot of the command list has `zone.pad`. `tests/thermal_relief.rs`:
+the U of track that left a pin one spoke now leaves it two or more, so the starved case is a tighter U with long
+legs, and the case of a pad cut off by the repair is now one of a pad that is not.
+**One placed pad** (`PlacedFootprint::pads`, `PadJoin`, command `zone.pad`). Zone connection, the same per copper
+layer, thermal gap, spoke width, angle and a reason, by pad number, before the footprint's settings everywhere
+they are read (`placed_pads`, so the fill, `board::thermal`, the DRC, the exports). Per layer because the first
+measurement asked for it: with a pad kept solid on all its layers, cynthion's 31 pads kept solid were 180 pad
+and layer pairs on its planes. Absent when empty (no migration). The KiCad export writes the settings on that
+pad (`zone_connect`, `thermal_width`, `thermal_gap`, `thermal_bridge_angle`); a connection per layer cannot be
+said there (`export.pad_layer_connection`, the fill written is cadlab's). The KiCad import takes a footprint that
+differs from one of the library only in such settings as that footprint with those pads' own (no `NAME_2`
+variant), when each difference can be said as a setting (a value the library's pad has and the board's has not
+cannot, and makes a variant as before).
+**The repair** (`thermal::relieve`, `repair_pads`), per pad still short after the zones are `thermal`, in order:
+a relief of its own at the minimums (gap `min_clearance` else `clearance`, spoke `min_track_width`), kept when
+it brings spokes; tracks of the net from the pad into the pour, inside the copper the pour would have with every
+pad solid (one more fill; a track inside it keeps every clearance the fill keeps), in 16 directions given as
+integer vectors, at most 2.5 mm beyond the pad, kept when they read as necks of their own; then, for a pad the
+pour joined before and nothing joins now, solid on that layer for that pad, with the reason. The order is the
+one that keeps most relief: solid is last, and only where the alternative is no joint.
+Corpus, twelve boards as routed by their projects (pad and layer pairs; "before" is D109's fill, "this fill" the
+same boards with the spokes in other directions, mounting holes with a ring of vias no longer counted as solder
+pads: cynthion's 180 solid through-hole pairs were those, set solid on the pad):
+
+| | pads in pours | by necks 0/1/2/3/4+ | short of spokes | solid through-hole | solid SMD (kept on purpose) | on inner layers (solid) | cut off |
+|---|---|---|---|---|---|---|---|
+| D109, as routed | 2376 | 8/348/378/290/380 | 143 | 227 | 437 | 436 (148) | |
+| D109, after its `zone.relieve` | 2292 | 19/447/501/405/612 | 304 | 0 | 0 | 400 (0) | 84 |
+| this fill, as routed | 2378 | 2/324/284/239/555 | 116 | 11 | 439 | 436 (4) | |
+| this fill, after `zone.relieve` | 2380 | 0/207/466/400/760 | 55 | 0 | 23 (23) | 436 (0) | 0 |
+| cynthion | 575 → 577 | 0/56/30/22/81 → 0/50/120/99/101 | 1 → 23 | 0 → 0 | 193 → 14 (14) | 169 (0) → 169 (0) | 0 |
+| glasgow-revC3 | 170 → 170 | 0/6/8/0/19 → 0/6/14/19/45 | 0 → 4 | 10 → 0 | 50 → 9 (9) | 93 (4) → 93 (0) | 0 |
+| glasgow-revD1 | 361 → 360 | 2/97/84/81/47 → 0/44/104/76/129 | 65 → 7 | 0 → 0 | 43 → 0 | 20 (0) → 20 (0) | 0 |
+| lumenpnp-mobo | 612 → 612 | 0/82/49/50/142 → 0/66/88/82/197 | 0 → 8 | 1 → 0 | 109 → 0 | 68 (0) → 68 (0) | 0 |
+| buspirate5-rev10 | 235 → 235 | 0/35/49/47/38 → 0/11/66/70/50 | 29 → 10 | 0 → 0 | 28 → 0 | 30 (0) → 30 (0) | 0 |
+| tinytapeout-demo | 250 → 250 | 0/38/43/28/103 → 0/26/47/39/108 | 14 → 2 | 0 → 0 | 8 → 0 | 56 (0) → 56 (0) | 0 |
+
+What it did: 225 pads a narrower relief of their own (glasgow-revD1 93, cynthion 35, lumenpnp-mobo 33,
+glasgow-revC3 26, buspirate5-rev10 21, tinytapeout-demo 11, sweep-v2.2 5, buspirate-rs232 1), 9 tracks (0.65 to
+1.6 mm: cynthion C11.2, C16.2, C63.2, J3.1; tinytapeout-demo C39.2, C45.2, L1.1; lumenpnp-mobo U16.2;
+glasgow-revC3 R50.2), 43 pads kept solid on one layer, all of them where the pour joined the pad through copper
+no spoke and no track fits in: cynthion 31 (26 balls of the BGA `IC1` in the pours under it, C14.2, C18.2, R73.2,
+R77.2, R120.1) and glasgow-revC3 12 (U8 and U36 pins 1, 2, 5, 6, C27.1, C28.1, R28.2, R34.2). 23 of those 43 read
+as solid by the 67 % rule; the others are joined on less of their outline.
+Left short of two spokes, 55 pads, each with one spoke, each listed by the command with what was tried:
+- cynthion 23: J1 and J2 pins A4, A9, B4, B9; the balls IC1.A1, A16, T1, T16, H9, J8, J9 and U10.C1 (a track
+  into the pour was found and joined the copper already there, so it was removed again); U10.E5, C27.2, C28.2,
+  C79.2, Q5.4, R94.1, R95.1;
+- buspirate5-rev10 10: J202.A4B9, J202.B4A9, U304 to U308 pin 2, U503.8, U504.11, U505.11;
+- lumenpnp-mobo 8: the motor drivers' pin 25 (U6 to U11), C77.2, C91.2;
+- glasgow-revD1 7: C72.2, R273.2, U34.2, U46.7, U58.7, U61.2, U70.7;
+- glasgow-revC3 4: C26.2, C86.2, U14.1, U31.1; tinytapeout-demo 2: C34.2, C42.2; sweep-v2.2 1: U1.4.
+For all but those eight balls the reason given is the same: a relief at the minimums brings no further spoke
+and no track of the net reaches the pour within 2.5 mm (the places were not looked at one by one). The pad D109
+found nominal on glasgow-revD1 after the repair is no longer reported (which step took it was not looked into). What stays as `drc.solid_pad` is copper that is no zone, as in D109.
+The DRC errors of cynthion (17), tinytapeout-demo (18) and glasgow-revD1 (3) are the same before and after the
+repair: the tracks added keep every clearance. They are `min_track_width` wide, so a net class with a wider
+track reports them (`drc.track_width_class`: 3 on tinytapeout-demo).
+*Time* (release, three threads, from the command line with load and save): `zone relieve` on glasgow-revD1 13.9 s
+(D109: 5.2 s), cynthion 11.2 s, tinytapeout-demo 5.1 s: up to seven fills and readings instead of two.
+**Fab profiles and IPC.** `[thermal_relief]` in every fab's profile (`published`, `verified_at`, `min_spoke`,
+`min_gap`, `min_spokes`, `note`, `pages`), read on 2026-11-18. Eurocircuits is the one fab with a value of its
+own: "A good practice for Thermals is to work with a Gap of 0.20mm (8mil) and a Thermal Segment Width of 0.20mm
+(8mil)" (design guidelines, copper layers), a recommendation; `fab.thermal_size` holds spokes and gaps to it.
+JLCPCB, PCBWay, AISLER, Elecrow, Seeed, NextPCB, PCBGOGO and ALLPCB publish none on the pages read, OSH Park none
+as a limit (its Eagle rule file sets a 10 mil isolation): their profiles say so, and the minimum track and space
+stand in. `rule-presets/ipc.toml` has three references and no preset value: IPC-2221 9.1.3 (relief only required
+for holes soldered in large conductor areas; confirmed), IPC-2222 9.1.2 (the webs together typically 60 % of the
+minimum land diameter, divided by their number: 0.40 / 0.27 / 0.20 mm for 2 / 3 / 4 webs on a 1.35 mm land;
+confirmed), the 4.0 mm of web per hole over all layers (one page: unverified). The standard gives a proportion
+and no minimum width or count; pages that attribute a 0.2 mm minimum spoke to IPC-2221B are listed as dissent.
+cadlab's default for a through-hole land (four spokes of 0.25 mm, 1.0 mm together) is that 60 % for a 1.67 mm
+land, less for larger lands and more for smaller ones; the default was not changed.
+**KiCad export.** With no zone setting a spoke width, the width cadlab fits to a small pad is written as that
+pad's `thermal_width` (pads narrower than twice the default of the rules' track width, not below the minimum
+track width), so KiCad's refill gives them cadlab's spokes; the import takes a pad width equal to the fitted one
+as unset when no zone sets a width, as D109 does with a zone's default width (KiCad rewrites what cadlab exports;
+the round trips of `tests/kicad_pcb_import.rs` hold).
+**Agents.** `route.all`, `route.nets` and the other router commands count the pads in pours as they leave the
+board (`starved_pads`, `solid_pads`, the warnings `zone.starved_pads` / `zone.solid_pads`, a line of the summary);
+`drc.run` and `fab.check` add a line with the count; each names `zone.relieve`. Test:
+`normal_flow_says_what_routing_left`.
+**DRC time.** `drc run` on glasgow-revD1: 38.6 s here, 34.9 s of it in the hole clearance check. A pour keeps the
+hole clearance from every hole of another net, so every via is within the candidate distance of every pour of
+another net, and for each the distance to the pour's whole outline was taken (1550 holes, 3368 such pairs).
+The pours are now indexed once (`board::prepared`, as `copper_pairs` does) and the distance measured against the
+segments near the hole: 4.5 s, the same findings (the fill is 3.1 s of it).
+**guide.** What the adapter must pass is in BOARD.md, "What a router must be told": the connection per layer
+(`zones::connection_on`), the relief with the fitted width and both sets of directions (`Relief::of`,
+`zones::spokes`, `zones::alt_spokes`), the minimum (`min_thermal_spokes`) and which pads it holds for
+(`thermal::classes`). `src/router/guide.rs` reads `ItemLocal::connection` only, so a pad solid on one layer is
+relieved there in guide's own zones until it is told.
+*Not done:* press-fit pins (decided: a pad attribute, solid by default, not held to the rules; KiCad's own mark
+for it was not looked up, so nothing was implemented); the 3D view still draws no copper; the native router does
+not keep room for spokes; the tracks of the repair take the minimum track width, not the net class's; a pad's own
+setting on a footprint that comes first in an import into an empty project becomes the footprint's (the other
+placements cannot unset it and get a variant); the fab pages were read through a text relay by a research run,
+not in a browser; whether KiCad counts cadlab's diagonal spokes and the corpus comparison with these rules are
+for CI to say (below).
+
 ## Open questions

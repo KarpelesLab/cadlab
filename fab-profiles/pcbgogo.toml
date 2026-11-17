@@ -132,3 +132,14 @@ columns = [
 ]
 side_names = ["TopLayer", "BottomLayer"]
 origin = "board"
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "The FR-4 capability table has no thermal relief value."
+pages = [
+    "https://www.pcbgogo.com/Capabilities/FR_4_PCB_Manufacturing.html",
+]

@@ -134,6 +134,14 @@ fn profiles_are_sourced_and_consistent() {
     let ps = Profiles::builtin();
     assert!(ps.warnings.is_empty());
     for (p, _) in ps.profiles.values() {
+        // Thermal relief (D112): every fab's profile says what the fab publishes of its own,
+        // or that the pages read give nothing; a value comes with the page it is from.
+        if p.id != "generic" {
+            let t = p.thermal_relief.as_ref().unwrap_or_else(|| panic!("{}: no thermal_relief", p.id));
+            assert!(!t.pages.is_empty() && t.verified_at.len() == 10 && t.note.is_some(), "{}", p.id);
+            let any = t.min_spoke.is_some() || t.min_gap.is_some() || t.min_spokes.is_some();
+            assert_eq!(t.published, any, "{}: `published` without a value, or a value without it", p.id);
+        }
         for q in &p.processes {
             // Every limit used by fab.check is in the profile for both fabs.
             if p.id != "generic" {

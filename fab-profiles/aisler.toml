@@ -236,3 +236,16 @@ silk_bottom = "{project}.bottomsilkscreen.ger"
 profile = "{project}.boardoutline.ger"
 drill_pth = "{project}.drills_pth.xln"
 drill_npth = "{project}.holes_npth.xln"
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "The design rule pages read have no thermal relief value (the pages of the 70 um and 6-layer stackups were not read)."
+pages = [
+    "https://community.aisler.net/t/pcb-design-rules/41",
+    "https://community.aisler.net/t/4-layer-35-m-enig-design-rules/3733",
+    "https://community.aisler.net/t/2-layer-1-6-mm-35-m-hasl-design-rules/3735",
+]

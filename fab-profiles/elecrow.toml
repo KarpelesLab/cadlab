@@ -157,3 +157,15 @@ columns = [
 ]
 side_names = ["Top", "Bottom"]
 origin = "board"
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "Neither the manufacturing page nor the specification PDF (February 2019) has a thermal relief value."
+pages = [
+    "https://www.elecrow.com/pcb-manufacturing.html",
+    "https://www.elecrow.com/download/quote/PCB_Specification_FAQ.pdf",
+]

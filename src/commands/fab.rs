@@ -442,8 +442,8 @@ impl Command for Check {
         };
         if o.thermal > 0 {
             s += &format!(
-                "\n  thermal relief: {} finding(s), pads that will be hard to solder; `zone.relieve` repairs them and \
-                 says what it could not do",
+                "\n  thermal relief: {} finding(s), pads that will be hard to solder; `zone.relieve` repairs what it can \
+                 and lists the rest with the reason",
                 o.thermal
             );
         }

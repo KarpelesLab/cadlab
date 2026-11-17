@@ -162,3 +162,15 @@ columns = [
 ]
 side_names = ["Top", "Bottom"]
 origin = "board"
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "The Fusion PCB page and its specification article have no thermal relief value (the Fusion Advanced specification was not read)."
+pages = [
+    "https://www.seeedstudio.com/fusion_pcb.html",
+    "https://support.seeed.cc/portal/en/kb/articles/fusion-pcb-specification",
+]

@@ -266,7 +266,9 @@ findings for the original and the re-export, unexplained differences, routing co
 outcomes by rule, per-layer Gerber areas and differences, drill counts, routing statistics). Every
 intermediate file is kept under `$CARGO_TARGET_TMPDIR/corpus/<project>/` (copy of the checkout, netlist, both
 DRC reports, cadlab's DRC as JSON, the imported project, the re-export, Gerbers and renders). CI runs it in the
-`corpus` job (KiCad 10 from the PPA, gerbv, release build, routing with a 30 s budget), caching the corpus
+`corpus` job (KiCad 10 from the PPA, installed by `scripts/ci-install-kicad.sh`, which fetches the PPA's index
+again until it has KiCad 10 and checks the installed version: a 503 from Launchpad left Ubuntu's KiCad 7, D112;
+gerbv, release build, routing with a 30 s budget), caching the corpus
 by the manifest's hash (under `runner.temp`, shared with the `corpus-route` and `freerouting-corpus` jobs; until D102
 the path had `..` in it, which `actions/cache` refuses, and nothing was cached); the job is informative
 (`continue-on-error`) like the oracle job. Locally (about four

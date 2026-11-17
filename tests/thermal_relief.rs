@@ -342,6 +342,15 @@ fn nominal_relief_and_sizes() {
     let sizes = findings(&o, "drc.thermal_size");
     assert_eq!(sizes.len(), 2, "{sizes:#?}");
     assert!(sizes.iter().any(|m| m.contains("gap")) && sizes.iter().any(|m| m.contains("spoke width")));
+    // A fab that publishes a thermal relief of its own is held to it, not to its minimum track
+    // and space (Eurocircuits: 0.20 mm gap and segment width, above its 0.1 mm track and space).
+    exec(&r, &mut s, "zone.set", json!({"name": "GND", "thermal_gap": "0.15mm", "thermal_spoke": "0.15mm"}));
+    let sizes =
+        |fab: &str, s: &mut Session| findings(&exec(&r, s, "fab.check", json!({"fab": fab})), "fab.thermal_size");
+    let ec = sizes("eurocircuits", &mut s);
+    assert_eq!(ec.len(), 2, "{ec:#?}");
+    assert!(ec.iter().all(|m| m.contains("0.2mm")), "{ec:#?}");
+    assert!(sizes("jlcpcb", &mut s).is_empty(), "0.15 mm is above JLCPCB's track and space");
 }
 
 /// A track wider than the pad makes it solid without any zone; a track of the pad's width does

@@ -56,3 +56,14 @@ include = ["copper", "mask", "paste", "silk", "profile", "drill"]
 archive = "{project}-allpcb.zip"
 drill_format = "excellon"
 # No `names`: ALLPCB publishes no file naming convention.
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "The capabilities page has no thermal relief value."
+pages = [
+    "https://www.allpcb.com/capabilities.html",
+]

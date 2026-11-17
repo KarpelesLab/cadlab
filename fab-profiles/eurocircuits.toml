@@ -211,3 +211,18 @@ columns = [
 ]
 side_names = ["TopLayer", "BottomLayer"]
 origin = "board"
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = true
+verified_at = "2026-11-18"
+min_spoke = "0.20mm"
+min_gap = "0.20mm"
+note = "Design guidelines, copper layers, \"Thermal Pads\": \"A good practice for Thermals is to work with a Gap of 0.20mm (8mil) and a Thermal Segment Width of 0.20mm (8mil).\" A recommendation; the hard minimum is the pattern class's track width and gap (min_track, min_space). No spoke count is given."
+pages = [
+    "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/copper-layers/",
+    "https://www.eurocircuits.com/pcb-design-guidelines/",
+    "https://www.eurocircuits.com/technical-guidelines/pcb-design-guidelines/classification/",
+]

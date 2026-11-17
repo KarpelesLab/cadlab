@@ -195,3 +195,17 @@ drill_format = "excellon"
 [output.cite]
 names = "https://docs.oshpark.com/design-tools/kicad/"
 drill_format = "https://docs.oshpark.com/design-tools/kicad/generating-kicad-gerbers/"
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "No stated minimum. Its Eagle rule file for 2 layers sets slThermalIsolate = 10mil (a tool setting, not a published limit; the 4 and 6 layer files were not read); its KiCad page gives a minimum zone connection width of 6 / 5 / 5 mil for 2 / 4 / 6 layers, a zone setting. docs.oshpark.com/design-rules/ answered 404."
+pages = [
+    "https://docs.oshpark.com/services/",
+    "https://docs.oshpark.com/design-tools/kicad/kicad-design-rules/",
+    "https://docs.oshpark.com/design-tools/eagle/design-rules-files",
+    "https://raw.githubusercontent.com/OSHPark/OSHPark-Eagle-Tools/master/dru/oshpark-2layer.dru",
+]

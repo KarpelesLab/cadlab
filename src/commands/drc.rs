@@ -284,7 +284,7 @@ impl Command for Run {
         if thermal > 0 {
             s += &format!(
                 "\n  thermal relief: {thermal} pad(s) in pours without relief or short of spokes; `zone.relieve` \
-                 repairs them and says what it could not do"
+                 repairs what it can and lists the rest with the reason"
             );
         }
         if o.not_listed > 0 {

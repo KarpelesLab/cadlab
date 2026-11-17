@@ -134,13 +134,18 @@ no `-o`.)
       `fab.*` warnings in `fab.check` / `fab.export`; counts in `zone.fill` and at `board.import_kicad`;
       `zone.thermals`; `zone.relieve` to repair a board; KiCad's `starved_thermal` as the oracle of the spoke
       count (`tests/kicad_pcb_oracle.rs`)
-- [ ] Thermal relief, left open (D109): the routers do not keep room for the spokes of relieved pads (both leave
-      more pads short of spokes than the projects' own routing, counted by `route_bench` with
-      `CADLAB_BENCH_THERMALS=1`); a pad `zone.relieve` leaves without any spoke is reported, not repaired (a
-      setting per placed pad, where today's are per footprint, would let it stay solid alone); the KiCad export
-      writes one spoke width per zone, not the width fitted to each small pad; guide is told the zone's spoke
-      width, not the fitted one; `fab.thermal_size` uses the fab's minimum track and space, no fab profile lists
-      a relief minimum of its own
+- [x] Thermal relief, second round (D112): spokes placed in the relief's other directions where the default ones
+      do not survive; a zone connection and relief per placed pad, per layer if needed (`zone.pad`, saved, undone,
+      KiCad export and import); `zone.relieve` takes each pad short of spokes alone (narrower relief, a track into
+      the pour, solid on one layer with the reason) and leaves none cut off (corpus: 55 pads short of two spokes
+      for the projects' own 143, 23 solid on purpose for 664, none cut off); the fitted spoke width in the KiCad
+      export; `[thermal_relief]` in the fab profiles and the IPC references; the router commands, `drc.run` and
+      `fab.check` name the count and `zone.relieve`; `drc run` on glasgow-revD1 38.6 s to 4.5 s; the KiCad
+      install of the CI jobs retries
+- [ ] Thermal relief, left open (D112): the native router does not keep room for the spokes of relieved pads
+      (guide: the adapter must pass what BOARD.md "What a router must be told" lists); press-fit pins as a pad
+      attribute (decided, not implemented); the repair's tracks take the minimum track width, not the net
+      class's; the 3D view draws no copper; `zone.relieve` takes 14 s on glasgow-revD1
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
 - [x] Legible silkscreen (D82): `drc.silk_edge` and `drc.silk_overlap` (rules `silk_to_edge`, `silk_clearance`),

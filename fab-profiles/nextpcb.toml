@@ -153,3 +153,15 @@ columns = [
 ]
 side_names = ["Top", "Bottom"]
 origin = "board"
+
+# Thermal relief of pads in pours (docs/BOARD.md "Thermal relief"; DECISIONS D112): what the fab publishes of its
+# own, read on `verified_at` below (the pages were read through a text relay, not in a browser). Where it publishes
+# nothing, a spoke is held to `min_track` and a gap to `min_space`.
+[thermal_relief]
+published = false
+verified_at = "2026-11-18"
+note = "The capabilities page names thermal reliefs only as a use of non-plated holes, without a value. A NextPCB blog article repeats the IPC-2222 rule (60 % of the minimum land diameter over the spokes), not a capability."
+pages = [
+    "https://www.nextpcb.com/pcb-capabilities",
+    "https://www.nextpcb.com/blog/pcb-thermal-design-basics-3-pcb-wiring-layout",
+]
