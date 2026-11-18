@@ -28,7 +28,10 @@
 //! cadlab's fill joins without them are taken out again (D108). The spokes of the pads that the fill
 //! relieves go over as the fill makes them, and their room costs other nets' tracks (`Zones::spokes`,
 //! `RouteOptions::spoke_cost`, D110); what the board itself keeps apart is told as such and left out of the
-//! later runs (`Cause::Apart`, D110). What guide's API cannot express is passed the stricter way and named in
+//! later runs (`Cause::Apart`, D110). In a run with a budget, the first run of guide routes every net
+//! against every other at once on one grid before its passes, as the native router's negotiation does
+//! (`RouteOptions::whole`, D113), with the directions the fill falls back to as spare spokes and the number
+//! of spokes a pad keeps (`Zones::spare_spokes`, `Zones::min_spokes`). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -484,7 +487,9 @@ pub(crate) fn adapt(
     let rules = Rules::new(spec).map_err(|e| geom_err("design rules", e))?;
 
     let mut gb = gdrc::Board::default();
-    let mut zones = Zones::default();
+    // How many spokes a soldered pad is to keep (`rules.min_thermal_spokes`, D109): a pad with
+    // no more than that has the room of each held harder (guide 0.0.17, D113).
+    let mut zones = Zones { min_spokes: p.board().rules.min_thermal_spokes, ..Default::default() };
     let mut obstacles: Vec<(Shape, LayerId)> = Vec::new();
     let (mut pad_names, mut copper_names, mut obstacle_names) = (Vec::new(), Vec::new(), Vec::new());
 
@@ -554,9 +559,7 @@ pub(crate) fn adapt(
                 // router must be told", D112): per zone of its net that holds it and per layer,
                 // where the connection in effect there is thermal and the pad is soldered, each
                 // spoke of `Relief::of` (gap, the width fitted to the pad, its directions) from
-                // the pad's anchor to its end in the pour. guide keeps their room (D110). The
-                // directions the fill falls back to (`Relief::alt`) are not given: they are
-                // what is left when these are lost.
+                // the pad's anchor to its end in the pour. guide keeps their room (D110).
                 let soldered = classes.get(&(refdes.clone(), number.clone())).is_none_or(|c| c.solder());
                 let mut fitted: Option<i64> = None;
                 for (z, zp) in relief_params.iter().filter(|(z, _)| soldered && z.net == it.net) {
@@ -581,6 +584,28 @@ pub(crate) fn adapt(
                                 .map(|q| (q.x as f64 - cx) * ux + (q.y as f64 - cy) * uy)
                                 .fold(0.0, f64::max);
                             zones.spokes.push(GSpoke {
+                                pad: at,
+                                layer: LayerId(l as u8),
+                                from: gp(it.anchor),
+                                to: GPoint::new((cx + ux * far).round() as i64, (cy + uy * far).round() as i64),
+                                width: relief.w,
+                            });
+                        }
+                        // The directions the fill falls back to, where those have no room (D112):
+                        // a pad that the routes leave none of the first is still joined by one
+                        // of these that nothing crosses, which guide counts on when it tells
+                        // the pads that routes cut off their pours (D113).
+                        for (dir, pg) in relief.alt.iter().zip(geo::zones::alt_spokes(it, &relief)) {
+                            let rad = (dir.0 as f64 / 1000.0).to_radians();
+                            let (ux, uy) = (rad.cos(), rad.sin());
+                            let (cx, cy) = (it.anchor.x.0 as f64, it.anchor.y.0 as f64);
+                            let far = pg
+                                .outer
+                                .0
+                                .iter()
+                                .map(|q| (q.x as f64 - cx) * ux + (q.y as f64 - cy) * uy)
+                                .fold(0.0, f64::max);
+                            zones.spare_spokes.push(GSpoke {
                                 pad: at,
                                 layer: LayerId(l as u8),
                                 from: gp(it.anchor),
@@ -1082,6 +1107,20 @@ fn supported(scope: &Scope) -> Result<(), RouteError> {
     Ok(())
 }
 
+/// The threads that guide's negotiation routes nets side by side on: rayon's, as the native
+/// router's batches have them, or one without the `parallel` feature. The routes are the
+/// same on any number.
+fn threads() -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        rayon::current_num_threads().max(1)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        1
+    }
+}
+
 /// guide's options for a run of `opts` on `p`, the budgets apart. `slots` are the routing
 /// layers (`routing_slots`).
 fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptions {
@@ -1138,6 +1177,14 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // fanout's rule (`fanout::small_via`). guide uses it only where a net's own does not fit.
     let (dia, drill) = super::smallest_via(&p.board().rules);
     gopts.fanout_via = (layers > 1 && dia > drill).then_some(ViaSize { diameter: dia.0, drill: drill.0 });
+    // Every net against every other at once, on one grid, before guide's passes (guide 0.0.17,
+    // off by default there): PathFinder over the whole board, as the native router does it,
+    // which is what closes the packages of fine pitch that a net at a time leaves shut in
+    // (D113). In a run with a budget, where guide gives the board up to its passes itself if
+    // the first round says the negotiation has no room in its share; and in the first run
+    // only: the later ones go on from its routes. On as many threads as the native router has.
+    gopts.whole = opts.budget.is_some() || opts.work.left().is_some();
+    gopts.threads = threads();
     gopts.seed = (opts.seed != 0).then_some(opts.seed);
     if !opts.layers.is_empty() {
         gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
@@ -1583,6 +1630,7 @@ pub(crate) fn route(
     let mut gopts = options(p, opts, &slots);
     gopts.work_budget = opts.work.left();
     let routed = call(&ad, &gopts, deadline, hooks)?;
+    gopts.whole = false;
     opts.work.charge(routed.stats.work);
     (hooks.progress)(0, None, &said(&routed));
     let mut stopped = routed.stopped;
@@ -2346,6 +2394,13 @@ mod tests {
         let pin = ad.pads.iter().position(|n| n == "J1.2").expect("J1.2");
         let spokes = &ad.design.zones.spokes;
         assert_eq!(spokes.len(), 4, "{spokes:?}");
+        // With the four directions that the fill falls back to (D112), as spare ones, and the
+        // number that a soldered pad is to keep (D113).
+        let spare = &ad.design.zones.spare_spokes;
+        assert_eq!(spare.len(), 4, "{spare:?}");
+        assert!(spare.iter().all(|s| s.pad == pin && s.layer == LayerId(1) && s.to != s.from), "{spare:?}");
+        assert!(spare.iter().all(|s| spokes.iter().all(|m| m.to != s.to)), "{spare:?}");
+        assert_eq!(ad.design.zones.min_spokes, p.board().rules.min_thermal_spokes);
         assert!(spokes.iter().all(|s| s.pad == pin && s.layer == LayerId(1) && s.width == 350_000), "{spokes:?}");
         // Along the axes, to the gap of 0.4 mm and the spoke's width past the pad's box
         // (1 mm by 1.6 mm).
@@ -2586,6 +2641,13 @@ mod tests {
         // The room of the spokes of pads in pours costs other nets' tracks (D110), and a via
         // what guide has it cost.
         assert_eq!((g.spoke_cost, g.via_cost), (4.0, pcb::RouteOptions::default().via_cost));
+        // Every net at once before the passes in a run with a budget, of time or of work, and
+        // in no other (D113); on the threads that the native router's batches have.
+        assert!(!g.whole && g.threads >= 1);
+        let timed = RouteOptions { budget: Some(Duration::from_secs(30)), ..Default::default() };
+        assert!(options(&p, &timed, &[0, 1]).whole);
+        let counted = RouteOptions { work: super::super::WorkMeter::limited(1_000_000), ..Default::default() };
+        assert!(options(&p, &counted, &[0, 1]).whole);
         let four = BOARD.replace(
             r#"(0 "F.Cu" signal) (31 "B.Cu" signal)"#,
             r#"(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)"#,

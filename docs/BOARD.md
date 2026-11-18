@@ -255,7 +255,12 @@ spoke needs free of other nets' copper and clearance. A pad is held to `rules.mi
 `thermal::classes` says it is soldered (`PadClass::solder`), tracks of its own net count as necks, and of the
 `dirs.len()` spokes at most that many are placed among `dirs` then `alt`. So the cost of copper of another
 net in a spoke's rectangle is that of losing a neck only while fewer than the minimum remain free among the
-eight. `thermal::census(..).starved` is the count the router commands report after a run.
+eight. `thermal::census(..).starved` is the count the router commands report after a run. The guide adapter gives
+guide the `dirs` spokes as the ones whose room is kept, the `alt` spokes as spare ones and
+`rules.min_thermal_spokes` as the number a pad keeps (guide 0.0.17, D113): guide counts a pad as joined to its pour
+by any of the eight that no route crosses, and holds harder the spokes of a pad whose `dirs` are no more than the
+minimum. The count per pad while routing, with a price that rises as the free spokes fall to the minimum, was
+built in guide's negotiation and is no gain (D113, "Tried and not kept").
 
 Not covered: the native router does not keep the sides of relieved pads free for their spokes (what the
 routers leave is counted by `route_bench --corpus` with `CADLAB_BENCH_THERMALS=1`, reported by the router

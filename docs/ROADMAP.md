@@ -342,21 +342,26 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       keeps apart found once, told as such and left out of the later runs (`Cause::Apart`: sweep-v2.2's two
       nets across its halves); a net with zones has its run on the filled board whatever the first run said
       of it. The default stays the native router
-- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D110,
-      with guide 0.0.16: level on the three small boards and sweep-v2.2; ahead on lumenpnp-mobo, cynthion and
-      glasgow-revD1; ranges that overlap on buspirate5-rev10, glasgow-revC3, tinytapeout-demo (2 to 10 against
-      2 to 15) and nrfmicro (0 to 2 against 0); behind on corne-cherry, 15 to 21 against 0 to 4): needs, in
-      guide, a negotiation over all the nets of a part at once that a minute pays for, for corne-cherry's two
-      QFN-56 and nrfmicro's last data net (the native router plans no way out of the first QFN at all: it
-      routes every net across every other at a price on one grid; fixed ways out for the pads left shut in
-      were built and are no gain, D110), vias (lumenpnp-mobo 511 to 686 against 309 to 343: per-net cleanup
-      with the others fixed removes few, dearer vias cost connections), a first pass on six layers whose
-      third outside the searches is looked into (glasgow-revD1, timed by net, D110), a price on a spoke that
-      rises as its pad runs short of them, and rule areas with a routed track width (D110, "Gaps"; D108,
+- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D113,
+      with guide 0.0.17 and its negotiation for every net at once in the first run: level on the three small
+      boards and sweep-v2.2; ahead in every run on buspirate5-rev10, lumenpnp-mobo, cynthion and glasgow-revD1;
+      ranges that overlap on tinytapeout-demo (0 to 4 against 2 to 15), glasgow-revC3 (31 to 35 against 31 to
+      36) and nrfmicro (0 to 1 against 0); behind on corne-cherry, 5 to 10 against 0 to 4): needs, in guide,
+      the host's fill in the pour rounds of its negotiation in place of its own estimate (every connection
+      corne-cherry has open is a pad that cadlab's fill leaves cut off from its pour and guide's cells had told
+      joined; 3 open in both orders at a budget of 150 million nodes), a negotiation that a board of six layers
+      at a pitch of 0.1 mm has the time for (glasgow-revD1 is given up to guide's passes, whose searches are
+      where its minute goes, 31 of 33 s: nothing between the turns to remove, D113), fewer vias (lumenpnp-mobo
+      409 to 529 against 336 to 343, of which some 250 are stubs to its planes; tinytapeout-demo 379 to 494
+      against 240 to 290), and rule areas with a routed track width (D113, "Gaps"; D110, "Gaps"; D108,
       "Gaps"; D106, "Gaps"; D104,
       "Gaps"; D101,
       "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still
-      blocks it"). Done since D106 (D108): the D+ of a USB receptacle whose pads have those of D- between them
+      blocks it"). Done since D110 (D113): every net routed against every other at once on one grid before
+      guide's passes, as the native router's negotiation does (guide 0.0.17, `RouteOptions::whole`: corne-cherry
+      5 to 10 open for 15 to 21, nrfmicro 0 to 1 for 0 to 2 and closed in 7 to 18 s in three orders of four, the
+      eleven boards without glasgow-revD1 55 to 59 for 70 to 84); the spare spokes and the number a pad keeps
+      given to guide; the first pass on six layers timed call by call. Done since D106 (D108): the D+ of a USB receptacle whose pads have those of D- between them
       and a part in front is crossed under the board by a plan (guide 0.0.15, `RouteOptions::crossings`: nrfmicro
       0 to 1 open for 2 to 5); more runs that move routes, in other orders, while there is time; the needless
       stubs to a plane taken out. Done since D104 (D106): a net's pads that nothing joins to its first are joined among

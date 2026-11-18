@@ -5590,3 +5590,108 @@ placements cannot unset it and get a variant); the fab pages were read through a
 not in a browser.
 
 ## Open questions
+
+### D113. guide 0.0.17 adopted: every net routed against every other at once before guide's passes in a run with a budget, the spare spokes and the number a pad keeps given; the default unchanged (2026-11-18)
+This round is for D110's first gap: the negotiation over all the nets that the native router has and guide had
+not. `guide = { version = "0.0.17", default-features = false, features = ["pcb"] }`; nothing else in
+`Cargo.lock` moves. Measured with the crate from crates.io, on the fill of D112.
+**What guide 0.0.17 does** (its `docs/benchmarks.md`, "PCB routing of every net at once"; its
+`docs/architecture.md` has the decision):
+- *`RouteOptions::whole`*, off by default in guide. Before its passes, every net is routed against every other
+  on one grid, as PathFinder does it and as the native router does: a route claims the points where another
+  net's track or via would be too close, a search pays for each claimed point by how many nets claim it and by
+  how often it was shared, and the wires in another net's way are routed again, round after round at prices
+  that rise, until none is. The design is the native router's (`src/router/engine.rs`, which guide may take
+  from: same owner, MIT), on guide's own model: what the board's copper allows is asked of guide's exact
+  clearance queries, a block of cells at a time; the grid is taken to the pads of fine pitch as the native grid
+  is (D64, D84), to the nanometre; a pad off its lines has ways out along its own axis that the negotiation
+  chooses among, where the native router plans escapes beforehand; only the wires in another's way are routed
+  again; a connection with an end that is walled in is told by looking back from it. What it ends with is each
+  net's copper as guide's passes begin, less what guide's exact check does not allow of it beside the rest,
+  and the passes, the settling, the pours and cleanup go on from there.
+- *Pours in the negotiation.* When the rounds end, the pads that the routes cut off their fills are told by
+  guide's cells, their nets planned again with those pads as terminals, and the rounds go on at the prices as
+  they are, so that the nets round such a pad make room: three times at most (the native router's pour
+  rounds, D80, on guide's estimate of the fill and not on cadlab's fill itself).
+- *`Zones::spare_spokes` and `Zones::min_spokes`.* With the host's spokes given, a pad is joined to its fill,
+  where guide tells the pads cut off, by the spokes that no route crosses and by nothing else, the spare ones
+  among them; and the spokes of a pad with no more of them than it is to keep cost eight times as much to
+  cross.
+- *A share, a way back, threads.* The negotiation has half of the first run's budget, and half of what is left
+  once more when its share ends with few points shared. The first round says what a round costs once it has
+  routed 15 % of the nets' length, in strides through their order: a board with no room for three rounds is
+  given up there and routed by guide's passes alone, as with 0.0.16. Nets whose regions are apart are routed
+  side by side on `RouteOptions::threads` threads, with the same routes on any number.
+**What the adapter does with it** (`router::guide`; ROUTER.md, "guide as a backend"; BOARD.md, "What a router
+must be told"):
+- *`whole` in a run with a budget*, of time or of work, in the first run only: the later ones go on from its
+  routes on the filled board. A run with no budget routes as before. On rayon's threads, as the native
+  router's batches: three in the tables below.
+- *The spare spokes*: the directions the fill falls back to (`Relief::alt`, `zones::alt_spokes`), per pad and
+  layer as the first ones are given.
+- *`min_spokes`*: `rules.min_thermal_spokes`.
+**Measured** (ROUTER.md, "Native router and guide 0.0.17, D113"). With the crate from crates.io, four runs of
+each router at 60 s, in the same half hour, two runs of each at a time: the native router with seeds 1 to 4 on
+three threads, guide in four orders of its nets with three threads for its negotiation and one for the rest.
+The twelve boards: 173 to 191 open for guide (median 185.5) against 324 to 340 for the native
+router (335); the eleven without glasgow-revD1 55 to 59 (56.5) against 81 to 101 (90.5). 0 DRC errors other
+than unrouted in the 96 runs, no call of guide over 59.6 s (the native router's longest 66.3 s). By board, guide
+against the native router: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, sweep-v2.2; ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 4 to 13; cynthion 11 to 12 against 28 to 29; glasgow-revD1 118 to 134 against 239 to 250;
+ranges that overlap on nrfmicro 0 to 1 against 0; tinytapeout-demo 0 to 4 against 2 to 15; glasgow-revC3 31 to 35 against 31 to 36; behind in every run on corne-cherry 5 to 10 against 0 to 4.
+Vias, the range of the four runs: lumenpnp-mobo 409 to 529 against 336 to 343, tinytapeout-demo 379 to 494 against 240 to 290, sweep-v2.2 18 to 24 against 21 to 28, glasgow-revC3 375 to 388 against 415 to 439, buspirate5-rev10 385 to 410 against 291 to 314, cynthion 577 to 703 against 469 to 482, corne-cherry 518 to 623 against 445 to 505, glasgow-revD1 1202 to 1248 against 877 to 929. Track, first run: lumenpnp-mobo 6300 mm against 5370, tinytapeout-demo 5592 mm against 4933, sweep-v2.2 2210 mm against 2161, glasgow-revC3 3655 mm against 3436, corne-cherry 8738 mm against 8273, cynthion 3965 mm against 3177. Time: nrfmicro 7 to 59 s against 2 to 11 s, corne-cherry 57 to 59 s against 21 to 37 s, buspirate5-rev10 28 to 49 s against 29 to 41 s, lumenpnp-mobo 33 to 37 s against 60 to 62 s.
+At a budget of 40 million nodes, three orders, the nine boards a budget cuts, beside 0.0.16: 715 open for 732
+(nrfmicro 0 for 5, sweep-v2.2 9 for 9, corne-cherry 79 for 75, tinytapeout-demo 43 for 35, buspirate5-rev10 0 for 16,
+lumenpnp-mobo 0 for 0, cynthion 38 for 53, glasgow-revC3 105 for 106, glasgow-revD1 441 for 433): the negotiation has half
+of the budget, which on corne-cherry and tinytapeout-demo ends it a third of the way through. At 150 million, two
+orders: corne-cherry 3 and 3, tinytapeout-demo 0 and 0, buspirate5-rev10 0 and 0, lumenpnp-mobo 0 and 0, cynthion 11
+and 9, glasgow-revC3 28 and 27, sweep-v2.2 3 and 3. guide's curated boards with the released crate and its own
+defaults, where `whole` is off: 1150 of 1151 connections with 712 vias, as before.
+**Which boards the negotiation runs on.** Eleven of the twelve. On glasgow-revD1 (six layers, a pitch of
+0.1 mm, 1939 connections) guide gives it up after a second, as two rounds were all its share held and the
+passes had 290 connections open after them for 180 without; the board is then routed as 0.0.16 routes it. So
+it is the default for a run with a budget here, and guide chooses by the board itself.
+**Spokes** (the same runs; `board::thermal::census`):
+
+| | pads in pours | no neck | short of two necks (`drc.starved_thermal`) | solid solder pads |
+|---|---|---|---|---|
+| as routed by their projects (D112) | | 2 | 116 | |
+| native router, seeds 1 to 4 | 2345 to 2353 | 36, 45, 38, 35 | 154, 162, 162, 155 | 432 to 442 |
+| guide 0.0.16, four orders (D110) | 2355 to 2363 | 2, 2, 2, 2 | 91, 82, 89, 100 | 442 to 461 |
+| guide 0.0.17, four orders | 2361 to 2366 | 1, 1, 1, 3 | 97, 91, 88, 97 | 459 to 468 |
+
+Short of two necks by board, guide against the native router: buspirate-rs232 1 against 1; sweep-v2.2 0 to 2 against 1 to 2; corne-cherry 0 to 2 against 2 to 4; tinytapeout-demo 8 to 11 against 16 to 21; buspirate5-rev10 31 to 38 against 38 to 44; lumenpnp-mobo 3 to 5 against 1 to 3; cynthion 1 to 4 against 2; glasgow-revD1 38 to 42 against 85 to 99.
+
+The spare spokes and the number a pad keeps change nothing that the count shows: at a budget of 150 million
+nodes, corne-cherry, tinytapeout-demo, buspirate5-rev10 and lumenpnp-mobo have 49 pads short with both, 49
+without the number and 50 without the spare ones, and the same connections open. No pad of the corpus has as few
+first spokes as it is to keep, so none is held harder; the pads that end short are those of buspirate5-rev10 and
+glasgow-revD1, close together in their pours.
+**Tried and not kept** (guide's `docs/benchmarks.md` has each with its numbers): the halo of a stub made wider by
+what the grid misses, as the native router has it for copper off its grid (nrfmicro's negotiation then stays at
+52 to 68 shared points); every net near a shared point routed again whole, as the native router does (13
+rounds in the share for 60); a weight on the search's bound; the spokes of a pad as something only so many
+nets may cross, counted by pad while the nets are routed with a price and a history, which is the price that
+BOARD.md describes (tinytapeout-demo 7 and 1 open for 0 and 0 at 150 million nodes, no fewer pads short);
+regions round the wires' own boxes and a first round in fixed batches, for more nets side by side.
+**The first pass on six layers** (D110's fourth gap). Timed again on glasgow-revD1 at 40 million nodes with a
+timer round every call that a turn of guide's passes makes: 33.1 s in the passes, of which 31.2 s are inside
+the two searches themselves (22.9 s in 3052 searches from the tree, 8.3 s in 3464 looks from the terminals)
+and 1.9 s is everything else (0.8 s telling a net's pieces, 0.8 s pruning). The third of the pass that D110 put
+outside the searches is not between the turns: the searches cost 1.3 million nodes a second, each step an exact
+query, where the negotiation's cost 3 million on its grid. Nothing to remove there; what would help that board
+is a negotiation that it has the time for.
+**Gaps, for guide's next release**, most useful first:
+1. *corne-cherry*: 5 to 10 against 0 to 4, the one board still behind. Every connection it has open is a pad
+   of a ground or a supply that cadlab's fill leaves cut off from its pour (C14.2, RC14.2, LED10.3, U1.19,
+   RU1.19: pads between other pads with a track at each end), which guide's cells had told joined: its run
+   ends with 482 of 482 connections on its own board. The native router's pour rounds fill the zones
+   themselves between two negotiations. What guide needs is the host's fill in its own pour rounds, as a
+   call back into the host, in place of its estimate; at a budget of 150 million nodes, where cadlab's later
+   runs do not move routes, the board has 3 open in both orders tried.
+2. *A board of six layers in a minute* (glasgow-revD1): a round of the negotiation is some 10 million nodes
+   there. The native router's own negotiation does not end on it either.
+3. *Vias*: lumenpnp-mobo 409 to 529 against 336 to 343, tinytapeout-demo 379 to 494 against 240 to 290, sweep-v2.2 18 to 24 against 21 to 28, glasgow-revC3 375 to 388 against 415 to 439, buspirate5-rev10 385 to 410 against 291 to 314, cynthion 577 to 703 against 469 to 482, corne-cherry 518 to 623 against 445 to 505, glasgow-revD1 1202 to 1248 against 877 to 929: of lumenpnp-mobo's some 250 are stubs to its planes, and the negotiation's own pass for fewer vias saves 10 to 60 a board.
+4. *Rule areas with a routed track width*, and *sweep-v2.2's time*: not touched.
+**Default: unchanged.** By the ranges of four runs of each, with 0.0.17: level on 4 boards (buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, sweep-v2.2); ahead in every run on 4 (buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 4 to 13; cynthion 11 to 12 against 28 to 29; glasgow-revD1 118 to 134 against 239 to 250); ranges that overlap on 3 (nrfmicro 0 to 1 against 0; tinytapeout-demo 0 to 4 against 2 to 15; glasgow-revC3 31 to 35 against 31 to 36); behind in every run on 1 (corne-cherry 5 to 10 against 0 to 4). The condition, at least as good on every board, is not met. `router: guide` stays the second opinion and the native router stays: the switch is the user's to make, and the evidence is this table, the spokes above and the budgets of nodes.
+*Not measured:* the generated boards with 0.0.17; more than four runs of either router; KiCad's DRC on a board
+guide routed; cadlab's oracles; cadlab's whole test suite, which is run at the merge.
