@@ -342,16 +342,19 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       keeps apart found once, told as such and left out of the later runs (`Cause::Apart`: sweep-v2.2's two
       nets across its halves); a net with zones has its run on the filled board whatever the first run said
       of it. The default stays the native router
-- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D114,
-      with guide 0.0.18 and cadlab's own fill given to it while it routes: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, nrfmicro, sweep-v2.2;
-      ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 4 to 33; cynthion 11 to 12 against 28 to 29; glasgow-revD1 118 to 135 against 238 to 250; ranges that overlap on corne-cherry 0 to 2 against 0 to 4; tinytapeout-demo 0 to 4 against 2 to 15; glasgow-revC3 31 to 35 against 31 to 37;
-      behind in every run on none): the default is unchanged, and the switch is the user's. Left, in
-      guide: the vias of the nets that are no stubs (lumenpnp-mobo some 280 where the native router has some 207;
-      vias in all lumenpnp-mobo 402 to 411 against 309 to 343, tinytapeout-demo 385 to 427 against 238 to 290, sweep-v2.2 18 to 24 against 21 to 28, glasgow-revC3 379 to 403 against 415 to 439, buspirate5-rev10 349 to 372 against 291 to 314, cynthion 604 to 699 against 469 to 482, corne-cherry 534 to 625 against 445 to 505, glasgow-revD1 1202 to 1253 against 877 to 932),
-      a negotiation that a board of six layers at a pitch of 0.1 mm has the time for (glasgow-revD1, not
-      touched in D114), and rule areas with a routed track width (D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
+- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D115,
+      with guide 0.0.19: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, nrfmicro, sweep-v2.2; ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 5 to 33; cynthion 8 against 28 to 29; glasgow-revD1 93 to 112 against 241 to 376; ranges that overlap on corne-cherry 0 to 2 against 0 to 4; tinytapeout-demo 0 to 7 against 2 to 15; glasgow-revC3 29 to 34 against 31 to 36; behind in every run on none): the default is unchanged, and the switch is the user's. Left, in
+      guide: the vias that its passes add after a negotiation that was cut (tinytapeout-demo 362 to 462 vias
+      against 240 to 290), the grounds of a board of two layers (corne-cherry 522 to 609 against 445 to 505), a
+      plan for a whole array of balls (glasgow-revC3), its track, longer than the native router's on every board,
+      and rule areas with a routed track width (D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D113 (D114): cadlab's fill of
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D114 (D115): guide's negotiation
+      for every net on a grid of twice the pitch on boards of more than two layers (guide 0.0.19: glasgow-revD1
+      is negotiated, the vias of the boards of four layers come down); every via that the fill of the routed
+      board makes needless taken out by that fill, with none made for it (`pcb::needless`, `needless`); the heat
+      pads named as pads that vias of their net may be in where no track leaves them (`Zones::via_pads`:
+      cynthion's three exposed pads joined); the fill at a run's end given only before its deadline. Done since D113 (D114): cadlab's fill of
       the zones around guide's routes given to guide when it asks (guide 0.0.18, `RunControl::refill`,
       `host_fills`), by which it tells the pads cut off their pours (corne-cherry 0 to 2 open for 5 to 10);
       a wire of its negotiation that ends where the fill is no more routed again; a negotiation that ends with

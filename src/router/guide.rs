@@ -1,5 +1,5 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113 and D114;
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114 and D115;
 //! docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
@@ -35,7 +35,10 @@
 //! cadlab's own fill of the zones around its routes when it asks for it ([`host_fills`],
 //! `RunControl::refill`, D114): the pads cut off their pours are told by that fill and not by guide's
 //! estimate of it, and the stubs to a plane whose pads a pour joins are taken out by it at the end
-//! of each run. What guide's API cannot express is passed the stricter way and named in
+//! of each run. Once the runs are over, every via that the fill of the routed board makes needless
+//! is told from that fill, with none made for it ([`needless`], `pcb::needless`, D115), and taken
+//! out with the tracks that led to it; a heat pad is named to guide as one that vias of its net may
+//! be in where no track leaves it (`Zones::via_pads`, D115). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -561,6 +564,19 @@ pub(crate) fn adapt(
                 if let Some(k) = it.local.stack {
                     stack_at.insert(k, at);
                     stack_own.insert(at, custom.own[i]);
+                }
+                // A heat pad is named as one that vias of its net may be in (`Zones::via_pads`,
+                // guide 0.0.19, D115): the exposed pad under a package is shut in by the pads
+                // round it, and its own board joins it to its plane by vias in it (cynthion's
+                // U8, U9 and U11). The rule against vias in pads is for the pads that leads are
+                // soldered to. guide lets a via in only where no track leaves the pad and none
+                // joins it to a pad of its net beside it: corne-cherry's two packages have a
+                // ground pin beside their exposed pads, and vias under them took the room that
+                // the pins round them need.
+                if classes.get(&(refdes.clone(), number.clone())) == Some(&geo::thermal::PadClass::Heat)
+                    && gb.pads[at].hole.is_none()
+                {
+                    zones.via_pads.push(at);
                 }
                 let th = it.local.thermal;
                 // The spokes of the pad's reliefs as cadlab's fill makes them (BOARD.md, "What a
@@ -1271,6 +1287,10 @@ const POUR_ROUNDS: usize = 2;
 const MOVE_AGAIN: usize = 4;
 const AGAIN_SEED: u64 = 7919;
 
+/// How far round a connection that taking needless copper out opened what was taken out of
+/// its net goes back in (`route`, "The stubs that the fill makes needless").
+const SPARE_NEAR: i64 = 3_000_000;
+
 /// The most tracks a stub to a plane has (`route`, "The stubs that the fill makes needless").
 const STUB_TRACKS: usize = 4;
 
@@ -1372,12 +1392,11 @@ fn phase(p: Phase) -> &'static str {
 /// machine.
 const REFILL_SHARE: f64 = 0.15;
 
-/// The share of the whole budget that a fill may take for guide to have the one it asks for
-/// once its routes are where they stay, which may be after the run's deadline: on a board
-/// whose fill takes longer (glasgow-revD1's takes 5.7 s of 60), or was not timed yet, that
-/// fill is made only if it ends before the deadline, and the time is the later runs'. The
-/// later runs' deadline leaves the time of two such fills.
-const LATE_FILL: f64 = 0.03;
+/// The share of the whole budget that a fill may take for the later runs' deadline to leave the
+/// time of two after it, for the needless vias that the fill of the routed board tells
+/// ([`needless`], D115): on a board whose fill takes longer (glasgow-revD1's takes 5.7 s of
+/// 60) that time is the runs', and what is needless stays.
+const SHORT_FILL: f64 = 0.03;
 
 /// What guide's runs have of the host for its fills ([`host_fills`]).
 struct Host<'a> {
@@ -1386,10 +1405,8 @@ struct Host<'a> {
     /// How long the last fill took, over all the runs of a call of [`route`], once one was
     /// made; after the first run, no more than its verification and refill took.
     took: &'a Cell<Option<Duration>>,
-    /// The longest a fill may take to be made after a run's deadline ([`LATE_FILL`]).
-    late: Duration,
-    /// By how much the last run that its deadline stopped came back after it, the fill it
-    /// was given then apart: what guide needs to end, which the later runs' deadline leaves.
+    /// By how much the last run that its deadline stopped came back after it: what guide
+    /// needs to end, which the later runs' deadline leaves.
     over: &'a Cell<Duration>,
 }
 
@@ -1408,8 +1425,14 @@ fn host_fills(ad: &Adapted, base: &Project, tracks: &[gdrc::Track], vias: &[gdrc
         v.id = q.alloc_id();
         q.board_mut().vias.push(v);
     }
+    fills_of(ad, &geo::copper_items(&q))
+}
+
+/// The zone fills among the copper items of a board, each island as a `Fill` of guide's zone
+/// for it (`Adapted::zones`). `None` if a fill is no shape that guide takes.
+fn fills_of(ad: &Adapted, items: &[CopperItem]) -> Option<Vec<Fill>> {
     let mut fills = Vec::new();
-    for it in &geo::copper_items(&q) {
+    for it in items {
         let ItemRef::Zone(zone, layer, _) = &it.item else { continue };
         let (Some(layer), Some(at)) =
             (ad.layers.iter().position(|n| n == layer), ad.zones.iter().position(|z| z == zone))
@@ -1453,7 +1476,7 @@ fn call(
     // cadlab refills the zones itself, so a stopped run does not wait for guide's fill.
     control.fill_on_stop = false;
     let began = Instant::now();
-    let (spent, after_deadline) = (Cell::new(Duration::ZERO), Cell::new(Duration::ZERO));
+    let spent = Cell::new(Duration::ZERO);
     let refill = |asked: &pcb::Refill<'_>| {
         let host = host?;
         let at = Instant::now();
@@ -1461,13 +1484,11 @@ fn call(
             let cap = d.saturating_duration_since(began).mul_f64(REFILL_SHARE);
             let took = host.took.get();
             let in_time = at + took.unwrap_or_default() <= d;
-            // After the deadline only a fill known to be short: glasgow-revD1's takes 5.7 s,
-            // and its first run came back that much late, with no time left for a second.
-            let refused = if asked.last {
-                !in_time && took.is_none_or(|t| t > host.late)
-            } else {
-                !in_time || spent.get() + took.unwrap_or_default() > cap
-            };
+            // The one at the end only before the deadline (D115): what it tells, the needless
+            // stubs, the fill that counts the run tells as well, at no fill more, and a run
+            // that came back a fill late left the runs after it and that telling short
+            // (lumenpnp-mobo: a fourth run back at 55 s of 60, and 457 vias for 332 to 370).
+            let refused = if asked.last { !in_time } else { !in_time || spent.get() + took.unwrap_or_default() > cap };
             if refused {
                 return None;
             }
@@ -1475,9 +1496,6 @@ fn call(
         let fills = host_fills(ad, host.base, asked.tracks, asked.vias);
         host.took.set(Some(at.elapsed()));
         spent.set(spent.get() + at.elapsed());
-        if deadline.is_some_and(|d| at >= d) {
-            after_deadline.set(after_deadline.get() + at.elapsed());
-        }
         fills
     };
     control.refill = Some(&refill);
@@ -1498,7 +1516,7 @@ fn call(
         return Err(RouteError::Cancelled);
     }
     if let (Some(host), Some(d)) = (host, deadline.filter(|_| routed.stopped == Some(Stopped::Deadline))) {
-        host.over.set(Instant::now().saturating_duration_since(d).saturating_sub(after_deadline.get()));
+        host.over.set(Instant::now().saturating_duration_since(d));
     }
     Ok(routed)
 }
@@ -1539,6 +1557,46 @@ fn convert_copper(ad: &Adapted, tracks: &[gdrc::Track], vias: &[gdrc::Via]) -> (
         })
         .collect();
     (tracks, vias)
+}
+
+/// What of guide's routes `tracks` and `vias` the fill of the board with them on it makes
+/// needless (`pcb::needless`, guide 0.0.19, D115), by position: `items` are the copper items of
+/// that board, fills included, and `ad` the first run's design, with none of guide's copper in
+/// it. Nothing is filled here: the fill is the one that counted the run.
+fn needless(ad: &Adapted, tracks: &[Track], vias: &[Via], items: &[CopperItem]) -> (Vec<usize>, Vec<usize>) {
+    let Some(fills) = fills_of(ad, items) else { return Default::default() };
+    // The nets are in the order of their names.
+    let net = |n: &Option<String>| n.as_ref().and_then(|n| ad.nets.binary_search(n).ok()).map(|i| NetId(i as u32));
+    let layer = |l: &str| ad.layers.iter().position(|n| n == l);
+    // What has no layer or no net of the design stays out, and its place with it.
+    let (mut gt, mut at_t) = (Vec::new(), Vec::new());
+    for (i, t) in tracks.iter().enumerate() {
+        let (Some(l), Some(n)) = (layer(&t.layer), net(&t.net)) else { continue };
+        gt.push(gdrc::Track {
+            start: gp(t.start),
+            end: gp(t.end),
+            mid: t.mid.map(gp),
+            width: t.width.0,
+            layer: LayerId(l as u8),
+            net: Some(n),
+        });
+        at_t.push(i);
+    }
+    let (mut gv, mut at_v) = (Vec::new(), Vec::new());
+    for (i, v) in vias.iter().enumerate() {
+        let (Some(a), Some(b), Some(n)) = (layer(&v.from), layer(&v.to), net(&v.net)) else { continue };
+        gv.push(gdrc::Via {
+            at: gp(v.at),
+            drill: v.drill.0,
+            diameter: v.diameter.0,
+            from: LayerId(a.min(b) as u8),
+            to: LayerId(a.max(b) as u8),
+            net: Some(n),
+        });
+        at_v.push(i);
+    }
+    let (t, v) = pcb::needless(&ad.design, &gt, &gv, &fills);
+    (t.into_iter().map(|k| at_t[k]).collect(), v.into_iter().map(|k| at_v[k]).collect())
 }
 
 /// Verification, as the native router's: cadlab's DRC on `p` with the new copper (IDs from
@@ -1773,9 +1831,9 @@ pub(crate) fn route(
     let deadline = opts.budget.map(|b| start + b.mul_f64(FIRST_SHARE));
     let mut gopts = options(p, opts, &slots);
     gopts.work_budget = opts.work.left();
-    let late = opts.budget.map_or(Duration::MAX, |b| b.mul_f64(LATE_FILL));
+    let short = opts.budget.map_or(Duration::MAX, |b| b.mul_f64(SHORT_FILL));
     let over = Cell::new(Duration::ZERO);
-    let first = Host { base: p, took: &fill_took, late, over: &over };
+    let first = Host { base: p, took: &fill_took, over: &over };
     let routed = call(&ad, Some(&first), &gopts, deadline, hooks)?;
     gopts.whole = false;
     opts.work.charge(routed.stats.work);
@@ -1826,14 +1884,14 @@ pub(crate) fn route(
         geo::ratsnest_from(items, isl).into_iter().filter(|l| wanted(&l.net)).collect()
     };
     // Its deadline: the end of the budget less `AFTER_SHARE` times what the first run needed
-    // after it, the fill that guide asks for at its end where that may be late (twice what
-    // the last took: the board has more copper by then) and the report, and no sooner than
-    // the first run's.
+    // after it, the two fills that taking the needless vias out may need once the runs are
+    // over, where a fill is short ([`SHORT_FILL`]), and the report, and no sooner than the
+    // first run's.
     // A board that was asked for no fill yet has one in no more than this took.
     fill_took.set(Some(fill_took.get().unwrap_or(after)));
     let fill = fill_took.get().unwrap_or(after);
     let second = opts.budget.zip(deadline).map(|(b, d)| {
-        let last = if fill <= late { fill * 2 } else { Duration::ZERO };
+        let last = if fill <= short { fill * 2 } else { Duration::ZERO };
         (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT).map_or(d, |t| t.max(d))
     });
     for round in 1..=POUR_ROUNDS + MOVE_AGAIN {
@@ -1899,7 +1957,7 @@ pub(crate) fn route(
             q.board_mut().vias.retain(|v| !handed.contains(&v.id));
             Some(q)
         };
-        let host = Host { base: base.as_ref().unwrap_or(&proj), took: &fill_took, late, over: &over };
+        let host = Host { base: base.as_ref().unwrap_or(&proj), took: &fill_took, over: &over };
         let more = call(&ad, Some(&host), &gopts, until, hooks)?;
         opts.work.charge(more.stats.work);
         work += more.stats.work;
@@ -1963,29 +2021,81 @@ pub(crate) fn route(
     let mut pruned = 0;
     // First those that guide itself told needless by the fill it was given at the end of
     // its runs (D114): taken out together and the board filled once, kept if it has no more
-    // open for it.
-    if !spare.is_empty() && opts.budget.is_none_or(|b| Instant::now() + fill * 2 + REPORT < start + b) {
-        let mut q = p.clone();
-        let (mut t2, mut v2) = (tracks.clone(), vias.clone());
-        t2.retain(|t| !spare.tracks.contains(&Spare::track(t)));
-        v2.retain(|v| !spare.vias.contains(&Spare::via(v)));
-        for t in &mut t2 {
-            t.id = q.alloc_id();
-            q.board_mut().tracks.push(t.clone());
+    // open for it. And with them what the fill of the board as it is now makes needless
+    // (D115): the fill that counted the last run is there, where a run that ended on its
+    // deadline was given none (tinytapeout-demo, cynthion, the two glasgows), and it says
+    // more than the fill each run was given, as what one run left needed another joined.
+    // With the time of one fill: the second, for what the first opens, is made if there is
+    // time for it then (tinytapeout-demo: a last run back at 56.6 s of 60 left no time for two,
+    // and 490 vias in that order of four).
+    let in_time = opts.budget.is_none_or(|b| Instant::now() + fill + REPORT < start + b);
+    if in_time {
+        // In place of what the runs told, each by its own fill: all of that is still on
+        // the board, and is told again by this one.
+        let (t, v) = needless(&ad, &tracks, &vias, &fitems);
+        spare.tracks = t.into_iter().map(|i| Spare::track(&tracks[i])).collect();
+        spare.vias = v.into_iter().map(|i| Spare::via(&vias[i])).collect();
+    }
+    if !spare.is_empty() && in_time {
+        // The board without them, filled.
+        let without = |spare: &Spare| {
+            let mut q = p.clone();
+            let (mut t2, mut v2) = (tracks.clone(), vias.clone());
+            t2.retain(|t| !spare.tracks.contains(&Spare::track(t)));
+            v2.retain(|v| !spare.vias.contains(&Spare::via(v)));
+            for t in &mut t2 {
+                t.id = q.alloc_id();
+                q.board_mut().tracks.push(t.clone());
+            }
+            for v in &mut v2 {
+                v.id = q.alloc_id();
+                q.board_mut().vias.push(v.clone());
+            }
+            let items2 = geo::copper_items(&q);
+            let isl2 = geo::islands(&items2);
+            (t2, v2, q, items2, isl2)
+        };
+        let was = open(&fitems, &fisl);
+        let mut less = without(&spare);
+        // Copper taken out leaves room, and another net's pour may fill it: the fill that
+        // joined a pad is then another, and the pad is open (cynthion: a strip of the
+        // ground's pour beside a stub, which the pour of a supply took with the stub gone).
+        // What was taken out of such a net near such a connection goes back in, once.
+        let more: Vec<RatLine> = {
+            let had: BTreeSet<(&str, &str, &str)> =
+                was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
+            open(&less.3, &less.4)
+                .into_iter()
+                .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                .collect()
+        };
+        let again = opts.budget.is_none_or(|b| Instant::now() + fill + REPORT < start + b);
+        if !more.is_empty() && again {
+            let near = |net: &str, x: i64, y: i64| {
+                more.iter().any(|l| {
+                    let (x0, x1) = (l.from_at.x.0.min(l.to_at.x.0), l.from_at.x.0.max(l.to_at.x.0));
+                    let (y0, y1) = (l.from_at.y.0.min(l.to_at.y.0), l.from_at.y.0.max(l.to_at.y.0));
+                    l.net == net
+                        && x >= x0 - SPARE_NEAR
+                        && x <= x1 + SPARE_NEAR
+                        && y >= y0 - SPARE_NEAR
+                        && y <= y1 + SPARE_NEAR
+                })
+            };
+            spare.tracks.retain(|(net, _, at)| !(near(net, at[0], at[1]) || near(net, at[2], at[3])));
+            spare.vias.retain(|(net, x, y)| !near(net, *x, *y));
+            less = without(&spare);
         }
-        for v in &mut v2 {
-            v.id = q.alloc_id();
-            q.board_mut().vias.push(v.clone());
-        }
-        let items2 = geo::copper_items(&q);
-        let isl2 = geo::islands(&items2);
-        if open(&items2, &isl2).len() <= open(&fitems, &fisl).len() {
+        let (t2, v2, q, items2, isl2) = less;
+        if open(&items2, &isl2).len() <= was.len() {
             pruned = vias.len() - v2.len();
             (tracks, vias, proj, fitems, fisl) = (t2, v2, q, items2, isl2);
             (hooks.progress)(
                 0,
                 None,
-                &format!("guide: {pruned} stub(s) to a plane taken out, needless by the fill guide was given"),
+                &format!(
+                    "guide: {pruned} via(s) to a plane or a pour taken out, needless by the fill of the routed board"
+                ),
             );
         }
     }
@@ -2882,6 +2992,80 @@ mod tests {
         let r = run();
         assert_eq!(r.stats.failed, 0, "{:?}", r.connections);
         assert_eq!(r, run());
+    }
+
+    /// What the fill of the routed board makes needless is told from that board, with no fill
+    /// made for it (`needless`, D115): of two stubs through vias from one pad to the pour of its
+    /// net on the other side, the first goes with its via, and the one that is left is needed.
+    #[test]
+    fn what_the_fill_of_the_routed_board_makes_needless_is_told_from_it() {
+        let p = project();
+        let ad = adapted(&p, &["GND", "SIG"]);
+        let pad = geo::placed_pads(&p).into_iter().find(|pp| pp.refdes == "R1" && pp.number == "2").expect("R1.2");
+        let c = pad.center;
+        let stub = |dy: i64| {
+            let end = Point::new(c.x, Nm(c.y.0 + dy));
+            let t = Track {
+                id: ObjectId(0),
+                layer: "F.Cu".into(),
+                width: Nm(250_000),
+                net: Some("GND".into()),
+                start: c,
+                end,
+                mid: None,
+                locked: false,
+            };
+            let v = Via {
+                id: ObjectId(0),
+                at: end,
+                drill: Nm(300_000),
+                diameter: Nm(600_000),
+                net: Some("GND".into()),
+                from: "F.Cu".into(),
+                to: "B.Cu".into(),
+                locked: false,
+            };
+            (t, v)
+        };
+        let told = |stubs: &[(Track, Via)]| {
+            let mut q = p.clone();
+            let (mut tracks, mut vias) = (Vec::new(), Vec::new());
+            for (t, v) in stubs {
+                let (mut t, mut v) = (t.clone(), v.clone());
+                t.id = q.alloc_id();
+                v.id = q.alloc_id();
+                q.board_mut().tracks.push(t.clone());
+                q.board_mut().vias.push(v.clone());
+                tracks.push(t);
+                vias.push(v);
+            }
+            needless(&ad, &tracks, &vias, &geo::copper_items(&q))
+        };
+        assert_eq!(told(&[stub(2_000_000), stub(-2_000_000)]), (vec![0], vec![0]));
+        assert_eq!(told(&[stub(-2_000_000)]), (vec![], vec![]));
+    }
+
+    /// A heat pad is named to guide as one that vias of its net may be in (D115): the exposed
+    /// pad of a package, and no pad that a lead is soldered to.
+    #[test]
+    fn a_heat_pad_is_named_for_vias_of_its_net() {
+        let part = r#"  (footprint "Q:Q" (layer "F.Cu") (at 115 56)
+    (property "Reference" "U1") (property "Value" "Q")
+    (pad "1" smd rect (at -2 -0.5) (size 0.6 0.3) (layers "F.Cu" "F.Mask") (net 2 "SIG"))
+    (pad "2" smd rect (at -2 0.5) (size 0.6 0.3) (layers "F.Cu" "F.Mask") (net 1 "GND"))
+    (pad "3" smd rect (at 2 0.5) (size 0.6 0.3) (layers "F.Cu" "F.Mask") (net 3 "DP"))
+    (pad "4" smd rect (at 2 -0.5) (size 0.6 0.3) (layers "F.Cu" "F.Mask") (net 4 "DM"))
+    (pad "5" smd rect (at 0 0) (size 2 2) (layers "F.Cu" "F.Mask") (net 1 "GND")))
+"#;
+        let board = BOARD.replace("  (gr_rect", &format!("{part}  (gr_rect"));
+        let mut p = Project::new("t");
+        import(&mut p, &board, &BoardImportOptions { file_name: "t.kicad_pcb".into(), ..Default::default() })
+            .expect("import");
+        let ad = adapted(&p, &["GND", "SIG"]);
+        let exposed = ad.pads.iter().position(|n| n == "U1.5").expect("U1.5");
+        assert_eq!(ad.design.zones.via_pads, [exposed]);
+        // The board without it names none.
+        assert!(adapted(&project(), &["GND", "SIG"]).design.zones.via_pads.is_empty());
     }
 
     /// The stubs that guide took out as needless are known between the runs by what they are on

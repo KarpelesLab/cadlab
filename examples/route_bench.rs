@@ -6,11 +6,14 @@
 //! also routed by freerouting (external process, DSN/SES) for comparison. `CADLAB_ROUTE_RENDER=<dir>`
 //! renders cadlab's results; `CADLAB_BENCH_BUDGET_MS` sets the time budget (default 120000);
 //! `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search (default: the router's default) and
-//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110; here and in the
+//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115; here and in the
 //! corpus mode), under the same time budget or work budget (`CADLAB_BENCH_WORK`, in guide's
 //! search nodes there). `CADLAB_BENCH_VIA_IN_PAD=1` lets guide place vias in pads, as it does on
 //! its own; without it the adapter forbids them, as the native router does. With
-//! `CADLAB_BENCH_VERBOSE=1` both modes count the vias in surface-mount pads of their net.
+//! `CADLAB_BENCH_VERBOSE=1` both modes count the vias in surface-mount pads of their net, and the
+//! corpus mode tells the vias and the track of the nets with zones apart from the others', by net,
+//! and the pieces that the pads and fills of each such net are in without the net's new copper
+//! (what a router had to join, by a via to a plane or by a track; D115).
 //! `CADLAB_BENCH_SEED=<n>` sets the seed (default 1; guide's default is none, its nets shortest
 //! first).
 //!
@@ -341,6 +344,64 @@ fn corpus(filters: &[String]) {
         if verbose {
             eprintln!("  stats: {}", serde_json::to_string(&r.stats).unwrap_or_default());
             eprintln!("  {}: {} of {} via(s) in SMD pads", e.name, routebench::vias_in_pads(&q), q.board().vias.len());
+            // The vias and the track of the nets with zones apart: a pad of such a net has a via
+            // to its plane whichever router routes it, and the others are where routers differ.
+            let zoned: std::collections::BTreeSet<&str> = p
+                .board()
+                .zones
+                .iter()
+                .filter(|z| !cadlab::board::thermal::is_teardrop(z))
+                .filter_map(|z| z.net.as_deref())
+                .collect();
+            let of_zone = |n: &Option<String>| n.as_deref().is_some_and(|n| zoned.contains(n));
+            let zone_vias = r.vias.iter().filter(|v| of_zone(&v.net)).count();
+            let zone_len: f64 = r
+                .tracks
+                .iter()
+                .filter(|t| of_zone(&t.net))
+                .map(|t| cadlab::board::track_length(t).0 as f64)
+                .sum::<f64>()
+                / 1e6;
+            eprintln!(
+                "  {}: nets with zones {zone_vias} via(s) and {zone_len:.1} mm, the others {} via(s) and {:.1} mm",
+                e.name,
+                r.vias.len() - zone_vias,
+                length - zone_len
+            );
+            let mut by_net: BTreeMap<&str, usize> = BTreeMap::new();
+            for v in r.vias.iter().filter(|v| of_zone(&v.net)) {
+                *by_net.entry(v.net.as_deref().unwrap_or("")).or_default() += 1;
+            }
+            let by_net: Vec<String> = by_net.iter().map(|(n, c)| format!("{n} {c}")).collect();
+            eprintln!("  {}: vias of the nets with zones: {}", e.name, by_net.join(", "));
+            // By net with zones, the pieces that the pads and the fills of the routed board are in
+            // without the net's new tracks and vias, all and those with pads: one less is what
+            // the router had to join, by a via to a plane or by a track.
+            {
+                use cadlab::board::ItemRef;
+                let new: std::collections::BTreeSet<_> =
+                    r.tracks.iter().map(|t| t.id).chain(r.vias.iter().map(|v| v.id)).collect();
+                let mut items = cadlab::board::copper_items(&q);
+                items.retain(|it| match &it.item {
+                    ItemRef::Track(id) | ItemRef::Via(id) => !(new.contains(id) && of_zone(&it.net)),
+                    _ => true,
+                });
+                let isl = cadlab::board::islands(&items);
+                let mut all: BTreeMap<&str, std::collections::BTreeSet<usize>> = BTreeMap::new();
+                let mut padded: BTreeMap<&str, std::collections::BTreeSet<usize>> = BTreeMap::new();
+                for (it, &k) in items.iter().zip(&isl) {
+                    let Some(n) = it.net.as_deref().filter(|n| zoned.contains(n)) else { continue };
+                    all.entry(n).or_default().insert(k);
+                    if matches!(it.item, ItemRef::Pad(..)) {
+                        padded.entry(n).or_default().insert(k);
+                    }
+                }
+                let list: Vec<String> = all
+                    .iter()
+                    .map(|(n, set)| format!("{n} {} ({} with pads)", set.len(), padded.get(n).map_or(0, |s| s.len())))
+                    .collect();
+                eprintln!("  {}: pieces of the nets with zones without their routes: {}", e.name, list.join(", "));
+            }
         }
         let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
         for c in r.connections.iter().filter(|c| c.status == router::ConnStatus::Failed) {

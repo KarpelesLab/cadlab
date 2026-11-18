@@ -264,6 +264,11 @@ built in guide's negotiation and is no gain (D113, "Tried and not kept").
 Since guide 0.0.18 (D114) the adapter also gives guide the fill itself, around its routes as they stand,
 when guide asks for it (`router::guide::host_fills`): the pads that routes cut off their pours are then told by
 the islands of that fill, and a pad whose spokes no longer reach it is one of them.
+Since guide 0.0.19 (D115) it also names the heat pads without a hole (`thermal::classes`, `PadClass::Heat`: an
+exposed pad, a tab) as pads that a via of their own net may be in (`Zones::via_pads`), which guide uses where no
+track leaves the pad: the rule against vias in pads is for the pads that leads are soldered to. And what the fill
+of the routed board makes needless of guide's vias is told from that fill, island by island
+(`router::guide::needless`).
 
 Not covered: the native router does not keep the sides of relieved pads free for their spokes (what the
 routers leave is counted by `route_bench --corpus` with `CADLAB_BENCH_THERMALS=1`, reported by the router
