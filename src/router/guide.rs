@@ -1,6 +1,6 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108 and D110; docs/ROUTER.md, "guide as a
-//! backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113 and D114;
+//! docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -31,10 +31,15 @@
 //! later runs (`Cause::Apart`, D110). In a run with a budget, the first run of guide routes every net
 //! against every other at once on one grid before its passes, as the native router's negotiation does
 //! (`RouteOptions::whole`, D113), with the directions the fill falls back to as spare spokes and the number
-//! of spokes a pad keeps (`Zones::spare_spokes`, `Zones::min_spokes`). What guide's API cannot express is passed the stricter way and named in
+//! of spokes a pad keeps (`Zones::spare_spokes`, `Zones::min_spokes`). While it routes, guide has
+//! cadlab's own fill of the zones around its routes when it asks for it ([`host_fills`],
+//! `RunControl::refill`, D114): the pads cut off their pours are told by that fill and not by guide's
+//! estimate of it, and the stubs to a plane whose pads a pour joins are taken out by it at the end
+//! of each run. What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -131,6 +136,8 @@ pub(crate) struct Adapted {
     /// The routes of an earlier run that guide may move ([`Adapted::take_back`]); empty for a
     /// first run.
     pub earlier: pcb::Earlier,
+    /// The board's zones by position in the design's.
+    pub zones: Vec<ObjectId>,
 }
 
 fn gp(q: Point) -> GPoint {
@@ -507,6 +514,7 @@ pub(crate) fn adapt(
     let mut stack_own: BTreeMap<usize, Option<i64>> = BTreeMap::new();
     let mut tie_copper: Vec<(usize, Vec<String>)> = Vec::new();
     let mut zone_at: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut zone_ids: Vec<ObjectId> = Vec::new();
     // By zone with a net that is no teardrop, the zone and its fill settings, for the spokes of
     // its pads; and what each pad is for (a heat pad or a pad that is not soldered is held to no
     // number of spokes).
@@ -636,6 +644,7 @@ pub(crate) fn adapt(
                 let Some(layer) = layers.iter().position(|n| n == layer) else { continue };
                 let Some(z) = board.zones.iter().find(|z| z.id == *zone) else { continue };
                 let at = *zone_at.entry(zone.0).or_insert_with(|| {
+                    zone_ids.push(*zone);
                     let zp = geo::zones::zone_params(p, z);
                     zones.zones.push(CopperZone {
                         outline: z.outline.iter().map(|q| gp(*q)).collect(),
@@ -861,6 +870,7 @@ pub(crate) fn adapt(
         copper: copper_names,
         obstacles: obstacle_names,
         earlier: pcb::Earlier::default(),
+        zones: zone_ids,
     })
 }
 
@@ -1300,6 +1310,41 @@ fn stub_pieces(
         .collect()
 }
 
+/// The stubs to a plane that guide's runs took out as needless (`Routed::spare`, D114), by
+/// what they are on the board: tracks by net, layer and ends, vias by net and place. They
+/// stay on the board between the runs, and go once the runs are over.
+#[derive(Default)]
+struct Spare {
+    tracks: BTreeSet<(String, String, [i64; 4])>,
+    vias: BTreeSet<(String, i64, i64)>,
+}
+
+impl Spare {
+    fn track(t: &Track) -> (String, String, [i64; 4]) {
+        let (a, b) = ((t.start.x.0, t.start.y.0), (t.end.x.0, t.end.y.0));
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        (t.net.clone().unwrap_or_default(), t.layer.clone(), [a.0, a.1, b.0, b.1])
+    }
+
+    fn via(v: &Via) -> (String, i64, i64) {
+        (v.net.clone().unwrap_or_default(), v.at.x.0, v.at.y.0)
+    }
+
+    /// Adds the stubs that a run took out, which come back as `tracks` and `vias` of the
+    /// board: those of the nets `moved`, which the run had back whole, in place of what
+    /// was known of them.
+    fn add(&mut self, moved: &BTreeSet<&str>, tracks: &[Track], vias: &[Via]) {
+        self.tracks.retain(|k| !moved.contains(k.0.as_str()));
+        self.vias.retain(|k| !moved.contains(k.0.as_str()));
+        self.tracks.extend(tracks.iter().map(Spare::track));
+        self.vias.extend(vias.iter().map(Spare::via));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tracks.is_empty() && self.vias.is_empty()
+    }
+}
+
 /// The least time a run that takes the routes back is begun with: it places every route
 /// before it routes anything.
 const MOVE_MIN: Duration = Duration::from_secs(3);
@@ -1320,11 +1365,71 @@ fn phase(p: Phase) -> &'static str {
     }
 }
 
+/// The most of a run's time that cadlab's fills for guide may take in all while it routes
+/// ([`host_fills`]): a fill that the time already spent on them and another as long as the
+/// last would take past it, or past the run's deadline, is not made, and guide goes on by its
+/// own estimate. A run with no deadline has every fill it asks for, which is the same on any
+/// machine.
+const REFILL_SHARE: f64 = 0.15;
+
+/// The share of the whole budget that a fill may take for guide to have the one it asks for
+/// once its routes are where they stay, which may be after the run's deadline: on a board
+/// whose fill takes longer (glasgow-revD1's takes 5.7 s of 60), or was not timed yet, that
+/// fill is made only if it ends before the deadline, and the time is the later runs'. The
+/// later runs' deadline leaves the time of two such fills.
+const LATE_FILL: f64 = 0.03;
+
+/// What guide's runs have of the host for its fills ([`host_fills`]).
+struct Host<'a> {
+    /// The board without the copper that the run routes or may move.
+    base: &'a Project,
+    /// How long the last fill took, over all the runs of a call of [`route`], once one was
+    /// made; after the first run, no more than its verification and refill took.
+    took: &'a Cell<Option<Duration>>,
+    /// The longest a fill may take to be made after a run's deadline ([`LATE_FILL`]).
+    late: Duration,
+    /// By how much the last run that its deadline stopped came back after it, the fill it
+    /// was given then apart: what guide needs to end, which the later runs' deadline leaves.
+    over: &'a Cell<Duration>,
+}
+
+/// cadlab's fill of the zones of `base` with guide's routes as they stand on it, as guide's
+/// fills (`RunControl::refill`, D114): what guide tells the pads cut off their pours by, in
+/// place of its estimate on a grid. `base` is the board without the copper that guide routes
+/// or may move. `None` if a fill is no shape that guide takes.
+fn host_fills(ad: &Adapted, base: &Project, tracks: &[gdrc::Track], vias: &[gdrc::Via]) -> Option<Vec<Fill>> {
+    let (tracks, vias) = convert_copper(ad, tracks, vias);
+    let mut q = base.clone();
+    for mut t in tracks {
+        t.id = q.alloc_id();
+        q.board_mut().tracks.push(t);
+    }
+    for mut v in vias {
+        v.id = q.alloc_id();
+        q.board_mut().vias.push(v);
+    }
+    let mut fills = Vec::new();
+    for it in &geo::copper_items(&q) {
+        let ItemRef::Zone(zone, layer, _) = &it.item else { continue };
+        let (Some(layer), Some(at)) =
+            (ad.layers.iter().position(|n| n == layer), ad.zones.iter().position(|z| z == zone))
+        else {
+            continue;
+        };
+        for shape in region(&it.shape).ok()? {
+            fills.push(Fill { zone: at, layer: LayerId(layer as u8), shape });
+        }
+    }
+    Some(fills)
+}
+
 /// One run of guide's router under the hooks: its progress goes to the progress sink, a
 /// cancellation seen there stops it, and `deadline` does. A panic in it is an error of the
-/// backend, not of the host.
+/// backend, not of the host. With `host`, guide has cadlab's own fill around its routes when
+/// it asks ([`host_fills`]).
 fn call(
     ad: &Adapted,
+    host: Option<&Host<'_>>,
     options: &pcb::RouteOptions,
     deadline: Option<Instant>,
     hooks: &Hooks<'_>,
@@ -1347,6 +1452,35 @@ fn call(
     control.progress_interval = PROGRESS_INTERVAL;
     // cadlab refills the zones itself, so a stopped run does not wait for guide's fill.
     control.fill_on_stop = false;
+    let began = Instant::now();
+    let (spent, after_deadline) = (Cell::new(Duration::ZERO), Cell::new(Duration::ZERO));
+    let refill = |asked: &pcb::Refill<'_>| {
+        let host = host?;
+        let at = Instant::now();
+        if let Some(d) = deadline {
+            let cap = d.saturating_duration_since(began).mul_f64(REFILL_SHARE);
+            let took = host.took.get();
+            let in_time = at + took.unwrap_or_default() <= d;
+            // After the deadline only a fill known to be short: glasgow-revD1's takes 5.7 s,
+            // and its first run came back that much late, with no time left for a second.
+            let refused = if asked.last {
+                !in_time && took.is_none_or(|t| t > host.late)
+            } else {
+                !in_time || spent.get() + took.unwrap_or_default() > cap
+            };
+            if refused {
+                return None;
+            }
+        }
+        let fills = host_fills(ad, host.base, asked.tracks, asked.vias);
+        host.took.set(Some(at.elapsed()));
+        spent.set(spent.get() + at.elapsed());
+        if deadline.is_some_and(|d| at >= d) {
+            after_deadline.set(after_deadline.get() + at.elapsed());
+        }
+        fills
+    };
+    control.refill = Some(&refill);
     let run = std::panic::AssertUnwindSafe(|| pcb::route_from(&ad.design, &ad.earlier, options, &control));
     let routed = match std::panic::catch_unwind(run) {
         Ok(Ok(r)) => r,
@@ -1363,15 +1497,22 @@ fn call(
     if routed.stopped == Some(Stopped::Cancelled) || (hooks.cancelled)() {
         return Err(RouteError::Cancelled);
     }
+    if let (Some(host), Some(d)) = (host, deadline.filter(|_| routed.stopped == Some(Stopped::Deadline))) {
+        host.over.set(Instant::now().saturating_duration_since(d).saturating_sub(after_deadline.get()));
+    }
     Ok(routed)
 }
 
 /// guide's tracks and vias as the board's (without IDs yet).
 fn convert(ad: &Adapted, routed: &pcb::Routed) -> (Vec<Track>, Vec<Via>) {
+    convert_copper(ad, &routed.tracks, &routed.vias)
+}
+
+/// Tracks and vias of guide's as the board's (without IDs yet).
+fn convert_copper(ad: &Adapted, tracks: &[gdrc::Track], vias: &[gdrc::Via]) -> (Vec<Track>, Vec<Via>) {
     let name = |n: Option<NetId>| n.and_then(|n| ad.nets.get(n.index())).cloned();
     let layer = |l: LayerId| ad.layers.get(usize::from(l.0)).cloned().unwrap_or_default();
-    let tracks = routed
-        .tracks
+    let tracks = tracks
         .iter()
         .map(|t| Track {
             id: ObjectId(0),
@@ -1384,8 +1525,7 @@ fn convert(ad: &Adapted, routed: &pcb::Routed) -> (Vec<Track>, Vec<Via>) {
             locked: false,
         })
         .collect();
-    let vias = routed
-        .vias
+    let vias = vias
         .iter()
         .map(|v| Via {
             id: ObjectId(0),
@@ -1584,6 +1724,10 @@ pub(crate) fn route(
     let start = Instant::now();
     let slots = super::routing_slots(p, &opts.layers)?;
     (hooks.progress)(0, None, "preparing");
+    // What a fill of the board takes, for the fills that guide asks for (`Host::took`): not
+    // known until one is made (the board's own fill, before routing, is kept from one command
+    // to the next and tells nothing).
+    let fill_took: Cell<Option<Duration>> = Cell::new(None);
     let items = geo::copper_items(p);
     let isl = geo::islands(&items);
     if let Scope::Nets(list) = scope {
@@ -1629,7 +1773,10 @@ pub(crate) fn route(
     let deadline = opts.budget.map(|b| start + b.mul_f64(FIRST_SHARE));
     let mut gopts = options(p, opts, &slots);
     gopts.work_budget = opts.work.left();
-    let routed = call(&ad, &gopts, deadline, hooks)?;
+    let late = opts.budget.map_or(Duration::MAX, |b| b.mul_f64(LATE_FILL));
+    let over = Cell::new(Duration::ZERO);
+    let first = Host { base: p, took: &fill_took, late, over: &over };
+    let routed = call(&ad, Some(&first), &gopts, deadline, hooks)?;
     gopts.whole = false;
     opts.work.charge(routed.stats.work);
     (hooks.progress)(0, None, &said(&routed));
@@ -1647,6 +1794,19 @@ pub(crate) fn route(
         .map(|(v, _)| (v.at.x, v.at.y))
         .collect();
     let (mut tracks, mut vias) = convert(&ad, &routed);
+    // The stubs to a plane that guide took out at its end, as cadlab's fill joins their pads
+    // without them (D114), stay on the board for the runs after this one: such a run plans
+    // a net with a plane on the plane alone, and would make each of them again on a board
+    // with less room (tinytapeout-demo at a budget of 150 million nodes: the runs that had
+    // the routes back without them ended with 72 connections open on their own board, where
+    // the first had 7). They go once the runs are over.
+    let mut spare = Spare::default();
+    {
+        let (t, v) = convert_copper(&ad, &routed.spare.0, &routed.spare.1);
+        spare.add(&BTreeSet::new(), &t, &v);
+        tracks.extend(t);
+        vias.extend(v);
+    }
     (hooks.progress)(0, None, "verifying");
     let ran = Instant::now();
     let mut drc_reason: BTreeMap<String, String> = BTreeMap::new();
@@ -1666,11 +1826,16 @@ pub(crate) fn route(
         geo::ratsnest_from(items, isl).into_iter().filter(|l| wanted(&l.net)).collect()
     };
     // Its deadline: the end of the budget less `AFTER_SHARE` times what the first run needed
-    // after it and the report, and no sooner than the first run's.
-    let second = opts
-        .budget
-        .zip(deadline)
-        .map(|(b, d)| (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + REPORT).map_or(d, |t| t.max(d)));
+    // after it, the fill that guide asks for at its end where that may be late (twice what
+    // the last took: the board has more copper by then) and the report, and no sooner than
+    // the first run's.
+    // A board that was asked for no fill yet has one in no more than this took.
+    fill_took.set(Some(fill_took.get().unwrap_or(after)));
+    let fill = fill_took.get().unwrap_or(after);
+    let second = opts.budget.zip(deadline).map(|(b, d)| {
+        let last = if fill <= late { fill * 2 } else { Duration::ZERO };
+        (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT).map_or(d, |t| t.max(d))
+    });
     for round in 1..=POUR_ROUNDS + MOVE_AGAIN {
         // The last runs are those that move routes: the first of them has what time the run
         // before it leaves, and every net left open, those that a run on the fixed board found
@@ -1683,7 +1848,11 @@ pub(crate) fn route(
             gopts.seed = Some(opts.seed.wrapping_add((round - POUR_ROUNDS) as u64 * AGAIN_SEED));
         }
         let least = if moves { MOVE_MIN } else { SECOND_MIN };
-        if stopped == Some(Stopped::WorkBudget) || second.is_some_and(|d| Instant::now() + least >= d) {
+        // Less twice what the last run that was stopped needed to end after its deadline: a
+        // run that has the routes back has more to end with (glasgow-revC3: 0.6 s after the
+        // first run's deadline, 1.1 s after the third's).
+        let until = second.map(|d| d.checked_sub(over.get() * 2).unwrap_or(d));
+        if stopped == Some(Stopped::WorkBudget) || until.is_some_and(|d| Instant::now() + least >= d) {
             break;
         }
         let left = open(&fitems, &fisl);
@@ -1721,12 +1890,25 @@ pub(crate) fn route(
             BTreeSet::new()
         };
         gopts.work_budget = opts.work.left();
-        let more = call(&ad, &gopts, second, hooks)?;
+        // The board that guide's routes of this run go on: without what it was handed to move.
+        let base = if handed.is_empty() {
+            None
+        } else {
+            let mut q = proj.clone();
+            q.board_mut().tracks.retain(|t| !handed.contains(&t.id));
+            q.board_mut().vias.retain(|v| !handed.contains(&v.id));
+            Some(q)
+        };
+        let host = Host { base: base.as_ref().unwrap_or(&proj), took: &fill_took, late, over: &over };
+        let more = call(&ad, Some(&host), &gopts, until, hooks)?;
         opts.work.charge(more.stats.work);
         work += more.stats.work;
         calls += 1;
         (hooks.progress)(0, None, &said(&more));
-        let (t, v) = convert(&ad, &more);
+        let (mut t, mut v) = convert(&ad, &more);
+        let (spare_t, spare_v) = convert_copper(&ad, &more.spare.0, &more.spare.1);
+        t.extend(spare_t.iter().cloned());
+        v.extend(spare_v.iter().cloned());
         if t.is_empty() && v.is_empty() {
             continue;
         }
@@ -1753,6 +1935,7 @@ pub(crate) fn route(
         }
         (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
         (drc_reason, stats.drc_removed) = (reasons, removed);
+        spare.add(&moved, &spare_t, &spare_v);
         stopped = stopped.or(more.stopped);
         gave_up.extend(gave_up_on(&ad, &more));
         escapes.extend(
@@ -1773,8 +1956,39 @@ pub(crate) fn route(
     // same, the stub and its via are taken out again: all of them at once, the board filled
     // again, and those put back whose pad the fill then leaves apart. Kept if the board has no
     // more open for it. After the last run, as a run for a net with a plane gives every pad
-    // that guide's own fill does not join its stub again.
+    // that guide's own fill does not join its stub again. Since D114 guide tells them
+    // itself at the end of each run, by the fill it is given then (`Refill::last`,
+    // `Routed::spare`), and they go first, for one fill of the board; the rest is for what
+    // that leaves, when there is time for its two.
     let mut pruned = 0;
+    // First those that guide itself told needless by the fill it was given at the end of
+    // its runs (D114): taken out together and the board filled once, kept if it has no more
+    // open for it.
+    if !spare.is_empty() && opts.budget.is_none_or(|b| Instant::now() + fill * 2 + REPORT < start + b) {
+        let mut q = p.clone();
+        let (mut t2, mut v2) = (tracks.clone(), vias.clone());
+        t2.retain(|t| !spare.tracks.contains(&Spare::track(t)));
+        v2.retain(|v| !spare.vias.contains(&Spare::via(v)));
+        for t in &mut t2 {
+            t.id = q.alloc_id();
+            q.board_mut().tracks.push(t.clone());
+        }
+        for v in &mut v2 {
+            v.id = q.alloc_id();
+            q.board_mut().vias.push(v.clone());
+        }
+        let items2 = geo::copper_items(&q);
+        let isl2 = geo::islands(&items2);
+        if open(&items2, &isl2).len() <= open(&fitems, &fisl).len() {
+            pruned = vias.len() - v2.len();
+            (tracks, vias, proj, fitems, fisl) = (t2, v2, q, items2, isl2);
+            (hooks.progress)(
+                0,
+                None,
+                &format!("guide: {pruned} stub(s) to a plane taken out, needless by the fill guide was given"),
+            );
+        }
+    }
     let prune = stopped != Some(Stopped::WorkBudget)
         && opts.budget.is_none_or(|b| Instant::now() + after.mul_f64(PRUNE_SHARE) + REPORT < start + b);
     if prune && !poured.is_empty() {
@@ -1854,13 +2068,10 @@ pub(crate) fn route(
                 isl2 = geo::islands(&items2);
             }
             if needed.len() < stubs.len() && open(&items2, &isl2).len() <= before {
-                pruned = vias.len() - v2.len();
+                let more = vias.len() - v2.len();
+                pruned += more;
                 (tracks, vias, proj, fitems, fisl) = (t2, v2, proj2, items2, isl2);
-                (hooks.progress)(
-                    0,
-                    None,
-                    &format!("guide: {pruned} stub(s) to a plane taken out, their pads on a pour"),
-                );
+                (hooks.progress)(0, None, &format!("guide: {more} stub(s) to a plane taken out, their pads on a pour"));
             }
         }
     }
@@ -2031,7 +2242,10 @@ pub(crate) fn route(
     stats.vias = vias.len();
     stats.length = tracks_length(&tracks);
     stats.iterations = calls;
-    stats.vias_removed = routed.stats.before_cleanup.0.saturating_sub(routed.stats.after_cleanup.0) + pruned;
+    // The stubs that guide took out at the end of its first run are counted where they go, in
+    // `pruned`, and not in its cleanup's.
+    let cleaned = routed.stats.before_cleanup.0.saturating_sub(routed.stats.after_cleanup.0 + routed.spare.1.len());
+    stats.vias_removed = cleaned + pruned;
     stats.work = work;
     stats.budget_exhausted = stopped.is_some();
     stats.fanout_vias = vias.iter().filter(|v| escapes.contains(&(v.at.x.0, v.at.y.0))).count();
@@ -2513,7 +2727,7 @@ mod tests {
         let p = project();
         let ad = adapted(&p, &["SIG", "DP", "DM"]);
         let gopts = options(&p, &RouteOptions::default(), &[0, 1]);
-        let mut r = call(&ad, &gopts, None, &Hooks::none()).expect("route");
+        let mut r = call(&ad, None, &gopts, None, &Hooks::none()).expect("route");
         assert!(r.stopped.is_none() && r.failed.is_empty() && gave_up_on(&ad, &r).is_empty(), "{:?}", r.failed);
         let sig = ad.nets.iter().position(|n| n == "SIG").expect("SIG");
         r.failed = vec![NetId(sig as u32)];
@@ -2558,7 +2772,7 @@ mod tests {
         assert_eq!(ad.tracks.len(), ad.design.board.tracks.len());
         assert!(ad.design.nets[sig].route);
         let gopts = options(&q, &RouteOptions::default(), &[0, 1]);
-        let again = call(&ad, &gopts, None, &Hooks::none()).expect("route");
+        let again = call(&ad, None, &gopts, None, &Hooks::none()).expect("route");
         assert_eq!(again.taken_back, [NetId(sig as u32)]);
         assert!(again.open.is_empty() && again.unrouted.is_empty(), "{:?}", again.open);
         let (t, v) = convert(&ad, &again);
@@ -2623,6 +2837,93 @@ mod tests {
         // A run for everything still routes and counts what the board has open.
         let r = route(&p, &Scope::All, &RouteOptions::default(), &Hooks::none()).expect("route");
         assert_eq!(r.stats.failed, 0, "{:?}", r.connections);
+    }
+
+    /// guide has cadlab's own fill around its routes when it asks for it (`RunControl::refill`,
+    /// D114): with nothing routed, the fill that the design went over with, zone for zone, and
+    /// with a track of another net through the pour, that fill with the track's room cut out.
+    #[test]
+    fn guide_is_given_cadlab_s_fill_around_its_routes() {
+        let p = project();
+        let ad = adapted(&p, &["GND", "SIG"]);
+        assert_eq!(ad.zones.len(), ad.design.zones.zones.len());
+        let fills = host_fills(&ad, &p, &[], &[]).expect("fills");
+        assert!(!fills.is_empty());
+        assert_eq!(fills, ad.design.zones.fills);
+        // A track of SIG on the back, across the middle of the pour.
+        let outline = &ad.design.zones.zones[0].outline;
+        let (x0, x1) = (outline.iter().map(|q| q.x).min().unwrap(), outline.iter().map(|q| q.x).max().unwrap());
+        let (y0, y1) = (outline.iter().map(|q| q.y).min().unwrap(), outline.iter().map(|q| q.y).max().unwrap());
+        let sig = NetId(ad.nets.iter().position(|n| n == "SIG").unwrap() as u32);
+        let mid = GPoint::new((x0 + x1) / 2, (y0 + y1) / 2);
+        let track = gdrc::Track {
+            start: GPoint::new(mid.x, y0 + 2_000_000),
+            end: GPoint::new(mid.x, y1 - 2_000_000),
+            mid: None,
+            width: 250_000,
+            layer: LayerId(1),
+            net: Some(sig),
+        };
+        let cut = host_fills(&ad, &p, std::slice::from_ref(&track), &[]).expect("fills");
+        assert_ne!(cut, fills);
+        let holds = |fills: &[Fill], q: GPoint| {
+            let dot = Shape::circle(q, 2_000).unwrap();
+            fills.iter().any(|f| f.layer == LayerId(1) && f.shape.touches(&dot))
+        };
+        assert!(holds(&fills, mid) && !holds(&cut, mid));
+        // The fills are in the design's own zones and layers, and the same when asked again.
+        assert!(cut.iter().all(|f| f.zone == 0 && f.layer == LayerId(1)));
+        assert_eq!(cut, host_fills(&ad, &p, &[track], &[]).expect("fills"));
+        // A run with a budget, which asks for them, is the same on every run.
+        let run = || {
+            let opts = RouteOptions { work: super::super::WorkMeter::limited(50_000_000), ..Default::default() };
+            route(&p, &Scope::All, &opts, &Hooks::none()).expect("route")
+        };
+        let r = run();
+        assert_eq!(r.stats.failed, 0, "{:?}", r.connections);
+        assert_eq!(r, run());
+    }
+
+    /// The stubs that guide took out as needless are known between the runs by what they are on
+    /// the board, whichever way a track was drawn, and those of a net that a later run had back
+    /// whole give way to what that run says of it (D114).
+    #[test]
+    fn the_stubs_guide_took_out_are_kept_by_net_and_place() {
+        let track = |net: &str, a: (i64, i64), b: (i64, i64)| Track {
+            id: ObjectId(0),
+            layer: "F.Cu".into(),
+            width: Nm(200_000),
+            net: Some(net.into()),
+            start: Point::new(Nm(a.0), Nm(a.1)),
+            end: Point::new(Nm(b.0), Nm(b.1)),
+            mid: None,
+            locked: false,
+        };
+        let via = |net: &str, at: (i64, i64)| Via {
+            id: ObjectId(0),
+            at: Point::new(Nm(at.0), Nm(at.1)),
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some(net.into()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        };
+        let mut spare = Spare::default();
+        assert!(spare.is_empty());
+        spare.add(
+            &BTreeSet::new(),
+            &[track("GND", (0, 0), (5, 0)), track("VCC", (0, 9), (5, 9))],
+            &[via("GND", (5, 0))],
+        );
+        assert!(spare.tracks.contains(&Spare::track(&track("GND", (5, 0), (0, 0)))));
+        assert!(!spare.tracks.contains(&Spare::track(&track("VCC", (5, 0), (0, 0)))));
+        assert!(spare.vias.contains(&Spare::via(&via("GND", (5, 0)))));
+        // A run that had GND back whole and took one other stub of it out.
+        spare.add(&["GND"].into(), &[track("GND", (7, 7), (8, 8))], &[via("GND", (8, 8))]);
+        assert_eq!(spare.tracks.len(), 2);
+        assert!(spare.tracks.contains(&Spare::track(&track("VCC", (0, 9), (5, 9)))));
+        assert!(!spare.vias.contains(&Spare::via(&via("GND", (5, 0)))) && spare.vias.len() == 1);
     }
 
     /// What guide is told beside the board: no fill of its own at the end and no joining of zones'

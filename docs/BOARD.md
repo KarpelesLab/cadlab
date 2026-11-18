@@ -261,6 +261,9 @@ guide the `dirs` spokes as the ones whose room is kept, the `alt` spokes as spar
 by any of the eight that no route crosses, and holds harder the spokes of a pad whose `dirs` are no more than the
 minimum. The count per pad while routing, with a price that rises as the free spokes fall to the minimum, was
 built in guide's negotiation and is no gain (D113, "Tried and not kept").
+Since guide 0.0.18 (D114) the adapter also gives guide the fill itself, around its routes as they stand,
+when guide asks for it (`router::guide::host_fills`): the pads that routes cut off their pours are then told by
+the islands of that fill, and a pad whose spokes no longer reach it is one of them.
 
 Not covered: the native router does not keep the sides of relieved pads free for their spokes (what the
 routers leave is counted by `route_bench --corpus` with `CADLAB_BENCH_THERMALS=1`, reported by the router

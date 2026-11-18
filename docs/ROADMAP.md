@@ -342,22 +342,22 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       keeps apart found once, told as such and left out of the later runs (`Cause::Apart`: sweep-v2.2's two
       nets across its halves); a net with zones has its run on the filled board whatever the first run said
       of it. The default stays the native router
-- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D113,
-      with guide 0.0.17 and its negotiation for every net at once in the first run: level on the three small
-      boards and sweep-v2.2; ahead in every run on buspirate5-rev10, lumenpnp-mobo, cynthion and glasgow-revD1;
-      ranges that overlap on tinytapeout-demo (0 to 4 against 2 to 15), glasgow-revC3 (31 to 35 against 31 to
-      36) and nrfmicro (0 to 1 against 0); behind on corne-cherry, 5 to 10 against 0 to 4): needs, in guide,
-      the host's fill in the pour rounds of its negotiation in place of its own estimate (every connection
-      corne-cherry has open is a pad that cadlab's fill leaves cut off from its pour and guide's cells had told
-      joined; 3 open in both orders at a budget of 150 million nodes), a negotiation that a board of six layers
-      at a pitch of 0.1 mm has the time for (glasgow-revD1 is given up to guide's passes, whose searches are
-      where its minute goes, 31 of 33 s: nothing between the turns to remove, D113), fewer vias (lumenpnp-mobo
-      409 to 529 against 336 to 343, of which some 250 are stubs to its planes; tinytapeout-demo 379 to 494
-      against 240 to 290), and rule areas with a routed track width (D113, "Gaps"; D110, "Gaps"; D108,
-      "Gaps"; D106, "Gaps"; D104,
-      "Gaps"; D101,
-      "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93, "Gaps"; D91, "What got in the way"; D88, "What still
-      blocks it"). Done since D110 (D113): every net routed against every other at once on one grid before
+- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D114,
+      with guide 0.0.18 and cadlab's own fill given to it while it routes: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, nrfmicro, sweep-v2.2;
+      ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 4 to 33; cynthion 11 to 12 against 28 to 29; glasgow-revD1 118 to 135 against 238 to 250; ranges that overlap on corne-cherry 0 to 2 against 0 to 4; tinytapeout-demo 0 to 4 against 2 to 15; glasgow-revC3 31 to 35 against 31 to 37;
+      behind in every run on none): the default is unchanged, and the switch is the user's. Left, in
+      guide: the vias of the nets that are no stubs (lumenpnp-mobo some 280 where the native router has some 207;
+      vias in all lumenpnp-mobo 402 to 411 against 309 to 343, tinytapeout-demo 385 to 427 against 238 to 290, sweep-v2.2 18 to 24 against 21 to 28, glasgow-revC3 379 to 403 against 415 to 439, buspirate5-rev10 349 to 372 against 291 to 314, cynthion 604 to 699 against 469 to 482, corne-cherry 534 to 625 against 445 to 505, glasgow-revD1 1202 to 1253 against 877 to 932),
+      a negotiation that a board of six layers at a pitch of 0.1 mm has the time for (glasgow-revD1, not
+      touched in D114), and rule areas with a routed track width (D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
+      D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D113 (D114): cadlab's fill of
+      the zones around guide's routes given to guide when it asks (guide 0.0.18, `RunControl::refill`,
+      `host_fills`), by which it tells the pads cut off their pours (corne-cherry 0 to 2 open for 5 to 10);
+      a wire of its negotiation that ends where the fill is no more routed again; a negotiation that ends with
+      points shared begun again in another order (nrfmicro 0 for 0 to 1); the stubs to a plane that a pour
+      makes needless taken out by the fill guide is given at the end of each run, kept on the board between the
+      runs and taken out once they are over. Done since D110 (D113): every net routed against every other at once on one grid before
       guide's passes, as the native router's negotiation does (guide 0.0.17, `RouteOptions::whole`: corne-cherry
       5 to 10 open for 15 to 21, nrfmicro 0 to 1 for 0 to 2 and closed in 7 to 18 s in three orders of four, the
       eleven boards without glasgow-revD1 55 to 59 for 70 to 84); the spare spokes and the number a pad keeps
