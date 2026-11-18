@@ -1,6 +1,6 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114 and D115;
-//! docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115 and
+//! D116; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -38,7 +38,11 @@
 //! of each run. Once the runs are over, every via that the fill of the routed board makes needless
 //! is told from that fill, with none made for it ([`needless`], `pcb::needless`, D115), and taken
 //! out with the tracks that led to it; a heat pad is named to guide as one that vias of its net may
-//! be in where no track leaves it (`Zones::via_pads`, D115). What guide's API cannot express is passed the stricter way and named in
+//! be in where no track leaves it (`Zones::via_pads`, D115). With them go the tracks from pad to
+//! pad that a pour joins as well (`pcb::needless_between`, D116), the board filled without them
+//! and what a connection or a pad's relief needs put back; and where the runs leave the time,
+//! guide has the routes back once more to look for a shorter way for each run of tracks
+//! (`RouteOptions::shorten`, D116). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -1294,6 +1298,11 @@ const SPARE_NEAR: i64 = 3_000_000;
 /// The most tracks a stub to a plane has (`route`, "The stubs that the fill makes needless").
 const STUB_TRACKS: usize = 4;
 
+/// How far from a pad that taking tracks out left short of its spokes those of its net go back
+/// in (D116): the pad's own tracks end at it, and those of the pads beside it are what let the
+/// pour in or kept it out.
+const PAD_NEAR: i64 = 1_500_000;
+
 /// What taking the needless stubs out needs, in times what the first run needed after it: two
 /// fills of the board.
 const PRUNE_SHARE: f64 = 2.5;
@@ -1330,44 +1339,23 @@ fn stub_pieces(
         .collect()
 }
 
-/// The stubs to a plane that guide's runs took out as needless (`Routed::spare`, D114), by
-/// what they are on the board: tracks by net, layer and ends, vias by net and place. They
-/// stay on the board between the runs, and go once the runs are over.
-#[derive(Default)]
-struct Spare {
-    tracks: BTreeSet<(String, String, [i64; 4])>,
-    vias: BTreeSet<(String, i64, i64)>,
-}
-
-impl Spare {
-    fn track(t: &Track) -> (String, String, [i64; 4]) {
-        let (a, b) = ((t.start.x.0, t.start.y.0), (t.end.x.0, t.end.y.0));
-        let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        (t.net.clone().unwrap_or_default(), t.layer.clone(), [a.0, a.1, b.0, b.1])
-    }
-
-    fn via(v: &Via) -> (String, i64, i64) {
-        (v.net.clone().unwrap_or_default(), v.at.x.0, v.at.y.0)
-    }
-
-    /// Adds the stubs that a run took out, which come back as `tracks` and `vias` of the
-    /// board: those of the nets `moved`, which the run had back whole, in place of what
-    /// was known of them.
-    fn add(&mut self, moved: &BTreeSet<&str>, tracks: &[Track], vias: &[Via]) {
-        self.tracks.retain(|k| !moved.contains(k.0.as_str()));
-        self.vias.retain(|k| !moved.contains(k.0.as_str()));
-        self.tracks.extend(tracks.iter().map(Spare::track));
-        self.vias.extend(vias.iter().map(Spare::via));
-    }
-
-    fn is_empty(&self) -> bool {
-        self.tracks.is_empty() && self.vias.is_empty()
-    }
-}
-
 /// The least time a run that takes the routes back is begun with: it places every route
 /// before it routes anything.
 const MOVE_MIN: Duration = Duration::from_secs(3);
+
+/// By pad and layer (designator, number, layer), where the pad is, its net, the necks of copper
+/// that reach it (as many as there can be for a pad in no pour) and whether it is short of its
+/// spokes (D116).
+type PadNecks = BTreeMap<(String, String, String), (Point, String, u8, bool)>;
+
+/// The least time that the run for shorter ways has for its searches (D116), for it to be
+/// begun.
+const SHORTER_MIN: Duration = Duration::from_millis(1500);
+
+/// How many times at most what the run for shorter ways returns is verified (D116): as it is,
+/// and with the nets back as they were whose new routes leave a connection open or break a
+/// rule beside those.
+const SHORTER_AGAIN: usize = 3;
 
 fn phase(p: Phase) -> &'static str {
     match p {
@@ -1560,10 +1548,17 @@ fn convert_copper(ad: &Adapted, tracks: &[gdrc::Track], vias: &[gdrc::Via]) -> (
 }
 
 /// What of guide's routes `tracks` and `vias` the fill of the board with them on it makes
-/// needless (`pcb::needless`, guide 0.0.19, D115), by position: `items` are the copper items of
+/// needless (`pcb::needless`, guide 0.0.19, D115; with `between`, `pcb::needless_between`, the
+/// tracks from pad to pad that a fill joins as well, guide 0.0.20, D116), by position: `items` are the copper items of
 /// that board, fills included, and `ad` the first run's design, with none of guide's copper in
 /// it. Nothing is filled here: the fill is the one that counted the run.
-fn needless(ad: &Adapted, tracks: &[Track], vias: &[Via], items: &[CopperItem]) -> (Vec<usize>, Vec<usize>) {
+fn needless(
+    ad: &Adapted,
+    tracks: &[Track],
+    vias: &[Via],
+    items: &[CopperItem],
+    between: bool,
+) -> (Vec<usize>, Vec<usize>) {
     let Some(fills) = fills_of(ad, items) else { return Default::default() };
     // The nets are in the order of their names.
     let net = |n: &Option<String>| n.as_ref().and_then(|n| ad.nets.binary_search(n).ok()).map(|i| NetId(i as u32));
@@ -1595,7 +1590,11 @@ fn needless(ad: &Adapted, tracks: &[Track], vias: &[Via], items: &[CopperItem]) 
         });
         at_v.push(i);
     }
-    let (t, v) = pcb::needless(&ad.design, &gt, &gv, &fills);
+    let (t, v) = if between {
+        pcb::needless_between(&ad.design, &gt, &gv, &fills)
+    } else {
+        pcb::needless(&ad.design, &gt, &gv, &fills)
+    };
     (t.into_iter().map(|k| at_t[k]).collect(), v.into_iter().map(|k| at_v[k]).collect())
 }
 
@@ -1857,11 +1856,10 @@ pub(crate) fn route(
     // a net with a plane on the plane alone, and would make each of them again on a board
     // with less room (tinytapeout-demo at a budget of 150 million nodes: the runs that had
     // the routes back without them ended with 72 connections open on their own board, where
-    // the first had 7). They go once the runs are over.
-    let mut spare = Spare::default();
+    // the first had 7). They go once the runs are over, with whatever else the fill of the
+    // board as it is then makes needless.
     {
         let (t, v) = convert_copper(&ad, &routed.spare.0, &routed.spare.1);
-        spare.add(&BTreeSet::new(), &t, &v);
         tracks.extend(t);
         vias.extend(v);
     }
@@ -1880,6 +1878,7 @@ pub(crate) fn route(
     // those a run that ended found no way for, and after a run that its deadline stopped every
     // net left open. And a last one, which takes the routes back to move them.
     let poured: BTreeSet<&str> = p.board().zones.iter().filter_map(|z| z.net.as_deref()).collect();
+    let between = !poured.is_empty();
     let open = |items: &[CopperItem], isl: &[usize]| -> Vec<RatLine> {
         geo::ratsnest_from(items, isl).into_iter().filter(|l| wanted(&l.net)).collect()
     };
@@ -1891,7 +1890,13 @@ pub(crate) fn route(
     fill_took.set(Some(fill_took.get().unwrap_or(after)));
     let fill = fill_took.get().unwrap_or(after);
     let second = opts.budget.zip(deadline).map(|(b, d)| {
-        let last = if fill <= short { fill * 2 } else { Duration::ZERO };
+        // And, where the nets with pours may have tracks to take out between their pads
+        // (D116), a fill more and the counts of the joints of the pads in pours.
+        let last = match (fill <= short, between) {
+            (true, true) => fill * 3 + after,
+            (true, false) => fill * 2,
+            (false, _) => Duration::ZERO,
+        };
         (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT).map_or(d, |t| t.max(d))
     });
     for round in 1..=POUR_ROUNDS + MOVE_AGAIN {
@@ -1965,8 +1970,8 @@ pub(crate) fn route(
         (hooks.progress)(0, None, &said(&more));
         let (mut t, mut v) = convert(&ad, &more);
         let (spare_t, spare_v) = convert_copper(&ad, &more.spare.0, &more.spare.1);
-        t.extend(spare_t.iter().cloned());
-        v.extend(spare_v.iter().cloned());
+        t.extend(spare_t);
+        v.extend(spare_v);
         if t.is_empty() && v.is_empty() {
             continue;
         }
@@ -1993,7 +1998,6 @@ pub(crate) fn route(
         }
         (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
         (drc_reason, stats.drc_removed) = (reasons, removed);
-        spare.add(&moved, &spare_t, &spare_v);
         stopped = stopped.or(more.stopped);
         gave_up.extend(gave_up_on(&ad, &more));
         escapes.extend(
@@ -2008,98 +2012,312 @@ pub(crate) fn route(
         opens.extend(explain_all(&ad, &more, false));
     }
 
-    // The stubs that the fill makes needless (D108): guide gives every pad of a net with a
-    // plane a stub through a via to it, and plans on no pour of an outer layer, which routes
-    // cut. Where cadlab's fill around the routed board joins such a pad to its net all the
-    // same, the stub and its via are taken out again: all of them at once, the board filled
-    // again, and those put back whose pad the fill then leaves apart. Kept if the board has no
-    // more open for it. After the last run, as a run for a net with a plane gives every pad
-    // that guide's own fill does not join its stub again. Since D114 guide tells them
-    // itself at the end of each run, by the fill it is given then (`Refill::last`,
-    // `Routed::spare`), and they go first, for one fill of the board; the rest is for what
-    // that leaves, when there is time for its two.
-    let mut pruned = 0;
-    // First those that guide itself told needless by the fill it was given at the end of
-    // its runs (D114): taken out together and the board filled once, kept if it has no more
-    // open for it. And with them what the fill of the board as it is now makes needless
-    // (D115): the fill that counted the last run is there, where a run that ended on its
-    // deadline was given none (tinytapeout-demo, cynthion, the two glasgows), and it says
-    // more than the fill each run was given, as what one run left needed another joined.
-    // With the time of one fill: the second, for what the first opens, is made if there is
-    // time for it then (tinytapeout-demo: a last run back at 56.6 s of 60 left no time for two,
-    // and 490 vias in that order of four).
-    let in_time = opts.budget.is_none_or(|b| Instant::now() + fill + REPORT < start + b);
-    if in_time {
-        // In place of what the runs told, each by its own fill: all of that is still on
-        // the board, and is told again by this one.
-        let (t, v) = needless(&ad, &tracks, &vias, &fitems);
-        spare.tracks = t.into_iter().map(|i| Spare::track(&tracks[i])).collect();
-        spare.vias = v.into_iter().map(|i| Spare::via(&vias[i])).collect();
-    }
-    if !spare.is_empty() && in_time {
-        // The board without them, filled.
-        let without = |spare: &Spare| {
-            let mut q = p.clone();
-            let (mut t2, mut v2) = (tracks.clone(), vias.clone());
-            t2.retain(|t| !spare.tracks.contains(&Spare::track(t)));
-            v2.retain(|v| !spare.vias.contains(&Spare::via(v)));
-            for t in &mut t2 {
-                t.id = q.alloc_id();
-                q.board_mut().tracks.push(t.clone());
-            }
-            for v in &mut v2 {
-                v.id = q.alloc_id();
-                q.board_mut().vias.push(v.clone());
-            }
-            let items2 = geo::copper_items(&q);
-            let isl2 = geo::islands(&items2);
-            (t2, v2, q, items2, isl2)
-        };
+    // A shorter way for each run of tracks, once the runs are over, where they leave the time
+    // (D116). A net keeps the way round another that has moved since, and a negotiation
+    // leaves every route where the prices of its rounds put it: guide has the routes back
+    // once more, as a run that moves routes has them, with nothing to route and no right to
+    // take a net out, and in its cleanup takes each run of a net's tracks from one pad or
+    // branch to the next that costs more than the straight way and looks for it again, the
+    // others where they are (`RouteOptions::shorten`, guide 0.0.20). A track that goes
+    // another way may cut a pour where the old one did not: guide tells the pads that this
+    // cuts off the fills it plans on, and joins them again. Verified as any run, and kept if
+    // the check takes nothing out of it and the board has no more open.
+    //
+    // In a run of its own, and with no time kept for it. Made shorter at the end of the
+    // first run, the routes of nrfmicro left its last connection with no way in the five
+    // runs after it, in one order of four, and lumenpnp-mobo's first run ended 4 to 7 s
+    // later, with no time for the run that closed its last connection. And with 6 % of the
+    // budget and four verifications kept for it, the boards that a minute does not finish
+    // had no time for a run that moves routes: over four orders tinytapeout-demo 13 and 16
+    // open for 6, lumenpnp-mobo 4 and 5 for none, glasgow-revC3 36 for 22, for 5 % of
+    // tinytapeout-demo's track, 3 % of glasgow-revC3's and 1 % of lumenpnp-mobo's. So it is
+    // for the boards whose runs end early, and for the budgets that leave room.
+    let reserve = |b: Duration| {
+        let last = if fill <= short { fill * 3 + after } else { Duration::ZERO };
+        (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT)
+    };
+    // With the time to get the routes back, to look, and to verify what comes of it.
+    let room = opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| Instant::now() + after + SHORTER_MIN < t));
+    if room && stopped != Some(Stopped::WorkBudget) && !tracks.is_empty() {
+        (hooks.progress)(0, None, "guide: looking for shorter ways");
         let was = open(&fitems, &fisl);
-        let mut less = without(&spare);
-        // Copper taken out leaves room, and another net's pour may fill it: the fill that
-        // joined a pad is then another, and the pad is open (cynthion: a strip of the
-        // ground's pour beside a stub, which the pour of a supply took with the stub gone).
-        // What was taken out of such a net near such a connection goes back in, once.
-        let more: Vec<RatLine> = {
-            let had: BTreeSet<(&str, &str, &str)> =
-                was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
-            open(&less.3, &less.4)
-                .into_iter()
-                .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
-                .collect()
+        // The routes of a net with a connection open stay where they are, as copper of the
+        // board, but those of a net with a zone, which guide plans on its fill. And those of
+        // a pair's nets and of a net with a length to keep, as the first run was given them,
+        // which are side by side or as long as they are to be: a shorter way is neither.
+        let held: BTreeSet<String> = ad
+            .design
+            .pairs
+            .iter()
+            .flat_map(|d| [d.positive, d.negative])
+            .chain(ad.design.lengths.iter().flat_map(|l| l.nets.iter().copied()))
+            .filter_map(|n| ad.nets.get(n.index()).cloned())
+            .collect();
+        let mut ad = adapt(&proj, &fitems, &BTreeSet::new(), opts)?;
+        let whole = |net: &Option<String>| {
+            net.as_deref().is_some_and(|n| !held.contains(n) && (poured.contains(n) || !was.iter().any(|l| l.net == n)))
         };
-        let again = opts.budget.is_none_or(|b| Instant::now() + fill + REPORT < start + b);
-        if !more.is_empty() && again {
-            let near = |net: &str, x: i64, y: i64| {
-                more.iter().any(|l| {
-                    let (x0, x1) = (l.from_at.x.0.min(l.to_at.x.0), l.from_at.x.0.max(l.to_at.x.0));
-                    let (y0, y1) = (l.from_at.y.0.min(l.to_at.y.0), l.from_at.y.0.max(l.to_at.y.0));
-                    l.net == net
-                        && x >= x0 - SPARE_NEAR
-                        && x <= x1 + SPARE_NEAR
-                        && y >= y0 - SPARE_NEAR
-                        && y <= y1 + SPARE_NEAR
-                })
+        let mine: BTreeSet<ObjectId> = tracks
+            .iter()
+            .filter(|t| whole(&t.net))
+            .map(|t| t.id)
+            .chain(vias.iter().filter(|v| whole(&v.net)).map(|v| v.id))
+            .collect();
+        let handed = ad.take_back(&mine);
+        let mut g = gopts;
+        g.shorten = true;
+        g.whole = false;
+        g.settle = false;
+        g.negotiate = false;
+        g.fine_pass = false;
+        g.rip_ups = 0;
+        g.seed = (opts.seed != 0).then_some(opts.seed);
+        g.work_budget = opts.work.left();
+        // With no fill asked of the host: guide tells what it cuts off by its own count of
+        // the fills, and the check after it is the board's.
+        let more = call(&ad, None, &g, opts.budget.and_then(reserve), hooks)?;
+        opts.work.charge(more.stats.work);
+        work += more.stats.work;
+        calls += 1;
+        (hooks.progress)(0, None, &said(&more));
+        let (mut t, mut v) = convert(&ad, &more);
+        let (spare_t, spare_v) = convert_copper(&ad, &more.spare.0, &more.spare.1);
+        t.extend(spare_t);
+        v.extend(spare_v);
+        let moved: BTreeSet<&str> =
+            more.taken_back.iter().filter_map(|n| ad.nets.get(n.index())).map(String::as_str).collect();
+        // The nets that keep the routes they had: none at first. Guide tells the pads that
+        // its new routes cut off the fills it plans on, and a pour that it does not plan on,
+        // as one of an outer layer beside a plane, may be cut all the same (cynthion: two
+        // pads in ten runs). The nets with new copper at an end of a connection that is open
+        // now and was not, and those that the check takes copper out of once others are
+        // back where they were, have their old routes back, and the rest is verified again,
+        // three times at most.
+        let mut old: BTreeSet<String> = BTreeSet::new();
+        let had: BTreeSet<(&str, &str, &str)> =
+            was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
+        for _ in 0..SHORTER_AGAIN {
+            let new = |net: &Option<String>| net.as_deref().is_some_and(|n| moved.contains(n) && !old.contains(n));
+            let (mut tracks2, mut vias2) = (tracks.clone(), vias.clone());
+            tracks2.retain(|t| !(handed.contains(&t.id) && new(&t.net)));
+            vias2.retain(|v| !(handed.contains(&v.id) && new(&v.net)));
+            // Of a net that guide did not take back, a net with a zone, what it has added.
+            let fresh = |net: &Option<String>| new(net) || !net.as_deref().is_some_and(|n| moved.contains(n));
+            tracks2.extend(t.iter().filter(|t| fresh(&t.net)).cloned());
+            vias2.extend(v.iter().filter(|v| fresh(&v.net)).cloned());
+            let (mut reasons, mut removed) = (drc_reason.clone(), stats.drc_removed);
+            let proj2 = verify(p, &mut tracks2, &mut vias2, &mut reasons, &mut removed);
+            let items2 = geo::copper_items(&proj2);
+            let isl2 = geo::islands(&items2);
+            let now = open(&items2, &isl2);
+            if removed == stats.drc_removed && now.len() <= was.len() {
+                let (mm, n) =
+                    (tracks_length(&tracks).0 - tracks_length(&tracks2).0, vias.len() as i64 - vias2.len() as i64);
+                (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
+                (hooks.progress)(
+                    0,
+                    None,
+                    &format!(
+                        "guide: {:.1} mm of track and {n} via(s) less by shorter ways, {} net(s) as they were",
+                        mm as f64 / 1e6,
+                        old.len()
+                    ),
+                );
+                break;
+            }
+            let in_time =
+                opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| Instant::now() + after.mul_f64(AFTER_SHARE) < t));
+            if !in_time {
+                break;
+            }
+            let ends: Vec<Point> = now
+                .iter()
+                .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                .flat_map(|l| [l.from_at, l.to_at])
+                .collect();
+            // A track by its box, which is near enough for one that passes a pad.
+            let at = |a: Point, b: Point| {
+                let (x0, x1) = (a.x.0.min(b.x.0) - PAD_NEAR, a.x.0.max(b.x.0) + PAD_NEAR);
+                let (y0, y1) = (a.y.0.min(b.y.0) - PAD_NEAR, a.y.0.max(b.y.0) + PAD_NEAR);
+                ends.iter().any(|e| e.x.0 >= x0 && e.x.0 <= x1 && e.y.0 >= y0 && e.y.0 <= y1)
             };
-            spare.tracks.retain(|(net, _, at)| !(near(net, at[0], at[1]) || near(net, at[2], at[3])));
-            spare.vias.retain(|(net, x, y)| !near(net, *x, *y));
-            less = without(&spare);
-        }
-        let (t2, v2, q, items2, isl2) = less;
-        if open(&items2, &isl2).len() <= was.len() {
-            pruned = vias.len() - v2.len();
-            (tracks, vias, proj, fitems, fisl) = (t2, v2, q, items2, isl2);
-            (hooks.progress)(
-                0,
-                None,
-                &format!(
-                    "guide: {pruned} via(s) to a plane or a pour taken out, needless by the fill of the routed board"
-                ),
+            let before = old.len();
+            old.extend(
+                t.iter()
+                    .filter(|t| new(&t.net) && at(t.start, t.end))
+                    .filter_map(|t| t.net.clone())
+                    .chain(v.iter().filter(|v| new(&v.net) && at(v.at, v.at)).filter_map(|v| v.net.clone()))
+                    .collect::<Vec<_>>(),
             );
+            old.extend(
+                reasons
+                    .keys()
+                    .filter(|n| !drc_reason.contains_key(*n) && moved.contains(n.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            if old.len() == before {
+                break;
+            }
         }
     }
+
+    let mut pruned = 0;
+    // What the fill of the board as it is now makes needless (D115), in place of what each
+    // run told by the fill it was given, all of which is still on the board: every via that
+    // the pads of its net are joined without, with the tracks that led to it. And with them
+    // the tracks from pad to pad that a pour joins as well (D116): a net with a pour is
+    // joined up again by tracks each time the routes of others cut the pour, while those
+    // still move, and a pad off its plane is taken to the pad beside it where that is nearer
+    // than a via; once the routes are where they stay, the pour reaches many of those pads
+    // all the same. The fill without such copper is another fill: the room it leaves may go
+    // to another net's pour (cynthion: a strip of the ground's pour beside a stub, which the
+    // pour of a supply took with the stub gone), and a pad that a track reached has a neck
+    // less. So in two steps, each with the time of its fills and its counts of the joints
+    // before it is begun (tinytapeout-demo: a last run back at 56.6 s of 60 left no time for
+    // two fills, D115). First the vias and what led to them, as D115 had it: taken out
+    // together and the board filled once; what was taken from a net near a connection that
+    // this opens goes back in and the board is filled once more; kept if it then has no more
+    // open. Then the tracks between pads the same way, where a pad that this leaves short of
+    // its spokes, or with fewer necks than it had and fewer than two, has what was taken
+    // from its net near it back as well; kept if the board has no more open and no pad is
+    // worse off for its relief. Both at once, with one fill for the two, left
+    // tinytapeout-demo with nothing taken out in three orders of four, where the second
+    // fill did not mend what the first had made worse: 400 to 462 vias for 362 to 462.
+    let joint_took = Cell::new(None::<Duration>);
+    let pads_of = |q: &Project, items: &[CopperItem]| -> PadNecks {
+        let t = Instant::now();
+        let rules = &q.board().rules;
+        let m = geo::thermal::joints_of(q, items, &|net| poured.contains(net))
+            .into_iter()
+            .map(|j| {
+                let short = j.starved(rules.min_thermal_spokes, rules.thermal_max_contact);
+                let necks = if j.in_pour() { j.necks } else { u8::MAX };
+                ((j.refdes, j.number, j.layer), (j.at, j.net, necks, short))
+            })
+            .collect();
+        joint_took.set(Some(joint_took.get().map_or(t.elapsed(), |d: Duration| d.max(t.elapsed()))));
+        m
+    };
+    // Whether there is time for so many fills and counts of the joints: a count is taken for
+    // a third of what the first run needed after it until one is timed.
+    let time_for = |fills: u32, counts: u32| {
+        opts.budget.is_none_or(|b| {
+            let count = joint_took.get().unwrap_or(after / 3);
+            Instant::now() + fill * fills + count * counts + REPORT < start + b
+        })
+    };
+    for between in [false, true] {
+        // The second step is begun with the time of all it may need: begun with less, it
+        // ended before its second fill on cynthion in three orders of four, with nothing
+        // to show for the first.
+        if (between && poured.is_empty()) || !(if between { time_for(2, 3) } else { time_for(1, 0) }) {
+            continue;
+        }
+        let (t_all, v_all) = needless(&ad, &tracks, &vias, &fitems, between);
+        if !(t_all.is_empty() && v_all.is_empty()) {
+            let was = open(&fitems, &fisl);
+            let was_pads = if between { pads_of(&proj, &fitems) } else { BTreeMap::new() };
+            // The board without them, filled.
+            let without = |gt: &BTreeSet<usize>, gv: &BTreeSet<usize>| {
+                let mut q = p.clone();
+                let mut t2: Vec<Track> =
+                    tracks.iter().enumerate().filter(|(i, _)| !gt.contains(i)).map(|(_, t)| t.clone()).collect();
+                let mut v2: Vec<Via> =
+                    vias.iter().enumerate().filter(|(i, _)| !gv.contains(i)).map(|(_, v)| v.clone()).collect();
+                for t in &mut t2 {
+                    t.id = q.alloc_id();
+                    q.board_mut().tracks.push(t.clone());
+                }
+                for v in &mut v2 {
+                    v.id = q.alloc_id();
+                    q.board_mut().vias.push(v.clone());
+                }
+                let items2 = geo::copper_items(&q);
+                let isl2 = geo::islands(&items2);
+                (t2, v2, q, items2, isl2)
+            };
+            // What is worse on a board, each as its net and the place round it: the pads,
+            // counted, and then the connections that are open now and were not.
+            let worse = |q: &Project, items: &[CopperItem], isl: &[usize]| -> (usize, Vec<(String, [i64; 4])>) {
+                let mut out: Vec<(String, [i64; 4])> = Vec::new();
+                if between {
+                    for (key, (at, net, necks, short)) in pads_of(q, items) {
+                        let Some(&(_, _, had, was_short)) = was_pads.get(&key) else { continue };
+                        if (short && !was_short) || (necks < had && necks < 2) {
+                            out.push((
+                                net,
+                                [at.x.0 - PAD_NEAR, at.y.0 - PAD_NEAR, at.x.0 + PAD_NEAR, at.y.0 + PAD_NEAR],
+                            ));
+                        }
+                    }
+                }
+                let pads = out.len();
+                let had: BTreeSet<(&str, &str, &str)> =
+                    was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
+                out.extend(
+                    open(items, isl)
+                        .into_iter()
+                        .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                        .map(|l| {
+                            let (x0, x1) = (l.from_at.x.0.min(l.to_at.x.0), l.from_at.x.0.max(l.to_at.x.0));
+                            let (y0, y1) = (l.from_at.y.0.min(l.to_at.y.0), l.from_at.y.0.max(l.to_at.y.0));
+                            (l.net, [x0 - SPARE_NEAR, y0 - SPARE_NEAR, x1 + SPARE_NEAR, y1 + SPARE_NEAR])
+                        }),
+                );
+                (pads, out)
+            };
+            let (mut gt, mut gv): (BTreeSet<usize>, BTreeSet<usize>) =
+                (t_all.into_iter().collect(), v_all.into_iter().collect());
+            let mut kept = None;
+            for round in 0..2 {
+                if (gt.is_empty() && gv.is_empty()) || !time_for(1, u32::from(between)) {
+                    break;
+                }
+                let less = without(&gt, &gv);
+                let (pads, bad) = worse(&less.2, &less.3, &less.4);
+                if pads == 0 && open(&less.3, &less.4).len() <= was.len() {
+                    kept = Some(less);
+                    break;
+                }
+                if round > 0 {
+                    break;
+                }
+                let near = |net: Option<&str>, x: i64, y: i64| {
+                    bad.iter().any(|(n, b)| Some(n.as_str()) == net && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3])
+                };
+                let before = gt.len() + gv.len();
+                gt.retain(|&i| {
+                    let t = &tracks[i];
+                    !(near(t.net.as_deref(), t.start.x.0, t.start.y.0) || near(t.net.as_deref(), t.end.x.0, t.end.y.0))
+                });
+                gv.retain(|&i| !near(vias[i].net.as_deref(), vias[i].at.x.0, vias[i].at.y.0));
+                if gt.len() + gv.len() == before {
+                    break;
+                }
+            }
+            if let Some((t2, v2, q, items2, isl2)) = kept {
+                let gone = vias.len() - v2.len();
+                pruned += gone;
+                let (n, mm) = (tracks.len() - t2.len(), tracks_length(&tracks).0 - tracks_length(&t2).0);
+                (tracks, vias, proj, fitems, fisl) = (t2, v2, q, items2, isl2);
+                (hooks.progress)(
+                    0,
+                    None,
+                    &format!(
+                        "guide: {gone} via(s) and {n} track(s), {:.1} mm, taken out, needless by the fill of the routed board{}",
+                        mm as f64 / 1e6,
+                        if between { ": tracks between pads that a pour joins" } else { "" }
+                    ),
+                );
+            }
+        }
+    }
+    // With the time of its two fills, by what a fill takes: by the first run's verification
+    // alone, tinytapeout-demo's began at 57.7 s of 60 in one order of four, after a first step
+    // that had kept nothing, and came back at 60.5 s (D116).
     let prune = stopped != Some(Stopped::WorkBudget)
+        && time_for(2, 0)
         && opts.budget.is_none_or(|b| Instant::now() + after.mul_f64(PRUNE_SHARE) + REPORT < start + b);
     if prune && !poured.is_empty() {
         let piece = pieces(&tracks, &vias);
@@ -3027,7 +3245,7 @@ mod tests {
             };
             (t, v)
         };
-        let told = |stubs: &[(Track, Via)]| {
+        let told = |stubs: &[(Track, Via)], between: bool| {
             let mut q = p.clone();
             let (mut tracks, mut vias) = (Vec::new(), Vec::new());
             for (t, v) in stubs {
@@ -3039,10 +3257,14 @@ mod tests {
                 tracks.push(t);
                 vias.push(v);
             }
-            needless(&ad, &tracks, &vias, &geo::copper_items(&q))
+            needless(&ad, &tracks, &vias, &geo::copper_items(&q), between)
         };
-        assert_eq!(told(&[stub(2_000_000), stub(-2_000_000)]), (vec![0], vec![0]));
-        assert_eq!(told(&[stub(-2_000_000)]), (vec![], vec![]));
+        assert_eq!(told(&[stub(2_000_000), stub(-2_000_000)], false), (vec![0], vec![0]));
+        assert_eq!(told(&[stub(-2_000_000)], false), (vec![], vec![]));
+        // Asked for the tracks between pads that a fill joins as well (D116), the same: the
+        // stub that is left is all that joins its pad.
+        assert_eq!(told(&[stub(2_000_000), stub(-2_000_000)], true), (vec![0], vec![0]));
+        assert_eq!(told(&[stub(-2_000_000)], true), (vec![], vec![]));
     }
 
     /// A heat pad is named to guide as one that vias of its net may be in (D115): the exposed
@@ -3066,48 +3288,6 @@ mod tests {
         assert_eq!(ad.design.zones.via_pads, [exposed]);
         // The board without it names none.
         assert!(adapted(&project(), &["GND", "SIG"]).design.zones.via_pads.is_empty());
-    }
-
-    /// The stubs that guide took out as needless are known between the runs by what they are on
-    /// the board, whichever way a track was drawn, and those of a net that a later run had back
-    /// whole give way to what that run says of it (D114).
-    #[test]
-    fn the_stubs_guide_took_out_are_kept_by_net_and_place() {
-        let track = |net: &str, a: (i64, i64), b: (i64, i64)| Track {
-            id: ObjectId(0),
-            layer: "F.Cu".into(),
-            width: Nm(200_000),
-            net: Some(net.into()),
-            start: Point::new(Nm(a.0), Nm(a.1)),
-            end: Point::new(Nm(b.0), Nm(b.1)),
-            mid: None,
-            locked: false,
-        };
-        let via = |net: &str, at: (i64, i64)| Via {
-            id: ObjectId(0),
-            at: Point::new(Nm(at.0), Nm(at.1)),
-            drill: Nm(300_000),
-            diameter: Nm(600_000),
-            net: Some(net.into()),
-            from: "F.Cu".into(),
-            to: "B.Cu".into(),
-            locked: false,
-        };
-        let mut spare = Spare::default();
-        assert!(spare.is_empty());
-        spare.add(
-            &BTreeSet::new(),
-            &[track("GND", (0, 0), (5, 0)), track("VCC", (0, 9), (5, 9))],
-            &[via("GND", (5, 0))],
-        );
-        assert!(spare.tracks.contains(&Spare::track(&track("GND", (5, 0), (0, 0)))));
-        assert!(!spare.tracks.contains(&Spare::track(&track("VCC", (5, 0), (0, 0)))));
-        assert!(spare.vias.contains(&Spare::via(&via("GND", (5, 0)))));
-        // A run that had GND back whole and took one other stub of it out.
-        spare.add(&["GND"].into(), &[track("GND", (7, 7), (8, 8))], &[via("GND", (8, 8))]);
-        assert_eq!(spare.tracks.len(), 2);
-        assert!(spare.tracks.contains(&Spare::track(&track("VCC", (0, 9), (5, 9)))));
-        assert!(!spare.vias.contains(&Spare::via(&via("GND", (5, 0)))) && spare.vias.len() == 1);
     }
 
     /// What guide is told beside the board: no fill of its own at the end and no joining of zones'

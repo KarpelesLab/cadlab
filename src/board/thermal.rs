@@ -298,6 +298,13 @@ type NetItems = (Vec<usize>, Vec<usize>, Vec<usize>);
 /// net, and pads that other copper of their net touches. `items` are the board's copper items
 /// with the zone fills ([`super::copper_items`]).
 pub fn joints(p: &Project, items: &[CopperItem]) -> Vec<Joint> {
+    joints_of(p, items, &|_| true)
+}
+
+/// The joints of the pads of the nets that `wanted` names, as [`joints`] has them: for a
+/// caller that looks at the pads of a few nets many times, as a router does with the nets
+/// that have pours.
+pub fn joints_of(p: &Project, items: &[CopperItem], wanted: &dyn Fn(&str) -> bool) -> Vec<Joint> {
     let board = p.board();
     let class = classes(&placed_pads(p));
     // Zones in fill order, with their settings.
@@ -338,7 +345,7 @@ pub fn joints(p: &Project, items: &[CopperItem]) -> Vec<Joint> {
         }
         let pad_index = RTree::new(layer_pads.iter().map(|&i| items[i].shape.bbox()));
         for (net, (pads, fills, others)) in nets {
-            if pads.is_empty() || (fills.is_empty() && others.is_empty()) {
+            if pads.is_empty() || (fills.is_empty() && others.is_empty()) || !wanted(net) {
                 continue;
             }
             // Each pad's zone, relief and window.

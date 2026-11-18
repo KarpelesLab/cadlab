@@ -6,14 +6,20 @@
 //! also routed by freerouting (external process, DSN/SES) for comparison. `CADLAB_ROUTE_RENDER=<dir>`
 //! renders cadlab's results; `CADLAB_BENCH_BUDGET_MS` sets the time budget (default 120000);
 //! `CADLAB_BENCH_ROUTER=grid|gridless|auto` picks the search (default: the router's default) and
-//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115; here and in the
+//! `CADLAB_BENCH_ROUTER=guide` the guide crate's router in its place (D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116; here and in the
 //! corpus mode), under the same time budget or work budget (`CADLAB_BENCH_WORK`, in guide's
 //! search nodes there). `CADLAB_BENCH_VIA_IN_PAD=1` lets guide place vias in pads, as it does on
 //! its own; without it the adapter forbids them, as the native router does. With
 //! `CADLAB_BENCH_VERBOSE=1` both modes count the vias in surface-mount pads of their net, and the
 //! corpus mode tells the vias and the track of the nets with zones apart from the others', by net,
 //! and the pieces that the pads and fills of each such net are in without the net's new copper
-//! (what a router had to join, by a via to a plane or by a track; D115).
+//! (what a router had to join, by a via to a plane or by a track; D115), and the length of track
+//! that is outside the pads of its net: a router that takes a track to the middle of its pad and
+//! one that ends it at the first point on the pad's copper differ by what is inside, which is
+//! copper on copper (D116). `CADLAB_BENCH_BY_NET=<dir>` then also writes, per board, `<board>.nets`
+//! (by net: length in mm, vias, whether it has a zone, whether it is left open) and
+//! `<board>.tracks` (every new track and via and every pad, in nanometres), for two routers'
+//! results side by side.
 //! `CADLAB_BENCH_SEED=<n>` sets the seed (default 1; guide's default is none, its nets shortest
 //! first).
 //!
@@ -374,6 +380,134 @@ fn corpus(filters: &[String]) {
             }
             let by_net: Vec<String> = by_net.iter().map(|(n, c)| format!("{n} {c}")).collect();
             eprintln!("  {}: vias of the nets with zones: {}", e.name, by_net.join(", "));
+            // The track that is outside the pads of its net: a router that ends a track at the
+            // first point of its grid inside a pad and one that goes on to the pad's centre
+            // differ by what is inside, which is copper on copper (D116).
+            {
+                let pads = cadlab::board::placed_pads(&q);
+                let mut by_net: BTreeMap<&str, Vec<&cadlab::board::PlacedPad>> = BTreeMap::new();
+                for pp in &pads {
+                    if let Some(n) = pp.net.as_deref() {
+                        by_net.entry(n).or_default().push(pp);
+                    }
+                }
+                let mut outside = 0.0f64;
+                let mut zone_outside = 0.0f64;
+                for t in r.tracks.iter().filter(|t| t.mid.is_none()) {
+                    let (a, b) = (t.start, t.end);
+                    let len = ((b.x.0 - a.x.0) as f64).hypot((b.y.0 - a.y.0) as f64);
+                    let at =
+                        |s: f64| (a.x.0 as f64 + (b.x.0 - a.x.0) as f64 * s, a.y.0 as f64 + (b.y.0 - a.y.0) as f64 * s);
+                    // By crossings of the pad's outline.
+                    let holds = |pp: &cadlab::board::PlacedPad, (x, y): (f64, f64)| {
+                        let ring = &pp.shape.outer.0;
+                        let mut odd = false;
+                        for k in 0..ring.len() {
+                            let (p, q) = (ring[k], ring[(k + 1) % ring.len()]);
+                            let (px, py, qx, qy) = (p.x as f64, p.y as f64, q.x as f64, q.y as f64);
+                            if (py > y) != (qy > y) && px + (y - py) / (qy - py) * (qx - px) > x {
+                                odd = !odd;
+                            }
+                        }
+                        odd
+                    };
+                    let own: Vec<&&cadlab::board::PlacedPad> = t
+                        .net
+                        .as_deref()
+                        .and_then(|n| by_net.get(n))
+                        .map(|v| v.iter().filter(|pp| pp.layers.contains(&t.layer)).collect())
+                        .unwrap_or_default();
+                    // From each end, how far the track stays in the pad that holds the end.
+                    let inside = |from: f64, to: f64| -> f64 {
+                        let Some(pp) = own.iter().find(|pp| holds(pp, at(from))) else { return 0.0 };
+                        if holds(pp, at(to)) {
+                            return 1.0;
+                        }
+                        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+                        for _ in 0..24 {
+                            let m = (lo + hi) / 2.0;
+                            if holds(pp, at(from + (to - from) * m)) {
+                                lo = m;
+                            } else {
+                                hi = m;
+                            }
+                        }
+                        lo
+                    };
+                    let out = len * (1.0 - (inside(0.0, 1.0) + inside(1.0, 0.0)).min(1.0)) / 1e6;
+                    outside += out;
+                    if of_zone(&t.net) {
+                        zone_outside += out;
+                    }
+                }
+                eprintln!(
+                    "  {}: track outside the pads of its net {outside:.1} mm, of the nets with zones {zone_outside:.1} mm",
+                    e.name
+                );
+            }
+            // By net, its track and its vias, for two routers' results side by side (D116).
+            if let Some(dir) = std::env::var_os("CADLAB_BENCH_BY_NET").map(PathBuf::from) {
+                let mut per: BTreeMap<&str, (f64, usize)> = BTreeMap::new();
+                for t in &r.tracks {
+                    per.entry(t.net.as_deref().unwrap_or("")).or_default().0 +=
+                        cadlab::board::track_length(t).0 as f64 / 1e6;
+                }
+                for v in &r.vias {
+                    per.entry(v.net.as_deref().unwrap_or("")).or_default().1 += 1;
+                }
+                let open: std::collections::BTreeSet<&str> = r
+                    .connections
+                    .iter()
+                    .filter(|c| c.status == cadlab::router::ConnStatus::Failed)
+                    .map(|c| c.net.as_str())
+                    .collect();
+                let text: String = per
+                    .iter()
+                    .map(|(n, (l, v))| {
+                        format!(
+                            "{n}\t{l:.3}\t{v}\t{}\t{}\n",
+                            u8::from(of_zone(&Some(n.to_string()))),
+                            u8::from(open.contains(n))
+                        )
+                    })
+                    .collect();
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join(format!("{}.nets", e.name)), text);
+                let mut text = String::new();
+                for t in &r.tracks {
+                    text += &format!(
+                        "t\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                        t.net.as_deref().unwrap_or(""),
+                        t.layer,
+                        t.start.x.0,
+                        t.start.y.0,
+                        t.end.x.0,
+                        t.end.y.0,
+                        t.width.0
+                    );
+                }
+                for v in &r.vias {
+                    text += &format!(
+                        "v\t{}\t{}\t{}\t{}\n",
+                        v.net.as_deref().unwrap_or(""),
+                        v.at.x.0,
+                        v.at.y.0,
+                        v.diameter.0
+                    );
+                }
+                for pp in cadlab::board::placed_pads(&q) {
+                    text += &format!(
+                        "p\t{}\t{}.{}\t{}\t{}\t{}\n",
+                        pp.net.as_deref().unwrap_or(""),
+                        pp.refdes,
+                        pp.number,
+                        pp.center.x.0,
+                        pp.center.y.0,
+                        pp.layers.join(",")
+                    );
+                }
+                let _ = std::fs::write(dir.join(format!("{}.tracks", e.name)), text);
+            }
             // By net with zones, the pieces that the pads and the fills of the routed board are in
             // without the net's new tracks and vias, all and those with pads: one less is what
             // the router had to join, by a via to a plane or by a track.

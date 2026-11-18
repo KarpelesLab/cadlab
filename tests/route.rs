@@ -1837,8 +1837,9 @@ fn guide_routes_a_board_with_a_pour() {
     let st = exec(&r, &mut s, "route.status", json!({}));
     assert_eq!(st["output"]["unrouted"], 0, "counted on the board with its pour filled again");
     // The signal tracks cut the pour that guide planned on (cadlab's fill of the empty board):
-    // a second run, on the routed board and its fill, joined what was left.
-    assert_eq!(o["output"]["stats"]["iterations"], 2, "{}", o["output"]["stats"]);
+    // a second run, on the routed board and its fill, joined what was left. And a third looked
+    // for shorter ways (D116), with nothing to route.
+    assert_eq!(o["output"]["stats"]["iterations"], 3, "{}", o["output"]["stats"]);
 }
 
 /// An unplated hole on the straight line between two pads, with no `hole_clearance` in the
