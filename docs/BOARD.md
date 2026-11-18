@@ -141,6 +141,42 @@ also depends on library footprints through custom rules and local clearances, D4
 unchanged project shares it), so repeated queries on the same state in one MCP or batch session cost a few
 milliseconds (5 ms on the synthetic board below, the NPTH list included).
 
+**A fill of a board that differs from one filled before (D117).** Most of what a fill of a plane with
+hundreds of relieved pads takes is their spokes: of glasgow-revD1's fill as its project routes it, 3.0 s of
+the 3.7 s that its steps take over all its layers' threads, for the 338 relieved pads of its busiest layer,
+whose spokes that do not fit whole are each trimmed with four booleans and two offsets. What a pad's relief comes to depends on the pad, on the allowed area and the
+pour where its spokes can be, in every direction of the relief, and on the same-net pads of the relief near
+them, and on nothing else (`zones::PadKey`, `pad_spokes`): it is made a pad at a time, side by side with the
+`parallel` feature and put together in the order of the pads, the pad's gap grown once for all its spokes,
+and `fill_zones` keeps each relief by what it was made from, compared in full, and takes it from there when
+a later fill has the same (two ages of them, the older dropped when the newer holds four million points).
+A fill after a track is moved makes the reliefs near it again and no other; the booleans of the whole layer
+(the keep-away, the opening, the islands) are made as before. The fill is the same polygons with or without:
+`fill_zones_uncached` uses nothing kept, `tests/zone_refill.rs` compares the two on every corpus board as
+routed, with a few tracks out, with tracks and vias out all over and with none, and
+`reliefs_reused_give_the_fill_made_from_scratch` on a grid of pads with tracks that come and go; the fills of
+the twelve corpus boards in four states each are also the fills that the code before made, by their hashes.
+Times, release, three threads (`RAYON_NUM_THREADS=3`, as a router run has them), the best of two, in ms:
+
+| board | as routed, before | as routed, from scratch | again with its last 5 tracks out | no track, before | no track, from scratch |
+|---|---|---|---|---|---|
+| buspirate5-rev10 | 725 | 428 | 289 | 504 | 237 |
+| lumenpnp-mobo | 1318 | 809 | 593 | 873 | 427 |
+| glasgow-revD1 | 3239 | 1486 | 872 | 8174 | 2741 |
+| tinytapeout-demo | 597 | 482 | 375 | 557 | 323 |
+| cynthion | 775 | 691 | 736 | 196 | 202 |
+| corne-cherry | 362 | 367 | 337 | 280 | 284 |
+| sweep-v2.2 | 196 | 189 | 178 | 136 | 135 |
+| glasgow-revC3 | 155 | 156 | 160 | 41 | 30 |
+| buspirate-flash-sop | 71 | 68 | 66 | 28 | 28 |
+| buspirate-rs232 | 57 | 51 | 46 | 46 | 36 |
+| lumenpnp-ringlight | 47 | 33 | 33 | 43 | 26 |
+
+The boards whose fills are many small zones (corne-cherry's 925 teardrops, cynthion's 61 zone layers) gain
+nothing: their time is in the booleans of each zone, and a zone whose surroundings are as they were is still
+filled again. Keeping whole zone layers by their inputs was not done: the layers of a board fill side by side,
+so the time of a fill is its slowest layer's, which is the one a router changes.
+
 ## Thermal relief (D109, `src/board/thermal.rs`)
 
 A pad soldered by hand, by wave or in an oven that sits solidly in a large copper area cannot be heated

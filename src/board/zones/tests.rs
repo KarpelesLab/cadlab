@@ -542,3 +542,55 @@ fn memo_follows_every_input() {
     p.circuit_mut().netclasses.get_mut("wide").unwrap().clearance = Some(Nm::from_um(1_200));
     assert_ne!(check(&p, "class clearance"), classed);
 }
+
+/// The reliefs of pads whose surroundings are as they were in an earlier fill are taken from
+/// it (`SpokeMemo`), and the fill is the one made from scratch, point for point: a grid of
+/// pads with rows of four in each other's gaps, foreign tracks that come and go beside some
+/// of them (whole spokes, trimmed spokes, spokes in the other directions, spokes from pad to
+/// pad), filled in a sequence of boards that each differ from the last in one place.
+#[test]
+fn reliefs_reused_give_the_fill_made_from_scratch() {
+    let outline = square(0, 0, 40 * MM, 40 * MM);
+    let mut items: Vec<(CopperItem, Nm)> = Vec::new();
+    for gx in 0..6 {
+        for gy in 0..6 {
+            let (cx, cy) = (4 * MM + gx * 6 * MM, 4 * MM + gy * 6 * MM);
+            if (gx + gy) % 3 == 0 {
+                for dx in [-750_000, -250_000, 250_000, 750_000] {
+                    items.push((pad("GND", cx + dx, cy, 150_000, 250_000), Nm::ZERO));
+                }
+            } else {
+                items.push((pad("GND", cx, cy, 500_000, 400_000), Nm::ZERO));
+            }
+        }
+    }
+    let pads = items.len();
+    let prm = params(PadConnection::Thermal);
+    let both = |items: &[(CopperItem, Nm)], what: &str| {
+        let inp = input(Some("GND"), &outline, items, prm);
+        let (reused, fresh) = (fill_layer_with(&inp, true).unwrap(), fill_layer(&inp).unwrap());
+        assert_eq!(reused, fresh, "{what}");
+        assert_eq!(fill_layer_with(&inp, true).unwrap(), fresh, "{what}, again");
+        fresh
+    };
+    let bare = both(&items, "no track");
+    // Tracks beside a pad, one more at a time: close enough to trim a spoke, then to drop it.
+    let mut last = bare.clone();
+    for k in 0..12i64 {
+        let (cx, cy) = (4 * MM + (k % 6) * 6 * MM, 4 * MM + (k % 5) * 6 * MM);
+        let off = 700_000 + 60_000 * k;
+        items.push((track("A", (cx + off, cy - 2 * MM), (cx + off, cy + 2 * MM), 200_000), Nm::ZERO));
+        if k % 2 == 0 {
+            items.push((track("B", (cx - 2 * MM, cy + off), (cx + 2 * MM, cy + off), 200_000), Nm::ZERO));
+        }
+        let now = both(&items, &format!("track {k}"));
+        assert_ne!(now, last, "track {k} changes the fill");
+        last = now;
+    }
+    // And out again, the first first: the fill of each board is its own, whatever was filled before.
+    while items.len() > pads {
+        items.remove(pads);
+        both(&items, "a track out");
+    }
+    assert_eq!(both(&items, "no track again"), bare);
+}

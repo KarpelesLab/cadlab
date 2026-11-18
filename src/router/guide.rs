@@ -1,6 +1,6 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
-//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115 and
-//! D116; docs/ROUTER.md, "guide as a backend").
+//! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115,
+//! D116 and D117; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -1291,6 +1291,17 @@ const POUR_ROUNDS: usize = 2;
 const MOVE_AGAIN: usize = 4;
 const AGAIN_SEED: u64 = 7919;
 
+/// How many runs that move routes may leave the board with no fewer connections open, each
+/// ending on its own with every net still open one whose own search found no way
+/// (`Routed::failed`), before no more are begun (D117). Such a run says that its order of the
+/// nets has no room for what is open, and a board of which two orders say so had the same
+/// asked of it until the time was gone: cynthion's eight, shut in by the pads of their net
+/// ties, had three such runs and its run for shorter ways 1.5 s for its searches, where after
+/// two it has 8.6 s. A run that leaves a net open that rip-up took out is no such word:
+/// nrfmicro's last connection is closed, in one order of four, by the fourth run after two
+/// that gained nothing, and counted by the gain alone it stayed open.
+const MOVE_STALE: usize = 2;
+
 /// How far round a connection that taking needless copper out opened what was taken out of
 /// its net goes back in (`route`, "The stubs that the fill makes needless").
 const SPARE_NEAR: i64 = 3_000_000;
@@ -1382,8 +1393,8 @@ const REFILL_SHARE: f64 = 0.15;
 
 /// The share of the whole budget that a fill may take for the later runs' deadline to leave the
 /// time of two after it, for the needless vias that the fill of the routed board tells
-/// ([`needless`], D115): on a board whose fill takes longer (glasgow-revD1's takes 5.7 s of
-/// 60) that time is the runs', and what is needless stays.
+/// ([`needless`], D115): on a board whose fill takes longer that time is the runs', and what
+/// is needless stays (glasgow-revD1's took 5.7 s of 60, and 1.7 s since D117).
 const SHORT_FILL: f64 = 0.03;
 
 /// What guide's runs have of the host for its fills ([`host_fills`]).
@@ -1467,17 +1478,19 @@ fn call(
     let spent = Cell::new(Duration::ZERO);
     let refill = |asked: &pcb::Refill<'_>| {
         let host = host?;
+        // Not the one at a run's end: what it tells, the stubs that the fill makes needless,
+        // stays on the board until the runs are over and is told again by the fill of the
+        // board as it is then ([`needless`]), so that fill bought nothing: one fill a run,
+        // 0.8 s of tinytapeout-demo's and 3 s of glasgow-revD1's (D117).
+        if asked.last {
+            return None;
+        }
         let at = Instant::now();
         if let Some(d) = deadline {
             let cap = d.saturating_duration_since(began).mul_f64(REFILL_SHARE);
             let took = host.took.get();
             let in_time = at + took.unwrap_or_default() <= d;
-            // The one at the end only before the deadline (D115): what it tells, the needless
-            // stubs, the fill that counts the run tells as well, at no fill more, and a run
-            // that came back a fill late left the runs after it and that telling short
-            // (lumenpnp-mobo: a fourth run back at 55 s of 60, and 457 vias for 332 to 370).
-            let refused = if asked.last { !in_time } else { !in_time || spent.get() + took.unwrap_or_default() > cap };
-            if refused {
+            if !in_time || spent.get() + took.unwrap_or_default() > cap {
                 return None;
             }
         }
@@ -1899,7 +1912,12 @@ pub(crate) fn route(
         };
         (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT).map_or(d, |t| t.max(d))
     });
+    // The runs that move routes that said the board has no room for what is open.
+    let mut idle = 0;
     for round in 1..=POUR_ROUNDS + MOVE_AGAIN {
+        if idle >= MOVE_STALE {
+            break;
+        }
         // The last runs are those that move routes: the first of them has what time the run
         // before it leaves, and every net left open, those that a run on the fixed board found
         // no way for among them. And for as long as there is time and something open, another
@@ -1972,7 +1990,14 @@ pub(crate) fn route(
         let (spare_t, spare_v) = convert_copper(&ad, &more.spare.0, &more.spare.1);
         t.extend(spare_t);
         v.extend(spare_v);
+        // Whether the run says that this order of the nets has no room for what is open: it
+        // ended on its own, and every net left open is one whose own search found no way.
+        let no_room = moves && more.stopped.is_none() && {
+            let failed = gave_up_on(&ad, &more);
+            left.iter().all(|l| failed.contains(&l.net))
+        };
         if t.is_empty() && v.is_empty() {
+            idle += usize::from(no_room);
             continue;
         }
         // What guide took back is in its result as it is now; what it left where it was
@@ -1994,8 +2019,10 @@ pub(crate) fn route(
         // A run that leaves no less open is as if it had not been: the board stays as the
         // runs before left it.
         if open(&items2, &isl2).len() >= left.len() {
+            idle += usize::from(no_room);
             continue;
         }
+        idle = 0;
         (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
         (drc_reason, stats.drc_removed) = (reasons, removed);
         stopped = stopped.or(more.stopped);
@@ -2021,7 +2048,11 @@ pub(crate) fn route(
     // others where they are (`RouteOptions::shorten`, guide 0.0.20). A track that goes
     // another way may cut a pour where the old one did not: guide tells the pads that this
     // cuts off the fills it plans on, and joins them again. Verified as any run, and kept if
-    // the check takes nothing out of it and the board has no more open.
+    // the check takes nothing out of it and the board has no more open. It is a run that
+    // moves no route (`rip_ups` at none), and since guide 0.0.21 (D117) such a run plans its
+    // escapes round the routes it is given: until then cynthion's came back in every run
+    // with two pads of +2V5 open under its array, a via of theirs cut as the run began by
+    // the dog-bone planned again for the ball beside it, and was not kept.
     //
     // In a run of its own, and with no time kept for it. Made shorter at the end of the
     // first run, the routes of nrfmicro left its last connection with no way in the five
@@ -2087,11 +2118,11 @@ pub(crate) fn route(
         let moved: BTreeSet<&str> =
             more.taken_back.iter().filter_map(|n| ad.nets.get(n.index())).map(String::as_str).collect();
         // The nets that keep the routes they had: none at first. Guide tells the pads that
-        // its new routes cut off the fills it plans on, by its own count of them, and a pour
-        // may be cut all the same (cynthion: two pads of +2V5, in every run tried). The nets with new copper at an end of a connection that is open
-        // now and was not, and those that the check takes copper out of once others are
-        // back where they were, have their old routes back, and the rest is verified again,
-        // three times at most.
+        // its new routes cut off the fills it plans on, by its own count of them, which is
+        // an estimate. The nets with new copper at an end of a connection that is open now
+        // and was not, the nets that are open themselves where they were not, and those
+        // that the check takes copper out of once others are back where they were, have
+        // their old routes back, and the rest is verified again, three times at most.
         let mut old: BTreeSet<String> = BTreeSet::new();
         let had: BTreeSet<(&str, &str, &str)> =
             was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
@@ -2146,6 +2177,16 @@ pub(crate) fn route(
                     .filter(|t| new(&t.net) && at(t.start, t.end))
                     .filter_map(|t| t.net.clone())
                     .chain(v.iter().filter(|v| new(&v.net) && at(v.at, v.at)).filter_map(|v| v.net.clone()))
+                    .collect::<Vec<_>>(),
+            );
+            // The nets that are open themselves where they were not, as well: one whose
+            // routes guide took back and could not put back whole has no new copper to
+            // tell it by.
+            old.extend(
+                now.iter()
+                    .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                    .filter(|l| moved.contains(l.net.as_str()))
+                    .map(|l| l.net.clone())
                     .collect::<Vec<_>>(),
             );
             old.extend(

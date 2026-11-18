@@ -22,8 +22,9 @@
 //! receives what can reach its outline (items from a per-layer [`RTree`], holes, keep-outs, and
 //! the parts of earlier fills near it); farther shapes cannot change the result (D42). Fills
 //! are derived data: recomputed on demand and never stored on disk; the last few results are
-//! reused in process when every input is identical ([`fill_zones`]). Timings in
-//! `docs/BOARD.md`.
+//! reused in process when every input is identical ([`fill_zones`]), and where a board differs
+//! from one filled before, the reliefs of the pads whose surroundings are as they were
+//! (`SpokeMemo`, D117): the fill is the same polygons either way. Timings in `docs/BOARD.md`.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -342,11 +343,27 @@ pub fn trimmed_spoke(
     avail: &PolygonSet,
     fill: &PolygonSet,
 ) -> Result<PolygonSet, poly::Error> {
+    trimmed_spoke_in(it, r, spoke, avail, fill, &mut None)
+}
+
+/// [`trimmed_spoke`], with the pad's thermal gap as a region kept in `gap` from one spoke of
+/// the pad to the next: it is the same for each of them, and made when the first needs it.
+fn trimmed_spoke_in(
+    it: &CopperItem,
+    r: &Relief,
+    spoke: &Polygon,
+    avail: &PolygonSet,
+    fill: &PolygonSet,
+    gap: &mut Option<PolygonSet>,
+) -> Result<PolygonSet, poly::Error> {
     if !poly::intersects(fill, spoke) {
         return Ok(vec![]);
     }
-    let gap = poly::offset(&it.shape, r.gap, Join::Round, OBSTACLE_TOL)?;
-    let room = Boolean::new().subject(fill, FillRule::NonZero).subject(&gap, FillRule::NonZero).execute()?;
+    let gap: &PolygonSet = match gap {
+        Some(g) => g,
+        None => gap.insert(poly::offset(&it.shape, r.gap, Join::Round, OBSTACLE_TOL)?),
+    };
+    let room = Boolean::new().subject(fill, FillRule::NonZero).subject(gap, FillRule::NonZero).execute()?;
     let inside = Boolean::new()
         .subject(avail, FillRule::NonZero)
         .clip(&room, FillRule::NonZero)
@@ -429,8 +446,186 @@ fn cull_selection(set: &PolygonSet, near: impl Fn(&poly::Rect) -> bool) -> (Vec<
     (sel, out)
 }
 
+/// Everything the relief of one pad in one fill depends on ([`pad_spokes`]).
+#[derive(Clone, PartialEq, Eq)]
+struct PadKey {
+    /// The pad.
+    item: CopperItem,
+    /// Its relief.
+    relief: Relief,
+    /// The allowed area and the pour, clipped to the windows of the layer's relieved pads:
+    /// the polygons that meet the box of the pad's spokes, in every direction of the relief.
+    avail: PolygonSet,
+    fill: PolygonSet,
+    /// The other pads of the relief whose windows meet that box, in their order: window and
+    /// shape.
+    others: Vec<(poly::Rect, PolygonSet)>,
+}
+
+impl PadKey {
+    /// A number to find the key by; equal keys have equal numbers.
+    fn hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.item.anchor.x.0, self.item.anchor.y.0).hash(&mut h);
+        self.item.shape.hash(&mut h);
+        self.avail.hash(&mut h);
+        self.fill.hash(&mut h);
+        self.others.len().hash(&mut h);
+        h.finish()
+    }
+
+    /// How many points it holds, for the memo's bound.
+    fn points(&self) -> usize {
+        let of = |s: &PolygonSet| s.iter().map(Polygon::vertex_count).sum::<usize>();
+        of(&self.item.shape) + of(&self.avail) + of(&self.fill) + self.others.iter().map(|(_, s)| of(s)).sum::<usize>()
+    }
+}
+
+/// What a pad's relief comes to: the spokes kept, whether one of them joins the pad to the
+/// pour, and the spokes that only reach another same-net pad of the relief (a row of pads,
+/// each in the others' gaps), by that pad's position in [`PadKey::others`].
+#[derive(Clone, Default)]
+struct PadSpokes {
+    kept: Vec<Polygon>,
+    joined: bool,
+    to_pads: Vec<(usize, Polygon)>,
+}
+
+/// The relief of one pad: a function of `key` alone (`main` and `alt` are its spokes,
+/// [`spokes`] and [`alt_spokes`] of its pad and relief), so that a pad whose surroundings are
+/// as they were in an earlier fill has the spokes it had there.
+fn pad_spokes(key: &PadKey, main: Vec<Polygon>, alt: Vec<Polygon>) -> Result<PadSpokes, poly::Error> {
+    let (it, r) = (&key.item, &key.relief);
+    let near = |set: &PolygonSet, r: &poly::Rect| -> PolygonSet {
+        set.iter().filter(|q| q.bbox().is_some_and(|b| b.intersects(r))).cloned().collect()
+    };
+    let fits = |s: &Polygon| {
+        let b = s.bbox().expect("spoke");
+        poly::contains(&near(&key.avail, &b), s) && poly::intersects(&near(&key.fill, &b), s)
+    };
+    let mut out = PadSpokes::default();
+    // The pad's thermal gap as a region, made when the first spoke needs it.
+    let mut gap: Option<PolygonSet> = None;
+    // A spoke whose end would cross another item's clearance is trimmed instead of dropped
+    // when the rest still joins the pour (`trimmed_spoke`).
+    let mut taken: Vec<Angle> = Vec::new();
+    let mut mine: Vec<Polygon> = Vec::new();
+    for (s, dir) in main.into_iter().zip(&r.dirs) {
+        let b = s.bbox().expect("spoke");
+        if fits(&s) {
+            mine.push(s.clone());
+            out.kept.push(s);
+            out.joined = true;
+            taken.push(*dir);
+            continue;
+        }
+        let t = trimmed_spoke_in(it, r, &s, &near(&key.avail, &b), &near(&key.fill, &b), &mut gap)?;
+        if !t.is_empty() {
+            mine.extend(t.iter().cloned());
+            out.kept.extend(t);
+            out.joined = true;
+            taken.push(*dir);
+            continue;
+        }
+        if !poly::contains(&near(&key.avail, &b), &s) {
+            continue;
+        }
+        if let Some(o) = key.others.iter().position(|(w, shape)| w.intersects(&b) && poly::intersects(shape, &s)) {
+            mine.push(s.clone());
+            out.to_pads.push((o, s));
+            taken.push(*dir);
+        }
+    }
+    // Spokes that did not survive are tried in the relief's other directions, whole or
+    // trimmed as above, and the ones that spread best around the pad are kept, up to the
+    // spoke count (D112). One that meets a kept spoke outside the pad is left out: on a small
+    // pad it would close the gap between two spokes, and the pad would have more copper on
+    // its outline, not another neck.
+    if taken.len() < r.dirs.len() && !r.alt.is_empty() {
+        let apart = |t: &PolygonSet| -> Result<bool, poly::Error> {
+            if mine.is_empty() {
+                return Ok(true);
+            }
+            let both = Boolean::new()
+                .subject(t, FillRule::NonZero)
+                .clip(&mine, FillRule::NonZero)
+                .op(Op::Intersection)
+                .execute()?;
+            Ok(both.iter().all(|q| poly::contains(&it.shape, q)))
+        };
+        let mut found: Vec<(Angle, PolygonSet)> = Vec::new();
+        for (s, dir) in alt.into_iter().zip(&r.alt) {
+            let b = s.bbox().expect("spoke");
+            let t = if fits(&s) {
+                vec![s]
+            } else {
+                trimmed_spoke_in(it, r, &s, &near(&key.avail, &b), &near(&key.fill, &b), &mut gap)?
+            };
+            if !t.is_empty() && apart(&t)? {
+                found.push((*dir, t));
+            }
+        }
+        let cand: Vec<Angle> = found.iter().map(|(d, _)| *d).collect();
+        for i in spread(&taken, &cand, r.dirs.len() - taken.len()) {
+            out.kept.extend(found[i].1.iter().cloned());
+            out.joined = true;
+        }
+    }
+    Ok(out)
+}
+
+/// The reliefs made in this process by what they were made from ([`PadKey`]), in two ages: one
+/// that is found again is of the newer, and when that holds [`SPOKE_POINTS`] the older goes.
+/// A fill of a board that differs from an earlier one in a few places makes only the reliefs
+/// near them again, which is most of what a fill of a plane with hundreds of pads takes
+/// (`docs/BOARD.md`, "Zone fill").
+#[derive(Default)]
+struct SpokeMemo {
+    now: BTreeMap<u64, Vec<(PadKey, PadSpokes)>>,
+    before: BTreeMap<u64, Vec<(PadKey, PadSpokes)>>,
+    points: usize,
+}
+
+/// The most points the newer age of [`SpokeMemo`] holds (16 bytes each, and the reliefs).
+const SPOKE_POINTS: usize = 4_000_000;
+
+impl SpokeMemo {
+    fn get(&mut self, hash: u64, key: &PadKey) -> Option<PadSpokes> {
+        if let Some((_, v)) = self.now.get(&hash).and_then(|b| b.iter().find(|(k, _)| k == key)) {
+            return Some(v.clone());
+        }
+        let bucket = self.before.get_mut(&hash)?;
+        let (k, v) = bucket.swap_remove(bucket.iter().position(|(k, _)| k == key)?);
+        self.put(hash, k, v.clone());
+        Some(v)
+    }
+
+    fn put(&mut self, hash: u64, key: PadKey, made: PadSpokes) {
+        if self.points > SPOKE_POINTS {
+            self.before = std::mem::take(&mut self.now);
+            self.points = 0;
+        }
+        self.points += key.points() + made.kept.iter().map(Polygon::vertex_count).sum::<usize>();
+        self.now.entry(hash).or_default().push((key, made));
+    }
+}
+
+static SPOKES: std::sync::Mutex<Option<SpokeMemo>> = std::sync::Mutex::new(None);
+
+/// Something done with the memo of reliefs; `None` if it cannot be had.
+fn spoke_memo<T>(f: impl FnOnce(&mut SpokeMemo) -> Option<T>) -> Option<T> {
+    f(SPOKES.lock().ok()?.get_or_insert_with(SpokeMemo::default))
+}
+
 /// Fills one zone layer. The result is canonical (deterministic).
 pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
+    fill_layer_with(input, false)
+}
+
+/// [`fill_layer`]; with `reuse`, the reliefs of pads whose surroundings are as they were in an
+/// earlier fill of this process are taken from it ([`SpokeMemo`]), which gives the same fill.
+fn fill_layer_with(input: &LayerInput<'_>, reuse: bool) -> Result<PolygonSet, poly::Error> {
     let prm = &input.params;
     // Area: zone outline ∩ board area.
     let outline: Ring = input.outline.to_vec().into();
@@ -533,90 +728,62 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
                 .execute()
         };
         let (local_avail, local_fill) = (clip(&avail)?, clip(&fill)?);
-        let near = |set: &PolygonSet, r: &poly::Rect| -> PolygonSet {
-            set.iter().filter(|q| q.bbox().is_some_and(|b| b.intersects(r))).cloned().collect()
+        let (avail_index, fill_index) =
+            (RTree::new(local_avail.iter().map(Polygon::bbox)), RTree::new(local_fill.iter().map(Polygon::bbox)));
+        // A pad's relief depends on the pad, on the allowed area and the pour where its
+        // spokes can be, and on the same-net pads of the relief near them ([`PadKey`]): each
+        // pad on its own, so side by side with the `parallel` feature, put together in the
+        // order of the pads, and reused from an earlier fill where all of that is as it was
+        // (`reuse`).
+        let per_pad = |k: usize| -> Result<(PadSpokes, Vec<usize>), poly::Error> {
+            let (it, r) = &thermal[k];
+            let (main, alt) = (spokes(it, r), alt_spokes(it, r));
+            let Some(reach) = main.iter().chain(&alt).filter_map(Polygon::bbox).reduce(|a, b| a.union(&b)) else {
+                return Ok((PadSpokes::default(), vec![]));
+            };
+            // In the order of the sets, as a spoke's own selection from them is.
+            let part = |set: &PolygonSet, index: &RTree| -> PolygonSet {
+                index.query(&reach).into_iter().map(|i| set[i as usize].clone()).collect()
+            };
+            let others: Vec<usize> = index.query(&reach).into_iter().map(|o| o as usize).filter(|&o| o != k).collect();
+            let key = PadKey {
+                item: (*it).clone(),
+                relief: r.clone(),
+                avail: part(&local_avail, &avail_index),
+                fill: part(&local_fill, &fill_index),
+                others: others.iter().map(|&o| (boxes[o], thermal[o].0.shape.clone())).collect(),
+            };
+            if !reuse {
+                return Ok((pad_spokes(&key, main, alt)?, others));
+            }
+            let hash = key.hash();
+            if let Some(found) = spoke_memo(|m| m.get(hash, &key)) {
+                return Ok((found, others));
+            }
+            let made = pad_spokes(&key, main, alt)?;
+            spoke_memo(|m| {
+                m.put(hash, key, made.clone());
+                Some(())
+            });
+            Ok((made, others))
         };
-        let fits = |s: &Polygon| {
-            let b = s.bbox().expect("spoke");
-            poly::contains(&near(&local_avail, &b), s) && poly::intersects(&near(&local_fill, &b), s)
+        #[cfg(feature = "parallel")]
+        let per: Vec<Result<(PadSpokes, Vec<usize>), poly::Error>> = {
+            use rayon::prelude::*;
+            (0..thermal.len()).into_par_iter().map(per_pad).collect()
         };
+        #[cfg(not(feature = "parallel"))]
+        let per: Vec<Result<(PadSpokes, Vec<usize>), poly::Error>> = (0..thermal.len()).map(per_pad).collect();
         // Pads joined to the pour by a spoke of their own, and spokes that only reach another
         // same-net pad of the relief (a row of pads, each in the others' gaps): (pad, other
         // pad, spoke).
         let mut joined = vec![false; thermal.len()];
         let mut pad_to_pad: Vec<(usize, usize, Polygon)> = Vec::new();
-        for (k, (it, r)) in thermal.iter().enumerate() {
-            // A spoke whose end would cross another item's clearance is trimmed instead of
-            // dropped when the rest still joins the pour (`trimmed_spoke`).
-            let mut taken: Vec<Angle> = Vec::new();
-            let mut mine: Vec<Polygon> = Vec::new();
-            for (s, dir) in spokes(it, r).into_iter().zip(&r.dirs) {
-                let b = s.bbox().expect("spoke");
-                if fits(&s) {
-                    mine.push(s.clone());
-                    kept.push(s);
-                    joined[k] = true;
-                    taken.push(*dir);
-                    continue;
-                }
-                let t = trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?;
-                if !t.is_empty() {
-                    mine.extend(t.iter().cloned());
-                    kept.extend(t);
-                    joined[k] = true;
-                    taken.push(*dir);
-                    continue;
-                }
-                if !poly::contains(&near(&local_avail, &b), &s) {
-                    continue;
-                }
-                let mut others = index.query(&b);
-                others.sort_unstable();
-                for o in others {
-                    let o = o as usize;
-                    if o != k && poly::intersects(&thermal[o].0.shape, &s) {
-                        mine.push(s.clone());
-                        pad_to_pad.push((k, o, s));
-                        taken.push(*dir);
-                        break;
-                    }
-                }
-            }
-            // Spokes that did not survive are tried in the relief's other directions, whole
-            // or trimmed as above, and the ones that spread best around the pad are kept, up
-            // to the spoke count (D112). One that meets a kept spoke outside the pad is left
-            // out: on a small pad it would close the gap between two spokes, and the pad
-            // would have more copper on its outline, not another neck.
-            if taken.len() < r.dirs.len() && !r.alt.is_empty() {
-                let apart = |t: &PolygonSet| -> Result<bool, poly::Error> {
-                    if mine.is_empty() {
-                        return Ok(true);
-                    }
-                    let both = Boolean::new()
-                        .subject(t, FillRule::NonZero)
-                        .clip(&mine, FillRule::NonZero)
-                        .op(Op::Intersection)
-                        .execute()?;
-                    Ok(both.iter().all(|q| poly::contains(&it.shape, q)))
-                };
-                let mut found: Vec<(Angle, PolygonSet)> = Vec::new();
-                for (s, dir) in alt_spokes(it, r).into_iter().zip(&r.alt) {
-                    let b = s.bbox().expect("spoke");
-                    let t = if fits(&s) {
-                        vec![s]
-                    } else {
-                        trimmed_spoke(it, r, &s, &near(&local_avail, &b), &near(&local_fill, &b))?
-                    };
-                    if !t.is_empty() && apart(&t)? {
-                        found.push((*dir, t));
-                    }
-                }
-                let cand: Vec<Angle> = found.iter().map(|(d, _)| *d).collect();
-                for i in spread(&taken, &cand, r.dirs.len() - taken.len()) {
-                    kept.extend(found[i].1.iter().cloned());
-                    joined[k] = true;
-                }
-            }
+        for (k, pad) in per.into_iter().enumerate() {
+            let (pad, others) = pad?;
+            kept.extend(pad.kept);
+            joined[k] = pad.joined;
+            pad_to_pad.extend(pad.to_pads.into_iter().map(|(o, s)| (k, others[o], s)));
         }
         // A spoke reaching a pad that the pour joins (directly or through such spokes) carries
         // the connection on, as copper between the two pads: kept until nothing changes.
@@ -702,7 +869,9 @@ const MEMO_ENTRIES: usize = 4;
 
 /// Fills every zone of the board, given the board's non-zone copper (pads, tracks, vias).
 /// Results are in board order (zone, then its layers in the order given). Results for identical
-/// inputs are reused within the process (see [`fill_zones_uncached`]).
+/// inputs are reused within the process, and of a board that differs from one filled before,
+/// the reliefs of the pads whose surroundings are as they were (see [`fill_zones_uncached`],
+/// which gives the same fills from scratch).
 pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     if p.board().zones.is_empty() {
         return vec![];
@@ -714,7 +883,7 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     {
         return e.fills.clone();
     }
-    let fills = fill_with(p, base, &npth, &item_c);
+    let fills = fill_with(p, base, &npth, &item_c, true);
     if let Ok(mut m) = MEMO.lock() {
         m.retain(|e| !e.matches(p, base, &npth, &item_c));
         let c = p.circuit();
@@ -735,16 +904,20 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     fills
 }
 
-/// Forgets the fills kept in process by [`fill_zones`] (benchmarks measure cold runs with it).
+/// Forgets the fills and the reliefs kept in process by [`fill_zones`] (benchmarks measure cold
+/// runs with it).
 pub fn clear_fill_cache() {
     if let Ok(mut m) = MEMO.lock() {
         m.clear();
     }
+    if let Ok(mut m) = SPOKES.lock() {
+        *m = None;
+    }
 }
 
-/// [`fill_zones`] without the in-process reuse.
+/// [`fill_zones`] without the in-process reuse, of whole fills or of parts of them.
 pub fn fill_zones_uncached(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
-    fill_with(p, base, &drill_holes(p), &item_clearances(p, base))
+    fill_with(p, base, &drill_holes(p), &item_clearances(p, base), false)
 }
 
 /// The clearance the DRC requires around each base item: its custom rule's, else its local
@@ -792,7 +965,9 @@ fn max_relief(items: &[(&CopperItem, Nm)], prm: &ZoneParams) -> i64 {
         .fold(zone, i64::max)
 }
 
-fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]) -> Vec<ZoneFill> {
+/// The fills, each zone layer from scratch; with `reuse`, parts of earlier fills are taken where
+/// everything they were made from is as it was (the reliefs of pads, [`SpokeMemo`]).
+fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm], reuse: bool) -> Vec<ZoneFill> {
     let board = p.board();
     if board.zones.is_empty() {
         return vec![];
@@ -916,23 +1091,26 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
                         keepaway.push(Polygon::new(ring, vec![]));
                     }
                 }
-                fill_layer(&LayerInput {
-                    net: z.net.as_deref(),
-                    outline: &outline,
-                    board: barea,
-                    items: match window {
-                        Some(w) => {
-                            // Every distance `fill_layer` grows an item by, plus the arc and
-                            // rounding margins of `reaches`.
-                            let d = max_c.max(prm.clearance.0).max(max_relief(&items_on, &prm));
-                            let q = w.expand(d + OBSTACLE_TOL.tolerance + SAFETY + 1);
-                            index.query(&q).into_iter().map(|i| items_on[i as usize]).collect()
-                        }
-                        None => items_on.clone(),
+                fill_layer_with(
+                    &LayerInput {
+                        net: z.net.as_deref(),
+                        outline: &outline,
+                        board: barea,
+                        items: match window {
+                            Some(w) => {
+                                // Every distance `fill_layer` grows an item by, plus the arc and
+                                // rounding margins of `reaches`.
+                                let d = max_c.max(prm.clearance.0).max(max_relief(&items_on, &prm));
+                                let q = w.expand(d + OBSTACLE_TOL.tolerance + SAFETY + 1);
+                                index.query(&q).into_iter().map(|i| items_on[i as usize]).collect()
+                            }
+                            None => items_on.clone(),
+                        },
+                        keepaway,
+                        params: prm,
                     },
-                    keepaway,
-                    params: prm,
-                })
+                    reuse,
+                )
             })();
             match result {
                 Ok(f) => fill.fill = f,

@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -940,7 +940,8 @@ exports and the count all read cadlab's fill). The result is then treated as the
   taken out of that net within 3 mm of the connection goes back in and the board is filled once more; kept if
   it has no more open. With a deadline it is made if there is time for one fill, and the second if there is
   time for it then; the later runs' deadline leaves the time of two where a fill takes no more than 3 % of the
-  budget (`SHORT_FILL`), and on glasgow-revD1, 5.7 s a fill, it is not made. A track from pad to pad stays in this step whatever fill joins the two (the next step is for
+  budget (`SHORT_FILL`): glasgow-revD1's took 5.7 s and the step was not made there, and since D117 it takes
+  1.7 s behind the adapter and is. A track from pad to pad stays in this step whatever fill joins the two (the next step is for
   those, below), and a piece of fill with no pad on it and less than a sixteenth of its net's largest is joined to
   nothing for its own sake.
 - *The tracks from pad to pad that a pour joins as well* (guide 0.0.20, D116). A net with a pour is joined up
@@ -963,11 +964,27 @@ exports and the count all read cadlab's fill). The result is then treated as the
   to take a net out, and `RouteOptions::shorten`: in its cleanup each run of a net's tracks from one pad or
   branch to the next that costs more than the straight way is taken out and looked for again, the others where
   they are, and kept if it is cheaper, a via at three times its routing price. Its result is verified as any
-  run's; where a connection is open that was not (a track that went another way may cut a pour, which guide's
-  own count of its fills does not always tell), the nets with new copper within 1.5 mm of an end of it have the routes they had back, as have
-  those that the check takes copper out of beside them, and the rest is verified again, three times at most;
+  run's; where a connection is open that was not (a track that went another way may cut a pour, which guide
+  tells by an estimate of its fills), the nets with new copper within 1.5 mm of an end of it have the routes
+  they had back, as have the nets that are open themselves where they were not and those that the check takes
+  copper out of beside them, and the rest is verified again, three times at most;
   kept if the check takes nothing out and the board has no more open. No time is kept for it: it is made when
-  the runs end early or the budget leaves room (D116 has what keeping time for it cost).
+  the runs end early or the budget leaves room (D116 has what keeping time for it cost). It is a run that moves
+  no route, and since guide 0.0.21 (D117) such a run plans its escapes on the board with the routes it is given
+  on it. Until then each pad had the escape planned again that a first run had planned for it, and where that
+  run had given the place to another net since, the other net's via was cut as the run began: cynthion's run
+  for shorter ways came back, every time, with two pads of +2V5 open under its array (which D116 put down to a
+  pour that the run had cut) and was not kept. The runs that move routes still plan their escapes that way: the
+  net that is cut is routed again round the escape, which is how a ball left shut in comes out (planned round
+  the routes there too, glasgow-revC3 had 29 open over four orders at 150 million nodes for 22).
+- *Two runs that move routes and gain nothing end them* (`MOVE_STALE`, D117). Another order of the nets closes
+  what one left open, and a board whose open connections no order closes had the same asked of it until the
+  time was gone: cynthion's eight had three such runs and its run for shorter ways 1.5 s for its searches,
+  where after two it has 8.6 s.
+- *No fill at a run's end* (D117). guide asks its host for a fill at the end of each run, to tell the stubs
+  that the fill makes needless; the adapter keeps those on the board until its runs are over and tells them
+  again by the fill of the board as it is then, so the fill bought nothing: 0.8 s a run on tinytapeout-demo,
+  3 s on glasgow-revD1. It is refused.
 - *What the board keeps apart* (guide 0.0.16, D110). A net with pads that the board's own copper, keep-outs,
   holes or edge keep apart on every layer (two halves of a board that only the schematic joins) is looked for
   once by guide on the board with none of its routes, and has no more turns once it has its other connections.
@@ -2428,6 +2445,88 @@ What the numbers say:
   9 → 12, nrfmicro 9 → 10, cynthion 55 → 56, tinytapeout-demo 40, lumenpnp-mobo 1 and glasgow-revD1 454 the same.
 
 The default is unchanged (DECISIONS D106).
+
+**Native router and guide 0.0.21, D117** (guide 0.0.21 from crates.io behind the adapter that asks no fill at a run's
+end and ends the runs that move routes after two that say the board has no room; cadlab's fill with the reliefs
+of its pads kept from one fill to the next, which the native router has as well; the corpus at the default 60 s;
+four runs of the native router, seeds 1 to 4, three threads, and four orders of guide, three threads for its
+negotiation and one for the rest, two runs of each at a time, side by side in the same quarter of an hour):
+
+| board | layers | native: open by run (min / median / max); vias, length, time | guide 0.0.21: open by run (min / median / max); vias, length, time |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 5, 491.9 mm, 0.8 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 4, 358.5 mm, 0.7 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 1, 176.5 mm, 0.3 s | 0, 0, 0, 0 (0 / 0 / 0); 4, 199.3 mm, 0.7 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 11.4 s | 0, 0, 0, 0 (0 / 0 / 0); 47, 526.0 mm, 19.2 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 52.0 s | 3, 3, 3, 3 (3 / 3 / 3); 18, 2207.0 mm, 57.7 s |
+| corne-cherry | 2 | 3, 4, 0, 3 (0 / 3 / 4); 484, 8273.0 mm, 29.4 s | 1, 0, 2, 1 (0 / 1 / 2); 495, 7412.5 mm, 58.6 s |
+| tinytapeout-demo | 4 | 12, 3, 14, 2 (2 / 7.5 / 14); 243, 4938.7 mm, 60.1 s | 0, 6, 0, 1 (0 / 0.5 / 6); 372, 5823.5 mm, 57.7 s cut |
+| buspirate5-rev10 | 4 | 4, 2, 12, 5 (2 / 4.5 / 12); 314, 3044.6 mm, 24.6 s | 0, 0, 0, 0 (0 / 0 / 0); 296, 3239.9 mm, 23.1 s |
+| lumenpnp-mobo | 4 | 13, 7, 1, 24 (1 / 10 / 24); 340, 5370.3 mm, 61.6 s cut | 0, 0, 0, 0 (0 / 0 / 0); 329, 6064.2 mm, 50.7 s |
+| cynthion | 4 | 28, 29, 29, 28 (28 / 28.5 / 29); 476, 3176.6 mm, 62.0 s cut | 8, 8, 8, 8 (8 / 8 / 8); 424, 3484.3 mm, 58.4 s |
+| glasgow-revC3 | 4 | 36, 31, 33, 31 (31 / 32 / 36); 415, 3436.4 mm, 61.7 s cut | 7, 4, 5, 7 (4 / 6 / 7); 453, 4464.6 mm, 59.4 s cut |
+| glasgow-revD1 | 6 | 169, 99, 107, 116 (99 / 111.5 / 169); 1046, 8967.0 mm, 60.8 s cut | 112, 88, 84, 120 (84 / 100 / 120); 1026, 9268.5 mm, 55.4 s cut |
+| all twelve | | 268, 178, 199, 212 (178 / 205.5 / 268) | 131, 109, 102, 140 (102 / 120 / 140) |
+| the eleven without glasgow-revD1 | | 99, 79, 92, 96 (79 / 94 / 99) | 19, 21, 18, 20 (18 / 19.5 / 21) |
+
+
+DRC errors other than unrouted, all runs: 0; longest call of guide 59.4 s, of the native router 63.1 s
+
+Pads in pours after the same runs (`CADLAB_BENCH_THERMALS=1`, `board::thermal::census`), the twelve boards together,
+by run:
+
+| | pads in pours | no neck | short of two necks (`drc.starved_thermal`) | solid solder pads |
+|---|---|---|---|---|
+| as routed by their projects (D112) | | 2 | 116 | |
+| native router, seeds 1 to 4 | 2350 to 2356 | 47, 7, 11, 2 | 159, 131, 146, 134 | 434 to 444 |
+| guide 0.0.20, four orders (D116) | 2371 to 2375 | 2, 3, 0, 2 | 64, 71, 75, 75 | 468 to 473 |
+| guide 0.0.21, four orders | 2371 to 2375 | 2, 3, 0, 2 | 70, 76, 75, 73 | 468 to 473 |
+
+Short of two necks by board, guide against the native router: buspirate-rs232 1 against 1; sweep-v2.2 0 to 2 against 1 to 2; corne-cherry 1 to 3 against 2 to 4; tinytapeout-demo 11 to 13 against 16 to 21; buspirate5-rev10 25 to 32 against 38 to 44; lumenpnp-mobo 0 against 2 to 3; cynthion 2 to 5 against 2; glasgow-revD1 24 to 28 against 66 to 90. With no neck: sweep-v2.2 0 against 0 to 2; tinytapeout-demo 0 against 0 to 3; lumenpnp-mobo 0 against 0 to 3; cynthion 0 to 3 against 0; glasgow-revD1 0 against 1 to 39.
+
+Vias, track, and the track outside the pads of its net, by the medians of the four runs, guide against the
+native router:
+
+| board | vias | track, mm | track outside the pads of its net, mm |
+|---|---|---|---|
+| buspirate-flash-sop | 5.5 against 4 | 494 against 461 (+7 %) | 431 against 431 (0 %) |
+| buspirate-rs232 | 4 against 10 | 358 against 281 (+28 %) | 291 against 272 (+7 %) |
+| lumenpnp-ringlight | 6 against 3 | 198 against 177 (+12 %) | 155 against 159 (-3 %) |
+| nrfmicro | 44.5 against 47.5 (-6 %) | 531 against 450 (+18 %) | 448 against 414 (+8 %) |
+| sweep-v2.2 | 20.5 against 25.5 (-20 %) | 2202 against 2159 (+2 %) | 2121 against 2122 (0 %) |
+| corne-cherry | 502.5 against 464.5 (+8 %) | 7595 against 8212 (-8 %) | 7322 against 8027 (-9 %) |
+| tinytapeout-demo | 381.5 against 261 (+46 %) | 5922 against 4928 (+20 %) | 5548 against 4704 (+18 %) |
+| buspirate5-rev10 | 312 against 308.5 (+1 %) | 3255 against 3088 (+5 %) | 2940 against 2870 (+2 %) |
+| lumenpnp-mobo | 335 against 341.5 (-2 %) | 6070 against 5468 (+11 %) | 5467 against 5180 (+6 %) |
+| cynthion | 421 against 478 (-12 %) | 3617 against 3184 (+14 %) | 3185 against 2981 (+7 %) |
+| glasgow-revC3 | 405.5 against 416 (-3 %) | 4502 against 3462 (+30 %) | 4015 against 3200 (+25 %) |
+| glasgow-revD1 | 1016 against 1084 (-6 %) | 9265 against 9147 (+1 %) | 8222 against 8608 (-4 %) |
+
+What the numbers say:
+
+- *The native router has the same fill*, and is not the one of D116's table on glasgow-revD1: 99 to 169 open for
+  238 to 289, where a fill took 3 s of each of its verifications. The other boards are within what its seeds gave
+  before.
+- *Against the native router, by the ranges of the table*: level on buspirate-flash-sop, buspirate-rs232,
+  lumenpnp-ringlight, nrfmicro, sweep-v2.2; ahead in every run on buspirate5-rev10, lumenpnp-mobo, cynthion and
+  glasgow-revC3; ranges that overlap on corne-cherry, tinytapeout-demo and glasgow-revD1 (84 to 120 against 99 to
+  169); behind in every run on none. The twelve boards: 102 to 140 (median 120) against 178 to 268 (205.5); the
+  eleven without glasgow-revD1: 18 to 21 (19.5) against 79 to 99 (94).
+- *From 0.0.20 to 0.0.21* (D116's table for the first, another day): open as it was on every board but
+  tinytapeout-demo, 0, 7, 0, 0 → 0, 6, 0, 1, and glasgow-revC3, 5 to 7 → 4 to 7. Track by the medians against the
+  native router's: cynthion +18 % → +14 %, tinytapeout-demo +23 % → +20 %, lumenpnp-mobo +12 % → +11 %, nrfmicro
+  +19 % → +18 %, glasgow-revC3 +29 % → +30 %. Vias: glasgow-revD1 1123.5 → 1016 (its needless vias go, 99 to 106
+  in every order), tinytapeout-demo 390.5 → 381.5, the others within 1 %.
+- *The steps after routing* are made on more boards and not on all: the run for shorter ways in 28 runs of 48 for
+  23 (lumenpnp-mobo in every order, 72 to 127 mm, and cynthion in two, for none), the tracks between pads on
+  cynthion in two orders (277 mm) and tinytapeout-demo in two (240 and 243 mm). tinytapeout-demo and the glasgows
+  end their first run at its share, 42 s, in every order, and have what the runs after it leave.
+- *Budgets of nodes*: 40 million, three orders, the nine boards a budget cuts: 620 open, board by board as 0.0.20.
+  150 million, two orders: open as 0.0.20; cynthion 3449 and 3398 mm of track for 3558 and 3471.
+- *glasgow-revD1 with more time*, one order, three threads: 23 open at three minutes (20 at U8) and 14 at five
+  (all at U8, its array of 256 balls); at one minute 62 of its 105 end there (D117).
+
+The default is unchanged (DECISIONS D117).
 
 **Native router and guide 0.0.20, D116** (guide 0.0.20 from crates.io behind the adapter that takes the tracks
 between pads that a pour joins out by the fill and has guide look for shorter ways once its runs are over; the fill

@@ -342,14 +342,15 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       keeps apart found once, told as such and left out of the later runs (`Cause::Apart`: sweep-v2.2's two
       nets across its halves); a net with zones has its run on the filled board whatever the first run said
       of it. The default stays the native router
-- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D116,
-      with guide 0.0.20: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, nrfmicro, sweep-v2.2; ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 5 to 13; cynthion 8 against 28 to 29; glasgow-revC3 5 to 7 against 31 to 37; glasgow-revD1 84 to 120 against 238 to 289; ranges that overlap on corne-cherry 0 to 2 against 0 to 4; tinytapeout-demo 0 to 7 against 2 to 15; behind in every run on none): the default is unchanged, and the switch is the user's. Left, in
+- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D117,
+      with guide 0.0.21 and the native router on the same faster fill: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, nrfmicro, sweep-v2.2; ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 1 to 24; cynthion 8 against 28 to 29; glasgow-revC3 4 to 7 against 31 to 36; ranges that overlap on corne-cherry 0 to 2 against 0 to 4; tinytapeout-demo 0 to 6 against 2 to 14; glasgow-revD1 84 to 120 against 99 to 169; behind in every run on none): the default is unchanged, and the switch is the user's. Done in D117: the reliefs of a fill kept from one fill to the next and made side by side (glasgow-revD1's fill 3.2 s → 1.5 s, 0.9 s after a few tracks moved; the same polygons, `tests/zone_refill.rs`), no fill at a run's end, the runs that move routes ended after two that say the board has no room, and the escapes of a run that moves no route planned round its routes (guide 0.0.21: what cynthion's run for shorter ways left open was a via cut by an escape planned again, not a pour). Still open for
       guide and its adapter: time for what comes after routing on the boards that a minute does not finish
-      (track within a tenth of the native router's on four boards of twelve, on nine counted outside the pads;
-      tinytapeout-demo +23 %), tinytapeout-demo's negotiation, which gains nothing after its twelfth round, and its
-      vias (327 to 462 against 238 to 290), a pour cut by a shorter way that guide's count does not tell, glasgow-revD1
-      (84 to 120 open, a fill of 5.7 s), a track that leaves a net tie's pad within the tie (cynthion's eight:
-      D116 has the geometry and why no rule was changed), and rule areas with a routed track width (D116, "Gaps";
+      (the first run of tinytapeout-demo and the glasgows takes its whole share, 42 s of 60; track within a tenth
+      of the native router's on five boards of twelve, on ten counted outside the pads; tinytapeout-demo +20 %),
+      tinytapeout-demo's vias (372 to 427 against 243 to 290; ending its negotiation sooner cost connections,
+      D117), glasgow-revD1 (84 to 120 open: a minute ends its first run, and five leave 14, all at its array), a
+      track that leaves a net tie's pad within the tie (cynthion's eight: D116 has the geometry and D117 why no
+      rule was changed), and rule areas with a routed track width (D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
       "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D115 (D116): the ways out of
