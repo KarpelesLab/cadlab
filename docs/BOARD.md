@@ -269,6 +269,12 @@ exposed pad, a tab) as pads that a via of their own net may be in (`Zones::via_p
 track leaves the pad: the rule against vias in pads is for the pads that leads are soldered to. And what the fill
 of the routed board makes needless of guide's vias is told from that fill, island by island
 (`router::guide::needless`).
+Since guide 0.0.20 (D116) the tracks from pad to pad that a pour joins as well go the same way, in a step of
+their own, and a relief is what decides whether one stays: the joints of the pads of the nets with pours are
+counted before and after (`thermal::joints_of`, the joints of the nets asked for alone), and a pad that the
+fill without those tracks leaves short of its spokes (`Joint::starved`) where it was not, or with fewer necks
+than it had and fewer than two, has the tracks of its net within 1.5 mm back before the board is filled again.
+A track to a pad is a neck of it, and the pour that takes the track's place is not always one.
 
 Not covered: the native router does not keep the sides of relieved pads free for their spokes (what the
 routers leave is counted by `route_bench --corpus` with `CADLAB_BENCH_THERMALS=1`, reported by the router

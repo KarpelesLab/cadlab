@@ -342,14 +342,26 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       keeps apart found once, told as such and left out of the later runs (`Cause::Apart`: sweep-v2.2's two
       nets across its halves); a net with zones has its run on the filled board whatever the first run said
       of it. The default stays the native router
-- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D115,
-      with guide 0.0.19: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, nrfmicro, sweep-v2.2; ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 5 to 33; cynthion 8 against 28 to 29; glasgow-revD1 93 to 112 against 241 to 376; ranges that overlap on corne-cherry 0 to 2 against 0 to 4; tinytapeout-demo 0 to 7 against 2 to 15; glasgow-revC3 29 to 34 against 31 to 36; behind in every run on none): the default is unchanged, and the switch is the user's. Left, in
-      guide: the vias that its passes add after a negotiation that was cut (tinytapeout-demo 362 to 462 vias
-      against 240 to 290), the grounds of a board of two layers (corne-cherry 522 to 609 against 445 to 505), a
-      plan for a whole array of balls (glasgow-revC3), its track, longer than the native router's on every board,
-      and rule areas with a routed track width (D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
+- [ ] `router: guide` level with the native router on the corpus, by the ranges of four runs of each (D116,
+      with guide 0.0.20: level on buspirate-flash-sop, buspirate-rs232, lumenpnp-ringlight, nrfmicro, sweep-v2.2; ahead in every run on buspirate5-rev10 0 against 2 to 12; lumenpnp-mobo 0 against 5 to 13; cynthion 8 against 28 to 29; glasgow-revC3 5 to 7 against 31 to 37; glasgow-revD1 84 to 120 against 238 to 289; ranges that overlap on corne-cherry 0 to 2 against 0 to 4; tinytapeout-demo 0 to 7 against 2 to 15; behind in every run on none): the default is unchanged, and the switch is the user's. Left, in
+      guide and its adapter: time for what comes after routing on the boards that a minute does not finish
+      (track within a tenth of the native router's on four boards of twelve, on nine counted outside the pads;
+      tinytapeout-demo +23 %), tinytapeout-demo's negotiation, which gains nothing after its twelfth round, and its
+      vias (327 to 462 against 238 to 290), a pour cut by a shorter way that guide's count does not tell, glasgow-revD1
+      (84 to 120 open, a fill of 5.7 s), a track that leaves a net tie's pad within the tie (cynthion's eight:
+      D116 has the geometry and why no rule was changed), and rule areas with a routed track width (D116, "Gaps";
+      D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D114 (D115): guide's negotiation
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D115 (D116): the ways out of
+      the second ring of an array of balls planned before anything is routed and the dog-bones of the balls
+      further in away from its middle (guide 0.0.20: glasgow-revC3 5 to 7 open for 29 to 34); the tracks from
+      pad to pad that a pour joins taken out by the fill of the routed board, where no connection opens and no
+      pad is left short of its spokes for it (`pcb::needless_between`, `thermal::joints_of`: lumenpnp-mobo 520 to
+      552 mm, buspirate5-rev10's track +5 % on the native router's for +17 %); a run of guide's for shorter ways
+      once the others are over, where they leave the time (`RouteOptions::shorten`); corne-cherry's vias within
+      15 % of the native router's (502.5 against 464.5 by the medians, the price of a shared point stopping at
+      thirty steps on two layers); `route_bench` tells the track outside the pads of its net and writes a
+      result's nets and tracks (`CADLAB_BENCH_BY_NET`). Done since D114 (D115): guide's negotiation
       for every net on a grid of twice the pitch on boards of more than two layers (guide 0.0.19: glasgow-revD1
       is negotiated, the vias of the boards of four layers come down); every via that the fill of the routed
       board makes needless taken out by that fill, with none made for it (`pcb::needless`, `needless`); the heat

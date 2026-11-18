@@ -2087,9 +2087,8 @@ pub(crate) fn route(
         let moved: BTreeSet<&str> =
             more.taken_back.iter().filter_map(|n| ad.nets.get(n.index())).map(String::as_str).collect();
         // The nets that keep the routes they had: none at first. Guide tells the pads that
-        // its new routes cut off the fills it plans on, and a pour that it does not plan on,
-        // as one of an outer layer beside a plane, may be cut all the same (cynthion: two
-        // pads in ten runs). The nets with new copper at an end of a connection that is open
+        // its new routes cut off the fills it plans on, by its own count of them, and a pour
+        // may be cut all the same (cynthion: two pads of +2V5, in every run tried). The nets with new copper at an end of a connection that is open
         // now and was not, and those that the check takes copper out of once others are
         // back where they were, have their old routes back, and the rest is verified again,
         // three times at most.
