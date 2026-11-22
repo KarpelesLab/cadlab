@@ -370,7 +370,19 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D118 (D121, with the
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D121 (D122, the same
+      direction, not met): a via of a net with a pour at the native router's price on two layers (guide 0.0.24:
+      corne-cherry 430 vias against the native router's 459 for 504, lumenpnp-ringlight 3 against 3 for 4);
+      of two ways as long as each other the one with less outside the pads; the runs that move routes ended
+      where one has said all there is (cynthion 49 to 57 s for 57 to 59 s, its track level with the native
+      router's, the spoke step begun in two orders of four); the first step for the needless vias made
+      whatever the time. By board and measure 24 better, 29 equal, 2 with ranges that overlap and 17 worse of
+      72 (21, 28, 3 and 20 in D121): vias on four boards, track on four, outside the pads on six, time on
+      three; by the nets both routers complete, tinytapeout-demo +34 % vias and +18 % track, glasgow-revD1 +6 %
+      and +5 %, glasgow-revC3 -11 % and +5 %. Open (D122, "Not attempted"): the vias and track that guide's
+      negotiation leaves a net with under another (it ends its rounds on tinytapeout-demo with 458 vias where
+      the native router ends its own with 255), the native router's gridless pass, sweep-v2.2's and
+      corne-cherry's time. Done since D118 (D121, with the
       direction that guide end equal to or better than the native router on every measure on every board,
       which it does not): a negotiation at the first pitch that does not end begun again on finer grids, as
       the native router's whole run is (guide 0.0.23: nrfmicro none open in any order, 11 over twelve orders

@@ -17,7 +17,7 @@
 //! that is outside the pads of its net: a router that takes a track to the middle of its pad and
 //! one that ends it at the first point on the pad's copper differ by what is inside, which is
 //! copper on copper (D116). `CADLAB_BENCH_BY_NET=<dir>` then also writes, per board, `<board>.nets`
-//! (by net: length in mm, vias, whether it has a zone, whether it is left open) and
+//! (by net: length in mm, vias, whether it has a zone, whether it is left open, the length outside the pads of the net) and
 //! `<board>.tracks` (every new track and via and every pad, in nanometres), for two routers'
 //! results side by side.
 //! `CADLAB_BENCH_SEED=<n>` sets the seed (default 1; guide's default is none, its nets shortest
@@ -413,6 +413,7 @@ fn corpus(filters: &[String]) {
             }
             let by_net: Vec<String> = by_net.iter().map(|(n, c)| format!("{n} {c}")).collect();
             eprintln!("  {}: vias of the nets with zones: {}", e.name, by_net.join(", "));
+            let mut outside_by_net: BTreeMap<&str, f64> = BTreeMap::new();
             // The track that is outside the pads of its net: a router that ends a track at the
             // first point of its grid inside a pad and one that goes on to the pad's centre
             // differ by what is inside, which is copper on copper (D116).
@@ -469,6 +470,7 @@ fn corpus(filters: &[String]) {
                     };
                     let out = len * (1.0 - (inside(0.0, 1.0) + inside(1.0, 0.0)).min(1.0)) / 1e6;
                     outside += out;
+                    *outside_by_net.entry(t.net.as_deref().unwrap_or("")).or_default() += out;
                     if of_zone(&t.net) {
                         zone_outside += out;
                     }
@@ -498,9 +500,10 @@ fn corpus(filters: &[String]) {
                     .iter()
                     .map(|(n, (l, v))| {
                         format!(
-                            "{n}\t{l:.3}\t{v}\t{}\t{}\n",
+                            "{n}\t{l:.3}\t{v}\t{}\t{}\t{:.3}\n",
                             u8::from(of_zone(&Some(n.to_string()))),
-                            u8::from(open.contains(n))
+                            u8::from(open.contains(n)),
+                            outside_by_net.get(n).copied().unwrap_or(0.0)
                         )
                     })
                     .collect();

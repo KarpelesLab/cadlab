@@ -1304,6 +1304,10 @@ const AGAIN_SEED: u64 = 7919;
 /// two it has 8.6 s. A run that leaves a net open that rip-up took out is no such word:
 /// nrfmicro's last connection is closed, in one order of four, by the fourth run after two
 /// that gained nothing, and counted by the gain alone it stayed open.
+///
+/// One run is enough where it says more (D122): having taken no net out and moved none aside,
+/// which is so of every order of the nets, or having been kept and found no way of its own for
+/// any net that the board then still has open.
 const MOVE_STALE: usize = 2;
 
 /// How far round a connection that taking needless copper out opened what was taken out of
@@ -2381,8 +2385,12 @@ pub(crate) fn route(
             let failed = gave_up_on(&ad, &more);
             left.iter().all(|l| failed.contains(&l.net))
         };
+        // And one that says so having taken no net out and moved none aside has said it of
+        // every order: where no route moved, the order of the nets is nothing to the result.
+        let none_moved = no_room && more.stats.rip_ups == 0 && more.stats.shoved == 0;
+        let fruitless = if none_moved { MOVE_STALE } else { usize::from(no_room) };
         if t.is_empty() && v.is_empty() {
-            idle += usize::from(no_room);
+            idle += fruitless;
             continue;
         }
         // What guide took back is in its result as it is now; what it left where it was
@@ -2403,11 +2411,24 @@ pub(crate) fn route(
         let isl2 = geo::islands(&items2);
         // A run that leaves no less open is as if it had not been: the board stays as the
         // runs before left it.
-        if open(&items2, &isl2).len() >= left.len() {
-            idle += usize::from(no_room);
+        let left2 = open(&items2, &isl2);
+        if left2.len() >= left.len() {
+            idle += fruitless;
             continue;
         }
-        idle = 0;
+        // A run that is kept, ended on its own, and found no way for any net that the board
+        // still has open: what is open is shut in by what no run moves, and another order
+        // has the same to say of it (cynthion: the eight nets at its net ties, after the
+        // run that closed a ninth; the run after it took 7 s of the minute to say so, and
+        // left none for the pads short of their spokes).
+        idle = if moves && more.stopped.is_none() && {
+            let failed = gave_up_on(&ad, &more);
+            left2.iter().all(|l| failed.contains(&l.net))
+        } {
+            MOVE_STALE
+        } else {
+            0
+        };
         (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
         (drc_reason, stats.drc_removed) = (reasons, removed);
         stopped = stopped.or(more.stopped);
@@ -2448,9 +2469,41 @@ pub(crate) fn route(
     // open for 6, lumenpnp-mobo 4 and 5 for none, glasgow-revC3 36 for 22, for 5 % of
     // tinytapeout-demo's track, 3 % of glasgow-revC3's and 1 % of lumenpnp-mobo's. So it is
     // for the boards whose runs end early, and for the budgets that leave room.
+    // Less the time of the step that moves routes out of the rooms of spokes, where the
+    // board as the runs leave it has pads short of their spokes with routes in a spoke's
+    // room: relief comes before a shorter way (D120), and on a board whose runs end late
+    // the run for shorter ways took what the step needs (cynthion: 7 s of the 17 left in
+    // one order, and the step not begun in three of four).
+    let spoke_need = {
+        let wanted_step =
+            opts.budget.is_some() && stopped != Some(Stopped::WorkBudget) && !poured.is_empty() && !tracks.is_empty();
+        let rooms = wanted_step && {
+            let rules = &proj.board().rules;
+            let short: BTreeSet<geo::thermal::Key3> =
+                geo::thermal::joints_of(&proj, &fitems, &|net| poured.contains(net))
+                    .into_iter()
+                    .filter(|j| j.starved(rules.min_thermal_spokes, rules.thermal_max_contact))
+                    .map(|j| (j.refdes, j.number, j.layer))
+                    .collect();
+            let new_t: BTreeSet<u64> = tracks.iter().map(|t| t.id.0).collect();
+            let new_v: BTreeSet<u64> = vias.iter().map(|v| v.id.0).collect();
+            !short.is_empty() && !spoke_rooms(&proj, &fitems, &short, &new_t, &new_v).is_empty()
+        };
+        if rooms {
+            (hooks.progress)(
+                0,
+                None,
+                "guide: pads short of spokes with routes in a spoke's room, the time of their step kept",
+            );
+            // What the step asks for before it begins, and the least of a run again.
+            SPOKE_MIN * 2 + after.mul_f64(AFTER_SHARE) + fill * 2 + after.mul_f64(2.0 / 3.0)
+        } else {
+            Duration::ZERO
+        }
+    };
     let reserve = |b: Duration| {
         let last = if fill <= short { fill * 3 + after } else { Duration::ZERO };
-        (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT)
+        (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT + spoke_need)
     };
     // With the time to get the routes back, to look, and to verify what comes of it.
     let room = opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| Instant::now() + after + SHORTER_MIN < t));
@@ -2636,7 +2689,12 @@ pub(crate) fn route(
         // The second step is begun with the time of all it may need: begun with less, it
         // ended before its second fill on cynthion in three orders of four, with nothing
         // to show for the first.
-        if (between && poured.is_empty()) || !(if between { time_for(2, 3) } else { time_for(1, 0) }) {
+        // The first is made whatever the time, where a fill is short: one fill, 3 % of the
+        // budget at most, for the vias that the board is counted with and that nothing needs.
+        // Under a load that kept the runs past their deadlines it was the step left out
+        // (D121: lumenpnp-mobo 488 and 471 vias in two orders of four for 349 and 343).
+        let must = !between && fill <= short;
+        if (between && poured.is_empty()) || !(if between { time_for(2, 3) } else { must || time_for(1, 0) }) {
             continue;
         }
         let (t_all, v_all) = needless(&ad, &tracks, &vias, &fitems, between);
@@ -2696,7 +2754,7 @@ pub(crate) fn route(
                 (t_all.into_iter().collect(), v_all.into_iter().collect());
             let mut kept = None;
             for round in 0..2 {
-                if (gt.is_empty() && gv.is_empty()) || !time_for(1, u32::from(between)) {
+                if (gt.is_empty() && gv.is_empty()) || !((must && round == 0) || time_for(1, u32::from(between))) {
                     break;
                 }
                 let less = without(&gt, &gv);
@@ -2867,7 +2925,7 @@ pub(crate) fn route(
             .into_iter()
             .filter(|r| r.nets.iter().all(|n| !held.contains(n) && wanted(n) && !poured.contains(n.as_str())))
             .collect();
-        if !rooms.is_empty() {
+        if !short.is_empty() {
             (hooks.progress)(
                 0,
                 None,
