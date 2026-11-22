@@ -360,10 +360,16 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       tinytapeout-demo's vias (372 to 427 against 243 to 290; ending its negotiation sooner cost connections,
       D117), glasgow-revD1 (84 to 120 open: a minute ends its first run, and five leave 14, all at its array), a
       track that leaves a net tie's pad within the tie (cynthion's eight: D116 has the geometry and D117 why no
-      rule was changed), and rule areas with a routed track width (D117, "Gaps"; D116, "Gaps";
+      rule was changed), and rule areas with a routed track width (D118, "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D115 (D116): the ways out of
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D117 (D118): guide's
+      negotiation routes the nets of a round eight at a time on its threads with the same routes on any number,
+      keeps a search round its two ends late, and the balls deep in an array whose nets' own via fits have their
+      vias planned (guide 0.0.22: glasgow-revD1 39 to 150 open at a minute for 84 to 120, 2 at five minutes for
+      14; tinytapeout-demo none open in four orders); the tracks end where they are inside the pads of their net
+      (`pad_ends`: track within 2 % of the native router's on eight boards of twelve); freerouting 2.5.0 beside
+      guide 0.0.22 on the CI runner. Done since D115 (D116): the ways out of
       the second ring of an array of balls planned before anything is routed and the dog-bones of the balls
       further in away from its middle (guide 0.0.20: glasgow-revC3 5 to 7 open for 29 to 34); the tracks from
       pad to pad that a pour joins taken out by the fill of the routed board, where no connection opens and no
