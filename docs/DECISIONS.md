@@ -6443,3 +6443,257 @@ the native router stays the default: the switch is the user's to make.
 *Not measured:* freerouting beside 0.0.21; the generated boards; more than four runs of either router; KiCad's
 DRC on a board guide routed; cadlab's oracles; cadlab's whole test suite, which is run at the merge; the fill's
 times on another machine than this one.
+
+### D119. Thermal relief, third round: what a pad is solid for, relief required at export by a rule, what stands in a spoke's way named, a spoke trimmed down to the minimum track and no further, a repair that takes its fills from the fill before (2026-11-22)
+D112 left a repair of 14 s on the largest board, 55 pads short of two spokes on the corpus as its projects
+route it (70 to 76 after guide, 131 to 159 after the native router, D117), each with the same sentence for a
+reason, no way to say a pad is solid on purpose but a bare `solid`, and thermal findings that never stop an
+export.
+**1. `zone.relieve` in less time, the same result.** Timed again first, on the code of D117 (release, three
+threads, a quiet machine, twice each; `route_bench --corpus` with `CADLAB_BENCH_ORIGINAL=1
+CADLAB_BENCH_THERMALS=relieve`, which times `thermal::relieve` on the board as its project routes it):
+glasgow-revD1 5.9 s where a fill of that board takes 1.4 s and reading its pads 0.7 s, cynthion 9.6 s (0.8 s
+and 0.6 s). (D112's 13.9 s was the command from the command line, with load and save, before D117's faster
+fill.) Where the time went, counted:
+the repair fills the board and reads every pad after each of its changes, up to eight times (after the zones
+and footprints, after the footprints' narrower spokes, after the reliefs at the minimums, after those taken
+back, the pours with every pad solid, after the tracks, after the tracks taken out, after the pads kept
+solid), and each of those was a fill of every zone layer and a reading of every pad.
+- *Zone layers kept* (`zones::LayerMemo`). `fill_zones` keeps the last fill of each zone layer with
+  everything it was made from (`LayerKey`, compared in full) and its allowed area. A zone layer whose inputs
+  are as they were is taken whole; one where only pads' reliefs changed keeps its allowed area (the offsets
+  of every item of another net and their difference: 0.5 s of the 1.8 s that glasgow-revD1's busiest layer
+  takes beside its spokes, timed once on a machine with other work). One fill kept per zone layer, ten million
+  points in all: with two fills per layer and the allowed area by a key of its own, cynthion's 61 zone layers
+  went over the bound at every fill and nothing was ever found again (measured: its refills took what a fill
+  from nothing takes).
+- *Joints kept* (`thermal::JointMemo`). The joint of a pad on a layer is a function of the pad, its zone and
+  relief, the zone copper and the other copper of its net near it, and the footprint's own pads beside it
+  (`JointKey`, `pad_joint`); kept by that, compared in full, read side by side with the `parallel` feature.
+- *One fill less, one reading less*: the pours with every pad solid are filled without being kept as a
+  board's fills (`fill_zones_once`), the joints the command has read are handed to the repair
+  (`relieve_from`), and no board is read twice in a row.
+- *The same result.* `thermal::relieve_uncached` is the repair with every fill and every reading from scratch.
+  `tests/zone_relieve.rs` runs both on every corpus board as routed (release, `CADLAB_CORPUS_DIR`) and asserts
+  the same board, the same report and the same joints, and that the joints kept are those of the board read
+  again from nothing; `relieve_is_the_relieve_from_scratch` does so on five small boards, twice, the second
+  time with everything the first left. `tests/zone_refill.rs` (the fills of `fill_zones` and
+  `fill_zones_uncached` on every corpus board in eight states) holds with the zone layers kept. The repairs
+  of this code and of D117's are not the same repairs: items 2 below change what a spoke is.
+
+Times of `thermal::relieve`, as above. On a quiet machine, twice each, D117's code beside this decision's
+one commit before its last (56377fc: the trimming rule of item 2 in its first form, the same fills and
+readings kept); and D117's code beside the code as it stands in one half hour on a machine with other work,
+the better of two:
+
+| board | fill + reading (D117) | relieve, D117, quiet | 56377fc, quiet | in fills and readings | D117, busy | as it stands, busy |
+|---|---|---|---|---|---|---|
+| glasgow-revD1 | 1.43 + 0.67 s | 5.92, 5.95 s | 5.04, 5.08 s | 2.8 to 2.4 | 9.19 s | 4.93 s |
+| cynthion | 0.76 + 0.62 s | 9.60, 9.66 s | 5.87, 5.88 s | 7.0 to 4.3 | 12.72 s | 5.99 s |
+| lumenpnp-mobo | 0.87 + 0.61 s | 5.67, 5.46 s | 3.39, 3.42 s | 3.8 to 2.3 | 6.06 s | 3.50 s |
+| tinytapeout-demo | 0.48 + 0.31 s | 3.28, 3.27 s | 1.80, 1.85 s | 4.2 to 2.3 | 3.74 s | 1.70 s |
+| buspirate5-rev10 | 0.43 + 0.25 s | 2.44, 2.39 s | 2.06, 2.10 s | 3.5 to 3.1 | 2.61 s | 1.77 s |
+
+*Not reached:* the repair was to take what one or two fills take, and takes 2.3 to 4.3 fills and readings
+of the board (the code as it stands was not timed on a quiet machine). What is left is the
+booleans of a whole layer: a zone layer in which one pad's relief changed still has its pour cut, opened by
+the minimum width, clipped to its pads' windows, joined with its spokes and searched for islands again, and
+on glasgow-revD1 that one layer is most of each of five fills (0.65 to 0.93 s each, of 1.4 s, timed on a
+machine with other work). The first fill after an import gains more than the repair: `kicad_import::import`
+fills the board once (counted: one `fill_zones`, cynthion's 61 zone layers made), and the fill a command
+asks for next finds all 61 again (cynthion 0.24 s for 0.76 s; glasgow-revD1, lumenpnp-mobo, tinytapeout-demo
+and buspirate5-rev10 as before, within a tenth).
+**2. The pads still short of two spokes: what blocks each, and what was done.** Each was looked at by
+direction (`thermal::blockers`, BOARD.md "What is in the way"): for a pad short of spokes, every direction of
+its relief in which no copper of its net crosses its outline, the spoke's rectangle against what the fill
+keeps away from. Three things came out of the 55 of D112.
+- *A trimmed spoke was copper of any width.* D51 kept a trimmed spoke that joined the pour over half the
+  spoke's width and cut it to the pad's gap and the pour. So half of a 0.4 mm spoke could not be trimmed
+  below 0.2 mm on a board whose tracks go down to 0.09 mm, and with the reliefs at the minimums that D112's
+  repair sets, half was 0.045 to 0.075 mm of copper, which no fab makes and no check saw
+  (`drc.thermal_size` reads the relief's nominal width); where the pour's rounded edge met the gap, the
+  copper kept was thinner still. **A spoke is now trimmed down to the minimum track width and no further**
+  (`Relief::min`, `zones::trimmed_spoke`): the spoke within the allowed area, shrunk by half of
+  `min_track_width`, the pieces that still reach from the pad to the pour grown again. This is the narrower
+  spoke "down to the rule minimum where the full width does not fit", in the fill itself and for every
+  board, not only for the pads the repair takes. With no minimum track in the rules D51's test stands.
+- *One piece of copper was one spoke.* A zone that sets spokes of 0.4064 mm joins a pad 0.4 mm wide by copper
+  that wraps its end: one piece in the band around the outline, 0.74 mm of it, read as one neck. The rules
+  now count necks by their copper (`Joint::worth`: the pieces, or the copper on the outline over the spoke
+  width when that is more), which is also nearer to KiCad, whose `starved_thermal` counts the spokes it drew.
+  The census has both counts below; the repair still works on the pieces (see "Tried and dropped").
+- *The reason given was the same for all* ("a relief at the minimums brings no further spoke, no track
+  reaches the pour"). `drc.starved_thermal` and the repair now name what stands in each open direction, the
+  tracks and vias first and as subjects (`track#12`, `via#7`, six at most), and the hint begins with whose
+  it is to move: for tracks and vias of other nets, `route.rip <their nets>` and route again.
+What else changed in the repair:
+- *A track around what is in the way* (`thermal::detour`). Where no straight track from the pad's middle
+  reaches the pour, a way through the copper the net may have is looked for on a grid of 0.05 mm, a spoke's
+  width of air kept from the spokes the pad has, ending in the pour beyond the relief gap, pulled straight,
+  five segments at most. Two on the corpus as routed (glasgow-revD1 C72.2, cynthion D24.1, 1.0 mm in three
+  segments each). For the other pads the search ends within a few hundred cells: there is no way.
+- *A pad in a pour that nothing joins and that no pour joined before* (a router's tracks around it) is tried
+  solid on that layer and kept so where that joins it, taken back where it does not.
+- *Spokes from the pad's ends or at further angles* were not added: on the pads left, the directions that
+  are blocked are blocked along the whole side (a track along it, the next pad, the zone's outline), and
+  where copper leads round a corner `detour` finds it as a track.
+
+Corpus, twelve boards as routed by their projects (pad and layer pairs; "short" is `drc.starved_thermal` per
+pad and layer, by pieces as D112 counted and by copper as the rule now counts; measured by
+`tests/zone_relieve.rs`):
+
+| | pads in pours | by necks 0/1/2/3/4+ | short, by pieces | short, by copper | kept solid by the repair | cut off |
+|---|---|---|---|---|---|---|
+| D112, as routed | 2378 | 2/324/284/239/555 | 116 | | | |
+| D112, after its `zone.relieve` | 2380 | 0/207/466/400/760 | 55 | | 43 | 0 |
+| now, as routed | 2378 | 1/308/244/256/583 | 95 | 68 | | |
+| now, after `zone.relieve` | 2380 | 0/207/436/418/787 | 56 | 32 | 10 | 0 |
+
+After `zone.relieve`, by board (short by pieces, D112 to now; then by copper; then the pads the repair keeps
+solid, D112 to now):
+
+| board | short, by pieces | by copper | kept solid | of those short by copper, what is in the way |
+|---|---|---|---|---|
+| cynthion | 23 to 31 | 17 | 31 to 1 | J1, J2 pins A4, A9, B4, B9: the next pins of the connector and the zone's outline, for three also tracks; IC1.G2, IC1.H3: the balls around them; C79.2, R77.2, R94.1, R95.1, U10.E5: tracks and vias; Q5.4, R73.2: another net's pour, a via |
+| buspirate5-rev10 | 10 to 10 | 7 | 0 | U304 to U308 pin 2: a track and a via at the free end; J202.A4B9, J202.B4A9: the next pins, a non-plated hole, the zone's outline |
+| glasgow-revD1 | 7 to 6 | 1 | 0 to 1 | U34.2: two tracks, the pads of D48 |
+| glasgow-revC3 | 4 to 4 | 2 | 12 to 8 | U14.1, U31.1: two vias, another net's pour, the zone's outline |
+| lumenpnp-mobo | 8 to 2 | 2 | 0 | C77.2, C91.2: the pads of two resistors, a via, another net's pour |
+| tinytapeout-demo | 2 to 2 | 2 | 0 | C34.2, C42.2: tracks |
+| sweep-v2.2 | 1 to 1 | 1 | 0 | U1.4: a track, the board edge |
+| the other five | 0 | 0 | 0 | |
+
+Read as it is: by D112's count the repair leaves as many pads on one piece of copper as before (55, 56);
+what moved is which. 33 of the 43 pads that D112 kept solid for want of any joint are relieved now, the 26
+balls of cynthion's `IC1` among them, most of them on one spoke trimmed to the 0.1 mm of that board's
+minimum track, which is why cynthion's count rises; lumenpnp-mobo's motor drivers' pin 25 and four pads of
+glasgow-revD1 have their second spoke. By the copper, 32 pads are short of two spokes, each with what is in
+its way named: tracks and vias of other nets on about half of them (the router's), the next pins of the
+pad's own connector or array and the outline of a small zone on 10, pads of other parts and other pours on
+the rest. No pad is left without a neck. The repair gave 191 pads a relief of their own (225), added 13
+tracks (9), kept 10 pads solid (43).
+After the routers (60 s, three threads, one run each on a machine with other work, the routers of D117;
+"before" is the same day's run of D117's code, which is another routing, the routers ending by time; all
+counts by `route_bench --corpus` with `CADLAB_BENCH_THERMALS=relieve`, "short" as each code counts it):
+
+| | open connections | pads in pours | no neck | on one neck | short | after `zone.relieve`: no neck | on one neck | short | spokes that cover the pad |
+|---|---|---|---|---|---|---|---|---|---|
+| guide, D117's code | 250 | 2370 | 2 | 257 | 63 (pieces) | 0 | 166 | 21 (pieces) | 3 |
+| guide, now | 293 | 2374 | 0 | 228 | 41 (copper) | 0 | 142 | 23 (copper) | 2 |
+| native router, D117's code | 309 | 2353 | 43 | 275 | 154 (pieces) | 2 | 164 | 37 (pieces) | 4 |
+| native router, now | 308 | 2359 | 25 | 243 | 90 (copper) | 0 | 136 | 22 (copper) | 4 |
+
+No pad is without a neck after the repair on either router's boards (two were, on glasgow-revD1 after the
+native router with D117's code; and one in an earlier run of this code, before the pads that nothing joined
+were tried solid: U34.7 of that board, with tracks of two nets and a via in its way. Whether that step is
+what leaves none now cannot be told from another routing). The pads on one neck are fewer after the repair
+with either router (166 to 142, 164 to 136: counted the same way before and now, on different routings).
+The counts of "short" are not comparable across the two codes (pieces, copper), and one run a side says
+nothing about the routers against each other: guide's run "now" left 293 connections open for 250, on a
+busier machine (glasgow-revD1 247 and 219).
+
+**3. What a pad is solid for** (`PadPurpose`: `press_fit`, `terminal`, `heat`, `stitching`; BOARD.md has the
+table). Stored on the placed pad (`PadJoin::purpose`), the pad or the footprint (`Overrides::purpose`), an
+enum, absent when unset, so boards and libraries without it are written as before. `zone.pad --purpose` and
+`footprint.set --purpose` set it and, unless a connection is given or set, `solid` with it. A press-fit pin and
+a stitching pad are not soldered (`PadClass::Bare`), a heat pad is a heat pad, a terminal is the solder pad
+it is and solid by its purpose; `drc.solid_pad` is quiet for all four, `zone.thermals` lists them (`meant`,
+the purpose), and `zone.relieve` keeps their setting where it removes a `solid` that says nothing. The default
+did not move: a through-hole pin or an SMD pad in a pour is relieved.
+*KiCad.* The published file format ("S-Expression Format", footprint pad, read 2026-11-22) has a `property`
+token on pads with six values: BGA, global and local fiducial, test point, heat sink, castellated. One says
+what a pad is in a pour: `pad_prop_heatsink` is read as `purpose: heat` and written back. It has no value for
+a press-fit pin (D112 had left that to be looked up), a terminal or stitching: those are written as the
+pad's `zone_connect` and listed by `export.pad_purpose`, and come back as solid pads without a purpose. No
+KiCad source was read. The generated exposed pads and tabs keep their `zone_connection: solid` and get no
+`purpose`: they are classed as heat pads by their paste windows and size already, and a property on them
+would move every golden file of a generated footprint for nothing.
+**4. Relief required.** `board.rules --thermal-required true` (`Rules::thermal_required`, stored with the
+board, false by default, in no preset and no fab profile): the thermal findings of the fab check
+(`fab.solid_pad`, `fab.thermal_nominal`, `fab.starved_thermal`, `fab.thermal_size`) are errors, so
+`fab.export` refuses, and no waiver takes an error away. A pad is let through by what item 3 says: a purpose,
+or a placed pad's own setting with its reason, which is also what the repair writes for the pads it keeps
+solid. A bare `solid` on a pad or footprint is then not taken as meant. `drc.run`'s own findings stay
+warnings. *The default stays as it was*, warnings: the user was asked which they want and has not said, and
+an error by default refuses the export of every imported board (664 solder pads solid on the corpus as its
+projects make it, D109).
+**5. Copper on the two pads of a chip part, against each other: not written.** A warning for a two-pad part
+with very unequal copper on its pads needs a number for "very". Read for one, 2026-11-22: Eurocircuits, "PCB
+assembly guidelines: tombstoning" ("the difference in thermal mass between pads of the same component", "the
+aim is to make the track width to each pad of the component the same width", "at least 0.25 mm of track before
+it connects to the copper area"); Nordson EFD, "Tombstone troubleshooting"; the DFM pages of JLCPCB, Cadence,
+Autodesk and Altium on tombstoning. All say the two pads should have the same copper; none gives a ratio or a
+percentage, and IPC-7351's text was not found in what could be read. So no threshold was invented and no rule
+added. What there is: `drc.solid_pad` names the risk when one pad of a two-pad part is solid and the other is
+not (D109), and Eurocircuits' 0.25 mm of track before a copper area is a number a later rule could stand on.
+**Golden files and tests.** One golden file moved and was blessed again on purpose,
+`tests/golden/exchange/tiny-ipc2581.xml`: the round pad of the tiny board whose spoke is trimmed has it with
+the corners of the trim rounded (four points for two in the plane's outline), and two cutouts in that plane
+that were a few nanometers wide (3.5429 to 3.6045 mm by 0.000002 mm: the seam between a trimmed spoke and
+the pour's rounded edge) are gone. No other golden file and no snapshot moved: the tests of zones, thermal
+relief, DRC, fab check, KiCad import and export, the exchange formats, the model's round trip, the CLI and
+MCP snapshots, the Gerber cross-check, the board render and the demo board were run. New tests:
+`tests/zone_relieve.rs` (above); in `tests/thermal_relief.rs` the repair against the repair from scratch,
+`solid_for_a_purpose`, `thermal_relief_required`, `relieve_joins_a_pad_nothing_joined`, and the blockers in
+`starved_thermal`; in `board::thermal` `purposes`, `a_track_around_the_corner` and the copper count in
+`solid_and_starved`; in `board::zones` `trimmed_spoke_is_no_narrower_than_a_track` and the allowed area kept
+in `reliefs_reused_give_the_fill_made_from_scratch`.
+**KiCad.** In CI, on the branch `ci/thermal-3`, KiCad 10 (the oracle and corpus jobs; `gh workflow run CI`):
+- commit 56377fc (the first form of the trimming rule): `Oracle tests` and `Open-source corpus` passed, as
+  did `Test & lint` on Linux and macOS (the whole suite); the run was cancelled there.
+- commit cd7e4bc (the rule as it stands): `Oracle tests` failed in the Gerber cross-check alone: on the
+  features board the fourth spoke of J1.1, the pin at the board edge, is now the one on the diagonal beside
+  the edge, trimmed to what the edge clearance leaves (0.063 mm² on `B.Cu` at x 9.69 to 10.07, y 1.06 to
+  1.37 mm), where D112's was the whole one across the pad: of the directions that fit, the one that spreads
+  best is taken, and more fit now. KiCad drops that spoke as it dropped D112's. The entry of `KNOWN` was
+  moved and says so. `kicad_agrees_on_starved_thermals` passed: `starved3` reported by both, `starved2` by
+  neither, and on `turned3` no finding on the exported fill (KiCad counts the diagonals cadlab places) and
+  "zone min spoke count 2; actual 1" on KiCad's own refill, as in D112.
+- commit 7d28cf8 (the same code, `KNOWN` moved): `Oracle tests` and `Open-source corpus` passed (KiCad
+  10.0.8): all twelve projects `ok`, no finding without an allowance on either side. On the corpus the two
+  tools still count on their own fills (the allowances of D109, on both sides): cadlab reports 68 pads as
+  routed on five boards (39, 14, 11, 3 and 1), KiCad its own on its refills. `Test & lint` (the whole
+  suite, fmt, clippy, rustdoc) passed on Linux, macOS and Windows, as did the freerouting, exchange and
+  openEMS oracles, MSRV 1.95, cargo-deny and the benchmarks. The run was cancelled with the router on the
+  corpus at a fixed work budget (informative), ems beside openEMS and freerouting on the corpus still
+  going; the branch is deleted.
+**Tried and dropped.**
+1. *The repair read place by place*: each change measured on a fill of the places around it alone
+   (`fill_zones_within`: the zones cut to windows around the changed pads and the pads beside them), the whole
+   board filled once at the end and compared, the slow way taken when the two disagree. Built and measured on
+   glasgow-revD1: the footprints' narrower spokes change 241 placed pads and the reliefs at the minimums 99,
+   and with the margins a change can reach (a relief, twice the minimum width, a clearance) their windows
+   took in 2541 and 2473 of the board's 2557 pads: a fill of the places was a fill of the board. And a fill
+   cut to a window is the same region and not the same polygons, so the result was the reference's only as
+   long as no decision sat on an arc's last micrometer. Taken out.
+2. *Two fills kept per zone layer and the allowed area by a key of its own*: over the bound on cynthion at
+   every fill (above).
+3. *The repair working on necks by their copper*: a pad on one wide piece was then not tried with a narrower
+   relief, and three pads of cynthion ended without effective relief. The repair works on the pieces as
+   before; the rule counts by copper.
+4. *A trimmed spoke dropped when narrower than a track, and D51's half-width test kept beside it*: the first
+   form of the rule. On the corpus as routed it only took spokes away (nine more pads on one neck after the
+   repair, 63 short by pieces for 55), and the U of D112's own test, with legs as long as it is wide, went
+   back to one spoke: what D51 cut to the gap and the pour was pinched where the pour's rounded edge meets
+   the gap, however wide the way. The rule as it stands (trimmed to the minimum track, within the allowed
+   area) keeps that U's diagonals and 95 pads short as routed for 116.
+**What got worse.** cynthion's pads short of two spokes (above: 23 to 31 by pieces, pads that were solid
+before). Fills are not those of D117 where a spoke is trimmed: fewer where what was left was thinner than a
+track, more where it was thinner than half the spoke and still a track, and a trimmed spoke is no longer cut
+to the pad's gap and the pour, so it can run through allowed copper that the pour's minimum width removed
+(it is a track's width of copper there, and keeps every clearance: it lies in the allowed area). Of the
+other directions that fit, the one that spreads best is still the one taken, and a trimmed one can now be
+taken where a whole one stood before (J1.1 of the features board, under **KiCad**): thinner copper, better
+spread; a whole spoke was not given the preference. A pad whose
+spokes at the minimum track width still cover two thirds of its outline is left as `drc.thermal_nominal`
+after the repair on boards the routers made: the repair narrows spokes and does not take one away.
+`LayerMemo` and `JointMemo` hold up to ten and two million points more in a process that fills (160 and 32 MB
+at the bound). A fill of a board from nothing takes the building of the keys more (not measured apart). The
+diagnostic's "its footprint leaves room for N" (`Joint::possible`, the zone's clearance around the boxes of
+the footprint's pads) and what `blockers` finds in the way (the clearances the fill keeps, round the pads'
+shapes) are two tests: on two balls of cynthion's `IC1` the first says two directions are free and the second
+finds the footprint's own pads in all of them.
+*Not done:* a router that moves a track off a pad's spoke on being told (`thermal::blockers` names them;
+BOARD.md, "What a router must be told", says what the guide adapter would pass); fewer spokes for a pad that
+four of them cover; the refill of a changed zone layer in less than its whole-layer booleans; `purpose` on
+generated footprints; the 3D view.

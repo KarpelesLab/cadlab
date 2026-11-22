@@ -6,7 +6,9 @@
 //! the board, the report and the joints of the repair that makes each from scratch
 //! (`relieve_uncached`). It prints, per board, the time of both, the pads before and after
 //! and, for the pads left short of spokes, what stands in the way by whose it is to move.
-//! Run in release: `CADLAB_CORPUS_DIR=... cargo test --release --test zone_relieve -- --nocapture`.
+//! Run in release: `CADLAB_CORPUS_DIR=... cargo test --release --test zone_relieve -- --nocapture`;
+//! `CADLAB_RELIEVE_ONLY=a,b` takes those boards alone, `CADLAB_RELIEVE_VERBOSE=1` lists every pad left
+//! short with what was tried and what is in its way, every pad on a single neck and what the repair did.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
