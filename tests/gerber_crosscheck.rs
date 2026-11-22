@@ -56,9 +56,11 @@ const KNOWN: &[Known] = &[(
     "features",
     "B.Cu",
     0.08,
-    (11.3, 11.8, 2.6, 3.1),
-    "J1.1 near the board edge: one of its four spokes along the axes does not survive, cadlab places it on \
-     the diagonal beyond the pad's corner, KiCad drops it (DECISIONS D112)",
+    (9.5, 10.2, 0.9, 1.5),
+    "J1.1 near the board edge: its spoke towards the edge does not survive, cadlab places it on the diagonal \
+     beside it, trimmed to what the edge clearance leaves and no narrower than the minimum track, KiCad drops \
+     it (DECISIONS D112, D119; before D119 a spoke was not trimmed that far and the fourth spoke was the \
+     whole one on the diagonal across the pad)",
 )];
 
 #[test]
