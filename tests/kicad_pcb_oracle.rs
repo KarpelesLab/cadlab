@@ -703,15 +703,13 @@ fn fenced_pin(sides: usize, d: f64, leg: f64) -> (tempfile::TempDir, Registry, S
 /// reaches, as cadlab does, and nothing on the pad two spokes reach. The third case is where
 /// the two fills differ (D112): a U that leaves room for diagonal spokes, which cadlab's fill
 /// places when the spokes along the axes do not survive. KiCad must count them on the exported
-/// fill (no finding); what its own refill gives the pad is printed, not asserted. The U's legs
-/// are short there: past longer ones the diagonals are trimmed to less than a track's width,
-/// and cadlab keeps no such spoke (D119).
+/// fill (no finding); what its own refill gives the pad is printed, not asserted.
 #[test]
 fn kicad_agrees_on_starved_thermals() {
     for (name, sides, d, leg, starved, same_refill) in [
         ("starved3", 3, 1.3, 3.0, true, true),
         ("starved2", 2, 1.5, 1.5, false, true),
-        ("turned3", 3, 1.5, 0.6, false, false),
+        ("turned3", 3, 1.5, 1.5, false, false),
     ] {
         let (_d, r, mut s) = fenced_pin(sides, d, leg);
         let ours: Vec<String> = cadlab::drc::check(s.project.as_ref().unwrap())

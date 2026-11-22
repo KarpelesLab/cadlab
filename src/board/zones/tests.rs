@@ -614,10 +614,10 @@ fn reliefs_reused_give_the_fill_made_from_scratch() {
     both(&items, "a pad solid");
 }
 
-/// What is left of a trimmed spoke is copper that can be made (D119): a spoke squeezed to
-/// less than the minimum track width between two tracks of another net is dropped where the
-/// relief asks for that width (`Relief::min`, from the rules), and kept as before where it
-/// does not.
+/// What is left of a trimmed spoke is copper that can be made, and a spoke may be trimmed down
+/// to that (D119): a spoke squeezed between two tracks of another net is kept where what is
+/// left is as wide as the minimum track (`Relief::min`, from the rules), however much of the
+/// spoke that is, and dropped where it is narrower; with no minimum, half the spoke decides.
 #[test]
 fn trimmed_spoke_is_no_narrower_than_a_track() {
     let outline = square(0, 0, 20 * MM, 20 * MM);
@@ -644,4 +644,10 @@ fn trimmed_spoke_is_no_narrower_than_a_track() {
     assert!(joined(prm), "0.24 mm is a track of 0.2 mm");
     prm.min_spoke = Nm(320_000);
     assert!(!joined(prm), "0.24 mm is no track of 0.32 mm");
+    // A wider spoke: 0.24 mm is less than half of 0.6 mm, and a track of 0.2 mm all the same.
+    prm.thermal_spoke = Nm(600_000);
+    prm.min_spoke = Nm::ZERO;
+    assert!(!joined(prm), "less than half the spoke, with no minimum to go by");
+    prm.min_spoke = Nm(200_000);
+    assert!(joined(prm), "trimmed down to the minimum track width");
 }

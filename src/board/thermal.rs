@@ -1325,7 +1325,7 @@ const TRACK_DIRS: [(i64, i64); 16] = [
     (2, -1),
 ];
 
-/// A pad short of spokes on a layer, as [`repair_pads`] sees it.
+/// A pad short of spokes on a layer, as `repair` sees it.
 #[derive(Clone, Debug)]
 struct Short {
     layer: String,
@@ -1623,7 +1623,8 @@ fn detour(it: &CopperItem, allowed: &PolygonSet, pour: &PolygonSet, w: i64, gap:
 ///    pad solid has copper for one (so it keeps every clearance), kept when they are necks of
 ///    their own: straight from the pad's middle, else around what is in the way ([`detour`]).
 /// 3. A pad the pour joined before and that nothing joins now is kept solid, that pad alone,
-///    with the reason.
+///    with the reason; so is a pad in a pour that nothing joined before either, where solid
+///    joins it, and where it does not (other nets shut it in) the setting is taken back.
 ///
 /// `js` are the joints of the board as it stands. Returns those of the board as it is left.
 fn repair(
@@ -1894,25 +1895,71 @@ fn repair(
         had.difference(&joined).cloned().collect()
     };
     let cut = lost(&js, &ours);
-    if !cut.is_empty() {
-        let mut by_pad: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-        for k in &cut {
-            by_pad.entry((k.0.clone(), k.1.clone())).or_default().push(k.2.clone());
+    // And for the pads in a pour that nothing joins on a layer though no pour joined them
+    // before either (a router's tracks around them): solid where that joins them, taken back
+    // where it does not (other nets shut the pad in: an open connection, the router's).
+    let dry: BTreeSet<Key3> = shorts(&js, had, &scope, min, max, false)
+        .iter()
+        .flat_map(|(k, v)| v.iter().filter(|s| s.necks == 0).map(|s| (k.0.clone(), k.1.clone(), s.layer.clone())))
+        .filter(|k| !cut.contains(k))
+        .collect();
+    if !cut.is_empty() || !dry.is_empty() {
+        let mut by_pad: BTreeMap<(String, String), Vec<(String, bool)>> = BTreeMap::new();
+        for (k, joined_before) in cut.iter().map(|k| (k, true)).chain(dry.iter().map(|k| (k, false))) {
+            by_pad.entry((k.0.clone(), k.1.clone())).or_default().push((k.2.clone(), joined_before));
         }
+        // (pad, its settings before, the layers tried for a pad no pour joined, what to say)
+        type Kept = ((String, String), Option<PadJoin>, Vec<String>, String);
+        let mut set: Vec<Kept> = Vec::new();
         for (k, layers) in by_pad {
+            let names: Vec<&str> = layers.iter().map(|(l, _)| l.as_str()).collect();
             let reason = format!(
-                "zone.relieve: kept solid, no thermal spoke and no track of the net fits on {} where the pour joined the pad",
-                layers.join(", ")
+                "zone.relieve: kept solid, no thermal spoke and no track of the net fits on {} where the pour {} the pad",
+                names.join(", "),
+                if layers.iter().all(|(_, before)| *before) { "joined" } else { "reaches" }
             );
             let Some(pf) = p.board_mut().footprints.get_mut(&k.0) else { continue };
+            let old = pf.pads.get(&k.1).cloned();
             let join = pf.pads.entry(k.1.clone()).or_default();
-            for l in &layers {
+            for (l, _) in &layers {
                 join.layers.insert(l.clone(), PadConnection::Solid);
             }
             join.reason = Some(reason.clone());
-            out.solid.push(format!("{}: {}", label(&k), reason.trim_start_matches("zone.relieve: ")));
+            let unjoined = layers.iter().filter(|(_, before)| !*before).map(|(l, _)| l.clone()).collect();
+            set.push((
+                k.clone(),
+                old,
+                unjoined,
+                format!("{}: {}", label(&k), reason.trim_start_matches("zone.relieve: ")),
+            ));
         }
         js = measure(p, how);
+        // Solid that joins nothing is taken back.
+        let joined: BTreeSet<Key3> = js.iter().filter(|j| j.zone_contact.0 > 0).map(key3).collect();
+        let mut back = false;
+        for (k, old, layers, text) in set {
+            let vain: Vec<&String> =
+                layers.iter().filter(|l| !joined.contains(&(k.0.clone(), k.1.clone(), (*l).clone()))).collect();
+            if vain.is_empty() {
+                out.solid.push(text);
+                continue;
+            }
+            back = true;
+            if let Some(pf) = p.board_mut().footprints.get_mut(&k.0) {
+                match old {
+                    Some(o) => pf.pads.insert(k.1.clone(), o),
+                    None => pf.pads.remove(&k.1),
+                };
+            }
+            let names: Vec<&str> = vain.iter().map(|l| l.as_str()).collect();
+            tried.entry(k.clone()).or_default().push(format!(
+                "solid on {} joins nothing: other nets shut the pad in, the connection is open",
+                names.join(", ")
+            ));
+        }
+        if back {
+            js = measure(p, how);
+        }
     }
     out.cut = lost(&js, &ours).iter().map(|(r, n, l)| format!("{r}.{n} on {l}")).collect();
     out.fitted.sort();

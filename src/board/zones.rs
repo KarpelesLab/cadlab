@@ -71,7 +71,7 @@ pub struct ZoneParams {
     /// `None`: the zone's width as given, for every pad.
     pub spoke_floor: Option<Nm>,
     /// The narrowest copper a spoke may be left with where it is trimmed (the rules' minimum
-    /// track width; 0: half the spoke's width, as the trim asks on its own).
+    /// track width; 0: none, and a trimmed spoke joins the pour over half its width).
     pub min_spoke: Nm,
 }
 
@@ -171,7 +171,8 @@ pub struct Relief {
     /// the pad nor the zone sets an angle; else none (D112).
     pub alt: Vec<Angle>,
     /// The narrowest copper a trimmed spoke may join the pad to the pour by (nm): the rules'
-    /// minimum track width, or the spoke's own width when that is less; 0: not asked (D119).
+    /// minimum track width, or the spoke's own width when that is less; 0: none, and a trimmed
+    /// spoke joins over half its width (D51, D119).
     pub min: i64,
 }
 
@@ -342,8 +343,10 @@ fn slanted_spoke(item: &CopperItem, b: &poly::Rect, a: Angle, gap: i64, w: i64) 
 /// A spoke trimmed where it would cross another item's clearance (a pad squeezed between
 /// other-net items, where no whole spoke fits): `spoke` ∩ `avail`, kept only within the pad's
 /// thermal gap and the pour, in pieces joining the pad to the pour over at least half the spoke
-/// width, and by copper nowhere narrower than the relief's minimum (`Relief::min`: what is
-/// left of a spoke is still a track that can be made). Otherwise nothing.
+/// width (D51). With a minimum in the relief (`Relief::min`, the minimum track width; D119) it
+/// is `spoke` ∩ `avail` where that is as wide as the minimum all the way from the pad to the
+/// pour: what is left of a spoke is a track that can be made, and a spoke may be trimmed down
+/// to that. Otherwise nothing.
 pub fn trimmed_spoke(
     it: &CopperItem,
     r: &Relief,
@@ -366,6 +369,23 @@ fn trimmed_spoke_in(
 ) -> Result<PolygonSet, poly::Error> {
     if !poly::intersects(fill, spoke) {
         return Ok(vec![]);
+    }
+    if r.min > 0 {
+        // What the allowed area leaves of the spoke, where it is as wide as a track all its
+        // way from the pad to the pour: shrunk by half the minimum width (less the slack of
+        // the arcs), the pieces that still reach from the one to the other, grown again.
+        let within = Boolean::new()
+            .subject(std::slice::from_ref(spoke), FillRule::NonZero)
+            .clip(avail, FillRule::NonZero)
+            .op(Op::Intersection)
+            .execute()?;
+        let shrink = (r.min / 2 - 2 * FILL_TOL.tolerance).max(1);
+        let mut core = poly::offset(&within, -shrink, Join::Round, FILL_TOL)?;
+        core.retain(|q| poly::intersects(q, &it.shape) && poly::intersects(q, fill));
+        if core.is_empty() {
+            return Ok(vec![]);
+        }
+        return poly::offset(&core, shrink, Join::Round, FILL_TOL);
     }
     let gap: &PolygonSet = match gap {
         Some(g) => g,
@@ -390,15 +410,6 @@ fn trimmed_spoke_in(
         .execute()?;
     if joint.is_empty() || poly::offset(&joint, -(r.w / 4), Join::Round, FILL_TOL)?.is_empty() {
         return Ok(vec![]);
-    }
-    // No narrower than a track may be: shrunk by half the minimum width (less the slack of
-    // the arcs), a piece must still reach from the pad to the pour.
-    let shrink = r.min / 2 - 2 * FILL_TOL.tolerance;
-    if shrink > r.w / 4 {
-        let core = poly::offset(&piece, -shrink, Join::Round, FILL_TOL)?;
-        if !core.iter().any(|q| poly::intersects(q, &it.shape) && poly::intersects(q, fill)) {
-            return Ok(vec![]);
-        }
     }
     Ok(piece)
 }

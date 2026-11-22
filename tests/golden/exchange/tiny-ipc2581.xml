@@ -841,8 +841,10 @@
                     <PolyStepSegment x="5.135139" y="5.402828"/>
                     <PolyStepSegment x="5.129268" y="5.395145"/>
                     <PolyStepSegment x="5.09564" y="5.351136"/>
-                    <PolyStepSegment x="4.446777" y="6"/>
-                    <PolyStepSegment x="4.093223" y="6"/>
+                    <PolyStepSegment x="4.465815" y="5.980962"/>
+                    <PolyStepSegment x="4.419853" y="6"/>
+                    <PolyStepSegment x="4.120147" y="6"/>
+                    <PolyStepSegment x="4.074185" y="5.980962"/>
                     <PolyStepSegment x="3.44436" y="5.351136"/>
                     <PolyStepSegment x="3.410732" y="5.395145"/>
                     <PolyStepSegment x="3.404861" y="5.402828"/>
@@ -904,13 +906,6 @@
                     <PolyStepSegment x="1" y="4.84999"/>
                     <PolyStepSegment x="1" y="1.1"/>
                   </Polygon>
-                  <Cutout>
-                    <PolyBegin x="3.542946" y="5.241328"/>
-                    <PolyStepSegment x="3.604495" y="5.1868"/>
-                    <PolyStepSegment x="3.604491" y="5.186802"/>
-                    <PolyStepSegment x="3.542947" y="5.241327"/>
-                    <PolyStepSegment x="3.542946" y="5.241328"/>
-                  </Cutout>
                   <Cutout>
                     <PolyBegin x="3.62067" y="5.173894"/>
                     <PolyStepSegment x="4.145" y="5.698223"/>
@@ -974,13 +969,6 @@
                     <PolyStepSegment x="4.471967" y="4.968356"/>
                     <PolyStepSegment x="4.462397" y="4.966959"/>
                     <PolyStepSegment x="4.395" y="4.957118"/>
-                  </Cutout>
-                  <Cutout>
-                    <PolyBegin x="4.935505" y="5.1868"/>
-                    <PolyStepSegment x="4.997054" y="5.241328"/>
-                    <PolyStepSegment x="4.997053" y="5.241327"/>
-                    <PolyStepSegment x="4.935509" y="5.186802"/>
-                    <PolyStepSegment x="4.935505" y="5.1868"/>
                   </Cutout>
                 </Contour>
               </UserSpecial>

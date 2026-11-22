@@ -278,20 +278,10 @@ fn starved_thermal() {
         let pts: Vec<Value> = u.iter().map(|(a, b)| json!([mm(*a), mm(*b)])).collect();
         exec(r, s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}))
     };
-    // Short legs: the diagonals away from the U pass their ends whole. (With legs as long as
-    // the U is wide, what the legs' ends leave of those diagonals is narrower than the minimum
-    // track, and a spoke trimmed to less than a track is none: D119.)
-    fence(&r, &mut s, 1_500_000, 600_000);
-    let js = joints(&s);
-    let j = joint(&js, "J1.1", "B.Cu");
-    assert!(j.spokes >= 2, "one spoke of the four along the axes survives, diagonals are added: {j:?}");
-    exec(&r, &mut s, "history.undo", json!({}));
     fence(&r, &mut s, 1_500_000, 1_500_000);
     let js = joints(&s);
     let j = joint(&js, "J1.1", "B.Cu");
-    assert_eq!(j.spokes, 1, "slivers of the diagonals, narrower than a track, are no spokes: {j:?}");
-    exec(&r, &mut s, "history.undo", json!({}));
-    fence(&r, &mut s, 1_500_000, 600_000);
+    assert!(j.spokes >= 2, "one spoke of the four along the axes survives, diagonals are added: {j:?}");
     assert!(findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.starved_thermal").is_empty());
     // A zone with an angle of its own keeps to it: one spoke.
     exec(&r, &mut s, "zone.set", json!({"name": "GND", "thermal_angle": "90deg"}));
@@ -864,4 +854,49 @@ fn thermal_relief_required() {
     for code in ["fab.solid_pad", "fab.thermal_nominal", "fab.starved_thermal", "fab.thermal_size"] {
         assert!(findings(&o, code).is_empty(), "{code}: {:#?}", findings(&o, code));
     }
+}
+
+/// A pad in a pour that nothing joins and that no pour joined before (D119): a relieved zone,
+/// the pin fenced by another net with a slot too narrow for a track. The repair keeps it solid
+/// on that layer, where the pour reaches it through the slot; with the fence closed there is
+/// no pour at the pin, nothing is set, and the pad is the open connection the DRC reports.
+#[test]
+fn relieve_joins_a_pad_nothing_joined() {
+    let fenced = |closed: bool| {
+        let (d, r, mut s) = setup();
+        exec(&r, &mut s, "zone.add", json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
+        let at = joint(&joints(&s), "J1.1", "B.Cu").at;
+        let (x, y, w) = (at.x.0, at.y.0, 1_300_000);
+        let first = if closed { x - w } else { x + 100_000 };
+        let fence = [(first, y - w), (x - w, y - w), (x - w, y + w), (x + w, y + w), (x + w, y - w), (first, y - w)];
+        let pts: Vec<Value> = fence[if closed { 1.. } else { 0.. }]
+            .iter()
+            .map(|(a, b)| json!([format!("{a}nm"), format!("{b}nm")]))
+            .collect();
+        let pts = if closed { pts } else { pts[..5].to_vec() };
+        exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}));
+        exec(&r, &mut s, "board.rules", json!({"min_track_width": "0.5mm"}));
+        (d, r, s)
+    };
+    // A slot: nothing joins the pin as the board stands, solid does.
+    let (_d, r, mut s) = fenced(false);
+    assert_eq!(joint(&joints(&s), "J1.1", "B.Cu").necks, 0);
+    let o = exec(&r, &mut s, "zone.relieve", json!({}));
+    let solid = o["output"]["solid"].as_array().expect("kept solid");
+    assert!(
+        solid.len() == 1 && solid[0].as_str().unwrap().contains("where the pour reaches the pad"),
+        "{}",
+        o["output"]
+    );
+    let js = joints(&s);
+    let j = joint(&js, "J1.1", "B.Cu");
+    assert!(j.zone_contact.0 > 0 && j.meant(true), "{j:?}");
+    // Closed: no pour is at the pin at all, nothing is set on it, and the connection is the
+    // open one the DRC reports.
+    let (_d, r, mut s) = fenced(true);
+    let o = exec(&r, &mut s, "zone.relieve", json!({}));
+    assert_eq!(o["output"]["solid"], Value::Null, "{}", o["output"]);
+    assert_eq!(exec(&r, &mut s, "zone.pad", json!({"pads": ["J1.1"]}))["output"]["pads"], json!([]));
+    let o = exec(&r, &mut s, "drc.run", json!({"unrouted": "each"}));
+    assert!(findings(&o, "drc.unrouted").iter().any(|m| m.contains("J1.1")), "{:#?}", findings(&o, "drc.unrouted"));
 }

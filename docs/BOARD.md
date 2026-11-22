@@ -98,12 +98,14 @@ For each zone and each of its layers, in priority order (higher first, ties in b
 4. Opening by `min_width / 2` removes copper narrower than `min_width` (default: rules `zone_min_width`).
 5. Spokes are added when they lie entirely in the allowed area of step 2 and reach the pour. A spoke that
    would cross another item's clearance (a pad squeezed between other-net pads, a spoke running past the
-   zone outline) is trimmed to the allowed area, keeping only its part within the pad's gap and the pour, and
-   only when that part joins the pour over at least half the spoke width; otherwise it is dropped (D51).
-   What is left of a trimmed spoke is also no narrower than a track may be: shrunk by half of
-   `min_track_width` (the spoke's own width when that is less), a piece of it must still reach from the pad
-   to the pour, or the spoke is dropped (`Relief::min`, D119). Half of a 0.15 mm spoke is 0.075 mm of copper,
-   which no fab's minimum track is.
+   zone outline) is trimmed to the allowed area, and kept where what is left is a track that can be made:
+   the spoke within the allowed area is shrunk by half of `min_track_width` (the spoke's own width when that
+   is less), the pieces that still reach from the pad to the pour are grown again, and those are the spoke;
+   with none it is dropped (`Relief::min`, D119). So a spoke is trimmed down to the minimum track width and
+   no further:
+   0.1 mm left of a 0.4 mm spoke is kept on a board whose minimum track is 0.09 mm, and half of a 0.15 mm
+   spoke, 0.075 mm, is not on a board whose minimum is 0.15 mm (D51 kept what joined the pour over half
+   the spoke's width, whatever that was; with no minimum track in the rules that still holds).
    A pad left with fewer spokes than it was to have gets the missing ones in the relief's other directions
    (the same directions turned by half a step: for four spokes the other four of the eight), whole or
    trimmed in the same way, when neither the pad nor the zone sets a `thermal_angle`: a pin with a track of
@@ -346,7 +348,10 @@ setting), `heat`, `bare`. `zone.relieve` brings a board to relieved pads in one 
      five segments and the same 2.5 mm;
    - *solid on purpose* (`solid`): a pad the pour joined before, on a layer where nothing joins it now, is
      set solid on that layer alone, with the reason. No pad a pour joined is left without a joint (`cut` and
-     the warning `zone.relieve_cut` remain for a pad that could not even be kept solid).
+     the warning `zone.relieve_cut` remain for a pad that could not even be kept solid). A pad in a pour
+     that nothing joined before either (a router's tracks around it) is tried the same way and kept solid
+     where that joins it; where it does not, other nets shut the pad in, the setting is taken back and the
+     pad is an open connection with what is in its way named (D119).
 3. It reports the counts before and after, every change, and every pad left short of spokes or without
    relief with what was tried and what is in its way (`left`, each with a `reason` and `blocked`; `reasons`,
    `blocked`).
@@ -394,9 +399,9 @@ fill without those tracks leaves short of its spokes (`Joint::starved`) where it
 than it had and fewer than two, has the tracks of its net within 1.5 mm back before the board is filled again.
 A track to a pad is a neck of it, and the pour that takes the track's place is not always one.
 
-Since D119 a trimmed spoke is kept only where what is left of it is `Relief::min` wide (the minimum track
-width): the room a spoke needs between two items of other nets is that width plus their clearances, not half
-the spoke. A pad with a `purpose` is classed by it (`thermal::classes`: `press_fit` and `stitching` are not
+Since D119 a trimmed spoke is kept where what is left of it is `Relief::min` wide (the minimum track
+width) and only there: the room a spoke needs between two items of other nets is that width plus their
+clearances, not half the spoke. A pad with a `purpose` is classed by it (`thermal::classes`: `press_fit` and `stitching` are not
 soldered and not held to a spoke count, `heat` may take vias of its net), and its connection is `solid`
 unless set otherwise, as `zones::connection_on` already says. `thermal::blockers(p, items, pads)` names, for
 the pads short of spokes after a run, the tracks and vias of other nets that stand in their spokes'
