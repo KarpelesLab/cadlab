@@ -180,7 +180,22 @@ pub const ALLOW: &[Allow<'static>] = &[
         reason: "KiCad uses net class via sizes only as defaults for new vias and never checks existing ones; cadlab \
                  warns when a via is smaller than its class asks for (D26)",
     },
+    Allow {
+        case: None,
+        side: Side::Cadlab,
+        rule: "drc.solid_pad",
+        when: Some(names_j1_1),
+        max: Some(1),
+        involving: &[],
+        text_within: None,
+        reason: "KiCad has no rule for a solder pad joined solidly to a pour; the test board's J1.1 is set solid \
+                 without a purpose, which cadlab takes as forgotten while thermal relief is required (D120)",
+    },
 ];
+
+fn names_j1_1(f: &Finding) -> bool {
+    f.items.contains("J1.1")
+}
 
 #[derive(Debug)]
 pub struct Finding {
