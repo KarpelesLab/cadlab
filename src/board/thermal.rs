@@ -193,6 +193,9 @@ pub struct Joint {
     pub style: Option<PadConnection>,
     /// The connection is the pad's own or its footprint's: said on purpose.
     pub own: bool,
+    /// That own connection is `solid`, whether a zone holds the pad on this layer or not: a
+    /// pad joined solidly by tracks or copper drawings says "meant" the same way (D120).
+    pub own_solid: bool,
     /// What the pad says it is solid for (`PadPurpose`), if anything.
     pub purpose: Option<PadPurpose>,
     /// The placed pad's own setting has a reason written with it (`PadJoin::reason`).
@@ -283,11 +286,12 @@ impl Joint {
     }
 
     /// Whether the pad is solid on purpose: it says what for (`purpose`), or its connection
-    /// is set solid on the pad, its placement or its footprint. With `required` (the rules'
-    /// `thermal_required`) a setting alone is not enough: the pad says what it is solid for,
-    /// or the placed pad's own setting has its reason.
+    /// is set solid on the pad, its placement or its footprint (in a zone: the connection the
+    /// zone gives it; outside one, where tracks or drawings make it solid: its own setting).
+    /// With `required` (the rules' `thermal_required`) a setting alone is not enough: the pad
+    /// says what it is solid for, or the placed pad's own setting has its reason.
     pub fn meant(&self, required: bool) -> bool {
-        let set = self.own && self.style == Some(PadConnection::Solid);
+        let set = self.own && (self.style == Some(PadConnection::Solid) || (self.style.is_none() && self.own_solid));
         self.purpose.is_some() || (set && (!required || self.reasoned))
     }
 
@@ -496,6 +500,7 @@ fn pad_joint(key: &JointKey) -> Option<Joint> {
         zone: key.zone.as_ref().map(|(name, _)| name.clone()),
         style: key.zone.as_ref().map(|(_, prm)| zones::connection_on(it, &key.layer, prm.pads)),
         own: zones::own_connection(it, &key.layer).is_some(),
+        own_solid: zones::own_connection(it, &key.layer) == Some(PadConnection::Solid),
         purpose: it.local.purpose,
         reasoned: key.reasoned,
         planned: key.zone.as_ref().map_or(0, |(_, prm)| prm.thermal_spokes),
@@ -882,10 +887,20 @@ pub fn check(p: &Project, rules: &Rules, items: &[CopperItem], currents: bool) -
                     ),
                 )
                 .with_subject(pin.clone())
-                .with_hint(
+                .with_hint(format!(
                     "enter the pad with one track no wider than the pad, or put the copper in a zone of the net \
-                     (zone.add: its pads get thermal spokes); waive it if it is meant (drc.waive)",
-                )
+                     (zone.add: its pads get thermal spokes); {}",
+                    if rules.thermal_required {
+                        // No waiver takes the fab check's error away: the pad says it.
+                        format!(
+                            "if it is meant, say what for: `zone.pad {refdes}.{number} --purpose \
+                             press_fit|terminal|heat|stitching`, or `zone.pad {refdes}.{number} --connection solid \
+                             --reason ..`"
+                        )
+                    } else {
+                        "waive it if it is meant (drc.waive)".to_string()
+                    }
+                ))
             };
             d = d.with_subject(ObjectRef::Net(j.net.clone())).at(j.at);
             out.push(d);
@@ -2457,6 +2472,7 @@ mod tests {
             zone: Some("Z".into()),
             style: Some(style),
             own: false,
+            own_solid: false,
             purpose: None,
             reasoned: false,
             planned: 4,

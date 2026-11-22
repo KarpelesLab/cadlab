@@ -244,25 +244,34 @@ says it is solid for goes before what it looks like (`purpose`, "Solid on purpos
 | `drc.thermal_size` | warning | a relief gap below the minimum clearance (`min_clearance`, else `clearance`) or a spoke below `min_track_width`: one per zone and value, with the pads |
 | `drc.current_spokes` | warning | a net with a `current`: pads whose spokes and tracks, all layers of a through-hole pin together, add up to less than the width IPC-2152 asks on the layer (one per net and layer, [ELECTRICAL.md](ELECTRICAL.md)) |
 
-They are warnings, as the other findings that leave the board correct and connected (`drc.current_width`,
-`drc.split_crossing`): `drc.run` counts them, `fab.check` carries them as `fab.solid_pad`,
+In `drc.run` they are warnings, as the other findings that leave the board correct and connected
+(`drc.current_width`, `drc.split_crossing`): `drc.run` counts them. `fab.check` carries them as `fab.solid_pad`,
 `fab.thermal_nominal`, `fab.starved_thermal` and, against the thermal relief minimums the fab publishes
 (`[thermal_relief]` of its profile: Eurocircuits; for the others, which publish none, their minimum track and
-space), `fab.thermal_size`, and `fab.export` writes the files and says so (`drc.run` with fab `targets` does not say
-each pad a second time under its `fab.` code). An error would refuse the export of every
-imported board whose designer meant its pads solid.
+space), `fab.thermal_size` (`drc.run` with fab `targets` does not say each pad a second time under its `fab.`
+code). There, where the board leaves, they are **errors** unless the board's rules say otherwise:
 
-**Relief required** (`board.rules --thermal-required true`, D119; off by default). With it the four `fab.`
+**Relief required** (the rule `thermal_required`, D119; **on by default**, D120: every new board, every rule
+preset, every imported KiCad board, and every saved project that does not say `false`). The four `fab.`
 findings are **errors**: `fab.check` fails and `fab.export` refuses (`fab.check_failed`, nothing written)
 until they are gone, as for any error of the fab check and with the same way round (`force`); a waiver does
-not take them away (waivers are for warnings). What takes one away is the repair (`zone.relieve`), or the
+not take them away (waivers are for warnings). Each finding's hint, and the refusal's, names the three ways
+out: `zone.relieve`, `zone.pad <ref.pad> --purpose ..`, and `board.rules --thermal-required false`, which
+makes them warnings again for this board (the export then writes the files and says so; `false` is the only
+value saved with the board, so a file without the field reads as required). A board with pours is therefore
+exported after `zone.relieve`: `zone fill`, `zone relieve`, `drc`, `fab export`. What takes one away is the
+repair (`zone.relieve`), or the
 pad saying what it is solid for: a `purpose` (below) on the placed pad, the pad or the footprint, or a placed
 pad's own setting with its `reason` (`zone.pad J1.3 --connection solid --reason "carries 12 A"`, which is also
 what `zone.relieve` writes for the pads it keeps solid). A `solid` setting that says neither, on a pad or a
-footprint, is then no longer taken as meant: an imported library sets it on parts whose designer never thought
+footprint, is not taken as meant while relief is required (in `drc.run` and `zone.thermals` as well: the pad
+is listed `solid`, not `meant`): an imported library sets it on parts whose designer never thought
 about soldering. The DRC's own findings stay warnings either way (`drc.run` is asked many times while a board
 is made; the export is where a board leaves). The switch is a rule of the board, stored with it, and no fab
-profile sets it.
+profile sets it. A pad that tracks wider than itself or copper drawings make solid, with no pour
+(`drc.solid_pad`'s second form), is not repaired by `zone.relieve`; it is let through the same way, by a
+purpose or by its own `solid` setting with a reason, zone or no zone (D120). An imported board whose designer meant its pads solid is refused at export until its pads
+say so or the rule is switched off: that is the price of the default, taken knowingly (D120).
 
 **What is in the way** (`thermal::blockers`, D119). For a pad short of spokes, each direction of its relief
 (the four and the other four) in which no copper of its net crosses its outline is looked at, the spoke's
@@ -635,9 +644,11 @@ own clearance from non-plated holes, the conservative former behaviour. The KiCa
 `min_thermal_spokes` (default 2; 0: not checked) and `thermal_max_contact` (percent, default 67; 0: not checked)
 are the two numbers of the thermal relief check ("Thermal relief"); the KiCad import takes the first from
 `min_resolved_spokes` when that asks for more (a project that accepts one spoke does not lower the minimum:
-`board.rules --min-thermal-spokes 1` does) and the export writes it there. `thermal_required` (default false,
-D119) makes the thermal relief findings of the fab check errors that stop `fab.export` ("Thermal relief",
-"Relief required"); no preset and no fab profile sets it.
+`board.rules --min-thermal-spokes 1` does) and the export writes it there. `thermal_required` (default true,
+D119, D120; only `false` is saved, and a saved board without the field reads as true) makes the thermal relief
+findings of the fab check errors that stop `fab.export` ("Thermal relief", "Relief required"); a preset
+starts from the default rules and so switches it on, `board.rules --thermal-required false` switches it off
+(alone or with a preset), and no fab profile sets it.
 
 Net classes (`netclass.*`) override per net: track width, clearance, via drill and diameter, diff pair width and
 gap. Unset values are inherited from `board.rules`; `netclass.show` / `netclass.list` give the values in

@@ -444,11 +444,11 @@ pub struct SetRules {
     /// default 67, 0: not checked).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_max_contact: Option<u8>,
-    /// Thermal relief is required: the fab check's thermal findings (fab.solid_pad,
-    /// fab.thermal_nominal, fab.starved_thermal, fab.thermal_size) are errors that stop
-    /// fab.export, and only a pad that says what it is solid for (zone.pad --purpose,
-    /// footprint.set --purpose, or a placed pad's setting with a reason) is left alone.
-    /// Default false: they are warnings.
+    /// Thermal relief is required (default true): the fab check's thermal findings
+    /// (fab.solid_pad, fab.thermal_nominal, fab.starved_thermal, fab.thermal_size) are errors
+    /// that stop fab.export, and only a pad that says what it is solid for (zone.pad --purpose,
+    /// footprint.set --purpose, or a placed pad's setting with a reason) is left alone;
+    /// zone.relieve gives the other pads their spokes. false: they are warnings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_required: Option<bool>,
 }
@@ -665,6 +665,10 @@ impl Command for SetRules {
         }
         for c in &o.changed {
             s += &format!("\n  {}: {} -> {}", c.field, c.from, c.to);
+        }
+        if !r.thermal_required {
+            s += "\nthermal relief is not required: pads without it are warnings of the fab check, not errors \
+                  (`board.rules --thermal-required true` requires it again)";
         }
         s
     }

@@ -584,6 +584,36 @@ fn chain(f: f64, cap: f64, ind: f64, db_per_m: f64) -> (C, C) {
 }
 
 fn outputs(c: &mut Client, project: &Path) {
+    // Thermal relief is required by default (D120). The router ties the SoC's VSS pins to the
+    // exposed pad beside them with tracks wider than a 0.2 mm pin, which the check counts as
+    // a pad without relief (`fab.solid_pad`, by tracks: `zone.relieve` repairs pours, not
+    // these). The export refuses and names the ways out; the designer says of each such pin
+    // that it is meant (a placed pad's own setting with its reason), and nothing else is let
+    // through: only GND pins of U1 are accepted here.
+    let t = c.ok("zone", "thermals", json!({}));
+    let solid: Vec<String> = t["output"]["pads"]
+        .as_array()
+        .map(|a| a.iter().filter(|j| j["state"] == "solid").map(|j| j["pad"].as_str().unwrap().to_string()).collect())
+        .unwrap_or_default();
+    if !solid.is_empty() {
+        assert!(
+            t["output"]["pads"].as_array().unwrap().iter().all(|j| {
+                j["state"] != "solid" || (j["pad"].as_str().unwrap().starts_with("U1.") && j["net"] == "GND")
+            }),
+            "{t}"
+        );
+        let e = c.err("fab", "export", json!({"fab": "jlcpcb", "dir": "out/jlcpcb"}));
+        assert_eq!(e["code"], "fab.check_failed", "{e}");
+        let hint = e["hint"].as_str().unwrap();
+        assert!(hint.contains("zone.relieve") && hint.contains("zone.pad") && hint.contains("thermal_required"), "{e}");
+        assert!(!project.join("out/jlcpcb").exists(), "a refused export writes nothing");
+        c.ok(
+            "zone",
+            "pad",
+            json!({"pads": solid, "connection": "solid",
+                "reason": "VSS pin tied to the exposed pad beside it, reflowed with it"}),
+        );
+    }
     let r = c.ok("fab", "export", json!({"fab": "jlcpcb", "dir": "out/jlcpcb"}));
     assert_eq!(r["output"]["stackup"], "JLC04161H-7628", "{r}");
     assert!(diags(&r, "fab.impedance_without_stackup").is_empty(), "{r}");

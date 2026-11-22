@@ -257,12 +257,14 @@ pub struct Rules {
     /// `drc.thermal_nominal`). 0: not checked.
     #[serde(skip_serializing_if = "is_default_thermal_contact")]
     pub thermal_max_contact: u8,
-    /// Thermal relief is required: a solder pad without relief or short of spokes is an error
-    /// of the fab check (`fab.solid_pad`, `fab.thermal_nominal`, `fab.starved_thermal`,
-    /// `fab.thermal_size`), which stops `fab.export`, and only a pad that says what it is solid
-    /// for (`PadPurpose`, or a placed pad's own setting with its reason) is left alone. Off:
-    /// they are warnings, and any connection set on the pad or its footprint counts as meant.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Thermal relief is required (the default, D120): a solder pad without relief or short of
+    /// spokes is an error of the fab check (`fab.solid_pad`, `fab.thermal_nominal`,
+    /// `fab.starved_thermal`, `fab.thermal_size`), which stops `fab.export`, and only a pad that
+    /// says what it is solid for (`PadPurpose`, or a placed pad's own setting with its reason) is
+    /// left alone. Off (`false`, the only value saved): they are warnings, and any connection
+    /// set on the pad or its footprint counts as meant. A saved board without the field reads
+    /// as on.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub thermal_required: bool,
 }
 
@@ -270,6 +272,14 @@ pub struct Rules {
 pub const DEFAULT_MIN_THERMAL_SPOKES: u8 = 2;
 /// Default `thermal_max_contact`, percent (left out of saved rules at this value).
 pub const DEFAULT_THERMAL_MAX_CONTACT: u8 = 67;
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
 
 fn is_default_thermal_spokes(n: &u8) -> bool {
     *n == DEFAULT_MIN_THERMAL_SPOKES
@@ -347,7 +357,7 @@ impl Default for Rules {
             silk_check: SilkCheck::Mask,
             min_thermal_spokes: DEFAULT_MIN_THERMAL_SPOKES,
             thermal_max_contact: DEFAULT_THERMAL_MAX_CONTACT,
-            thermal_required: false,
+            thermal_required: true,
         }
     }
 }
@@ -1114,5 +1124,25 @@ mod tests {
         .unwrap();
         assert!(matches!(c.segments[1], Segment::Arc { .. }));
         assert!(matches!(c.segments[0], Segment::Line { .. }));
+    }
+
+    /// `thermal_required` (D120): on for a new board and in every preset, a saved board
+    /// without the field reads as on, and `false` is the only value written.
+    #[test]
+    fn thermal_relief_is_required_unless_said_otherwise() {
+        assert!(Rules::default().thermal_required);
+        for preset in [RulePreset::Ipc2, RulePreset::Ipc3] {
+            assert!(Rules::preset(preset).thermal_required, "{preset:?}");
+        }
+        let b: Board = serde_json::from_str("{}").unwrap();
+        assert!(b.rules.thermal_required, "a board saved without rules");
+        let on = serde_json::to_value(Rules::default()).unwrap();
+        assert!(on.get("thermal_required").is_none(), "{on}");
+        // Rules as saved before the field existed: every other field, not this one.
+        let old: Rules = serde_json::from_value(on).unwrap();
+        assert!(old.thermal_required);
+        let off = serde_json::to_value(Rules { thermal_required: false, ..Rules::default() }).unwrap();
+        assert_eq!(off["thermal_required"], false);
+        assert!(!serde_json::from_value::<Rules>(off).unwrap().thermal_required);
     }
 }

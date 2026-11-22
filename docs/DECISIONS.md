@@ -6821,7 +6821,8 @@ or a placed pad's own setting with its reason, which is also what the repair wri
 solid. A bare `solid` on a pad or footprint is then not taken as meant. `drc.run`'s own findings stay
 warnings. *The default stays as it was*, warnings: the user was asked which they want and has not said, and
 an error by default refuses the export of every imported board (664 solder pads solid on the corpus as its
-projects make it, D109).
+projects make it, D109). *(D120: the user has said; required by
+default.)*
 **5. Copper on the two pads of a chip part, against each other: not written.** A warning for a two-pad part
 with very unequal copper on its pads needs a number for "very". Read for one, 2026-11-22: Eurocircuits, "PCB
 assembly guidelines: tombstoning" ("the difference in thermal mass between pads of the same component", "the
@@ -6902,3 +6903,84 @@ finds the footprint's own pads in all of them.
 BOARD.md, "What a router must be told", says what the guide adapter would pass); fewer spokes for a pad that
 four of them cover; the refill of a changed zone layer in less than its whole-layer booleans; `purpose` on
 generated footprints; the 3D view.
+
+### D120. Thermal relief is required by default: a board with a solder pad left solid in a pour does not leave through `fab.export` unless its rules say it may (2026-11-22)
+D119 added the rule `thermal_required` and left it off, the user not having said which default they want. The
+user decided on 2026-11-22: **on**. The reason is a board, not a principle: a forgotten relief made a large
+board painful to solder, every ground pin of it a pad that the pour kept cold, and nothing between the layout
+and the order had stopped it. A warning among the others of an export did not. An error that refuses the
+export does.
+**What is on.** `Rules::thermal_required` is true for a new board (`Rules::default`), in every built-in rule
+preset (`ipc2`, `ipc3`: `rule-presets/ipc.toml` holds only what differs from the default and does not name the
+rule; applying a preset starts from the default rules, so it switches the rule on again as it resets every other
+rule, and `--preset ipc3 --thermal-required false` keeps it off; `--fab` derives lengths and leaves the rule as
+the board has it), and for an imported KiCad board (KiCad
+has no such rule; the import keeps the board's own, `kicad_import::rules::apply`). With it the four thermal
+findings of the fab check (`fab.solid_pad`, `fab.thermal_nominal`, `fab.starved_thermal`, `fab.thermal_size`)
+are errors, `fab.check` fails and `fab.export` refuses with `fab.check_failed`, nothing written, as D119
+describes; `drc.run`'s own findings stay warnings.
+**What an old file reads as: on.** The field was added after v0.0.5 and has been in no release, so no
+released cadlab wrote it; every project saved before D119, and every one saved since without the switch, has
+no such field. The native format's rules (DATA_MODEL.md: `schema_version`, migrations on load) say nothing
+against giving an absent optional field its default, which is how every optional rule was added (ELECTRICAL.md:
+"optional fields: projects without them load and save unchanged, so no schema migration was needed"); the
+schema version stays 1 and there is no migration. The serialization turns over with the default: `true` is
+left out, **`"thermal_required": false` is the only value saved**, so a board that was switched off stays off
+and says so in its file, and a board saved with D119's `true` (between D119 and this, unreleased) reads as
+before and loses the now redundant field at its next save. The price, taken knowingly: an existing project
+whose pours hold solid solder pads is refused at its next export where it was exported with warnings before.
+That is the forgotten relief the user wants caught, and the refusal names the ways out.
+**The ways out**, all three in the hint of each finding and of the refusal (`fab::check::THERMAL_REQUIRED_HINT`;
+the refusal counts the thermal errors among the fab check's):
+1. `zone.relieve`: the repair, for pads in a pour.
+2. The pad says what it is solid for: `zone.pad <ref.pad> --purpose press_fit|terminal|heat|stitching`,
+   `footprint.set <footprint> --pads N --purpose ..`, or a placed pad's own setting with its reason
+   (`zone.pad J1.3 --connection solid --reason "carries 12 A"`).
+3. `board.rules --thermal-required false`: warnings again for this board, stored with it; `board.rules` then
+   says in its text that relief is not required. `fab.export --force` exports past any error of the fab
+   check, as before.
+**What else changed with it.**
+- *A pad solid by tracks.* `drc.solid_pad` has a second form, a pad with tracks wider than itself or copper
+  drawings on two thirds of its outline and no pour (`Solid::Copper`). `zone.relieve` does not repair it (it
+  works on pours), its hint offered a waiver, which takes no error away, and a pad's own `solid` setting did
+  not count for it (`Joint::meant` looked at the connection a zone gives the pad, and there is no zone). Left
+  so, the default would have refused a board with no way out but a purpose that does not fit or the switch.
+  Now a pad's own setting counts where no zone holds the pad (`Joint::own_solid`; with the rule on, the placed
+  pad's with its reason, as in a pour), and the hint under the rule names `zone.pad <pad> --purpose ..` and
+  `--connection solid --reason ..` instead of the waiver. With the rule off a bare setting on such a pad
+  is "meant" too, as it is in a pour.
+- *The hint of the pour form* already named `zone.relieve` and `--purpose`; every thermal error now ends with
+  the same sentence naming the three ways.
+**Tests that changed, and what they mean now.**
+- `tests/thermal_relief.rs`: `thermal_relief_required` starts from the default (errors, the export refused,
+  the three ways in both hints), switches the rule off (warnings, a bare footprint setting meant; `false` in
+  the command's output), and on again (`true` is not written). `solid_on_purpose_is_quiet` is the test of a
+  board that does not require relief (bare setting meant, a waiver quiets the fab check) and now says so by
+  switching the rule off first. `wide_track_into_a_pad` adds the track form under the rule: an error, not
+  taken away by `zone.relieve` or a bare setting, taken away by the setting with its reason.
+- `tests/drc_crosscheck.rs`, `cases_have_no_thermal_findings`: the case `local_settings` sets a header pin
+  solid on its footprint (to compare a pad's `zone_connect` with KiCad) and says nothing of what for; under
+  the rule that bare setting is not meant, and the test now expects exactly that one `drc.solid_pad` on J1.1
+  there, none on any other case. Giving the pad `purpose: terminal` was tried and dropped: KiCad's format has
+  no pad property for a terminal (D119), so the round trip lost it and `tests/kicad_pcb_import.rs` saw a
+  changed footprint and one more finding after the import.
+- `tests/agent_session6.rs`: the router enters the SoC's VSS pin U1.45 (a 0.2 mm QFN pin beside the exposed
+  pad) with tracks wider than the pin, 78 % of its outline. The export is refused (asserted, with the hint and
+  nothing written), and the replay sets the pins `zone.thermals` lists as solid, which must all be GND pins of
+  U1, solid with a reason, then exports as before.
+- Unit tests: `model::board::tests::thermal_relief_is_required_unless_said_otherwise` (default, presets, a
+  board and rules without the field, only `false` written), `kicad_import::rules::tests::minimum_spokes`
+  (an imported board requires relief).
+- No golden file and no snapshot moved: `true` is not written, the default flow of every committed board has
+  no pad the rule stops (the demo board has no pour), and no committed project carried the field.
+- With the corpus (`CADLAB_CORPUS_DIR`): the only replay that exports an imported board is
+  `agent_session4`'s ring light, and its two exports pass with the rule on (run here without `kicad-cli`).
+**The documented flow.** A board with pours is exported after `zone fill`, `zone relieve`, `drc`: BOARD.md
+("Relief required"), MANUFACTURING.md (fab profiles, `fab.export`), INTERFACES.md (the example session). The
+demo board's five lines stand: it has no pour.
+**What this costs, said plainly.** An imported board whose designer meant its pads solid (664 solder pads on
+the corpus as its projects make it, D109) is refused until `zone.relieve` has run, its pads say what they are
+solid for, or the rule is switched off; the import says the count and names the repair, as before. A board the
+routers made can be refused for a fine-pitch pin entered by a track wider than itself (session 6), which no
+repair fixes yet: the pad says it is meant, or the router is taught to neck down there (not done). The fab
+check's thermal errors cannot be waived, by D119.

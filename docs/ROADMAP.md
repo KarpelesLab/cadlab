@@ -145,16 +145,21 @@ no `-o`.)
 - [x] Thermal relief, third round (D119): what a pad is solid for as a stored attribute (`purpose`: press-fit,
       terminal, heat, stitching; `zone.pad --purpose`, `footprint.set --purpose`; KiCad's `pad_prop_heatsink`
       imported and exported); `board.rules --thermal-required` makes the thermal findings of the fab check
-      errors that stop `fab.export` (off by default); `drc.starved_thermal` names what stands where the missing
+      errors that stop `fab.export` (off by default then; on since D120); `drc.starved_thermal` names what stands where the missing
       spokes would run, the tracks and vias as subjects (`thermal::blockers`); necks counted by their copper; a
       trimmed spoke no narrower than the minimum track; `zone.relieve` leads a track around what is in the way
       and takes zone layers, reliefs and joints from the fill before (`LayerMemo`, `JointMemo`), the same
       result as from scratch (`tests/zone_relieve.rs`)
+- [x] Thermal relief required by default (D120, the user's decision of 2026-11-22): `thermal_required` is on
+      for new boards, every preset, imported KiCad boards and saved projects without the field (only `false` is
+      saved); the export's refusal and each finding name `zone.relieve`, `zone.pad --purpose` and `board.rules
+      --thermal-required false`; a pad solid by wide tracks is let through by its own setting with a reason
 - [ ] Thermal relief, left open (D119): the native router does not keep room for the spokes of relieved pads,
       and neither router moves a track off a pad's spoke on being told (`thermal::blockers` names them); a
       refill still costs the whole-layer booleans of each zone layer it changes, so `zone.relieve` is two to
       four fills, not one; no check of the copper on the two pads of a chip part against each other (no
-      published number); the 3D view draws no copper
+      published number); the 3D view draws no copper; no repair for a pad solid by tracks wider than itself (a
+      router that necks down into a fine-pitch pin, D120)
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
 - [x] Legible silkscreen (D82): `drc.silk_edge` and `drc.silk_overlap` (rules `silk_to_edge`, `silk_clearance`),

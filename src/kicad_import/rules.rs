@@ -678,6 +678,8 @@ mod tests {
             let mut p = Project::new("t");
             apply(&mut p, &k);
             assert_eq!(p.board().rules.min_thermal_spokes, want, "KiCad's {kicad}");
+            // KiCad has no such rule: an imported board requires thermal relief like any other (D120).
+            assert!(p.board().rules.thermal_required);
         }
     }
 

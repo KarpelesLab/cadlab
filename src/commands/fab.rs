@@ -636,6 +636,12 @@ impl Command for Export {
         let errors = report.count(Severity::Error);
         let process_id = report.process.clone();
         let choices = report.choices.clone();
+        // Errors of thermal relief (the rule `thermal_required`): the refusal says the ways out.
+        let thermal = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error && crate::fab::check::THERMAL_CODES.contains(&d.code.as_ref()))
+            .count();
         for d in report.diagnostics {
             ctx.report(d);
         }
@@ -644,11 +650,20 @@ impl Command for Export {
                 .with_hint("see fab.check"));
         };
         if errors > 0 && !self.force {
+            let mut hint =
+                "fix them (fab.check lists them), choose another fab (fab.compare), or pass force".to_string();
+            if thermal > 0 {
+                hint = format!(
+                    "{hint}; {thermal} of them {} thermal relief: {}",
+                    if thermal == 1 { "is" } else { "are" },
+                    crate::fab::check::THERMAL_REQUIRED_HINT
+                );
+            }
             return Err(CommandError::conflict(
                 "fab.check_failed",
                 format!("{} cannot make the board as is: fab.check found {errors} error(s)", p.name),
             )
-            .with_hint("fix them (fab.check lists them), choose another fab (fab.compare), or pass force"));
+            .with_hint(hint));
         }
         let project = ctx.project()?;
         if crate::fabout::excellon::too_many_tools(project) {

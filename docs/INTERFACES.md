@@ -76,6 +76,7 @@ cadlab board rules --fab jlcpcb
 cadlab place set U2 --at 10mm,15mm --rotation 90 --side top
 cadlab place auto
 cadlab route all --budget 60s
+cadlab zone relieve                    # a board with pours: every solder pad gets its thermal spokes
 cadlab drc
 cadlab render board out/top.png --layers F.Cu,F.SilkS
 cadlab fab compare jlcpcb,pcbway

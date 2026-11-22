@@ -170,7 +170,12 @@ fn kicad_drc_of_export_matches_cadlab_drc_of_import() {
 
 /// The cross-check boards raise no thermal relief finding (docs/BOARD.md, "Thermal relief"):
 /// their pours relieve every solder pad with two spokes or more, so the comparison with KiCad
-/// needs no allowance for these rules, which are cadlab's own.
+/// needs no allowance for these rules, which are cadlab's own. One pad is the exception since
+/// relief is required by default (D120): the header pin that `local_settings` sets solid on its
+/// footprint, to compare a pad's `zone_connect` with KiCad, says nothing of what for, and a
+/// bare `solid` is then not taken as meant (`drc.solid_pad`, exactly that pad). A purpose
+/// would quiet it here and be lost in KiCad's file, which has no pad property for a terminal
+/// (`tests/kicad_pcb_import.rs` compares the round trip).
 #[test]
 fn cases_have_no_thermal_findings() {
     for case in crosscheck::cases() {
@@ -190,6 +195,10 @@ fn cases_have_no_thermal_findings() {
             })
             .map(|d| format!("{}: {}", d.code, d.message))
             .collect();
-        assert!(found.is_empty(), "{}: {found:#?}", case.name);
+        if case.name == "local_settings" {
+            assert!(found.len() == 1 && found[0].starts_with("drc.solid_pad: through-hole pin J1.1 "), "{found:#?}");
+        } else {
+            assert!(found.is_empty(), "{}: {found:#?}", case.name);
+        }
     }
 }

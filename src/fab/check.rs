@@ -50,6 +50,17 @@ pub struct Report {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Codes of the thermal relief findings of the fab check, errors under the board's rule
+/// `thermal_required` (D119, on by default: D120).
+pub const THERMAL_CODES: [&str; 4] =
+    ["fab.solid_pad", "fab.thermal_nominal", "fab.starved_thermal", "fab.thermal_size"];
+
+/// The ways out of a thermal relief finding that the board's rules make an error: the repair,
+/// what a pad is solid for, and the rule itself.
+pub const THERMAL_REQUIRED_HINT: &str = "thermal relief is required by the board's rules; the ways out: `zone.relieve` \
+     (the repair of pads in a pour: spokes), `zone.pad <ref.pad> --purpose press_fit|terminal|heat|stitching` (a pad \
+     that is solid on purpose says what for), `board.rules --thermal-required false` (warnings again for this board)";
+
 impl Report {
     /// Number of findings of a severity.
     pub fn count(&self, s: Severity) -> usize {
@@ -318,11 +329,9 @@ impl Ctx<'_> {
             // waiver takes away; a pad that is solid on purpose says what for.
             if own.thermal_required {
                 d.severity = crate::diag::Severity::Error;
-                d.hint = Some(format!(
-                    "{}; the board's rules require thermal relief (`board.rules --thermal-required false` makes \
-                     these warnings again)",
-                    d.hint.unwrap_or_default()
-                ));
+                // Each finding names the ways out: the repair, what a pad is solid for, the rule.
+                let hint = d.hint.unwrap_or_default();
+                d.hint = Some(format!("{hint}; {THERMAL_REQUIRED_HINT}"));
             }
             out.push(d);
         }

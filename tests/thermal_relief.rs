@@ -219,10 +219,14 @@ fn solid_zone_is_reported_and_repaired() {
 }
 
 /// A pad that is solid on purpose: said on the pad, the check is quiet; a waiver on the zone
-/// quiets the rest, in the DRC and in the fab check.
+/// quiets the rest, in the DRC and in the fab check. This is the board whose rules do not
+/// require relief (`thermal_required: false`): with the rule, which is the default (D120), a
+/// bare setting is not "meant" and no waiver takes the fab check's errors away
+/// (`thermal_relief_required`).
 #[test]
 fn solid_on_purpose_is_quiet() {
     let (_d, r, mut s) = setup();
+    exec(&r, &mut s, "board.rules", json!({"thermal_required": false}));
     exec(
         &r,
         &mut s,
@@ -378,6 +382,26 @@ fn wide_track_into_a_pad() {
     exec(&r, &mut s, "track.add", json!({"layer": "F.Cu", "width": "1.5mm", "points": ["C2.1", "U1.OUT"]}));
     let solid = findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.solid_pad");
     assert!(solid.iter().any(|m| m.contains("C2.1") && m.contains("tracks wider than the pad")), "{solid:#?}");
+    // Required by default (D120): an error of the fab check, which the repair of pours does
+    // not take away and which a bare setting does not either; the placed pad's own setting
+    // with its reason does, zone or no zone, and its hint says so.
+    let of = |o: &Value, pad: &str| -> Vec<Value> {
+        let all = o["diagnostics"].as_array().unwrap().iter();
+        all.filter(|d| d["code"] == "fab.solid_pad" && d["message"].as_str().unwrap().contains(pad)).cloned().collect()
+    };
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    let found = of(&o, "C2.1");
+    assert_eq!(found.len(), 1, "{o}");
+    assert_eq!(found[0]["severity"], "error", "{}", found[0]);
+    let hint = found[0]["hint"].as_str().unwrap();
+    assert!(hint.contains("zone.pad C2.1") && hint.contains("--reason") && !hint.contains("drc.waive"), "{hint}");
+    exec(&r, &mut s, "zone.relieve", json!({}));
+    exec(&r, &mut s, "zone.pad", json!({"pads": ["C2.1"], "connection": "solid"}));
+    assert_eq!(of(&exec(&r, &mut s, "fab.check", json!({"fab": "generic"})), "C2.1").len(), 1);
+    exec(&r, &mut s, "zone.pad", json!({"pads": ["C2.1"], "connection": "solid", "reason": "carries 6 A"}));
+    assert!(of(&exec(&r, &mut s, "fab.check", json!({"fab": "generic"})), "C2.1").is_empty());
+    let solid = findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.solid_pad");
+    assert!(!solid.iter().any(|m| m.contains("C2.1")), "{solid:#?}");
 }
 
 /// The spokes of a power pin against its net's current: narrow spokes are reported with the
@@ -797,12 +821,14 @@ fn solid_for_a_purpose() {
     assert!(j.solid(67).is_none() && j.class == PadClass::Through && j.spokes == 4, "{j:?}");
 }
 
-/// The rule `thermal_required` (D119): the thermal findings of the fab check are errors, which
-/// stop the export; a solid setting alone no longer says "meant", a purpose or a placed
-/// pad's reason does; `zone.relieve` clears them. Off, which is the default, they are warnings.
+/// The rule `thermal_required` (D119), on by default (D120): the thermal findings of the fab
+/// check are errors, which stop the export; a solid setting alone does not say "meant", a
+/// purpose or a placed pad's reason does; `zone.relieve` clears them. Switched off, they are
+/// warnings and a setting counts as meant.
 #[test]
 fn thermal_relief_required() {
     let (_d, r, mut s) = setup();
+    assert!(s.project.as_ref().unwrap().board().rules.thermal_required, "a new board requires relief");
     exec(
         &r,
         &mut s,
@@ -818,9 +844,30 @@ fn thermal_relief_required() {
             .map(|d| d["severity"].as_str().unwrap().to_string())
             .collect()
     };
+    // Nothing set: errors, each naming the three ways out.
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    assert_eq!(severities(&o, "fab.solid_pad"), vec!["error"; 4], "{o}");
+    let ways = |hint: &str| {
+        hint.contains("zone.relieve")
+            && hint.contains("zone.pad")
+            && hint.contains("--purpose")
+            && hint.contains("thermal-required")
+    };
+    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "fab.solid_pad").unwrap();
+    assert!(ways(d["hint"].as_str().unwrap()), "{d}");
+    // The export refuses, as for any error of the fab check, and says the same.
+    let out = _d.path().join("fab");
+    let refused = r
+        .execute(&mut s, "fab.export", json!({"fab": "generic", "dir": out}), RunOptions::default())
+        .expect_err("fab.export with thermal errors");
+    assert_eq!(refused.error.diagnostic.code, "fab.check_failed", "{}", refused.error);
+    assert!(ways(refused.error.diagnostic.hint.as_deref().unwrap_or_default()), "{}", refused.error);
+    assert!(!out.exists(), "nothing is written");
+    // Switched off: warnings, and a setting on the footprint is meant.
+    let o = exec(&r, &mut s, "board.rules", json!({"thermal_required": false}));
+    assert_eq!(o["output"]["thermal_required"], false, "{}", o["output"]);
     let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
     assert_eq!(severities(&o, "fab.solid_pad"), vec!["warning"; 4]);
-    // A setting on the footprint: meant, while relief is not required.
     let fp = {
         let p = s.project.as_ref().unwrap();
         cadlab::board::footprint_for(p, "J1").unwrap().name.clone()
@@ -828,23 +875,11 @@ fn thermal_relief_required() {
     exec(&r, &mut s, "footprint.set", json!({"name": fp, "pads": ["1"], "zone_connection": "solid"}));
     let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
     assert_eq!(severities(&o, "fab.solid_pad").len(), 3);
-    // Required: errors, and the setting alone is not enough.
+    // Required again: errors, and the setting alone is not enough.
     let o = exec(&r, &mut s, "board.rules", json!({"thermal_required": true}));
-    assert_eq!(o["output"]["thermal_required"], true, "{}", o["output"]);
+    assert!(o["output"]["thermal_required"].is_null(), "true is the default and not written: {}", o["output"]);
     let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
     assert_eq!(severities(&o, "fab.solid_pad"), vec!["error"; 4], "{o}");
-    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "fab.solid_pad").unwrap();
-    assert!(
-        d["hint"].as_str().unwrap().contains("--purpose") && d["hint"].as_str().unwrap().contains("thermal-required"),
-        "{d}"
-    );
-    // The export refuses, as for any error of the fab check.
-    let out = _d.path().join("fab");
-    let refused = r
-        .execute(&mut s, "fab.export", json!({"fab": "generic", "dir": out}), RunOptions::default())
-        .expect_err("fab.export with thermal errors");
-    assert_eq!(refused.error.diagnostic.code, "fab.check_failed", "{}", refused.error);
-    assert!(!out.exists(), "nothing is written");
     // A waiver does not take an error away.
     exec(&r, &mut s, "drc.waive", json!({"code": "drc.solid_pad", "subjects": ["zone:GND"], "reason": "reflow only"}));
     let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
@@ -861,6 +896,12 @@ fn thermal_relief_required() {
     for code in ["fab.solid_pad", "fab.thermal_nominal", "fab.starved_thermal", "fab.thermal_size"] {
         assert!(findings(&o, code).is_empty(), "{code}: {:#?}", findings(&o, code));
     }
+    // A preset starts from the default rules: required, unless the same call says otherwise.
+    exec(&r, &mut s, "board.rules", json!({"thermal_required": false}));
+    exec(&r, &mut s, "board.rules", json!({"preset": "ipc2"}));
+    assert!(s.project.as_ref().unwrap().board().rules.thermal_required);
+    exec(&r, &mut s, "board.rules", json!({"preset": "ipc2", "thermal_required": false}));
+    assert!(!s.project.as_ref().unwrap().board().rules.thermal_required);
 }
 
 /// A pad in a pour that nothing joins and that no pour joined before (D119): a relieved zone,

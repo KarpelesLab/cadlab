@@ -330,7 +330,7 @@ corner of the board frame (`outline_lower_left`). The other fabs do not document
 | `fab.show {fab}` | a profile in full, with its unverified values and sources |
 | `fab.check {fab, process?, parts?, boards?}` | can the fab make and assemble the board: layer count, thickness, copper, finish/color preferences (first offered one is chosen), board size; track width, clearance, hole-to-hole, copper-to-edge and silk-to-pad through cadlab's DRC with a temporary rule set holding the profile's minimums (net class values ignored, the project's rules untouched); drills, annular rings, pad hole-to-hole; silk line width and text height; assembly sides, package size, through-hole; parts availability through the configured suppliers (`fab.no_suppliers` when none), at the profile's `catalog` providers when configured, with the substitutions of the fab's `fab-lock.json` (`dir`, default `out/fab/<fab>`) applied (`fab.substituted` info) and ranked substitute candidates (`candidates`, default 3) for every unavailable line in the output's `substitutes` and in the finding's hint. Codes `fab.*`, each with a hint |
 | `fab.compare {fabs?, parts?}` | one row per fab: feasible, error/warning counts, failing constraint codes |
-| `fab.export {fab, dir?, process?, boards?, force?}` | runs the check (refuses on errors unless `force`), then writes to `out/fab/<fab>/`: the fabrication files named by the profile, the zip archive of them (flat, deflated, fixed timestamps: byte-identical across runs), BOM and CPL in the fab's layouts with rotation offsets applied, and `fab-lock.json`; substitutions in the previous lock are used and kept, substitute candidates are reported as in `fab.check` |
+| `fab.export {fab, dir?, process?, boards?, force?}` | runs the check (refuses on errors unless `force`; a solder pad without thermal relief is one unless the board's rules say otherwise, and the refusal names `zone.relieve`, `zone.pad --purpose` and `board.rules --thermal-required false`: [BOARD.md](BOARD.md), "Relief required"), then writes to `out/fab/<fab>/`: the fabrication files named by the profile, the zip archive of them (flat, deflated, fixed timestamps: byte-identical across runs), BOM and CPL in the fab's layouts with rotation offsets applied, and `fab-lock.json`; substitutions in the previous lock are used and kept, substitute candidates are reported as in `fab.check` |
 | `fab.substitute {fab, part, mpn?, remove?, force?, boards?, dir?}` | applies a substitute for one BOM line at one fab: `mpn` (default the best candidate) must be one of the line's candidates (`bom.substitutes`) unless `force` (basis `manual`). Writes it to the fab's `fab-lock.json` (creating a lock without files if there was no export yet), never to the project; `remove` undoes it. The next `fab.check` / `fab.export` for that fab order the substitute; other fabs are not affected |
 
 `process.impedance` in the lock (and `impedance` in the `fab.export` result) lists the controlled lines to state on
@@ -406,6 +406,12 @@ project ──► fab check  (capabilities vs design, parts availability vs that
 Retargeting from JLCPCB to PCBWay is therefore `cadlab fab check pcbway`, fix what it reports (usually substitute a
 few parts), then `cadlab fab export pcbway`.
 
+A board with copper pours goes through `cadlab zone relieve` before its first export: thermal relief is required
+by the board's rules unless they say otherwise (D120), so `fab.check` reports a solder pad joined solidly to its
+pour, or short of spokes, as an error and `fab.export` refuses. The order is `zone fill`, `zone relieve`, `drc`,
+`fab export`; a pad that is solid on purpose says so (`zone.pad J1.3 --purpose terminal`, or `--connection solid
+--reason ..`), and `board.rules --thermal-required false` makes the findings warnings again for that board.
+
 ### Target fabs
 
 Support as many as practical, in this order:
@@ -434,7 +440,9 @@ cadlab -p demo fab export jlcpcb      # demo/out/fab/jlcpcb/
 cadlab -p demo fab export pcbway      # demo/out/fab/pcbway/
 ```
 
-Each export warns `fab.no_suppliers` (parts availability is not checked without a catalog) and nothing else.
+Each export warns `fab.no_suppliers` (parts availability is not checked without a catalog) and nothing else. The
+board has no copper pour and no track wider than the pad it enters, so the required thermal relief (D120) asks
+nothing of it and the five lines need no `zone relieve`.
 `tests/demo_board.rs` runs these lines and checks what a program can: ERC, lint and DRC clean, both bundles complete,
 the fabrication data byte-identical under the two fabs' file names, the project files unchanged by the exports and
 naming no fab outside `targets`, the archives identical between two builds. KiCad's DRC of the same board is the
