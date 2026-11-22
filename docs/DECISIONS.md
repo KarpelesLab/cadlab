@@ -7356,3 +7356,234 @@ costs a connection where the nodes run out. Its time at 60 s is 28 to 59 s for 5
 under load (item 4 of what was ported is by its reasoning alone); freerouting beside the two (CI's job was not
 run on this branch); KiCad's DRC on a board guide routed; cadlab's oracles locally; cadlab's whole test suite,
 which is run at the merge.
+
+### D123. guide 0.0.25 adopted: each net routed again where the others are by the negotiation's search, a run of tracks laid round the corners beside it, forty rounds at twice the pitch and no price for a plane in the negotiation; the default unchanged (2026-11-23)
+The direction is D121's and D122's: guide is to end equal to or better than the native router on every measure on
+every board, by taking from the native router what it still does better. It does not end there in this round
+either, and is nearer. This decision says where the two negotiations part, measured round by round and net by
+net, what was ported, what it moved, and what is still behind.
+`guide = { version = "0.0.25", default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock`
+moves. The table is measured with the crate from crates.io; what led to it, with a checkout of guide behind a
+`[patch]` that is in no commit, and with prints and switches in both routers that are in neither release.
+**Where the two negotiations part** (measured; tinytapeout-demo, one run of each on three threads).
+- *Round by round*: the native router has 2007 points shared after its first round, 57 after its ninth, 18 after
+  its twelfth and 2 after its twenty-ninth, and ends at its fortieth, which is all it has (`max_iterations` at
+  normal effort), with 255 vias and 4686 mm; its vias go from 184 after the first round to 250 after the
+  twelfth and stay. guide 0.0.24, at twice the pitch, has 3210, 164, 108 and then 12 to 116 for 165 rounds more,
+  and its vias go from 247 to 410 by the ninth round and to 476 by the hundred and thirty-fifth.
+- *The first round is already apart, at the same pitch.* With guide's negotiation forced to the native router's
+  pitch of 0.2 mm, after one round, in which each net is routed once with next to nothing priced: 244 vias,
+  5153 mm and 5429 points shared against 184, 4494 mm and 2007. By net (dumps of both after that round): the
+  ground has 124 connections, 27 vias and 318 mm with guide and 32 connections, no via and 32 mm with the native
+  router, which takes the pads that the pour on their own layer joins as joined, where guide plans a net with a
+  plane on its inner planes alone; the other nets have 216 vias and 4390 mm against 173 and 4076 mm. With no
+  price for a track inside another net's plane and none in the room of a spoke, those have 194 and 4260 mm.
+  guide's adapter runs with a track at twice its length inside a plane
+  (`RouteOptions::plane_cost`, guide's default), which on a board with planes on two of its four layers makes a
+  via half as dear beside a way round as it is to the native router.
+- *What the rounds route again is not it.* D113 tried every net near a shared point routed again, within the
+  share it then had, and dropped it for the rounds it cost; the negotiation is on threads since D118, so it was
+  tried again, as the native router has it: every net whose box is near a shared point, routed again whole, but
+  a net of 64 connections or more with nothing shared of its own, which keeps its wires away from the points.
+  And the nets of a round one at a time, not eight. And both. The vias after the ninth round are 403 to 406 in
+  all three for 410 (one run of each): the same.
+- *Nor the pitch alone.* At the native router's pitch with the native router's rising price and its choice of
+  the nets to route again, no price for a plane or for the room of a spoke, and the ground planned on every
+  pour: 184 vias after the first round, as the native router has, with 4735 mm for 4494 and 2966 points shared
+  for 2007; 281 vias after the ninth for 248, and 300 after the twentieth for 258, with 5170 mm for 4741 and 159
+  points shared for 37. A round takes 0.4 to 0.6 s, as the native router's. So guide's rounds at that pitch
+  cost what the native router's do and settle less; what is left between the two after those differences are
+  taken away was not found (inferred, not measured: where a route may end at a pad, which the native router
+  lets be any cell on its copper and guide the cells beside its middle).
+**What was ported** (guide 0.0.25 but the last, which is the adapter's).
+1. *A plane of another net costs a track nothing in guide's negotiation*, as in the native router's. The passes
+   that route a net at a time, and move others for it, pay for a plane as they did. At 150 million nodes, four
+   orders, medians, with the price and without it: tinytapeout-demo 0, 1, 0 and 4 open with 324 vias and 5133 mm
+   for none open with 299 and 5071 mm; buspirate5-rev10 322 vias and 3068 mm for 308.5 and 3017; lumenpnp-mobo
+   331.5 and 5483 mm for 333 and 5407; cynthion 418 and 3088 mm for 416.5 and 3072; glasgow-revC3 21 open over
+   the four orders with 406.5 vias and 3699 mm for 22 with 395 and 3613.
+2. *Forty rounds at most at twice the pitch*, the native router's forty, where guide had a hundred, and a
+   negotiation that its last round ended is not begun again in another order. D116 wrote that ending the rounds
+   after the twelfth, for the passes to have the time, was not tried: tinytapeout-demo has 44 points shared
+   after its fortieth round and 16 to 28 after some 150, and as its rounds end 349 to 388 vias for 394 to 458;
+   at 150 million nodes over six orders it ends with 305 vias and 5037 mm with forty rounds for 311.5 and
+   5412 mm with a hundred. At the first pitch, where the price of a shared point stops at thirty steps (D115),
+   the hundred stay: corne-cherry had 11, 2, 3 and 9 open in four orders at 60 s with forty for 4, 0, 0 and 0.
+3. *Each net routed again where the others are, by the negotiation's search* (`whole::again`), which D122
+   named and did not attempt. The native router's pass for fewer vias routes each net again once its routes are
+   legal, with a via at forty steps; guide's cleanup did the same by the searches that route a net among fixed
+   copper, 12.5 s for 76 vias where the negotiation's own search had 0.4 s for 78 as its rounds ended. That
+   search knew only the routes it made itself, on its own points. Now a net claims on the grid what its copper
+   keeps other nets' away from wherever it lies; copper that is off the grid claims as much more as a track on
+   the grid may pass nearer than its points say, between two of them (the native router's `delta`); a net gives
+   up its claims while it is routed where nothing is claimed; and what the search finds is kept only if guide's
+   exact check allows every track and via of it among the others' copper as it is. The first time through the
+   nets is for fewer vias alone, at what cleanup lets a via less cost in track, and the times after for a way
+   as short with as many as well. No layer has a direction of its own in it: with the directions that the
+   rounds have, buspirate-rs232 kept 7, 6, 6 and 5 vias in four orders where cleanup alone leaves 5, 5, 5 and 4.
+   On the negotiation's grid at the end of the first run, 0.5 to 4 s a board (tinytapeout-demo: 294 nets looked
+   at and 41 kept in 1.5 s, 12 vias and 81 mm less); at the pitch in the run for shorter ways.
+4. *The native router's gridless pass* (`router::gridless`), in guide's cleanup of the run for shorter ways
+   (`cleanup::round_corners`): each stretch of a run of tracks is laid as the shortest way through the corners
+   of what is beside it, by tracks in the eight directions that the exact check allows, if that is shorter. The
+   corners are those of the octagon round each corner of a pad, each end of a track and each via or hole of
+   another net, whose sides are as far from it as the track's centre has to stay; the native router has them
+   from the hulls of what a track passes. 0.1 to 0.2 s and 15 to 36 mm on a board of four layers
+   (lumenpnp-mobo 5986 to 5950 mm, buspirate5-rev10 3094 to 3068, cynthion 3415 to 3401, before the track inside
+   the pads is left out).
+   tinytapeout-demo at 150 million nodes over six orders, medians, with 1 and 2 in all: 315 vias and 5200 mm
+   with this pass alone, 308.5 and 5102 mm with 3 alone, 305 and 5037 mm with both; and 333 and 5202 mm with
+   neither, a plane at its price and a hundred rounds, which is 0.0.24.
+5. *A pass on the finer lattice that took no net out is the last* (guide 0.0.25), and *no run that moves
+   routes after a first run that moved none and found no way* (the adapter, `first_said_all`). D122 ended the
+   runs that move routes after one that ended on its own having taken no net out and moved none aside, with
+   every open net one whose own search found no way; the first run says the same where it ends so, and the run
+   that moves routes searches the same board for the same ways. sweep-v2.2, whose three open connections
+   neither router makes, had two passes on the finer lattice for them in its first run, 13 s and 6 s, and a
+   run that moves routes of 17 s after it: it has the first of the two passes, and the run for shorter ways,
+   which it never had the time for, in place of the other.
+**Measured** (ROUTER.md, "Native router and guide 0.0.25, D123"). D121's method: four runs of each router at 60 s,
+one of each at a time, side by side: the native router with seeds 1 to 4 on three threads, guide in four orders
+with three threads for its negotiation; and four more of each on tinytapeout-demo, whose runs end on the
+deadline (seeds 5 to 8). cadlab on this branch, guide from crates.io. The machine's load was 2.2 to 4.0 for the
+three quarters of an hour (noted every two minutes). The twelve boards: 27 to 32 open for guide (median 28.5)
+against 179 to 218 (190), where 0.0.24 had 43 to 58; the eleven without glasgow-revD1 16 to 21 (18.5) against 82
+to 101 (89.5); glasgow-revD1 7 to 15 against 94 to 117, where 0.0.24 had 22 to 39. 0 DRC errors other than
+unrouted in the 104 runs; no pad of any board solid by copper that is no pour (`fab.solid_pad` by a track: none),
+with either router; the pads met by copper wider than themselves are the copper drawings of D121
+(tinytapeout-demo 9, lumenpnp-mobo 1, glasgow-revD1 1, in every run of both). Pads short of two necks over the
+twelve boards: 28, 36, 26 and 36 for guide against 91, 77, 80 and 74 (D122: 36, 36, 41 and 44 against 88, 77, 80
+and 77); with no neck 2, 2, 0 and 0 against 15, 7, 1 and 2 (D122: 0, 0, 0 and 3), the two of cynthion's in two
+orders (below).
+**Equal, better or worse than the native router**, by board and measure, as D121 and D122 counted it: by the
+ranges for what is open and the pads short of two necks, by the medians for the vias and the track (within 2 %
+is equal), by the medians for the time (within a tenth or 2 s is equal); tinytapeout-demo by its eight runs:
+
+| board | open | vias | track | track outside pads | short of two necks | time |
+|---|---|---|---|---|---|---|
+| buspirate-flash-sop | equal (0/0/0/0 against 0/0/0/0) | worse (+25 %) 5 against 4 | better (-4 %) 440 against 461 | equal (-0 %) 429 against 431 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| buspirate-rs232 | equal (0/0/0/0 against 0/0/0/0) | better (-50 %) 5 against 10 | worse (+6 %) 297 against 281 | worse (+5 %) 286 against 272 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| lumenpnp-ringlight | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 3 against 3 | better (-6 %) 167 against 177 | equal (-1 %) 158 against 159 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| nrfmicro | equal (0/0/0/0 against 0/0/0/0) | better (-11 %) 42.5 against 47.5 | better (-3 %) 437 against 450 | equal (+1 %) 418 against 414 | equal (0/0/0/0 against 0/0/0/0) | equal (2 to 22 s against 2 to 13 s) |
+| sweep-v2.2 | equal (3/3/3/3 against 3/3/3/3) | better (-22 %) 20 against 25.5 | equal (-2 %) 2122 against 2159 | equal (-1 %) 2110 against 2122 | better (0/1/1/1 against 2/1/2/1) | better (40 to 42 s against 51 to 52 s) |
+| corne-cherry | better (1/0/1/0 against 3/3/2/4) | better (-7 %) 427.5 against 459 | better (-7 %) 7552 against 8103 | better (-6 %) 7446 against 7915 | better (2/2/1/1 against 3/3/2/2) | worse (33 to 59 s against 20 to 32 s) |
+| tinytapeout-demo | overlap, median 0 against 4 (0/0/0/0/1/0/0/7 against 19/2/5/5/2/2/3/9) | worse (+13 %) 308 against 273 | worse (+7 %) 5254 against 4894 | worse (+10 %) 5147 against 4672 | better (7/7/3/3/7/6/2/8 against 20/12/10/16/16/14/17/19) | worse (52 to 59 s against 34 to 61 s) |
+| buspirate5-rev10 | better (0/0/0/0 against 4/2/4/8) | worse (+2 %) 308.5 against 302 | better (-4 %) 3017 against 3129 | equal (-1 %) 2894 against 2911 | better (6/11/10/8 against 22/24/30/21) | equal (21 to 36 s against 18 to 32 s) |
+| lumenpnp-mobo | better (0/0/0/0 against 8/12/7/15) | better (-2 %) 335.5 against 343.5 | equal (-1 %) 5407 against 5462 | equal (+2 %) 5278 against 5177 | better (0/0/0/0 against 2/4/0/1) | equal (56 to 59 s against 61 to 64 s) |
+| cynthion | better (8/8/8/8 against 28/29/29/28) | better (-12 %) 422 against 478 | better (-2 %) 3125 against 3190 | equal (+2 %) 3037 against 2986 | worse (5/5/1/1 against 1/1/1/1) | equal (56 to 59 s against 60 to 62 s) |
+| glasgow-revC3 | better (9/6/8/5 against 36/31/35/31) | better (-3 %) 406 against 416.5 | worse (+8 %) 3756 against 3478 | worse (+13 %) 3648 against 3216 | equal (0/0/0/0 against 0/0/0/0) | equal (59 to 60 s against 60 to 62 s) |
+| glasgow-revD1 | better (8/15/7/12 against 117/108/94/96) | worse (+7 %) 1168 against 1089.5 | worse (+18 %) 10748 against 9117 | worse (+21 %) 10421 against 8592 | better (8/10/10/22 against 41/32/35/32) | equal (55 to 57 s against 61 to 62 s) |
+
+Counted over the 72 cells: 27 better, 29 equal, 1 with ranges that overlap, 15 worse (D122: 24, 29, 2 and 17;
+D121: 21, 28, 3 and 20). No longer worse: sweep-v2.2's time (better, 40 to 42 s for 51 to 52 s),
+buspirate5-rev10's time (equal, 21 to 36 s for 18 to 32 s), lumenpnp-mobo's track outside the pads (equal, +2 %
+for +4 %), cynthion's (equal, +2 % for +3 %). Better where it was equal: buspirate5-rev10's track (-4 %),
+cynthion's track (-2 %), lumenpnp-mobo's and glasgow-revC3's vias (-2 % and -3 %). Still worse and nearer:
+tinytapeout-demo's vias +13 % for +32 %, its track +7 % for +16 % and +10 % for +19 % outside the pads;
+glasgow-revC3's track +8 % for +14 % and +13 % for +20 %; glasgow-revD1's vias +7 % for +11 %;
+buspirate5-rev10's vias +2 % for +9 %, which is 308.5 against 302; buspirate-flash-sop's 5 against 4 for 6. The
+15: the vias of buspirate-flash-sop, tinytapeout-demo, buspirate5-rev10 and glasgow-revD1; the track of
+buspirate-rs232, tinytapeout-demo, glasgow-revC3 and glasgow-revD1, and outside the pads the same four; the time
+of corne-cherry and tinytapeout-demo; cynthion's pads short of two necks.
+*The same runs by the nets that both routers complete* (`CADLAB_BENCH_BY_NET` in every run; run k of the one
+router beside run k of the other, the nets that neither leaves open, and the medians of the pairs):
+
+| board | nets both complete | vias on them | track on them | track outside pads on them | nets only guide completes, their track and vias; only the native router |
+|---|---|---|---|---|---|
+| buspirate-flash-sop | 12 | equal (+0 %) 4 against 4 | better (-4 %) 440 against 461 | equal (-1 %) 429 against 431 | 1 net, 0 mm, 1 via; 0 |
+| buspirate-rs232 | 30 | better (-50 %) 5 against 10 | worse (+6 %) 297 against 281 | worse (+5 %) 286 against 272 | 0; 0 |
+| lumenpnp-ringlight | 12 | equal (+0 %) 3 against 3 | better (-6 %) 167 against 177 | equal (-1 %) 158 against 159 | 0; 0 |
+| nrfmicro | 41 | better (-11 %) 42.5 against 47.5 | better (-3 %) 437 against 450 | equal (+1 %) 418 against 414 | 0; 0 |
+| sweep-v2.2 | 40 | better (-25 %) 18 against 24 | equal (-1 %) 2041 against 2060 | equal (+0 %) 2030 against 2028 | 0; 0 |
+| corne-cherry | 149 | better (-10 %) 374 against 414.5 | better (-5 %) 7213 against 7569 | better (-4 %) 7120 against 7412 | 2.5 nets, 222 mm, 31.5 vias; 0.5 |
+| tinytapeout-demo | 135 | worse (+12 %) 262 against 233 | worse (+9 %) 5082 against 4657 | worse (+11 %) 4978 against 4472 | 1 net, 98 mm, 29.5 vias; 0 |
+| buspirate5-rev10 | 181 | worse (+8 %) 270 against 250 | worse (+2 %) 2998 against 2927 | worse (+6 %) 2878 against 2720 | 2 nets, 27 mm, 37.5 vias; 0 |
+| lumenpnp-mobo | 188.5 | equal (-1 %) 259 against 261.5 | equal (+0 %) 5222 against 5203 | worse (+3 %) 5105 against 4945 | 4.5 nets, 184 mm, 72 vias; 4 |
+| cynthion | 311 | better (-22 %) 281.5 against 360.5 | better (-3 %) 2795 against 2876 | equal (+0 %) 2720 against 2719 | 15 nets, 353 mm, 139 vias; 0 |
+| glasgow-revC3 | 201 | better (-13 %) 223 against 255 | equal (+2 %) 2734 against 2681 | worse (+6 %) 2669 against 2512 | 18.5 nets, 986 mm, 183 vias; 6 |
+| glasgow-revD1 | 502 | better (-2 %) 780 against 796.5 | worse (+10 %) 8352 against 7620 | worse (+12 %) 8097 against 7218 | 48.5 nets, 2360 mm, 298.5 vias; 8.5 |
+
+Over these 36 cells: 13 better, 11 equal, 12 worse (D122: 11, 10 and 15). tinytapeout-demo +12 % vias and +9 %
+track for +34 % and +18 %; buspirate5-rev10 +8 % and +2 % for +13 % and +4 %; glasgow-revC3 -13 % vias and +2 %
+track, which is equal, for -11 % and +5 %; cynthion -22 % and -3 %; glasgow-revD1 -2 % vias for +6 %, and its
+track +10 % for +5 % (below).
+**Budgets of nodes**, which do not move with the machine (one thread, guide alone, the crate from crates.io).
+40 million, three orders, the nine boards that a budget cuts: 594 open for 0.0.24's 597. glasgow-revC3 has 39
+over the three (12, 15 and 12) for 42; the eight others as many as they had (nrfmicro 0, sweep-v2.2 9, corne-cherry
+36, 28 and 22, tinytapeout-demo 25, buspirate5-rev10 0, lumenpnp-mobo 0, cynthion 24, glasgow-revD1 411). 150
+million, two orders: corne-cherry 8 and 0, tinytapeout-demo 0 and 0 with 300 and 298 vias for 320 and 329,
+glasgow-revC3 6 and 6, cynthion 8 and 8, sweep-v2.2 3 and 3, buspirate5-rev10 and lumenpnp-mobo none, as 0.0.24.
+**What got worse.** *glasgow-revD1's track*: 10748 mm against the native router's 9117 (+18 % for +11 %, and
++21 % for +14 % outside the pads), with 7 to 15 connections open for 22 to 39, which is 48.5 nets that only guide
+completes for 43.5; but on the nets that both complete it is +10 % for +5 % too (8352 mm against 7620, with 2 %
+fewer vias). Measured in the first comparison of this round, at 60 s over four orders, with the price of a plane
+in the negotiation and without it and nothing else changed: 10035 mm with 34, 28, 25 and 39 open, and 10779 mm
+with 23, 28, 5 and 8. So it is what item 1 costs on the board of six layers: more of its nets find a way, and
+the ways are longer (inferred: through the layers of its planes, which were dear). *cynthion's pads short of two
+necks*: 5, 5, 1 and 1 against the native router's 1, 1, 1 and 1, where 0.0.24 had 0, 1, 1 and 4, with two pads
+that have no neck in the two orders with 5. As in D122 the spoke step is begun in two orders of four, and takes
+5 to 1; in the other two the first run ends at its deadline, 42 s, of which two passes on the finer lattice
+have 14 s and 11 s for the eight nets at the net ties (measured), and the run on the filled board, the two
+steps for the needless copper and the report leave the step no room. With a budget of 150 million nodes and no
+deadline it has 1, 1, 1 and 1 in the four orders. *cynthion's and lumenpnp-mobo's time*: 56 to 59 s for 49 to
+57 s and 56 to 59 s for 49 to 54 s, each still under the native router's (60 to 62 s and 61 to 64 s) and by the
+rule equal where it was better: the run for shorter ways now has each net routed again at the pitch before its
+searches, and lumenpnp-mobo ends with it in every order. *tinytapeout-demo's time*, by the rule: 52 to 59 s in
+eight orders against 34 to 61 s, the medians 58 s and 43 s; by the first four runs of each, as D122 counted it,
+56 s and 54 s, equal as it was. guide's time on this board has not moved; of its eight orders one ends with 7
+connections open and one with 1 (0, 0, 0 and 0 in the table's four; D122 measured 0, 3, 0, 0, then 0, 7, 1, 0,
+then 2, 0, 0, 0). Nothing else was found worse than 0.0.24.
+**Tried and not kept** (each measured; guide's `docs/benchmarks.md` has those that are guide's).
+- *Every net near a shared point routed again whole, as the native router has it, and the nets of a round one
+  at a time* (above): the vias after the ninth round the same, 403 to 406 for 410.
+- *guide's negotiation at the native router's pitch on four layers, now with the native router's rising
+  price* (D122 had it with the price stopped at thirty steps): tinytapeout-demo's share ends it after 25 to 78
+  rounds with 42 to 122 points shared, and the board has 6, 2, 0 and 4 open in four orders at 60 s with 344 vias.
+- *A net with a plane planned on its pours of the outer layers too*, as the native router plans it: the first
+  round has 168 vias where it had 247, and at 150 million nodes over six orders tinytapeout-demo ends with 337.5
+  vias, 5442 mm and 5 connections open for 300, 5071 mm and none. The pads that the routes then cut off their
+  pour are joined again one by one, by stubs among routes that are final.
+- *The price of a shared point rising at the first pitch* (D115's choice, D121 tried it): once more, now that
+  each net is routed again afterwards. corne-cherry 505.5 vias and 8200 mm over four orders at 60 s for 432 and
+  7556 mm; its time 36, 52, 59 and 35 s for 59, 34, 59 and 58 s.
+- *The pads cut off their fills told at the last round too*, with forty rounds more for them:
+  tinytapeout-demo 316 vias and 5501 mm at 60 s for 309.5 and 5186 mm.
+- *Each net routed again with the directions of the layers that the rounds have* (item 3): buspirate-rs232 7,
+  6, 6 and 5 vias for 5, 5, 5 and 4.
+- *A negotiation that its fortieth round ended begun again in other orders*, as one that ended for being no
+  better still is: buspirate5-rev10 36, 35, 30 and 29 s for 21, 24, 49 and 26 s, with as many vias and none open
+  either way.
+**Not attempted, or begun and left, and why the parity is not there.** By what it would take:
+1. *The vias that a round of guide's negotiation at twice the pitch leaves* (tinytapeout-demo +12 % and +9 %
+   track on the nets both complete, buspirate5-rev10 +8 % and +2 %, glasgow-revD1's vias +7 % by the totals).
+   What this round found: the price of a plane, with which the board had 3210 points shared after its first
+   round for 2075 without, is gone, and the ground planned on its planes alone, 124 connections for the native
+   router's 32, stays (tried, above). The rounds themselves, at twice the pitch, still take tinytapeout-demo
+   from 243 vias after the first to 349 to 388 as they end, where the native router's take it from 184 to
+   255. Routing each net again alone takes 12 to 22 of
+   them in the first run: a net that went under another loses its vias only if the other moves too. Not tried:
+   two or three nets taken out together and routed again in turn, kept if all of them are no worse.
+2. *glasgow-revD1's and glasgow-revC3's track* (+10 % and +2 % on the nets both complete, +12 % and +6 % outside
+   the pads): what got worse, above, and the run for shorter ways, which neither board has the time for at
+   60 s; each net routed again at the pitch and the corners are in that run alone. In the first run they made
+   nrfmicro's and lumenpnp-mobo's later runs fail in D116, with cleanup's searches; not measured again.
+3. *buspirate-rs232's track* (+6 %), looked at again after the corner pass as D122 asked: 297 mm against 281,
+   as it was. The pass takes 1 to 2 mm of the board's 354 before the track inside the pads is left out; what
+   is left is the trade that D122 found, five vias for ten. *buspirate-flash-sop's vias* (5 against 4, for
+   6): 5 in three orders of four and 6 in the fourth. The via that is left with no track joins two pieces of
+   GND_CHIP's pour for a pad that a track of another net cuts off, where the native router's rounds for the
+   pours move that track (D122). Not attempted.
+4. *The time*: corne-cherry's (33 to 59 s against 20 to 32 s) is its negotiation at the first pitch, 19 to
+   21 s for the native router's 9 s, and the runs that go on for as long as a connection is open (one in two
+   orders of four, where the native router has two to four in every one and stops). The price of a shared
+   point rising was tried once more and not kept (above). cynthion's is the passes on the finer lattice for
+   connections that have no way: the pass that took no net out is the last now, and sweep-v2.2 ends in 40 to
+   42 s for it, but on cynthion a pass moves nets aside for those searches, and the next one has its turn.
+5. *corne-cherry with a budget of nodes* (D122: 86 open over three orders at 40 million for 0.0.23's 80, and 8
+   in the order given at 150 million for none): 86, and 8 and 0, as 0.0.24. Not attempted.
+6. *glasgow-revC3 at 40 million nodes* has 39 open over three orders for 42; the passes on six layers on
+   threads (D121's list) were not looked at.
+**Default: unchanged.** `router: guide` stays the second opinion and the native router stays the default.
+*Not measured:* the generated boards; more than four runs of either router, but tinytapeout-demo's eight; a
+machine under load; freerouting beside the two (CI's job was not run on this branch); KiCad's DRC on a board
+guide routed; cadlab's oracles locally; cadlab's whole test suite, which is run at the merge.

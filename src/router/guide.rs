@@ -2144,6 +2144,24 @@ fn said(r: &pcb::Routed) -> String {
     )
 }
 
+/// Whether the first run has said of what is open all that a run that moves routes would
+/// (D123): it ended on its own having taken no net out and moved none aside, `moved_none`,
+/// no run since was stopped, and every net that the board has `open` is one that a run's
+/// own search found no way for, `gave_up`. Such a search may cross the routes of the other
+/// nets, and found no way across them either; a run that has the routes back to move them
+/// searches the same board for the same ways, in whatever order it takes the nets. D122 has
+/// this of a run that moves routes, after which no other is begun; sweep-v2.2, whose three
+/// open connections no router makes, had such a run for them after a first that said so,
+/// 17 s of its minute.
+fn first_said_all<'a>(
+    moved_none: bool,
+    stopped: Option<Stopped>,
+    mut open: impl Iterator<Item = &'a str>,
+    gave_up: &BTreeSet<String>,
+) -> bool {
+    moved_none && stopped.is_none() && open.all(|net| gave_up.contains(net))
+}
+
 /// Routes `scope` with guide. See the module documentation.
 ///
 /// **Budgets.** The work budget is guide's (`RouteOptions::work_budget`, in search nodes, which
@@ -2242,6 +2260,9 @@ pub(crate) fn route(
     let mut stopped = routed.stopped;
     let mut opens: Vec<Open> = explain_all(&ad, &routed, true);
     let mut gave_up = gave_up_on(&ad, &routed);
+    // Whether the first run ended on its own having taken no net out and moved none aside
+    // ([`first_said_all`]).
+    let first_moved_none = routed.stopped.is_none() && routed.stats.rip_ups == 0 && routed.stats.shoved == 0;
     // Told by the first run alone: in a later one the routes of the runs before are copper of
     // the board, and what they keep apart another order of the nets may join.
     let apart = apart_nets(&ad, &routed);
@@ -2326,6 +2347,9 @@ pub(crate) fn route(
             break;
         }
         let left = open(&fitems, &fisl);
+        if moves && first_said_all(first_moved_none, stopped, left.iter().map(|l| l.net.as_str()), &gave_up) {
+            break;
+        }
         let again: BTreeSet<String> = left
             .iter()
             .filter(|l| !apart.contains(&l.net))
@@ -3899,6 +3923,21 @@ mod tests {
         assert_eq!(gave_up_on(&ad, &r).into_iter().collect::<Vec<_>>(), ["SIG"]);
         r.stopped = Some(Stopped::Deadline);
         assert!(gave_up_on(&ad, &r).is_empty());
+    }
+
+    /// No run that moves routes after a first run that moved none and found no way (D123).
+    #[test]
+    fn a_first_run_that_moved_no_route_has_said_all_of_what_it_found_no_way_for() {
+        let gave_up: BTreeSet<String> = ["raw".to_string(), "vcc".to_string()].into();
+        let open = ["raw", "vcc", "raw"];
+        assert!(first_said_all(true, None, open.iter().copied(), &gave_up));
+        // Nothing open: there is nothing to say, and nothing to run for.
+        assert!(first_said_all(true, None, std::iter::empty(), &gave_up));
+        // A net open that no search gave up on, a first run that took a net out or moved
+        // one aside, or a run that was stopped: a run that moves routes has its turn.
+        assert!(!first_said_all(true, None, ["raw", "gnd"].iter().copied(), &gave_up));
+        assert!(!first_said_all(false, None, open.iter().copied(), &gave_up));
+        assert!(!first_said_all(true, Some(Stopped::Deadline), open.iter().copied(), &gave_up));
     }
 
     /// The routes of a run, on the board, are handed to guide as routes that it may move

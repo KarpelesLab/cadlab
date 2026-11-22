@@ -370,7 +370,21 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D121 (D122, the same
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D122 (D123, the same
+      direction, not met): each net routed again where the others are by the negotiation's search, once
+      every route is where it is, with claims for copper that is off its grid; the native router's gridless
+      pass in the run for shorter ways; a plane at no price in guide's negotiation and the native router's
+      forty rounds at twice the pitch; no pass on the finer lattice, and no run that moves routes, after one
+      that moved no net (guide 0.0.25: the twelve boards 27 to 32 open against 179 to 218 for 43 to 58,
+      glasgow-revD1 7 to 15 for 22 to 39; tinytapeout-demo's vias +13 % for +32 % and its track +7 % for +16 %;
+      sweep-v2.2 40 to 42 s for 58 s, under the native router's). By board and measure 27 better, 29 equal, 1
+      with ranges that overlap and 15 worse of 72 (24, 29, 2 and 17 in D122): vias on four boards, track on
+      four and outside the pads on the same four, time on two, cynthion's pads short of two necks; by the nets
+      both routers complete 13, 11 and 12 of 36 (11, 10 and 15). Worse than 0.0.24: glasgow-revD1's track
+      (+18 % for +11 %; +10 % for +5 % on the nets both complete), cynthion's pads short of two necks in the two
+      orders that leave the spoke step no room. Open (D123, "Not attempted"): the vias of a round at twice
+      the pitch that no net loses alone, glasgow-revD1's track, corne-cherry's time and its connections at a
+      budget of nodes, the passes on the finer lattice for connections with no way. Done since D121 (D122, the same
       direction, not met): a via of a net with a pour at the native router's price on two layers (guide 0.0.24:
       corne-cherry 430 vias against the native router's 459 for 504, lumenpnp-ringlight 3 against 3 for 4);
       of two ways as long as each other the one with less outside the pads; the runs that move routes ended
