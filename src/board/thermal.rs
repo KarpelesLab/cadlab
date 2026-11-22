@@ -31,7 +31,7 @@ use crate::geom::poly::{self, Boolean, FillRule, Geometry, Join, Op, Polygon, Po
 use crate::geom::{Point, RTree};
 use crate::model::Project;
 use crate::model::board::{PadConnection, PadJoin, Rules, Zone};
-use crate::model::footprint::{MaskOpening, PadKind, Paste};
+use crate::model::footprint::{MaskOpening, PadKind, PadPurpose, Paste};
 use crate::refs::ObjectRef;
 use crate::units::Nm;
 
@@ -127,7 +127,17 @@ pub fn classes(pads: &[PlacedPad]) -> BTreeMap<(String, String), PadClass> {
         let hole_ring = numbers.len() == 1 && pads.len() > 1 && smd.is_empty();
         for pp in &pads {
             let covered = pp.pad.mask == MaskOpening::None;
-            let class = if heat.iter().any(|h| {
+            // What the pad says it is solid for goes before what it looks like: a press-fit
+            // pin and a stitching pad are not soldered, a heat pad spreads heat; a terminal is
+            // soldered (and solid on purpose, which the rules read from its `purpose`).
+            let said = match pp.overrides.purpose {
+                Some(PadPurpose::PressFit | PadPurpose::Stitching) => Some(PadClass::Bare),
+                Some(PadPurpose::Heat) => Some(PadClass::Heat),
+                Some(PadPurpose::Terminal) | None => None,
+            };
+            let class = if let Some(c) = said {
+                c
+            } else if heat.iter().any(|h| {
                 std::ptr::eq(*h, *pp)
                     || (h.number == pp.number && {
                         let c = poly::Point::from(pp.center);
@@ -183,6 +193,10 @@ pub struct Joint {
     pub style: Option<PadConnection>,
     /// The connection is the pad's own or its footprint's: said on purpose.
     pub own: bool,
+    /// What the pad says it is solid for (`PadPurpose`), if anything.
+    pub purpose: Option<PadPurpose>,
+    /// The placed pad's own setting has a reason written with it (`PadJoin::reason`).
+    pub reasoned: bool,
     /// Spokes asked for (thermal style).
     pub planned: u8,
     /// Relief gap in effect (thermal style).
@@ -248,13 +262,33 @@ impl Joint {
         }
     }
 
+    /// The necks of the pad counted by their copper: the separate pieces that reach it, or,
+    /// when that is more, the spokes that the copper on its outline is worth (its length over
+    /// the relief's spoke width). Spokes as wide as a small pad's sides meet at its corners
+    /// and reach it as one piece of copper on two or three of its sides: that is no pad on a
+    /// single spoke (D119).
+    pub fn worth(&self) -> u8 {
+        let by_width = if self.spoke.0 > 0 { self.contact.0 / self.spoke.0 } else { 0 };
+        self.necks.max(by_width.clamp(0, 255) as u8)
+    }
+
     /// Whether the pad is relieved by fewer necks than `min` asks for, or than its own
-    /// footprint leaves room for when that is less (never fewer than one).
+    /// footprint leaves room for when that is less (never fewer than one); necks by their
+    /// copper ([`Joint::worth`]).
     pub fn starved(&self, min: u8, max_share: u8) -> bool {
         self.in_pour()
             && self.style == Some(PadConnection::Thermal)
             && self.solid(max_share).is_none()
-            && self.necks < min.min(self.possible.max(1))
+            && self.worth() < min.min(self.possible.max(1))
+    }
+
+    /// Whether the pad is solid on purpose: it says what for (`purpose`), or its connection
+    /// is set solid on the pad, its placement or its footprint. With `required` (the rules'
+    /// `thermal_required`) a setting alone is not enough: the pad says what it is solid for,
+    /// or the placed pad's own setting has its reason.
+    pub fn meant(&self, required: bool) -> bool {
+        let set = self.own && self.style == Some(PadConnection::Solid);
+        self.purpose.is_some() || (set && (!required || self.reasoned))
     }
 
     /// The pin as a subject.
@@ -305,6 +339,183 @@ pub fn joints(p: &Project, items: &[CopperItem]) -> Vec<Joint> {
 /// caller that looks at the pads of a few nets many times, as a router does with the nets
 /// that have pours.
 pub fn joints_of(p: &Project, items: &[CopperItem], wanted: &dyn Fn(&str) -> bool) -> Vec<Joint> {
+    joints_with(p, items, wanted, true)
+}
+
+/// Everything the joint of one pad on one layer is read from ([`pad_joint`]).
+#[derive(Clone, PartialEq, Eq)]
+struct JointKey {
+    layer: String,
+    /// The pad.
+    pad: CopperItem,
+    /// Its zone: name and settings.
+    zone: Option<(String, ZoneParams)>,
+    /// Its relief there.
+    relief: Option<Relief>,
+    /// The zone copper of its net near it (the net's fills on the layer, cut to the windows
+    /// of the net's pads).
+    fill: PolygonSet,
+    /// The other copper of its net near it: shape, and what [`Joint::wide`] asks of it (a
+    /// track's width; `None` with `true` for a copper drawing, with `false` for a via or a
+    /// teardrop).
+    others: Vec<(PolygonSet, Option<Nm>, bool)>,
+    /// The pads of other nets of its own footprint near it, grown by the zone's clearance.
+    blockers: Vec<Rect>,
+    class: PadClass,
+    reasoned: bool,
+}
+
+impl JointKey {
+    fn hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.layer.hash(&mut h);
+        (self.pad.anchor.x.0, self.pad.anchor.y.0).hash(&mut h);
+        self.pad.shape.hash(&mut h);
+        self.fill.hash(&mut h);
+        self.others.len().hash(&mut h);
+        h.finish()
+    }
+
+    fn points(&self) -> usize {
+        let of = |s: &PolygonSet| s.iter().map(Polygon::vertex_count).sum::<usize>();
+        of(&self.pad.shape) + of(&self.fill) + self.others.iter().map(|(s, ..)| of(s)).sum::<usize>() + 16
+    }
+}
+
+/// The joints read in this process by what they were read from, in two ages, as the reliefs
+/// of a fill are kept (`zones::SpokeMemo`): the pads of a board that differs from one read
+/// before in a few places are read again near those places alone.
+#[derive(Default)]
+struct JointMemo {
+    now: BTreeMap<u64, Vec<(JointKey, Option<Joint>)>>,
+    before: BTreeMap<u64, Vec<(JointKey, Option<Joint>)>>,
+    points: usize,
+}
+
+/// The most points the newer age of [`JointMemo`] holds.
+const JOINT_POINTS: usize = 2_000_000;
+
+impl JointMemo {
+    fn get(&mut self, hash: u64, key: &JointKey) -> Option<Option<Joint>> {
+        if let Some((_, v)) = self.now.get(&hash).and_then(|b| b.iter().find(|(k, _)| k == key)) {
+            return Some(v.clone());
+        }
+        let bucket = self.before.get_mut(&hash)?;
+        let (k, v) = bucket.swap_remove(bucket.iter().position(|(k, _)| k == key)?);
+        self.put(hash, k, v.clone());
+        Some(v)
+    }
+
+    fn put(&mut self, hash: u64, key: JointKey, made: Option<Joint>) {
+        if self.points > JOINT_POINTS {
+            self.before = std::mem::take(&mut self.now);
+            self.points = 0;
+        }
+        self.points += key.points();
+        self.now.entry(hash).or_default().push((key, made));
+    }
+}
+
+static JOINTS: std::sync::Mutex<Option<JointMemo>> = std::sync::Mutex::new(None);
+
+fn joint_memo<T>(f: impl FnOnce(&mut JointMemo) -> Option<T>) -> Option<T> {
+    f(JOINTS.lock().ok()?.get_or_insert_with(JointMemo::default))
+}
+
+/// Forgets the joints kept in process by [`joints`] (`zones::clear_fill_cache` calls it).
+pub fn clear_joint_cache() {
+    if let Ok(mut m) = JOINTS.lock() {
+        *m = None;
+    }
+}
+
+/// The joint of one pad on one layer: a function of `key` alone. `None` when no copper of
+/// its net is at the pad.
+fn pad_joint(key: &JointKey) -> Option<Joint> {
+    let it = &key.pad;
+    let ItemRef::Pad(refdes, number) = &it.item else { return None };
+    let bbox = it.shape.bbox()?;
+    let reach = key.relief.as_ref().map_or(0, |r| r.gap.max(0) + r.w.max(0));
+    let window = bbox.expand(reach + 2 * BAND);
+    let outer = poly::offset(&it.shape, BAND, Join::Round, OBSTACLE_TOL).ok()?;
+    let band = Boolean::new()
+        .subject(&outer, FillRule::NonZero)
+        .clip(&it.shape, FillRule::NonZero)
+        .op(Op::Difference)
+        .execute()
+        .ok()?;
+    let zone_copper = &key.fill;
+    let mut all = zone_copper.clone();
+    all.extend(key.others.iter().flat_map(|(s, ..)| s.iter().cloned()));
+    let within = |copper: &PolygonSet| -> PolygonSet {
+        if copper.is_empty() {
+            return vec![];
+        }
+        Boolean::new()
+            .subject(copper, FillRule::NonZero)
+            .clip(&band, FillRule::NonZero)
+            .op(Op::Intersection)
+            .execute()
+            .unwrap_or_default()
+    };
+    let (zc, ac) = (within(zone_copper), within(&all));
+    // A pour: zone copper within the relief's reach that goes on beyond it. The rim a fill
+    // leaves around a solid pad shut in by other nets is the pad, not a pour.
+    let reach = rect(&bbox.expand(reach + BAND));
+    let inside = window.expand(-1);
+    let near =
+        zone_copper.iter().any(|q| q.bbox().is_some_and(|b| !inside.contains_rect(&b)) && poly::intersects(q, &reach));
+    if ac.is_empty() && !near {
+        return None;
+    }
+    let short = zones::short_side(&it.shape).max(1);
+    let wide = key
+        .others
+        .iter()
+        .any(|(shape, width, always)| (width.map_or(*always, |w| w.0 > short)) && poly::intersects(shape, &band));
+    // Spokes the footprint's own pads of other nets leave room for; the relief's other
+    // directions count too, up to the spokes asked for.
+    let possible = match (&key.relief, &key.zone) {
+        (Some(r), Some(_)) => zones::spokes(it, r)
+            .iter()
+            .chain(&zones::alt_spokes(it, r))
+            .filter(|s| !key.blockers.iter().any(|b| poly::intersects(&rect(b), *s)))
+            .count()
+            .min(r.dirs.len())
+            .min(255) as u8,
+        _ => 0,
+    };
+    Some(Joint {
+        refdes: refdes.clone(),
+        number: number.clone(),
+        net: it.net.clone().unwrap_or_default(),
+        layer: key.layer.clone(),
+        at: it.anchor,
+        class: key.class,
+        zone: key.zone.as_ref().map(|(name, _)| name.clone()),
+        style: key.zone.as_ref().map(|(_, prm)| zones::connection_on(it, &key.layer, prm.pads)),
+        own: zones::own_connection(it, &key.layer).is_some(),
+        purpose: it.local.purpose,
+        reasoned: key.reasoned,
+        planned: key.zone.as_ref().map_or(0, |(_, prm)| prm.thermal_spokes),
+        gap: Nm(key.relief.as_ref().map_or(0, |r| r.gap)),
+        spoke: Nm(key.relief.as_ref().map_or(0, |r| r.w)),
+        spokes: zc.len().min(255) as u8,
+        necks: ac.len().min(255) as u8,
+        zone_contact: length(poly::area2(&zc)),
+        contact: length(poly::area2(&ac)),
+        perimeter: length(poly::area2(&band)),
+        possible,
+        short: Nm(short),
+        wide,
+        near,
+    })
+}
+
+/// [`joints_of`]; with `reuse`, the pads whose every input is as it was when they were last
+/// read in this process are taken from then ([`JointMemo`]), which gives the same joints.
+fn joints_with(p: &Project, items: &[CopperItem], wanted: &dyn Fn(&str) -> bool, reuse: bool) -> Vec<Joint> {
     let board = p.board();
     let class = classes(&placed_pads(p));
     // Zones in fill order, with their settings.
@@ -387,6 +598,7 @@ pub fn joints_of(p: &Project, items: &[CopperItem], wanted: &dyn Fn(&str) -> boo
             };
             let local_index = RTree::new(local.iter().map(|q| q.bbox()));
             let other_index = RTree::new(others.iter().map(|&i| items[i].shape.bbox()));
+            let mut keys: Vec<JointKey> = Vec::new();
             for j in jobs {
                 let grown = j.bbox.expand(2 * BAND);
                 let mut near_fill: Vec<u32> = local_index.query(&j.window);
@@ -396,99 +608,69 @@ pub fn joints_of(p: &Project, items: &[CopperItem], wanted: &dyn Fn(&str) -> boo
                 if near_fill.is_empty() && near_other.is_empty() {
                     continue;
                 }
-                let Ok(outer) = poly::offset(&j.it.shape, BAND, Join::Round, OBSTACLE_TOL) else { continue };
-                let Ok(band) = Boolean::new()
-                    .subject(&outer, FillRule::NonZero)
-                    .clip(&j.it.shape, FillRule::NonZero)
-                    .op(Op::Difference)
-                    .execute()
-                else {
-                    continue;
-                };
-                let zone_copper: PolygonSet = near_fill.iter().map(|&k| local[k as usize].clone()).collect();
-                let mut all = zone_copper.clone();
-                all.extend(near_other.iter().flat_map(|&k| items[others[k as usize]].shape.iter().cloned()));
-                let within = |copper: &PolygonSet| -> PolygonSet {
-                    if copper.is_empty() {
-                        return vec![];
-                    }
-                    Boolean::new()
-                        .subject(copper, FillRule::NonZero)
-                        .clip(&band, FillRule::NonZero)
-                        .op(Op::Intersection)
-                        .execute()
-                        .unwrap_or_default()
-                };
-                let (zc, ac) = (within(&zone_copper), within(&all));
-                // A pour: zone copper within the relief's reach that goes on beyond it. The rim
-                // a fill leaves around a solid pad shut in by other nets is the pad, not a pour.
-                let reach = rect(&j.bbox.expand(j.relief.as_ref().map_or(0, |r| r.gap.max(0) + r.w.max(0)) + BAND));
-                let inside = j.window.expand(-1);
-                let near = zone_copper
-                    .iter()
-                    .any(|q| q.bbox().is_some_and(|b| !inside.contains_rect(&b)) && poly::intersects(q, &reach));
-                if ac.is_empty() && !near {
-                    continue;
-                }
                 let ItemRef::Pad(refdes, number) = &j.it.item else { continue };
                 let zone = j.zone.map(|k| &zoned[k]);
-                let short = zones::short_side(&j.it.shape).max(1);
-                let wide = near_other.iter().map(|&k| &items[others[k as usize]]).any(|o| {
-                    let wider = match &o.item {
-                        ItemRef::Track(id) => widths.get(id).is_some_and(|w| w.0 > short),
-                        ItemRef::Via(..) | ItemRef::Zone(..) => false,
-                        _ => true,
-                    };
-                    wider && poly::intersects(&o.shape, &band)
-                });
-                // Spokes the footprint's own pads of other nets leave room for.
-                let possible = match (&j.relief, zone) {
-                    (Some(r), Some((_, prm, _))) => {
+                let blockers: Vec<Rect> = match (&j.relief, zone) {
+                    (Some(_), Some((_, prm, _))) => {
                         let c = prm.clearance.0.max(0);
                         let mut blockers: Vec<u32> = pad_index.query(&j.window.expand(c));
                         blockers.sort_unstable();
-                        let blockers: Vec<Polygon> = blockers
+                        blockers
                             .into_iter()
                             .map(|k| &items[layer_pads[k as usize]])
                             .filter(|o| o.net != j.it.net && matches!(&o.item, ItemRef::Pad(r, _) if r == refdes))
-                            .filter_map(|o| o.shape.bbox().map(|b| rect(&b.expand(c))))
-                            .collect();
-                        // The relief's other directions count too, up to the spokes asked for.
-                        zones::spokes(j.it, r)
-                            .iter()
-                            .chain(&zones::alt_spokes(j.it, r))
-                            .filter(|s| !blockers.iter().any(|b| poly::intersects(b, *s)))
-                            .count()
-                            .min(r.dirs.len())
-                            .min(255) as u8
+                            .filter_map(|o| o.shape.bbox().map(|b| b.expand(c)))
+                            .collect()
                     }
-                    _ => 0,
+                    _ => vec![],
                 };
-                let style = zone.map(|(_, prm, _)| zones::connection_on(j.it, &layer, prm.pads));
-                out.push(Joint {
-                    refdes: refdes.clone(),
-                    number: number.clone(),
-                    net: net.to_string(),
+                keys.push(JointKey {
                     layer: layer.clone(),
-                    at: j.it.anchor,
+                    pad: j.it.clone(),
+                    zone: zone.map(|(z, prm, _)| (z.name.clone(), *prm)),
+                    relief: j.relief,
+                    fill: near_fill.iter().map(|&k| local[k as usize].clone()).collect(),
+                    others: near_other
+                        .iter()
+                        .map(|&k| &items[others[k as usize]])
+                        .map(|o| match &o.item {
+                            ItemRef::Track(id) => (o.shape.clone(), widths.get(id).copied(), false),
+                            ItemRef::Via(..) | ItemRef::Zone(..) => (o.shape.clone(), None, false),
+                            _ => (o.shape.clone(), None, true),
+                        })
+                        .collect(),
+                    blockers,
                     class: class.get(&(refdes.clone(), number.clone())).copied().unwrap_or(PadClass::Bare),
-                    zone: zone.map(|(z, _, _)| z.name.clone()),
-                    style,
-                    own: zones::own_connection(j.it, &layer).is_some(),
-                    planned: zone.map_or(0, |(_, prm, _)| prm.thermal_spokes),
-                    gap: Nm(j.relief.as_ref().map_or(0, |r| r.gap)),
-                    spoke: Nm(j.relief.as_ref().map_or(0, |r| r.w)),
-                    spokes: zc.len().min(255) as u8,
-                    necks: ac.len().min(255) as u8,
-                    zone_contact: length(poly::area2(&zc)),
-                    contact: length(poly::area2(&ac)),
-                    perimeter: length(poly::area2(&band)),
-                    possible,
-                    short: Nm(short),
-                    wide,
-                    near,
+                    reasoned: board
+                        .footprints
+                        .get(refdes)
+                        .and_then(|f| f.pads.get(number))
+                        .is_some_and(|j| j.reason.as_ref().is_some_and(|r| !r.trim().is_empty())),
                 });
             }
+            let read = |key: &JointKey| -> Option<Joint> {
+                if !reuse {
+                    return pad_joint(key);
+                }
+                let hash = key.hash();
+                if let Some(found) = joint_memo(|m| m.get(hash, key)) {
+                    return found;
+                }
+                let made = pad_joint(key);
+                joint_memo(|m| {
+                    m.put(hash, key.clone(), made.clone());
+                    Some(())
+                });
+                made
+            };
+            #[cfg(feature = "parallel")]
+            let made: Vec<Option<Joint>> = {
+                use rayon::prelude::*;
+                keys.par_iter().map(read).collect()
+            };
+            #[cfg(not(feature = "parallel"))]
+            let made: Vec<Option<Joint>> = keys.iter().map(read).collect();
+            out.extend(made.into_iter().flatten());
         }
     }
     out
@@ -618,6 +800,10 @@ pub fn check(p: &Project, rules: &Rules, items: &[CopperItem], currents: bool) -
         }
     }
     let max = rules.thermal_max_contact;
+    // What stands where the missing spokes of the pads short of them would run.
+    let starved_keys: BTreeSet<Key3> =
+        js.iter().filter(|j| j.class.solder() && j.starved(rules.min_thermal_spokes, max)).map(key3).collect();
+    let in_the_way = blockers(p, items, &starved_keys);
     let solid_pad = |r: &str, n: &str| by_pad.get(&(r, n)).is_some_and(|v| v.iter().any(|j| j.solid(max).is_some()));
     let min_gap = if rules.min_clearance > Nm::ZERO { rules.min_clearance } else { rules.clearance };
     // Sizes below the minimums: one finding per zone and value.
@@ -630,7 +816,7 @@ pub fn check(p: &Project, rules: &Rules, items: &[CopperItem], currents: bool) -
         }
         // Without relief.
         let solid: Vec<&Joint> = v.iter().copied().filter(|j| j.solid(max).is_some()).collect();
-        let meant = |j: &Joint| j.own && j.style == Some(PadConnection::Solid);
+        let meant = |j: &Joint| j.meant(rules.thermal_required);
         let unmeant: Vec<&Joint> = solid.iter().copied().filter(|j| !meant(j)).collect();
         if let Some(j) = unmeant.first() {
             let poured: Vec<&Joint> = unmeant.iter().copied().filter(|j| j.solid(max) == Some(Solid::Pour)).collect();
@@ -668,9 +854,19 @@ pub fn check(p: &Project, rules: &Rules, items: &[CopperItem], currents: bool) -
                 } else {
                     format!(
                         "`zone.relieve` gives every solder pad thermal spokes (`zone.set {z} --pads thermal` for \
-                         this zone); if this pad is solid on purpose, say so on the pad or footprint \
-                         (`footprint.set <footprint> --pads {number} --zone-connection solid`) or waive it \
-                         (`drc.waive drc.solid_pad --subjects zone:{z} --reason ..`)"
+                         this zone); if this pad is solid on purpose, say what for: `zone.pad {refdes}.{number} \
+                         --purpose press_fit|terminal|heat|stitching` for this pad, `footprint.set <footprint> --pads \
+                         {number} --purpose ..` for every part with that footprint{}",
+                        if rules.thermal_required {
+                            " (thermal relief is required by the rules: a solid setting without a purpose or a \
+                             reason is not enough, `zone.pad .. --connection solid --reason ..` gives one)"
+                                .to_string()
+                        } else {
+                            format!(
+                                ", or set it solid (`--zone-connection solid`), or waive it (`drc.waive drc.solid_pad \
+                                 --subjects zone:{z} --reason ..`)"
+                            )
+                        }
                     )
                 })
             } else {
@@ -700,37 +896,76 @@ pub fn check(p: &Project, rules: &Rules, items: &[CopperItem], currents: bool) -
             let z = j.zone.as_deref().unwrap_or_default();
             let per: Vec<String> = starved.iter().map(|j| format!("{} on {}", j.necks, j.layer)).collect();
             let cut = starved.iter().all(|j| j.necks == 0);
-            out.push(
-                Diagnostic::warning(
-                    "drc.starved_thermal",
-                    format!(
-                        "{refdes}.{number} (net {}) is joined to zone:{z} by {} of {} thermal spoke(s) (minimum {}, \
-                         its footprint leaves room for {}){}",
-                        j.net,
-                        per.join(", "),
-                        j.planned,
-                        rules.min_thermal_spokes,
-                        starved.iter().map(|j| j.possible).max().unwrap_or(0),
-                        if cut {
-                            ": no spoke reaches the pour"
-                        } else {
-                            ": one spoke carries all its current and breaks easily"
-                        },
-                    ),
-                )
-                .with_subject(pin.clone())
-                .with_subject(zone_ref(z))
-                .with_subject(ObjectRef::Net(j.net.clone()))
-                .at(j.at)
-                .with_hint(format!(
-                    "`zone.relieve` takes each such pad alone (a narrower relief, then a short track of the net into \
-                     the pour) and says what it could not do; by hand: move the tracks and vias of other nets off the \
-                     pad's sides, set the relief of this pad (`zone.pad {refdes}.{number} --thermal-spoke .. \
-                     --thermal-gap ..`, `--thermal-angle 45deg`), or keep it solid on purpose (`zone.pad \
-                     {refdes}.{number} --connection solid --reason ..`); `board.rules --min-thermal-spokes` sets the \
-                     minimum"
-                )),
-            );
+            let blocked: BTreeSet<&Blocker> =
+                starved.iter().filter_map(|j| in_the_way.get(&key3(j))).flatten().collect();
+            let way = if blocked.is_empty() {
+                String::new()
+            } else {
+                format!("; in the way of the others: {}", Blocker::list(blocked.iter().copied()))
+            };
+            // Whose it is to make room, by what is in the way.
+            let has = |class: &str| blocked.iter().any(|b| b.class() == class);
+            let mut first = String::new();
+            if has("route") {
+                let routed: Vec<String> = blocked.iter().filter(|b| b.class() == "route").map(|b| b.text()).collect();
+                let nets: BTreeSet<&str> = blocked
+                    .iter()
+                    .filter_map(|b| match b {
+                        Blocker::Track { net, .. } | Blocker::Via { net, .. } => net.as_deref(),
+                        _ => None,
+                    })
+                    .collect();
+                first += &format!(
+                    "the tracks and vias of other nets beside the pad are the router's to move ({}): `route.rip {}` \
+                     and route again (`route.nets`), the routers keep the room of a pad's spokes; ",
+                    routed.join(", "),
+                    nets.iter().copied().collect::<Vec<_>>().join(" ")
+                );
+            }
+            if has("place") {
+                first += "a pad of another net stands where a spoke would run: move the part away (`place.move`) or \
+                          accept the pad as it is (a waiver, `drc.waive drc.starved_thermal --subjects <pad>`); ";
+            }
+            if has("zone") || has("board") {
+                first += "the pour ends beside the pad (the zone's outline, the board edge, a keep-out, another \
+                          net's pour, or copper narrower than the zone's minimum width): widen the zone there \
+                          (`zone.set`, its `min_width`) or move the part; ";
+            }
+            let mut d = Diagnostic::warning(
+                "drc.starved_thermal",
+                format!(
+                    "{refdes}.{number} (net {}) is joined to zone:{z} by {} of {} thermal spoke(s) (minimum {}, \
+                     its footprint leaves room for {}){}{way}",
+                    j.net,
+                    per.join(", "),
+                    j.planned,
+                    rules.min_thermal_spokes,
+                    starved.iter().map(|j| j.possible).max().unwrap_or(0),
+                    if cut {
+                        ": no spoke reaches the pour"
+                    } else {
+                        ": one spoke carries all its current and breaks easily"
+                    },
+                ),
+            )
+            .with_subject(pin.clone())
+            .with_subject(zone_ref(z))
+            .with_subject(ObjectRef::Net(j.net.clone()))
+            .at(j.at)
+            .with_hint(format!(
+                "{first}`zone.relieve` takes each such pad alone (a narrower relief, then a short track of the net \
+                 into the pour) and says what it could not do; by hand: set the relief of this pad (`zone.pad \
+                 {refdes}.{number} --thermal-spoke .. --thermal-gap ..`, `--thermal-angle 45deg`), or keep it solid \
+                 on purpose (`zone.pad {refdes}.{number} --purpose terminal`, or `--connection solid --reason ..`); \
+                 `board.rules --min-thermal-spokes` sets the minimum"
+            ));
+            // The things in the way that can be named, the router's first.
+            let mut named: Vec<&Blocker> = blocked.iter().copied().collect();
+            named.sort_by_key(|b| (b.class() != "route", (*b).clone()));
+            for s in named.iter().filter_map(|b| b.subject()).take(6) {
+                d = d.with_subject(s);
+            }
+            out.push(d);
         }
         for j in v.iter().copied().filter(|j| j.in_pour() && j.style == Some(PadConnection::Thermal)) {
             let z = j.zone.clone().unwrap_or_default();
@@ -866,25 +1101,93 @@ pub struct Relieved {
     /// Pads left with fewer spokes than the minimum, with what was tried (`J1.3` to reason).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reasons: BTreeMap<String, String>,
+    /// For the pads left short of spokes, per pad and layer (`J1.3 on F.Cu`): what stands
+    /// where the missing spokes would run ([`blockers`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blocked: BTreeMap<String, Vec<Blocker>>,
     /// Pads the pour joined on a layer before and that nothing joins to it now
     /// (`J1.3 on In1.Cu`): none unless a pad could neither be reached nor kept solid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cut: Vec<String>,
 }
 
+/// How [`relieve`] fills and reads the board after each of its changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Measure {
+    /// With what earlier fills and readings of this process left where everything they were
+    /// made from is as it was (`zones::fill_zones`, [`joints`]).
+    Kept,
+    /// Every fill and every pad from scratch: the reference.
+    Scratch,
+}
+
+/// The joints of the board as it stands.
+fn measure(p: &Project, how: Measure) -> Vec<Joint> {
+    match how {
+        Measure::Kept => joints(p, &super::copper_items(p)),
+        Measure::Scratch => {
+            let mut items = super::base_copper_items(p);
+            let fills = zones::fill_zones_uncached(p, &items);
+            items.extend(zones::fills_as_items(fills));
+            joints_with(p, &items, &|_| true, false)
+        }
+    }
+}
+
 /// Brings the board to relieved solder pads: every zone that joins pads solidly (`solid`,
 /// `tht_thermal`) becomes `thermal` (all zones, or those named); `solid` settings on solder pads
-/// and footprints go, unless `keep_own`; heat pads (exposed pads, tabs) of the footprints on
-/// the board get a `solid` setting of their own so that they stay solid, and pads that are not
-/// soldered keep theirs. Zones that connect no pads (`none`) and the zones' relief sizes are
-/// left alone. Then each pad still short of spokes is taken alone (`repair_pads`): a narrower
-/// relief of its own, a short track into the pour, or, where the pour joined it before and
-/// nothing else fits, solid for that one pad. The fills follow on their own (they are
-/// derived). Also returns the joints of the board as it is left.
+/// and footprints go, unless `keep_own` or the pad says what it is solid for
+/// (`Overrides::purpose`); heat pads (exposed pads, tabs) of the footprints on the board get a
+/// `solid` setting of their own so that they stay solid, and pads that are not soldered keep
+/// theirs. Zones that connect no pads (`none`) and the zones' relief sizes are left alone.
+/// Then each pad still short of spokes is taken alone (`repair`): a narrower relief of its
+/// own, a short track into the pour, or, where the pour joined it before and nothing else
+/// fits, solid for that one pad. The fills follow on their own (they are derived). Also
+/// returns the joints of the board as it is left.
+///
+/// The board is filled and its pads read after each change, up to eight times; each time the
+/// zone layers, the reliefs and the pads whose every input is as it was are taken from the
+/// time before (`zones::fill_zones`, [`joints`]), so a change costs what it touches.
+/// [`relieve_uncached`] makes every fill and reading from scratch and gives the same.
 pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> (Relieved, Vec<Joint>) {
+    run(p, only, keep_own, None, Measure::Kept)
+}
+
+/// [`relieve`], given the joints of the board as it stands when the caller has them
+/// ([`joints`] of its copper items).
+pub fn relieve_from(
+    p: &mut Project,
+    only: Option<&[String]>,
+    keep_own: bool,
+    before: Option<&[Joint]>,
+) -> (Relieved, Vec<Joint>) {
+    run(p, only, keep_own, before, Measure::Kept)
+}
+
+/// [`relieve`] with every fill and every reading of the pads made from scratch: the reference
+/// that [`relieve`] is held to (`tests/zone_relieve.rs`), several times slower.
+pub fn relieve_uncached(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> (Relieved, Vec<Joint>) {
+    run(p, only, keep_own, None, Measure::Scratch)
+}
+
+fn run(
+    p: &mut Project,
+    only: Option<&[String]>,
+    keep_own: bool,
+    before: Option<&[Joint]>,
+    how: Measure,
+) -> (Relieved, Vec<Joint>) {
     let mut out = Relieved::default();
     // The solder pads a pour joins as the board stands: none of them may end without a joint.
-    let had: BTreeSet<Key3> = joints(p, &super::copper_items(p))
+    let owned;
+    let before = match before {
+        Some(b) => b,
+        None => {
+            owned = measure(p, how);
+            &owned
+        }
+    };
+    let had: BTreeSet<Key3> = before
         .iter()
         .filter(|j| j.zone_contact.0 > 0 && j.class.solder() && j.style != Some(PadConnection::None))
         .map(key3)
@@ -922,11 +1225,13 @@ pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> (Rel
     for (name, _) in used {
         let Some(fp) = lib.footprints.get_mut(&name) else { continue };
         let fp_solid = fp.overrides.zone_connection == Some(PadConnection::Solid);
+        // A pad that says what it is solid for is not a solder pad left solid by oversight.
+        let fp_meant = fp.overrides.purpose.is_some();
         let solder = |n: &str| fp_class.get(&(name.clone(), n.to_string())).is_some_and(|c| c.solder());
-        let any_solder = fp.pads.iter().any(|pad| solder(&pad.number));
+        let any_solder = fp.pads.iter().any(|pad| solder(&pad.number) && pad.overrides.purpose.is_none());
         // A footprint's setting covers all its pads: it goes when solder pads are among them,
         // and the pads that are right solid get it as their own.
-        let lifted = fp_solid && any_solder && !keep_own;
+        let lifted = fp_solid && any_solder && !keep_own && !fp_meant;
         if lifted {
             fp.overrides.zone_connection = None;
             out.removed.push(name.clone());
@@ -935,7 +1240,8 @@ pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> (Rel
         for pad in &mut fp.pads {
             let label = format!("{name} pad {}", pad.number);
             let own = pad.overrides.zone_connection;
-            if solder(&pad.number) {
+            let meant = pad.overrides.purpose.is_some() || fp_meant;
+            if solder(&pad.number) && !meant {
                 if own == Some(PadConnection::Solid) && !keep_own {
                     pad.overrides.zone_connection = None;
                     out.removed.push(label);
@@ -943,7 +1249,7 @@ pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> (Rel
             } else if own == Some(PadConnection::Solid) || fp_solid {
                 out.kept.push(label);
             } else if own.is_none()
-                && (lifted || fp_class.get(&(name.clone(), pad.number.clone())) == Some(&PadClass::Heat))
+                && (lifted || meant || fp_class.get(&(name.clone(), pad.number.clone())) == Some(&PadClass::Heat))
             {
                 pad.overrides.zone_connection = Some(PadConnection::Solid);
                 out.kept.push(label);
@@ -958,9 +1264,9 @@ pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> (Rel
     // pads that still read solid through their spokes get a width of their own, half their
     // shorter side, between the minimum track width and the width they had.
     let rules = p.board().rules.clone();
-    let items = super::copper_items(p);
+    let js = measure(p, how);
     let mut widths: BTreeMap<(String, String), Nm> = BTreeMap::new();
-    for j in joints(p, &items) {
+    for j in &js {
         if j.class.solder()
             && j.in_pour()
             && j.style == Some(PadConnection::Thermal)
@@ -975,19 +1281,20 @@ pub fn relieve(p: &mut Project, only: Option<&[String]>, keep_own: bool) -> (Rel
         }
     }
     let lib = p.library_mut();
-    for ((name, number), w) in widths {
-        let Some(fp) = lib.footprints.get_mut(&name) else { continue };
-        for pad in fp.pads.iter_mut().filter(|pad| pad.number == number) {
-            pad.overrides.thermal_spoke = Some(w);
+    for ((name, number), w) in &widths {
+        let Some(fp) = lib.footprints.get_mut(name) else { continue };
+        for pad in fp.pads.iter_mut().filter(|pad| pad.number == *number) {
+            pad.overrides.thermal_spoke = Some(*w);
         }
         out.narrowed.push(format!("{name} pad {number}: {w}"));
     }
-    let js = repair_pads(p, only, &had, &mut out);
+    let js = if widths.is_empty() { js } else { measure(p, how) };
+    let js = repair(p, only, &had, &mut out, js, how);
     (out, js)
 }
 
 /// A pad on a layer: designator, pad number, layer.
-type Key3 = (String, String, String);
+pub type Key3 = (String, String, String);
 
 fn key3(j: &Joint) -> Key3 {
     (j.refdes.clone(), j.number.clone(), j.layer.clone())
@@ -1030,13 +1337,16 @@ struct Short {
 
 /// The pads short of spokes, per pad its layers: relieved solder pads in a pour (or that a
 /// pour joined before, `had`) with fewer necks than `min` asks and their footprint leaves room
-/// for, and pads of `had` that nothing joins any more.
+/// for, and pads of `had` that nothing joins any more. Necks as separate pieces of copper,
+/// which is what the repair works on, or `by_copper` as the rule counts them
+/// ([`Joint::worth`]), which is what it reports as left.
 fn shorts(
     js: &[Joint],
     had: &BTreeSet<Key3>,
     scope: &dyn Fn(Option<&str>) -> bool,
     min: u8,
     max: u8,
+    by_copper: bool,
 ) -> BTreeMap<(String, String), Vec<Short>> {
     let mut out: BTreeMap<(String, String), Vec<Short>> = BTreeMap::new();
     let mut seen: BTreeSet<Key3> = BTreeSet::new();
@@ -1050,7 +1360,7 @@ fn shorts(
             && scope(j.zone.as_deref())
             && (j.in_pour() || was)
             && j.solid(max).is_none()
-            && j.necks < want
+            && (if by_copper { j.worth() } else { j.necks }) < want
         {
             out.entry((j.refdes.clone(), j.number.clone())).or_default().push(Short {
                 layer: j.layer.clone(),
@@ -1186,35 +1496,155 @@ fn reaches(it: &CopperItem, allowed: &PolygonSet, pour: &PolygonSet, w: i64, wan
     out
 }
 
+/// Most segments of a track that [`detour`] leads around what is in a pad's way.
+const DETOUR_SEGMENTS: usize = 5;
+
+/// A track of width `w` from the middle of a pad to its pour that is not straight: a way
+/// through the copper the net may have (`allowed`, the pour as it would be with the pad
+/// solid) around what stands between the pad and the pour as it is (`pour`), found on a grid
+/// of [`TRACK_STEP`] and pulled straight where the copper allows, in at most
+/// [`DETOUR_SEGMENTS`] segments and [`TRACK_REACH`] beyond the pad's half length. It leaves
+/// the pad clear of the spokes it has, keeps a spoke's width from them on its way through the
+/// relief gap (`gap`), and ends `w` deep in the pour beyond that gap: a second way for the
+/// heat and the current, not more copper on the spoke that is there. The points of the track,
+/// from the pad's middle; `None` when there is no such way.
+fn detour(it: &CopperItem, allowed: &PolygonSet, pour: &PolygonSet, w: i64, gap: i64) -> Option<Vec<poly::Point>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let b = it.shape.bbox()?;
+    if w <= 0 || pour.is_empty() {
+        return None;
+    }
+    let c: poly::Point = it.anchor.into();
+    let union = |a: &PolygonSet, b: &PolygonSet| {
+        Boolean::new().subject(a, FillRule::NonZero).subject(b, FillRule::NonZero).op(Op::Union).execute()
+    };
+    let minus = |a: &PolygonSet, b: &PolygonSet| {
+        Boolean::new().subject(a, FillRule::NonZero).clip(b, FillRule::NonZero).op(Op::Difference).execute()
+    };
+    let grow = |a: &PolygonSet, by: i64| poly::offset(a, by, Join::Round, OBSTACLE_TOL);
+    let allowed = union(allowed, &it.shape).ok()?;
+    // Where the middle of the track may be: half its width inside the allowed copper.
+    let room = poly::offset(&allowed, -(w / 2 + 1_000), Join::Round, zones::FILL_TOL).ok()?;
+    // The spokes the pad has: the pour inside its relief gap. The track keeps its own width
+    // of air from them outside the pad.
+    let ring = minus(&grow(&it.shape, gap.max(0) + 2 * BAND).ok()?, &it.shape).ok()?;
+    let spokes = Boolean::new()
+        .subject(pour, FillRule::NonZero)
+        .clip(&ring, FillRule::NonZero)
+        .op(Op::Intersection)
+        .execute()
+        .ok()?;
+    let (keep_off, near_spokes) = if spokes.is_empty() {
+        (vec![], vec![])
+    } else {
+        (minus(&grow(&spokes, w / 2 + w).ok()?, &it.shape).ok()?, minus(&grow(&spokes, w / 2).ok()?, &it.shape).ok()?)
+    };
+    let free = if keep_off.is_empty() { room } else { minus(&room, &keep_off).ok()? };
+    // Where it may end: half its width inside the pour beyond the relief gap.
+    let beyond = minus(pour, &grow(&it.shape, gap.max(0) + 2 * BAND).ok()?).ok()?;
+    let ends = poly::offset(&beyond, -(w / 2 + 1_000), Join::Round, zones::FILL_TOL).ok()?;
+    if free.is_empty() || ends.is_empty() {
+        return None;
+    }
+    let (free_at, ends_at) = (poly::Prepared::new(&free), poly::Prepared::new(&ends));
+    let inside = |set: &poly::Prepared<'_, PolygonSet>, q: poly::Point| set.locate(q) == poly::Location::Inside;
+    // The grid, around the pad's middle; a step along an axis costs 10, a diagonal one 14.
+    let reach = b.width().max(b.height()) / 2 + TRACK_REACH;
+    let n = (reach / TRACK_STEP) as i32;
+    let at = |(i, j): (i32, i32)| poly::Point::new(c.x + i64::from(i) * TRACK_STEP, c.y + i64::from(j) * TRACK_STEP);
+    let limit = (reach / TRACK_STEP) as u32 * 10;
+    let mut open: BTreeMap<(i32, i32), bool> = BTreeMap::new();
+    let mut dist: BTreeMap<(i32, i32), u32> = BTreeMap::new();
+    let mut prev: BTreeMap<(i32, i32), (i32, i32)> = BTreeMap::new();
+    let mut heap: BinaryHeap<Reverse<(u32, i32, i32)>> = BinaryHeap::new();
+    dist.insert((0, 0), 0);
+    heap.push(Reverse((0, 0, 0)));
+    let mut goal = None;
+    while let Some(Reverse((d, i, j))) = heap.pop() {
+        if dist.get(&(i, j)).is_some_and(|best| *best < d) {
+            continue;
+        }
+        if inside(&ends_at, at((i, j))) {
+            goal = Some((i, j));
+            break;
+        }
+        for (di, dj, cost) in
+            [(1, 0, 10), (0, 1, 10), (-1, 0, 10), (0, -1, 10), (1, 1, 14), (-1, 1, 14), (-1, -1, 14), (1, -1, 14)]
+        {
+            let k = (i + di, j + dj);
+            let nd = d + cost;
+            if k.0.abs() > n || k.1.abs() > n || nd > limit || dist.get(&k).is_some_and(|best| *best <= nd) {
+                continue;
+            }
+            if !*open.entry(k).or_insert_with(|| inside(&free_at, at(k))) {
+                continue;
+            }
+            dist.insert(k, nd);
+            prev.insert(k, (i, j));
+            heap.push(Reverse((nd, k.0, k.1)));
+        }
+    }
+    let mut cells = vec![goal?];
+    while let Some(&p) = prev.get(cells.last().expect("non-empty")) {
+        cells.push(p);
+    }
+    cells.reverse();
+    let pts: Vec<poly::Point> = cells.into_iter().map(at).collect();
+    // Pulled straight: from each point, the farthest later one that a straight track reaches
+    // inside the allowed copper and clear of the spokes.
+    let straight = |a: poly::Point, z: poly::Point| {
+        let d = (z.x - a.x, z.y - a.y);
+        let len = ((d.0 * d.0 + d.1 * d.1) as f64).sqrt().round() as i64;
+        if len == 0 {
+            return true;
+        }
+        let s = stroke(a, d, len, w).0;
+        poly::contains(&allowed, &s) && !poly::intersects(&near_spokes, &s)
+    };
+    let mut out = vec![pts[0]];
+    let mut i = 0;
+    while i + 1 < pts.len() {
+        let j = (i + 1..pts.len()).rev().find(|&j| straight(pts[i], pts[j]))?;
+        out.push(pts[j]);
+        i = j;
+        if out.len() > DETOUR_SEGMENTS + 1 {
+            return None;
+        }
+    }
+    (out.len() >= 2).then_some(out)
+}
+
 /// The second half of [`relieve`]: each pad still short of spokes, alone.
 ///
 /// 1. A narrower relief of its own (gap at the minimum clearance, spokes at the minimum track
 ///    width), kept when it brings the pad more spokes.
 /// 2. Tracks of the net from the pad into the pour, where the pour as it would be with the
 ///    pad solid has copper for one (so it keeps every clearance), kept when they are necks of
-///    their own.
+///    their own: straight from the pad's middle, else around what is in the way ([`detour`]).
 /// 3. A pad the pour joined before and that nothing joins now is kept solid, that pad alone,
 ///    with the reason.
 ///
-/// Returns the joints of the board as it is left.
-fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, out: &mut Relieved) -> Vec<Joint> {
+/// `js` are the joints of the board as it stands. Returns those of the board as it is left.
+fn repair(
+    p: &mut Project,
+    only: Option<&[String]>,
+    had: &BTreeSet<Key3>,
+    out: &mut Relieved,
+    mut js: Vec<Joint>,
+    how: Measure,
+) -> Vec<Joint> {
     let rules = p.board().rules.clone();
     let (min, max) = (rules.min_thermal_spokes, rules.thermal_max_contact);
     let scope =
         |z: Option<&str>| only.is_none_or(|names| z.is_none_or(|z| names.iter().any(|n| n.eq_ignore_ascii_case(z))));
     let label = |k: &(String, String)| format!("{}.{}", k.0, k.1);
-    let measure = |p: &Project| {
-        let items = super::copper_items(p);
-        let js = joints(p, &items);
-        (items, js)
-    };
-    let (_, js) = measure(p);
-    let mut short = shorts(&js, had, &scope, min, max);
+    let mut short = shorts(&js, had, &scope, min, max, false);
     if short.is_empty() {
         return js;
     }
-    let mut js = js;
     let mut tried: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut ours: BTreeSet<Key3> = BTreeSet::new();
 
     // 1. A narrower relief.
     let min_gap = if rules.min_clearance > Nm::ZERO { rules.min_clearance } else { rules.clearance };
@@ -1247,8 +1677,8 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
                 pf.pads.insert(k.1.clone(), new.clone());
             }
         }
-        let (_, js1) = measure(p);
-        let after = shorts(&js1, had, &scope, min, max);
+        let js1 = measure(p, how);
+        let after = shorts(&js1, had, &scope, min, max, false);
         let mut reverted = false;
         for (k, old, new) in set {
             if score(after.get(&k)) < score(short.get(&k)) {
@@ -1270,54 +1700,66 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
                 }
             }
         }
-        js = if reverted { measure(p).1 } else { js1 };
-        short = shorts(&js, had, &scope, min, max);
+        js = if reverted { measure(p, how) } else { js1 };
+        short = shorts(&js, had, &scope, min, max, false);
     }
 
     // 2. Tracks into the pour.
-    let mut ours: BTreeSet<Key3> = BTreeSet::new();
     if !short.is_empty() && min_w > Nm::ZERO {
-        let items = super::copper_items(p);
         let teardrops: BTreeSet<crate::id::ObjectId> =
             p.board().zones.iter().filter(|z| is_teardrop(z)).map(|z| z.id).collect();
         // The pours as they would be with every pad solid: copper the net may have.
-        let mut base = super::base_copper_items(p);
-        for it in &mut base {
+        let base = super::base_copper_items(p);
+        let mut base_solid = base.clone();
+        for it in &mut base_solid {
             if let ItemRef::Pad(..) = it.item {
                 it.local.connection = Some(PadConnection::Solid);
             }
         }
-        let solid = zones::fill_zones_uncached(p, &base);
-        // Per net and layer, the pads to reach.
-        // (pad item, pad, spokes missing)
-        type Job<'a> = (&'a CopperItem, (String, String), u8);
-        let mut jobs: BTreeMap<(String, String), Vec<Job<'_>>> = BTreeMap::new();
-        for (k, v) in &short {
-            for s in v {
-                let Some(it) = items.iter().find(|it| {
-                    matches!(&it.item, ItemRef::Pad(r, n) if *r == k.0 && *n == k.1) && it.layers.contains(&s.layer)
-                }) else {
-                    continue;
-                };
-                let Some(net) = it.net.clone() else { continue };
-                jobs.entry((net, s.layer.clone())).or_default().push((it, k.clone(), s.want - s.necks));
-            }
-        }
-        let mut add: Vec<(Key3, String, Reach, Point, Nm)> = Vec::new();
-        for ((net, layer), pads) in &jobs {
+        let class_w = |net: &str| {
             let circuit = p.circuit();
-            let class_w = circuit
+            circuit
                 .nets
                 .get(net)
                 .and_then(|n| n.class.as_ref())
                 .and_then(|k| circuit.netclasses.get(k))
                 .and_then(|c| c.track_width)
-                .unwrap_or(min_w);
-            let windows: Vec<Polygon> = pads
-                .iter()
-                .filter_map(|(it, ..)| it.shape.bbox())
-                .map(|b| rect(&b.expand(b.width().max(b.height()) / 2 + TRACK_REACH + class_w.max(min_w).0)))
-                .collect();
+                .unwrap_or(min_w)
+        };
+        // The window a pad's tracks are looked for in.
+        let window = |it: &CopperItem, net: &str| {
+            it.shape.bbox().map(|b| b.expand(b.width().max(b.height()) / 2 + TRACK_REACH + class_w(net).max(min_w).0))
+        };
+        // Per net and layer, the pads to reach.
+        // (pad item, pad, spokes missing, relief gap)
+        type Job<'a> = (&'a CopperItem, (String, String), u8, Nm);
+        let mut jobs: BTreeMap<(String, String), Vec<Job<'_>>> = BTreeMap::new();
+        for (k, v) in &short {
+            for s in v {
+                let Some(it) = base.iter().find(|it| {
+                    matches!(&it.item, ItemRef::Pad(r, n) if *r == k.0 && *n == k.1) && it.layers.contains(&s.layer)
+                }) else {
+                    continue;
+                };
+                let Some(net) = it.net.clone() else { continue };
+                jobs.entry((net, s.layer.clone())).or_default().push((it, k.clone(), s.want - s.necks, s.gap));
+            }
+        }
+        // The pours as they are, and as they would be with every pad solid.
+        let (pours, solid): (Vec<CopperItem>, Vec<zones::ZoneFill>) = match how {
+            Measure::Kept => (zones::zone_items(p, &base), zones::fill_zones_once(p, &base_solid)),
+            Measure::Scratch => (
+                zones::fills_as_items(zones::fill_zones_uncached(p, &base)),
+                zones::fill_zones_uncached(p, &base_solid),
+            ),
+        };
+        // (pad and layer, net, the track's points from the pad's middle, width, the length of
+        // a straight one)
+        type Added = (Key3, String, Vec<poly::Point>, Nm, Option<i64>);
+        let mut add: Vec<Added> = Vec::new();
+        for ((net, layer), pads) in &jobs {
+            let class_w = class_w(net);
+            let windows: Vec<Polygon> = pads.iter().filter_map(|(it, ..)| window(it, net)).map(|b| rect(&b)).collect();
             let local = |set: PolygonSet| -> PolygonSet {
                 if set.is_empty() {
                     return set;
@@ -1330,7 +1772,7 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
                     .unwrap_or_default()
             };
             let pour = local(
-                items
+                pours
                     .iter()
                     .filter(|it| {
                         it.net.as_deref() == Some(net.as_str())
@@ -1351,9 +1793,8 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
             );
             let pour_index = RTree::new(pour.iter().map(|q| q.bbox()));
             let allowed_index = RTree::new(allowed.iter().map(|q| q.bbox()));
-            for (it, k, need) in pads {
-                let Some(b) = it.shape.bbox() else { continue };
-                let w = b.expand(b.width().max(b.height()) / 2 + TRACK_REACH + class_w.max(min_w).0);
+            for (it, k, need, gap) in pads {
+                let Some(w) = window(it, net) else { continue };
                 let pick = |set: &PolygonSet, index: &RTree| -> PolygonSet {
                     let mut near = index.query(&w);
                     near.sort_unstable();
@@ -1372,45 +1813,65 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
                     found = reaches(it, &allowed, &pour, min_w.0, usize::from(*need));
                     width = min_w;
                 }
+                let key = (k.0.clone(), k.1.clone(), layer.clone());
                 if found.is_empty() {
-                    tried.entry(k.clone()).or_default().push(format!(
-                        "no track of the net {min_w} wide reaches the pour on {layer} within {} of the pad",
-                        Nm(TRACK_REACH)
-                    ));
+                    // No straight one: around what is in the way.
+                    match detour(it, &allowed, &pour, min_w.0, gap.0) {
+                        Some(path) => add.push((key, net.clone(), path, min_w, None)),
+                        None => tried.entry(k.clone()).or_default().push(format!(
+                            "no track of the net {min_w} wide reaches the pour on {layer} within {} of the pad, \
+                             straight or around what is in the way",
+                            Nm(TRACK_REACH)
+                        )),
+                    }
+                    continue;
                 }
                 for r in found {
-                    add.push(((k.0.clone(), k.1.clone(), layer.clone()), net.clone(), r, it.anchor, width));
+                    add.push((key.clone(), net.clone(), vec![it.anchor.into(), r.end], width, Some(r.len)));
                 }
             }
         }
         if !add.is_empty() {
             let necks = |js: &[Joint]| -> BTreeMap<Key3, u8> { js.iter().map(|j| (key3(j), j.necks)).collect() };
             let before = necks(&js);
-            let mut ids: Vec<(Key3, crate::id::ObjectId, String)> = Vec::new();
-            for (k, net, r, from, width) in add {
-                let id = p.alloc_id();
-                p.board_mut().tracks.push(crate::model::board::Track {
-                    id,
-                    layer: k.2.clone(),
-                    width,
-                    net: Some(net),
-                    start: from,
-                    end: r.end.into(),
-                    mid: None,
-                    locked: false,
-                });
-                ids.push((k.clone(), id, format!("{}.{} on {}: {width} wide, {} long", k.0, k.1, k.2, Nm(r.len))));
+            let mut ids: Vec<(Key3, Vec<crate::id::ObjectId>, String)> = Vec::new();
+            for (k, net, path, width, straight) in add {
+                let mut made = Vec::new();
+                let mut len = 0i64;
+                for seg in path.windows(2) {
+                    let id = p.alloc_id();
+                    let (dx, dy) = ((seg[1].x - seg[0].x) as f64, (seg[1].y - seg[0].y) as f64);
+                    len += dx.hypot(dy).round() as i64;
+                    p.board_mut().tracks.push(crate::model::board::Track {
+                        id,
+                        layer: k.2.clone(),
+                        width,
+                        net: Some(net.clone()),
+                        start: seg[0].into(),
+                        end: seg[1].into(),
+                        mid: None,
+                        locked: false,
+                    });
+                    made.push(id);
+                }
+                let len = straight.unwrap_or(len);
+                let bends = if made.len() > 1 { format!(" in {} segments", made.len()) } else { String::new() };
+                ids.push((
+                    k.clone(),
+                    made,
+                    format!("{}.{} on {}: {width} wide, {} long{bends}", k.0, k.1, k.2, Nm(len)),
+                ));
             }
-            let (_, js1) = measure(p);
+            let js1 = measure(p, how);
             let after = necks(&js1);
             // A track that is no neck of its own goes again.
             let mut drop: BTreeSet<crate::id::ObjectId> = BTreeSet::new();
-            for (k, id, text) in &ids {
+            for (k, made, text) in &ids {
                 if after.get(k).copied().unwrap_or(0) > before.get(k).copied().unwrap_or(0) {
                     ours.insert(k.clone());
                     out.tracks.push(text.clone());
                 } else {
-                    drop.insert(*id);
+                    drop.extend(made.iter().copied());
                     tried
                         .entry((k.0.clone(), k.1.clone()))
                         .or_default()
@@ -1421,18 +1882,18 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
                 js1
             } else {
                 p.board_mut().tracks.retain(|t| !drop.contains(&t.id));
-                measure(p).1
+                measure(p, how)
             };
         }
     }
 
     // 3. Solid, for the pads the pour joined and that nothing joins now.
-    let lost = |js: &[Joint]| -> BTreeSet<Key3> {
+    let lost = |js: &[Joint], ours: &BTreeSet<Key3>| -> BTreeSet<Key3> {
         let joined: BTreeSet<Key3> =
             js.iter().filter(|j| j.zone_contact.0 > 0 || ours.contains(&key3(j))).map(key3).collect();
         had.difference(&joined).cloned().collect()
     };
-    let mut cut = lost(&js);
+    let cut = lost(&js, &ours);
     if !cut.is_empty() {
         let mut by_pad: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
         for k in &cut {
@@ -1451,21 +1912,382 @@ fn repair_pads(p: &mut Project, only: Option<&[String]>, had: &BTreeSet<Key3>, o
             join.reason = Some(reason.clone());
             out.solid.push(format!("{}: {}", label(&k), reason.trim_start_matches("zone.relieve: ")));
         }
-        js = measure(p).1;
-        cut = lost(&js);
+        js = measure(p, how);
     }
-    out.cut = cut.iter().map(|(r, n, l)| format!("{r}.{n} on {l}")).collect();
+    out.cut = lost(&js, &ours).iter().map(|(r, n, l)| format!("{r}.{n} on {l}")).collect();
     out.fitted.sort();
     out.tracks.sort();
-    for (k, v) in shorts(&js, had, &scope, min, max) {
+    let left = shorts(&js, had, &scope, min, max, true);
+    // What stands where the missing spokes would run.
+    let keys: BTreeSet<Key3> =
+        left.iter().flat_map(|(k, v)| v.iter().map(|s| (k.0.clone(), k.1.clone(), s.layer.clone()))).collect();
+    let in_the_way = if keys.is_empty() {
+        BTreeMap::new()
+    } else {
+        let mut items = super::base_copper_items(p);
+        let fills = match how {
+            Measure::Kept => zones::fill_zones(p, &items),
+            Measure::Scratch => zones::fill_zones_uncached(p, &items),
+        };
+        items.extend(zones::fills_as_items(fills));
+        blockers(p, &items, &keys)
+    };
+    for (k, v) in left {
         let state: Vec<String> = v.iter().map(|s| format!("{} of {} on {}", s.necks, s.want, s.layer)).collect();
         let mut why = tried.remove(&k).unwrap_or_default();
         if why.is_empty() {
             why.push("its relief is set on the pad or its placement, left as it is".into());
         }
+        let mut found: BTreeSet<Blocker> = BTreeSet::new();
+        for s in &v {
+            if let Some(b) = in_the_way.get(&(k.0.clone(), k.1.clone(), s.layer.clone())) {
+                found.extend(b.iter().cloned());
+                out.blocked.insert(format!("{} on {}", label(&k), s.layer), b.clone());
+            }
+        }
+        if !found.is_empty() {
+            why.push(format!("in the way: {}", Blocker::list(&found)));
+        }
         out.reasons.insert(label(&k), format!("{}: {}", state.join(", "), why.join("; ")));
     }
     js
+}
+
+/// What stands where a thermal spoke of a pad would run ([`blockers`]).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Blocker {
+    /// A track of another net, within its clearance: the router's to move.
+    Track {
+        /// The track's number (`track#12`).
+        id: u64,
+        /// Its net.
+        net: Option<String>,
+    },
+    /// A via of another net.
+    Via {
+        /// The via's number (`via#12`).
+        id: u64,
+        /// Its net.
+        net: Option<String>,
+    },
+    /// A pad of another net of another part (`U3.4`), placed beside it.
+    Pad {
+        /// The pad.
+        pad: String,
+        /// Its net.
+        net: Option<String>,
+    },
+    /// A pad of another net of the pad's own footprint: the next pin of its row. Nothing on
+    /// the board moves it; the directions it takes are not held against the pad
+    /// ([`Joint::possible`]), and what else stands in them is not listed.
+    Own {
+        /// The pad.
+        pad: String,
+        /// Its net.
+        net: Option<String>,
+    },
+    /// The pour of another net's zone, filled before this one.
+    Zone {
+        /// The zone.
+        zone: String,
+        /// Its net.
+        net: Option<String>,
+    },
+    /// A copper drawing or text of another net.
+    Copper {
+        /// Its net.
+        net: Option<String>,
+    },
+    /// A non-plated hole and the clearance copper keeps from it.
+    Hole,
+    /// A keep-out that forbids pours.
+    Keepout {
+        /// Its name.
+        name: String,
+    },
+    /// The board edge and the clearance copper keeps from it.
+    Edge,
+    /// The outline of the pad's own zone: the pad lies at its border.
+    Outline,
+    /// The relief gap of another pad of the same net beside it.
+    Gap {
+        /// That pad.
+        pad: String,
+    },
+    /// No copper of the pour there, with nothing of another net in the way: what is left
+    /// between the pad and its neighbours is narrower than the zone's minimum width or than
+    /// half a spoke, or an island that nothing of the net joins.
+    Narrow,
+}
+
+impl Blocker {
+    /// As text: `track#12 (net SDA)`.
+    pub fn text(&self) -> String {
+        let of = |n: &Option<String>| n.as_ref().map(|n| format!(" (net {n})")).unwrap_or_default();
+        match self {
+            Blocker::Track { id, net } => format!("track#{id}{}", of(net)),
+            Blocker::Via { id, net } => format!("via#{id}{}", of(net)),
+            Blocker::Pad { pad, net } => format!("pad {pad}{}", of(net)),
+            Blocker::Own { pad, net } => format!("its footprint's pad {pad}{}", of(net)),
+            Blocker::Zone { zone, net } => format!("the pour of zone:{zone}{}", of(net)),
+            Blocker::Copper { net } => format!("a copper drawing{}", of(net)),
+            Blocker::Hole => "a non-plated hole".into(),
+            Blocker::Keepout { name } => format!("keep-out {name}"),
+            Blocker::Edge => "the board edge".into(),
+            Blocker::Outline => "the outline of its zone".into(),
+            Blocker::Gap { pad } => format!("the relief gap of {pad}"),
+            Blocker::Narrow => "no pour wide enough to keep (the zone's minimum width)".into(),
+        }
+    }
+
+    /// Several, as a list for a message.
+    pub fn list<'a>(all: impl IntoIterator<Item = &'a Blocker>) -> String {
+        all.into_iter().map(Blocker::text).collect::<Vec<_>>().join(", ")
+    }
+
+    /// The object as a subject of a diagnostic, when it is one that can be named.
+    pub fn subject(&self) -> Option<ObjectRef> {
+        match self {
+            Blocker::Track { id, .. } => Some(ObjectRef::Item { kind: "track".into(), index: *id }),
+            Blocker::Via { id, .. } => Some(ObjectRef::Item { kind: "via".into(), index: *id }),
+            Blocker::Pad { pad, .. } | Blocker::Own { pad, .. } | Blocker::Gap { pad } => ObjectRef::parse(pad).ok(),
+            Blocker::Zone { zone, .. } => Some(zone_ref(zone)),
+            Blocker::Keepout { name } => Some(ObjectRef::Named { kind: "keepout".into(), name: name.clone() }),
+            _ => None,
+        }
+    }
+
+    /// Whose it is to move: `route` (a track or via: the router's), `place` (a pad of another
+    /// part: the placement's), `footprint` (a pad of its own footprint: no one's), `zone`
+    /// (another pour, the zone's outline or minimum width, a keep-out, a copper drawing),
+    /// `board` (the edge, a hole), `relief` (the gap of a pad of the net beside it).
+    pub fn class(&self) -> &'static str {
+        match self {
+            Blocker::Track { .. } | Blocker::Via { .. } => "route",
+            Blocker::Pad { .. } => "place",
+            Blocker::Own { .. } => "footprint",
+            Blocker::Zone { .. }
+            | Blocker::Outline
+            | Blocker::Narrow
+            | Blocker::Keepout { .. }
+            | Blocker::Copper { .. } => "zone",
+            Blocker::Edge | Blocker::Hole => "board",
+            Blocker::Gap { .. } => "relief",
+        }
+    }
+}
+
+/// For each pad and layer of `pads` that its zone relieves: what stands where the spokes that
+/// do not reach it would run, in every direction of the relief (`Relief::dirs` and
+/// `Relief::alt`) in which neither the pour nor other copper of the net meets the pad. Sorted,
+/// each thing once. `items` are the board's copper items with the fills. A diagnostic's detail:
+/// the clearances are those the fill keeps, a custom rule between two items apart.
+pub fn blockers(p: &Project, items: &[CopperItem], pads: &BTreeSet<Key3>) -> BTreeMap<Key3, Vec<Blocker>> {
+    let mut out: BTreeMap<Key3, Vec<Blocker>> = BTreeMap::new();
+    if pads.is_empty() {
+        return out;
+    }
+    let board = p.board();
+    let rules = &board.rules;
+    let clear = super::clearance::Clearances::new(p, items, true);
+    let area = zones::board_area(p, rules.copper_to_edge).ok().flatten();
+    let mut order: Vec<usize> = (0..board.zones.len()).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(board.zones[i].priority), i));
+    let zoned: Vec<(&Zone, ZoneParams, Polygon)> = order
+        .iter()
+        .filter(|&&i| !is_teardrop(&board.zones[i]))
+        .map(|&i| {
+            let z = &board.zones[i];
+            let ring: Vec<poly::Point> = z.outline.iter().map(|&q| q.into()).collect();
+            (z, zones::zone_params(p, z), Polygon::new(ring, vec![]))
+        })
+        .collect();
+    let zone_names: BTreeMap<crate::id::ObjectId, &str> = board.zones.iter().map(|z| (z.id, z.name.as_str())).collect();
+    // The non-plated holes, which pours keep away from (center, radius); a plated hole of
+    // another net is named by its pad or its via.
+    let holes: Vec<(poly::Point, i64)> = placed_pads(p)
+        .into_iter()
+        .filter_map(|pp| match pp.hole {
+            Some((d, false)) => Some((pp.hole_at.into(), d.0 / 2)),
+            _ => None,
+        })
+        .collect();
+    let hole_c = |zone_c: Nm| if rules.hole_clearance > Nm::ZERO { rules.hole_clearance.0 } else { zone_c.0 };
+    // The place of each zone in the order of the fills.
+    let filled: BTreeMap<crate::id::ObjectId, usize> =
+        order.iter().enumerate().map(|(k, &i)| (board.zones[i].id, k)).collect();
+    for layer in board.stackup.copper_names() {
+        let on: Vec<usize> = (0..items.len()).filter(|&i| items[i].layers.contains(&layer)).collect();
+        let index = RTree::new(on.iter().map(|&i| items[i].shape.bbox()));
+        for &i in &on {
+            let it = &items[i];
+            let ItemRef::Pad(refdes, number) = &it.item else { continue };
+            let key = (refdes.clone(), number.clone(), layer.clone());
+            if !pads.contains(&key) {
+                continue;
+            }
+            let (Some(net), Some(bbox)) = (it.net.as_deref(), it.shape.bbox()) else { continue };
+            let Some((z, prm, outline)) = zoned.iter().find(|(z, _, outline)| {
+                z.net.as_deref() == Some(net)
+                    && z.layers.contains(&layer)
+                    && outline.bbox().is_some_and(|b| b.intersects(&bbox))
+                    && poly::intersects(outline, &it.shape)
+            }) else {
+                continue;
+            };
+            if zones::connection_on(it, &layer, prm.pads) != PadConnection::Thermal {
+                continue;
+            }
+            let my_place = filled.get(&z.id).copied().unwrap_or(usize::MAX);
+            let r = Relief::of(it, prm);
+            let zone_c = prm.clearance.max(zones::class_clearance(p, z.net.as_deref()).unwrap_or(rules.clearance));
+            let Ok(outer) = poly::offset(&it.shape, BAND, Join::Round, OBSTACLE_TOL) else { continue };
+            let Ok(band) = Boolean::new()
+                .subject(&outer, FillRule::NonZero)
+                .clip(&it.shape, FillRule::NonZero)
+                .op(Op::Difference)
+                .execute()
+            else {
+                continue;
+            };
+            let reach = bbox.expand(r.reach() + clear.max().0.max(zone_c.0) + zones::SAFETY + 2 * BAND);
+            let mut near: Vec<u32> = index.query(&reach);
+            near.sort_unstable();
+            let near: Vec<usize> = near.into_iter().map(|k| on[k as usize]).filter(|&k| k != i).collect();
+            // Copper of the net that is not a pad: a direction it meets the pad in has its neck.
+            let own: PolygonSet = near
+                .iter()
+                .map(|&k| &items[k])
+                .filter(|o| o.net.as_deref() == Some(net) && !matches!(o.item, ItemRef::Pad(..)))
+                .flat_map(|o| o.shape.iter().cloned())
+                .collect();
+            let mut found: BTreeSet<Blocker> = BTreeSet::new();
+            // Whether a direction has its neck is asked along the middle of its spoke: a spoke
+            // as wide as the pad covers the pad's other sides too.
+            let thin = Relief { w: (r.w / 4).max(4 * BAND), ..r.clone() };
+            let probes: Vec<Polygon> =
+                zones::spokes(it, &thin).into_iter().chain(zones::alt_spokes(it, &thin)).collect();
+            for (di, s) in zones::spokes(it, &r).iter().chain(&zones::alt_spokes(it, &r)).enumerate() {
+                let piece = Boolean::new()
+                    .subject(std::slice::from_ref(&probes[di]), FillRule::NonZero)
+                    .clip(&band, FillRule::NonZero)
+                    .op(Op::Intersection)
+                    .execute()
+                    .unwrap_or_default();
+                if piece.is_empty() || poly::intersects(&own, &piece) {
+                    continue;
+                }
+                // What stands in this direction; a pad of the footprint itself takes it whole.
+                // The spoke grown by a clearance meets what keeps that clearance from it (a
+                // pour is large: the spoke is grown, not the pour).
+                let mut grown: BTreeMap<i64, PolygonSet> = BTreeMap::new();
+                let mut here: BTreeSet<Blocker> = BTreeSet::new();
+                for &k in &near {
+                    let o = &items[k];
+                    if o.net.as_deref() == Some(net) || super::tied(it, o) {
+                        continue;
+                    }
+                    let c = match &o.item {
+                        // A pour filled after this one keeps away from it, not this one from it.
+                        ItemRef::Zone(id, ..) if filled.get(id).copied().unwrap_or(usize::MAX) > my_place => continue,
+                        ItemRef::Zone(..) => zone_c.0,
+                        _ => clear.item(k).max(zone_c).0,
+                    } + zones::SAFETY;
+                    if !o.shape.bbox().is_some_and(|b| s.bbox().is_some_and(|sb| b.expand(c).intersects(&sb))) {
+                        continue;
+                    }
+                    let reach = grown.entry(c).or_insert_with(|| {
+                        poly::offset(std::slice::from_ref(s), c, Join::Round, OBSTACLE_TOL).unwrap_or_default()
+                    });
+                    if !poly::intersects(&o.shape, &*reach) {
+                        continue;
+                    }
+                    here.insert(match &o.item {
+                        ItemRef::Track(id) => Blocker::Track { id: id.0, net: o.net.clone() },
+                        ItemRef::Via(id) => Blocker::Via { id: id.0, net: o.net.clone() },
+                        ItemRef::Pad(r, n) if r == refdes => {
+                            Blocker::Own { pad: format!("{r}.{n}"), net: o.net.clone() }
+                        }
+                        ItemRef::Pad(r, n) => Blocker::Pad { pad: format!("{r}.{n}"), net: o.net.clone() },
+                        ItemRef::Zone(id, ..) => Blocker::Zone {
+                            zone: zone_names.get(id).copied().unwrap_or_default().to_string(),
+                            net: o.net.clone(),
+                        },
+                        ItemRef::Graphic(..) | ItemRef::FpGraphic(..) => Blocker::Copper { net: o.net.clone() },
+                    });
+                }
+                if here.iter().any(|b| matches!(b, Blocker::Own { .. })) {
+                    found.extend(here.into_iter().filter(|b| matches!(b, Blocker::Own { .. })));
+                    continue;
+                }
+                if area.as_ref().is_some_and(|a| !poly::contains(a, s)) {
+                    here.insert(Blocker::Edge);
+                }
+                if !poly::contains(std::slice::from_ref(outline), s) {
+                    here.insert(Blocker::Outline);
+                }
+                for k in &board.keepouts {
+                    if k.no_pours
+                        && !k.allows(Some(net))
+                        && (k.layers.is_empty() || k.layers.contains(&layer))
+                        && k.outline.len() >= 3
+                    {
+                        let ring: Vec<poly::Point> = k.outline.iter().map(|&q| q.into()).collect();
+                        if poly::intersects(&Polygon::new(ring, vec![]), s) {
+                            here.insert(Blocker::Keepout { name: k.name.clone() });
+                        }
+                    }
+                }
+                for (at, radius) in &holes {
+                    let grown = radius + hole_c(zone_c) + zones::SAFETY;
+                    if s.bbox().is_some_and(|sb| sb.intersects(&Rect::new(*at, *at).expand(grown)))
+                        && let Ok(ring) = poly::Circle::new(*at, grown).to_ring(OBSTACLE_TOL)
+                        && poly::intersects(&Polygon::new(ring, vec![]), s)
+                    {
+                        here.insert(Blocker::Hole);
+                    }
+                }
+                if !here.is_empty() {
+                    found.extend(here);
+                    continue;
+                }
+                // Nothing of another net: the gap of a pad of the net beside it, or a pour
+                // too narrow to be kept.
+                let mut gap = false;
+                for &k in &near {
+                    let o = &items[k];
+                    let ItemRef::Pad(r2, n2) = &o.item else { continue };
+                    if o.net.as_deref() != Some(net)
+                        || zones::connection_on(o, &layer, prm.pads) == PadConnection::Solid
+                    {
+                        continue;
+                    }
+                    let g = match zones::connection_on(o, &layer, prm.pads) {
+                        PadConnection::None => prm.clearance.0,
+                        _ => Relief::of(o, prm).gap,
+                    };
+                    if poly::offset(&o.shape, g, Join::Round, OBSTACLE_TOL)
+                        .is_ok_and(|grown| poly::intersects(&grown, s))
+                    {
+                        found.insert(Blocker::Gap { pad: format!("{r2}.{n2}") });
+                        gap = true;
+                    }
+                }
+                if !gap {
+                    found.insert(Blocker::Narrow);
+                }
+            }
+            if !found.is_empty() {
+                out.entry(key).or_default().extend(found);
+            }
+        }
+    }
+    for v in out.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1588,6 +2410,8 @@ mod tests {
             zone: Some("Z".into()),
             style: Some(style),
             own: false,
+            purpose: None,
+            reasoned: false,
             planned: 4,
             gap: Nm(200_000),
             spoke: Nm(250_000),
@@ -1628,5 +2452,96 @@ mod tests {
         let mut row0 = cut.clone();
         row0.possible = 0;
         assert!(row0.starved(2, 67), "never fewer than one");
+        // Necks by their copper (D119): one piece of copper as wide as two spokes is no pad
+        // on a single spoke; one as wide as a spoke and a half is.
+        let wide = joint(PadClass::Smd, t, 1, 500_000, 500_000);
+        assert_eq!((wide.necks, wide.worth()), (1, 2));
+        assert!(!wide.starved(2, 67));
+        let fat = joint(PadClass::Smd, t, 1, 400_000, 400_000);
+        assert!(fat.worth() == 1 && fat.starved(2, 67));
+    }
+
+    /// What a pad says it is solid for goes before what it looks like (D119): a press-fit pin
+    /// and a stitching pad are not soldered, a heat pad spreads heat, a terminal is the solder
+    /// pad it is; and a joint is meant by its purpose, by a solid setting while relief is not
+    /// required, by a setting with its reason when it is.
+    #[test]
+    fn purposes() {
+        let mm = 1_000_000;
+        let tht = PadKind::Tht { drill: Nm(mm) };
+        let mut pads = vec![
+            placed("J1", "1", (0, 0), (1_700_000, 1_700_000), tht),
+            placed("J1", "2", (0, 3 * mm), (1_700_000, 1_700_000), tht),
+            placed("J1", "3", (0, 6 * mm), (1_700_000, 1_700_000), tht),
+            placed("J1", "4", (0, 9 * mm), (1_700_000, 1_700_000), tht),
+            placed("J1", "5", (0, 12 * mm), (1_700_000, 1_700_000), tht),
+        ];
+        pads[0].overrides.purpose = Some(PadPurpose::PressFit);
+        pads[1].overrides.purpose = Some(PadPurpose::Terminal);
+        pads[2].overrides.purpose = Some(PadPurpose::Heat);
+        pads[3].overrides.purpose = Some(PadPurpose::Stitching);
+        let class = |n: &str| class_of(&pads, "J1", n);
+        assert_eq!(
+            [class("1"), class("2"), class("3"), class("4"), class("5")],
+            [PadClass::Bare, PadClass::Through, PadClass::Heat, PadClass::Bare, PadClass::Through]
+        );
+        let mut j = joint(PadClass::Through, PadConnection::Solid, 1, 4_000_000, 4_000_000);
+        assert!(!j.meant(false) && !j.meant(true), "a zone's solid is no one's purpose");
+        j.own = true;
+        assert!(j.meant(false) && !j.meant(true), "a setting alone, where relief is required, is not enough");
+        j.reasoned = true;
+        assert!(j.meant(true));
+        j.reasoned = false;
+        j.purpose = Some(PadPurpose::Terminal);
+        assert!(j.meant(true));
+    }
+
+    /// A track around what is in the way (D119): from a pad along a corridor of allowed
+    /// copper that turns a corner to the pour. No straight track from the pad's middle
+    /// reaches it; the detour does, in a few segments, inside the corridor. With the corridor
+    /// cut there is none, nor when the only way out runs beside the spoke the pad has.
+    #[test]
+    fn a_track_around_the_corner() {
+        let mm = 1_000_000;
+        let sq =
+            |x0: i64, y0: i64, x1: i64, y1: i64| rect(&Rect::new(poly::Point::new(x0, y0), poly::Point::new(x1, y1)));
+        let pad = CopperItem {
+            item: ItemRef::Pad("U1".into(), "1".into()),
+            net: Some("GND".into()),
+            layers: vec!["F.Cu".into()],
+            shape: vec![sq(-mm / 2, -mm / 2, mm / 2, mm / 2)],
+            anchor: Point::new(Nm(0), Nm(0)),
+            local: Default::default(),
+        };
+        // East along y = 0 to x = 1.4, then north to the pour at y = 1.2 and beyond.
+        let pour: PolygonSet = vec![sq(800_000, 1_200_000, 1_600_000, 2 * mm)];
+        let corridor = |cut: bool| -> PolygonSet {
+            let mut parts = vec![sq(mm / 2, -200_000, 1_400_000, 200_000), sq(mm, -200_000, 1_400_000, 1_200_000)];
+            if cut {
+                parts[1] = sq(mm, 600_000, 1_400_000, 1_200_000);
+            }
+            parts.extend(pour.iter().cloned());
+            poly::union_all(&parts, FillRule::NonZero).unwrap()
+        };
+        let w = 200_000;
+        assert!(reaches(&pad, &corridor(false), &pour, w, 1).is_empty(), "no straight track");
+        let path = detour(&pad, &corridor(false), &pour, w, 200_000).expect("a way around the corner");
+        assert!((3..=4).contains(&path.len()), "round the corner in two or three segments: {path:?}");
+        assert_eq!(path[0], poly::Point::new(0, 0));
+        let mut allowed = corridor(false);
+        allowed.extend(pad.shape.iter().cloned());
+        let allowed = poly::union_all(&allowed, FillRule::NonZero).unwrap();
+        for seg in path.windows(2) {
+            let d = (seg[1].x - seg[0].x, seg[1].y - seg[0].y);
+            let len = ((d.0 * d.0 + d.1 * d.1) as f64).sqrt().round() as i64;
+            assert!(poly::contains(&allowed, &stroke(seg[0], d, len, w).0), "{seg:?} inside the allowed copper");
+        }
+        let end = *path.last().unwrap();
+        assert!(poly::contains(&pour, &sq(end.x - w / 2, end.y - w / 2, end.x + w / 2, end.y + w / 2)), "{end:?}");
+        assert!(detour(&pad, &corridor(true), &pour, w, 200_000).is_none(), "the corridor cut");
+        // A spoke the pad has, east in the corridor: the way out would run on it.
+        let mut with_spoke = pour.clone();
+        with_spoke.push(sq(mm / 2, -100_000, 700_000, 100_000));
+        assert!(detour(&pad, &corridor(false), &with_spoke, w, 200_000).is_none(), "beside the spoke it has");
     }
 }

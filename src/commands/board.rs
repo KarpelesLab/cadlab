@@ -444,6 +444,13 @@ pub struct SetRules {
     /// default 67, 0: not checked).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_max_contact: Option<u8>,
+    /// Thermal relief is required: the fab check's thermal findings (fab.solid_pad,
+    /// fab.thermal_nominal, fab.starved_thermal, fab.thermal_size) are errors that stop
+    /// fab.export, and only a pad that says what it is solid for (zone.pad --purpose,
+    /// footprint.set --purpose, or a placed pad's setting with a reason) is left alone.
+    /// Default false: they are warnings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_required: Option<bool>,
 }
 
 /// A rule value that changed.
@@ -607,6 +614,7 @@ impl Command for SetRules {
         }
         r.min_thermal_spokes = self.min_thermal_spokes.unwrap_or(r.min_thermal_spokes);
         r.thermal_max_contact = self.thermal_max_contact.unwrap_or(r.thermal_max_contact);
+        r.thermal_required = self.thermal_required.unwrap_or(r.thermal_required);
 
         if r.via_drill >= r.via_diameter {
             return Err(CommandError::invalid_args("board.invalid_rule", "via diameter must exceed via drill"));

@@ -278,7 +278,9 @@ impl Ctx<'_> {
     /// and pads short of spokes (the board's own rules), and relief spokes and gaps below the
     /// profile's minimum track and space. Warnings: the fab can make the board, soldering it is
     /// what suffers, and a pad that is solid on purpose is waived on the board (`drc.waive`
-    /// covers the `fab.` finding of the same subjects through its `drc.` code).
+    /// covers the `fab.` finding of the same subjects through its `drc.` code). With the
+    /// board's rule `thermal_required` they are errors, and only a pad that says what it is
+    /// solid for is left alone (D119).
     fn thermals(&self, out: &mut Vec<Diagnostic>) {
         let q = self.process;
         let own = &self.p.board().rules;
@@ -291,6 +293,7 @@ impl Ctx<'_> {
             min_clearance: Nm::ZERO,
             min_thermal_spokes: own.min_thermal_spokes.max(t.min_spokes.unwrap_or(0)),
             thermal_max_contact: own.thermal_max_contact,
+            thermal_required: own.thermal_required,
             ..Rules::default()
         };
         let items = geo::copper_items(self.p);
@@ -311,6 +314,16 @@ impl Ctx<'_> {
                 _ => continue,
             };
             d.code = code.into();
+            // Required by the board's rules: an error, which stops the export and which no
+            // waiver takes away; a pad that is solid on purpose says what for.
+            if own.thermal_required {
+                d.severity = crate::diag::Severity::Error;
+                d.hint = Some(format!(
+                    "{}; the board's rules require thermal relief (`board.rules --thermal-required false` makes \
+                     these warnings again)",
+                    d.hint.unwrap_or_default()
+                ));
+            }
             out.push(d);
         }
     }

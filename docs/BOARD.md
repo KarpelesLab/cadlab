@@ -100,6 +100,10 @@ For each zone and each of its layers, in priority order (higher first, ties in b
    would cross another item's clearance (a pad squeezed between other-net pads, a spoke running past the
    zone outline) is trimmed to the allowed area, keeping only its part within the pad's gap and the pour, and
    only when that part joins the pour over at least half the spoke width; otherwise it is dropped (D51).
+   What is left of a trimmed spoke is also no narrower than a track may be: shrunk by half of
+   `min_track_width` (the spoke's own width when that is less), a piece of it must still reach from the pad
+   to the pour, or the spoke is dropped (`Relief::min`, D119). Half of a 0.15 mm spoke is 0.075 mm of copper,
+   which no fab's minimum track is.
    A pad left with fewer spokes than it was to have gets the missing ones in the relief's other directions
    (the same directions turned by half a step: for four spokes the other four of the eight), whole or
    trimmed in the same way, when neither the pad nor the zone sets a `thermal_angle`: a pin with a track of
@@ -173,9 +177,18 @@ Times, release, three threads (`RAYON_NUM_THREADS=3`, as a router run has them),
 | lumenpnp-ringlight | 47 | 33 | 33 | 43 | 26 |
 
 The boards whose fills are many small zones (corne-cherry's 925 teardrops, cynthion's 61 zone layers) gain
-nothing: their time is in the booleans of each zone, and a zone whose surroundings are as they were is still
-filled again. Keeping whole zone layers by their inputs was not done: the layers of a board fill side by side,
-so the time of a fill is its slowest layer's, which is the one a router changes.
+nothing from the reliefs: their time is in the booleans of each zone.
+
+**Zone layers kept (D119).** `fill_zones` also keeps, per zone and layer, the last two fills with everything
+they were made from (`zones::LayerKey`: the outline, the board area, per item its shape, whether it is of the
+zone's net, a pad's anchor, connection and relief settings, the clearance kept from an item of another net,
+the keep-away regions, the zone's settings), compared in full, and the allowed area of the last fill (the
+zone's area less other nets' copper and the keep-aways) by what that is made from. A zone layer whose every
+input is as it was is taken whole; one where only pads' reliefs or connections changed keeps its allowed
+area and makes the pour, the opening and the spokes again. Emptied when it holds six million points;
+`clear_fill_cache` forgets it, `fill_zones_uncached` uses none of it, and `tests/zone_refill.rs`, which
+compares the two on every corpus board in eight states, holds for it as it did for the reliefs. This is what
+`zone.relieve` runs on (below): its fills differ from one another in a few pads' settings and a few tracks.
 
 ## Thermal relief (D109, `src/board/thermal.rs`)
 
@@ -206,7 +219,10 @@ lies within its relief's reach and goes on beyond it. It has **no relief** when 
 `thermal_max_contact` percent of its outline or more (default 67), or when copper that is no pour does and some
 of it is wider than the pad (a track wider than the pad's shorter side, a copper drawing); tracks no wider than
 the pad are how a pad is connected, however much of a small pad's outline they take. Teardrop zones (KiCad's
-`$teardrop_…$`) count as tracks.
+`$teardrop_…$`) count as tracks. The necks are counted **by their copper** where the rules ask how many a pad
+has (`Joint::worth`, D119): the separate pieces, or, when that is more, the length of copper on the outline
+over the relief's spoke width. Spokes as wide as a small pad's side meet at its corners and reach the pad as
+one piece of copper on two or three of its sides; that is no pad on a single spoke.
 
 **What a pad is.** `through`: a plated through-hole pin. `smd`: a surface-mount solder pad. `heat`: an SMD pad
 with a grid of paste windows (exposed pads; one window counts on a pad at least 2.5 times the footprint's median
@@ -214,13 +230,15 @@ pad area: an imported pin with a paste aperture of its own has one too), an SMD 
 nearly as large beside it (tabs; the two lugs of a connector are solder pads), and pads of the same number inside
 one (thermal via pads). `bare`: not soldered: covered by solder mask, without a number, non-plated,
 or alone on its footprint as an SMD pad without paste (test point) or with a plated hole of 0.5 mm or less (a
-stitching via drawn as a footprint). Only `through` and `smd` pads are held to the rules below.
+stitching via drawn as a footprint). Only `through` and `smd` pads are held to the rules below. What a pad
+says it is solid for goes before what it looks like (`purpose`, "Solid on purpose" below): `press_fit` and
+`stitching` are `bare`, `heat` is `heat`, a `terminal` is the solder pad it is and solid by its purpose.
 
 | Code | Severity | Finding |
 |---|---|---|
 | `drc.solid_pad` | warning | a solder pad joined solidly to a pour of its net (pad and zone as subjects, its layers listed, the tombstoning risk named when the other pad of a two-pad part is not), or with wide tracks or copper drawings on its outline |
 | `drc.thermal_nominal` | warning | a solder pad whose zone gives it spokes that cover its outline all the same (spokes as wide as its sides) |
-| `drc.starved_thermal` | warning | a relieved pad joined by fewer necks than `min_thermal_spokes` (default 2), or than the other pads of its own footprint leave room for when that is less (a pin in a row has its ends only; never fewer than one). With none, the DRC also reports the open connection (`drc.unrouted`, error) |
+| `drc.starved_thermal` | warning | a relieved pad joined by fewer necks than `min_thermal_spokes` (default 2), or than the other pads of its own footprint leave room for when that is less (a pin in a row has its ends only; never fewer than one); necks by their copper. The finding names **what stands where the missing spokes would run** (`thermal::blockers`, below), with the tracks and vias among its subjects, and its hint says whose it is to move. With none, the DRC also reports the open connection (`drc.unrouted`, error) |
 | `drc.thermal_size` | warning | a relief gap below the minimum clearance (`min_clearance`, else `clearance`) or a spoke below `min_track_width`: one per zone and value, with the pads |
 | `drc.current_spokes` | warning | a net with a `current`: pads whose spokes and tracks, all layers of a through-hole pin together, add up to less than the width IPC-2152 asks on the layer (one per net and layer, [ELECTRICAL.md](ELECTRICAL.md)) |
 
@@ -232,12 +250,61 @@ space), `fab.thermal_size`, and `fab.export` writes the files and says so (`drc.
 each pad a second time under its `fab.` code). An error would refuse the export of every
 imported board whose designer meant its pads solid.
 
+**Relief required** (`board.rules --thermal-required true`, D119; off by default). With it the four `fab.`
+findings are **errors**: `fab.check` fails and `fab.export` writes nothing until they are gone, and a waiver
+does not take them away (waivers are for warnings). What takes one away is the repair (`zone.relieve`), or the
+pad saying what it is solid for: a `purpose` (below) on the placed pad, the pad or the footprint, or a placed
+pad's own setting with its `reason` (`zone.pad J1.3 --connection solid --reason "carries 12 A"`, which is also
+what `zone.relieve` writes for the pads it keeps solid). A `solid` setting that says neither, on a pad or a
+footprint, is then no longer taken as meant: an imported library sets it on parts whose designer never thought
+about soldering. The DRC's own findings stay warnings either way (`drc.run` is asked many times while a board
+is made; the export is where a board leaves). The switch is a rule of the board, stored with it, and no fab
+profile sets it.
+
+**What is in the way** (`thermal::blockers`, D119). For a pad short of spokes, each direction of its relief
+(the four and the other four) in which no copper of its net crosses its outline is looked at, the spoke's
+rectangle against what the fill keeps away from: per direction, a pad of the footprint itself takes it whole
+(`its footprint's pad U1.5`: nothing on the board moves it, and such directions are not held against the pad),
+else everything of another net within its clearance of the spoke is named: `track#12 (net SDA)`, `via#7`, a pad
+of another part, the pour of a zone filled before this one, a copper drawing, a non-plated hole, a keep-out, the
+board edge, the zone's own outline; with none of those, the relief gap of a pad of the same net beside it, or
+no pour wide enough to keep (the zone's minimum width, an island nothing joins). By whose it is to move
+(`Blocker::class`): `route` (tracks and vias: the router's; the hint names the nets to rip and route again),
+`place` (another part's pad), `footprint`, `zone`, `board`, `relief`. `drc.starved_thermal` and
+`fab.starved_thermal` carry them in the message and as subjects, `zone.thermals` and `zone.relieve` per pad
+and layer (`blocked`).
+
 **Solid on purpose.** Say it where it holds: on one placed pad (`zone.pad J1.3 --connection solid --reason ..`,
 on some layers only with `--layers In1.Cu`), on the pad or the footprint for every part that uses it
 (`footprint.set <footprint> --pads 4 --zone-connection solid`), or as a waiver for a whole zone or net
 (`drc.waive drc.solid_pad --subjects zone:GND --reason ..`, which covers the `fab.` finding too). The check is
 then quiet for that pad; `zone.thermals` still lists a placed pad's setting with its reason (`meant`). A zone
 can still be made `solid`; `zone.add` and `zone.set` then warn (`zone.solid_pads`).
+
+**What a pad is solid for** (`purpose`, D119). A stored attribute beside the zone connection, on the placed
+pad (`PadJoin::purpose`), the pad or the footprint (`Overrides::purpose`), the placed pad's first:
+
+| `purpose` | what it is | class | in a pour |
+|---|---|---|---|
+| `press_fit` | a pin pressed into its hole, never soldered | `bare` | solid, not held to the rules |
+| `terminal` | a soldered terminal that carries more than spokes do (a power lug, a battery contact, a bus bar) | as its pad (`through`, `smd`) | solid, meant |
+| `heat` | a pad that spreads heat (an exposed pad, a tab, a heat sink's land) | `heat` | solid, not held to the rules |
+| `stitching` | a via or pin drawn as a footprint that ties planes together | `bare` | solid, not held to the rules |
+
+`zone.pad J1.3 --purpose press_fit` and `footprint.set <footprint> --pads 1 --purpose terminal` set it and,
+unless a connection is given or already set, set the connection `solid` with it; `--unset purpose` takes it
+back. It says "meant" where a bare `solid` says only "solid": `drc.solid_pad` is quiet for the pad whatever
+`thermal_required` is, `zone.thermals` lists it (`meant`, with the purpose), and `zone.relieve` keeps the
+setting where it removes a `solid` that says nothing. The default is untouched: a through-hole pin or an SMD
+pad in a pour without a purpose is relieved.
+*KiCad.* The file format documents six pad properties (`(property pad_prop_bga)`, `pad_prop_fiducial_glob`,
+`pad_prop_fiducial_loc`, `pad_prop_testpoint`, `pad_prop_heatsink`, `pad_prop_castellated`; KiCad developer
+documentation, "S-Expression Format", footprint pad, read 2026-11-22). One of them says what a pad is in a
+pour: `pad_prop_heatsink` is imported as `purpose: heat` and written back for it. The format has no property
+for a press-fit pin, a terminal or stitching on a pad: those go out as the pad's `zone_connect` alone
+(`export.pad_purpose`, an information finding listing them), and a board read back has them as solid pads
+without a purpose. `zone_connect` itself (0 none, 1 thermal, 2 solid; 3 through-hole thermal) is imported and
+exported as before.
 
 **One placed pad** (`zone.pad`, D112). `PlacedFootprint::pads` holds, by pad number, what one pad of one placed
 part has of its own: `zone_connection`, the same per copper layer (`layers`: a through-hole pin solid in the
@@ -272,12 +339,27 @@ setting), `heat`, `bare`. `zone.relieve` brings a board to relieved pads in one 
      pad solid (which keeps every clearance of the net, so the track does), ending in the pour as it is,
      crossing the pad's outline clear of the necks it has; the shortest first, a second one at a right angle
      or more from the first; a track that turns out to be no neck of its own is removed again. They are
-     ordinary tracks of the board;
+     ordinary tracks of the board. Where no straight one fits, a way *around* what is in the way is looked
+     for in the same copper (`thermal::detour`, D119): on a grid of 0.05 mm, the track's middle half its width
+     inside the allowed copper, a spoke's width of air kept from the spokes the pad has on its way through
+     the relief gap, ending in the pour beyond that gap, pulled straight where the copper allows, in at most
+     five segments and the same 2.5 mm;
    - *solid on purpose* (`solid`): a pad the pour joined before, on a layer where nothing joins it now, is
      set solid on that layer alone, with the reason. No pad a pour joined is left without a joint (`cut` and
      the warning `zone.relieve_cut` remain for a pad that could not even be kept solid).
 3. It reports the counts before and after, every change, and every pad left short of spokes or without
-   relief with what was tried (`left`, each with a `reason`; `reasons`).
+   relief with what was tried and what is in its way (`left`, each with a `reason` and `blocked`; `reasons`,
+   `blocked`).
+
+*Time (D119).* The repair fills the board and reads its pads after each of its changes, up to eight times.
+Each fill takes the zone layers whose inputs are as they were from the fill before ("Zone layers kept"
+above), each reading the pads whose inputs are (`thermal::JointMemo`: per pad and layer, the pad, its zone and
+relief, the zone copper and the other copper of its net near it; read side by side with the `parallel`
+feature), and the pours "with every pad solid" that the tracks are looked for in are filled once without
+being kept. The result is the one of the repair that makes every fill and every reading from scratch
+(`thermal::relieve_uncached`): the board, the report and the joints, compared in full on every corpus board
+by `tests/zone_relieve.rs` (release, `CADLAB_CORPUS_DIR`) and on five small boards by
+`relieve_is_the_relieve_from_scratch`. Times in D119.
 
 Mounting holes with a ring of vias (several drilled pads of one number and no other pad) are `bare`.
 
@@ -312,15 +394,26 @@ fill without those tracks leaves short of its spokes (`Joint::starved`) where it
 than it had and fewer than two, has the tracks of its net within 1.5 mm back before the board is filled again.
 A track to a pad is a neck of it, and the pour that takes the track's place is not always one.
 
+Since D119 a trimmed spoke is kept only where what is left of it is `Relief::min` wide (the minimum track
+width): the room a spoke needs between two items of other nets is that width plus their clearances, not half
+the spoke. A pad with a `purpose` is classed by it (`thermal::classes`: `press_fit` and `stitching` are not
+soldered and not held to a spoke count, `heat` may take vias of its net), and its connection is `solid`
+unless set otherwise, as `zones::connection_on` already says. `thermal::blockers(p, items, pads)` names, for
+the pads short of spokes after a run, the tracks and vias of other nets that stand in their spokes'
+rectangles (`Blocker::Track`, `Blocker::Via`, class `route`): the nets to move for a pad to get its second
+spoke, which is what `drc.starved_thermal` tells the user to rip and route again. The adapter does not use it
+yet. The tracks that `zone.relieve` adds around obstacles are ordinary tracks of the net from the pad's
+middle; a router that takes routes back should take them as it takes the straight ones of D112.
+
 Not covered: the native router does not keep the sides of relieved pads free for their spokes (what the
 routers leave is counted by `route_bench --corpus` with `CADLAB_BENCH_THERMALS=1`, reported by the router
 commands and repaired by `zone.relieve`). The KiCad export writes the placed pads' settings on the pads and,
 when no zone sets a spoke width, the width cadlab fits to a small pad as that pad's `thermal_width`, so a
 refill in KiCad gives it the same spokes (the import takes such a width as unset again); it cannot say a
 connection per layer (`export.pad_layer_connection`) nor the spokes placed in other directions, so on those
-pads KiCad's own refill differs from the fill written, which is cadlab's. Press-fit pins have no mark in the
-model (decided, D112: a pad attribute, solid by default and not held to the rules; not implemented). The 3D
-view draws no copper.
+pads KiCad's own refill differs from the fill written, which is cadlab's. A check of the copper on the two
+pads of a chip part against each other (tombstoning) was looked for and not written: no published source
+gives a number for it (D119). The 3D view draws no copper.
 
 ## Keep-outs and net exceptions (D76)
 
@@ -363,6 +456,7 @@ footprint follows; nothing in them names a fab (D12).
 | board `mask_min_web` | board | openings closer than it merge: the mask layer is written as the closing of all openings (grown by half the web, shrunk back, round joins), as regions |
 | `clearance` | pad, footprint | see the clearance resolution below |
 | `zone_connection` | pad, footprint | how zones of the pad's net join it (zone fill, step 3) |
+| `purpose` | placed pad, pad, footprint | what the pad is solid for on purpose: `press_fit`, `terminal`, `heat`, `stitching` ("Thermal relief", D119) |
 | `thermal_gap`, `thermal_spoke`, `thermal_angle` | pad, footprint | thermal relief gap, spoke width and first spoke direction (relative to the pad) instead of the zone's (zone fill, step 3) |
 | `back` | SMD pad | the pad's copper, mask and paste are on the other side of its footprint (card-edge fingers, heat sinks soldered from the back) |
 | `mask` | pad | openings on the pad's outer copper (default), on the footprint's side only (`front`) or the other side only (`back`) for holes, or none (`none`: tented thermal vias, covered heat spreaders) |
@@ -535,7 +629,9 @@ own clearance from non-plated holes, the conservative former behaviour. The KiCa
 `min_thermal_spokes` (default 2; 0: not checked) and `thermal_max_contact` (percent, default 67; 0: not checked)
 are the two numbers of the thermal relief check ("Thermal relief"); the KiCad import takes the first from
 `min_resolved_spokes` when that asks for more (a project that accepts one spoke does not lower the minimum:
-`board.rules --min-thermal-spokes 1` does) and the export writes it there.
+`board.rules --min-thermal-spokes 1` does) and the export writes it there. `thermal_required` (default false,
+D119) makes the thermal relief findings of the fab check errors that stop `fab.export` ("Thermal relief",
+"Relief required"); no preset and no fab profile sets it.
 
 Net classes (`netclass.*`) override per net: track width, clearance, via drill and diameter, diff pair width and
 gap. Unset values are inherited from `board.rules`; `netclass.show` / `netclass.list` give the values in
@@ -638,7 +734,7 @@ the library stay).
 | courtyard drawings (either side) | per side, the closed shapes (polygons, circles as polygons around them, lines forming loops) united; on the footprint's side the largest piece becomes the courtyard, further pieces (a carrier board's two separate outlines) and the other side's (a key switch's body above a socket footprint on the bottom) stay closed courtyard drawings (`back` for the other side), which the courtyard DRC and `intersectsCourtyard` rules (own side) use too; drawings that close no loop: their bounding box; none on either side: 0.25 mm around the pads (`import.courtyard_generated`, listing every footprint) |
 | `MountingHole*` footprints / `H`, `MH` designators with one round hole pad | board holes (plated with net, or NPTH) |
 | board-only footprints (`board_only`, not in the circuit, or a designator cadlab cannot use) made of round holes | one tented plated hole on a net (stitching via footprints): a through via; otherwise one board hole per pad, plated ones keeping their net and mask opening, and the footprint's silkscreen drawings as board graphics (a mouse bite's outline at the board edge) (`import.footprint_as_via`, `import.footprint_as_holes`) |
-| `solder_mask_margin`, `solder_paste_margin`, `solder_paste_margin_ratio` / `solder_paste_ratio`, `clearance`, `zone_connect` (pad, footprint) | the pad's or footprint's settings (zero margins and clearances are KiCad's "not set" and stay unset; `zone_connect` 0 none, 1 thermal, 2 solid, 3 `tht_thermal`) |
+| `solder_mask_margin`, `solder_paste_margin`, `solder_paste_margin_ratio` / `solder_paste_ratio`, `clearance`, `zone_connect` (pad, footprint), `(property pad_prop_heatsink)` (pad) | the pad's or footprint's settings (zero margins and clearances are KiCad's "not set" and stay unset; `zone_connect` 0 none, 1 thermal, 2 solid, 3 `tht_thermal`; the heat sink property is the pad's `purpose: heat`, D119, the other pad properties say nothing about pours and are not kept) |
 | `thermal_gap`, `thermal_width` / `thermal_bridge_width` (pad, footprint), `thermal_bridge_angle` (pad) | the pad's or footprint's thermal gap, spoke width and spoke angle (zero sizes stay unset; an angle equal to KiCad's default for the pad shape, 45° round, 90° others, which is cadlab's, stays unset). The export writes `thermal_width` and `thermal_gap` and hands a footprint's angle to its pads; a zone's `thermal_angle` and `thermal_spokes` have no KiCad counterpart (KiCad pads always have up to 4 spokes) and are not written |
 | setup `pad_to_mask_clearance`, `solder_mask_min_width`, `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | `board.rules` `mask_expansion`, `mask_min_web`, `paste_margin`, `paste_ratio` |
 | `net_tie_pad_groups` (`"1, 2"`) | the footprint's `net_ties` |

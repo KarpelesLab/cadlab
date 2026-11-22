@@ -517,6 +517,39 @@ pub struct Overrides {
     /// zone's (default: 45° for round pads, 90° for others).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_angle: Option<Angle>,
+    /// What the pad is joined solidly to the pours of its net for, when that is meant: the
+    /// thermal relief rules then leave it alone (`drc.solid_pad`, `zone.relieve`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<PadPurpose>,
+}
+
+/// Why a pad is solid in the pours of its net on purpose (`Overrides::purpose`,
+/// `PadJoin::purpose`): a thermal relief would be wrong for it, and a check that finds it
+/// solid has found nothing forgotten (docs/BOARD.md, "Thermal relief"; D119).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PadPurpose {
+    /// A press-fit pin: pressed into its hole, never soldered.
+    PressFit,
+    /// A terminal that carries more current than spokes do (a power lug, a battery contact, a
+    /// bus bar): soldered, and solid for its current.
+    Terminal,
+    /// A pad that spreads heat: the exposed pad of a package, a tab, a heat sink's land.
+    Heat,
+    /// Stitching: a via or a pin drawn as a footprint that ties planes together.
+    Stitching,
+}
+
+impl PadPurpose {
+    /// Lower-case name, as it is written.
+    pub fn name(self) -> &'static str {
+        match self {
+            PadPurpose::PressFit => "press_fit",
+            PadPurpose::Terminal => "terminal",
+            PadPurpose::Heat => "heat",
+            PadPurpose::Stitching => "stitching",
+        }
+    }
 }
 
 impl Overrides {
@@ -536,6 +569,7 @@ impl Overrides {
             thermal_gap: self.thermal_gap.or(fallback.thermal_gap),
             thermal_spoke: self.thermal_spoke.or(fallback.thermal_spoke),
             thermal_angle: self.thermal_angle.or(fallback.thermal_angle),
+            purpose: self.purpose.or(fallback.purpose),
         }
     }
 }

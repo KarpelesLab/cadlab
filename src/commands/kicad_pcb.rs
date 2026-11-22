@@ -302,6 +302,32 @@ impl Command for ExportKicad {
             }
             ctx.report(d);
         }
+        if !out.pad_purposes.is_empty() {
+            const SHOWN: usize = 8;
+            let list: Vec<String> =
+                out.pad_purposes.iter().take(SHOWN).map(|(pad, what)| format!("{pad} ({what})")).collect();
+            let mut d = crate::Diagnostic::info(
+                "export.pad_purpose",
+                format!(
+                    "{} pad(s) say what they are solid for in a way KiCad's file format has no pad property for: \
+                     {}{}; their zone connection is written, the purpose is not",
+                    out.pad_purposes.len(),
+                    list.join(", "),
+                    if out.pad_purposes.len() > SHOWN { ", ..." } else { "" }
+                ),
+            )
+            .with_hint(
+                "the documented pad properties are BGA, fiducial, test point, heat sink and castellated; `heat` is \
+                 written as `pad_prop_heatsink`, and a board read back from KiCad has the others as solid pads \
+                 without a purpose (`zone.pad <pad> --purpose ..` says it again)",
+            );
+            for (pad, _) in out.pad_purposes.iter().take(SHOWN) {
+                if let Ok(r) = crate::ObjectRef::parse(pad) {
+                    d = d.with_subject(r);
+                }
+            }
+            ctx.report(d);
+        }
         Ok(KicadExported {
             pcb: path.display().to_string(),
             project: pro.display().to_string(),

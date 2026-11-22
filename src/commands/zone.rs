@@ -719,9 +719,15 @@ pub struct PadJoint {
     /// Share of the pad's outline joined to copper of its net, percent.
     pub share: u32,
     /// relieved, starved (too few spokes), solid (no effective relief, not meant), nominal
-    /// (spokes too wide to relieve), meant (solid by the pad's or footprint's own setting),
-    /// heat or bare.
+    /// (spokes too wide to relieve), meant (solid by the pad's or footprint's own setting, or
+    /// by its `purpose`), heat or bare.
     pub state: String,
+    /// What the pad says it is solid for (press_fit, terminal, heat, stitching).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<crate::model::footprint::PadPurpose>,
+    /// For a pad short of spokes: what stands where the missing ones would run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<thermal::Blocker>,
     /// Why: the reason written with the pad's own setting (`zone.pad`, `zone.relieve`), or
     /// what `zone.relieve` tried for a pad it leaves short of spokes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -738,7 +744,7 @@ fn pad_joint(j: &Joint, rules: &crate::model::board::Rules) -> PadJoint {
     let state = match (j.class, solid) {
         (PadClass::Bare, _) => "bare",
         (PadClass::Heat, _) => "heat",
-        (_, Some(_)) if j.own && j.style == Some(PadConnection::Solid) => "meant",
+        (_, Some(_)) if j.meant(rules.thermal_required) => "meant",
         (_, Some(Solid::Pour)) if j.style == Some(PadConnection::Thermal) => "nominal",
         (_, Some(_)) => "solid",
         (_, None) if j.starved(rules.min_thermal_spokes, rules.thermal_max_contact) => "starved",
@@ -757,6 +763,8 @@ fn pad_joint(j: &Joint, rules: &crate::model::board::Rules) -> PadJoint {
         possible: j.possible,
         share: j.share(),
         state: state.into(),
+        purpose: j.purpose,
+        blocked: Vec::new(),
         reason: None,
     }
 }
@@ -773,17 +781,23 @@ fn joints_text(pads: &[PadJoint], shown: usize) -> String {
         .take(shown)
         .map(|j| {
             format!(
-                "{} {} on {}{}: {} ({} of {} spoke(s), {} % of its outline, {}){}",
+                "{} {} on {}{}: {}{} ({} of {} spoke(s), {} % of its outline, {}){}{}",
                 j.pad,
                 j.net,
                 j.layer,
                 j.zone.as_ref().map(|z| format!(" in zone:{z}")).unwrap_or_default(),
                 j.state,
+                j.purpose.map(|p| format!(" as {}", p.name())).unwrap_or_default(),
                 j.spokes,
                 j.planned,
                 j.share,
                 j.class.name(),
-                j.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default()
+                j.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default(),
+                if j.blocked.is_empty() || j.reason.as_ref().is_some_and(|r| r.contains("in the way")) {
+                    String::new()
+                } else {
+                    format!("; in the way: {}", thermal::Blocker::list(&j.blocked))
+                }
             )
         })
         .collect();
@@ -833,10 +847,23 @@ impl Command for ZoneThermals {
                 && only.as_ref().is_none_or(|z| j.zone.as_ref() == Some(z))
         });
         let census = thermal::census(p, &js, rules.thermal_max_contact);
+        let starved: std::collections::BTreeSet<thermal::Key3> = js
+            .iter()
+            .filter(|j| j.class.solder() && j.starved(rules.min_thermal_spokes, rules.thermal_max_contact))
+            .map(|j| (j.refdes.clone(), j.number.clone(), j.layer.clone()))
+            .collect();
+        let in_the_way = thermal::blockers(p, &geo::copper_items(p), &starved);
         let pads: Vec<PadJoint> = js
             .iter()
-            .map(|j| PadJoint { reason: own_reason(p, j), ..pad_joint(j, rules) })
-            .filter(|j| self.all || attention(j) || (j.state == "meant" && j.reason.is_some()))
+            .map(|j| PadJoint {
+                reason: own_reason(p, j),
+                blocked: in_the_way
+                    .get(&(j.refdes.clone(), j.number.clone(), j.layer.clone()))
+                    .cloned()
+                    .unwrap_or_default(),
+                ..pad_joint(j, rules)
+            })
+            .filter(|j| self.all || attention(j) || (j.state == "meant" && (j.reason.is_some() || j.purpose.is_some())))
             .collect();
         Ok(ThermalReport { census, pads })
     }
@@ -908,13 +935,19 @@ impl Command for ZoneRelieve {
         let js = thermal::joints(p, &geo::copper_items(p));
         let before = thermal::census(p, &js, max);
         let p = ctx.project_mut()?;
-        let (changes, js) = thermal::relieve(p, (!names.is_empty()).then_some(names.as_slice()), self.keep_own);
+        let (changes, js) =
+            thermal::relieve_from(p, (!names.is_empty()).then_some(names.as_slice()), self.keep_own, Some(&js));
         let rules = p.board().rules.clone();
         let after = thermal::census(p, &js, max);
         let left: Vec<PadJoint> = js
             .iter()
             .map(|j| PadJoint {
                 reason: changes.reasons.get(&format!("{}.{}", j.refdes, j.number)).cloned(),
+                blocked: changes
+                    .blocked
+                    .get(&format!("{}.{} on {}", j.refdes, j.number, j.layer))
+                    .cloned()
+                    .unwrap_or_default(),
                 ..pad_joint(j, &rules)
             })
             .filter(attention)
@@ -1018,8 +1051,14 @@ pub struct ZonePad {
     /// Why (kept with the setting and shown by `zone.thermals`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What the pad is solid for on purpose: press_fit (a press-fit pin, not soldered),
+    /// terminal (soldered, solid for its current), heat (an exposed pad, a tab) or stitching.
+    /// The pad is then joined solidly on every layer unless a `connection` is given too, the
+    /// thermal relief rules leave it alone and `zone.relieve` keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<crate::model::footprint::PadPurpose>,
     /// Settings to reset to inherited: connection, layers, thermal_gap, thermal_spoke,
-    /// thermal_angle, or all.
+    /// thermal_angle, purpose, or all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unset: Vec<String>,
 }
@@ -1052,7 +1091,8 @@ impl Command for ZonePad {
     fn run(self, ctx: &mut Context<'_>) -> Result<PadOwns, CommandError> {
         check_len(self.thermal_gap, "thermal_gap", false)?;
         check_len(self.thermal_spoke, "thermal_spoke", true)?;
-        const FIELDS: [&str; 6] = ["connection", "layers", "thermal_gap", "thermal_spoke", "thermal_angle", "all"];
+        const FIELDS: [&str; 7] =
+            ["connection", "layers", "thermal_gap", "thermal_spoke", "thermal_angle", "purpose", "all"];
         for u in &self.unset {
             if !FIELDS.contains(&u.as_str()) {
                 return Err(CommandError::invalid_args(
@@ -1107,6 +1147,7 @@ impl Command for ZonePad {
             || self.thermal_spoke.is_some()
             || self.thermal_angle.is_some()
             || self.reason.is_some()
+            || self.purpose.is_some()
             || !self.unset.is_empty();
         if change {
             if keys.is_empty() {
@@ -1124,6 +1165,7 @@ impl Command for ZonePad {
                         "thermal_gap" => join.thermal_gap = None,
                         "thermal_spoke" => join.thermal_spoke = None,
                         "thermal_angle" => join.thermal_angle = None,
+                        "purpose" => join.purpose = None,
                         _ => *join = PadJoin::default(),
                     }
                 }
@@ -1141,6 +1183,13 @@ impl Command for ZonePad {
                 join.thermal_angle = self.thermal_angle.map(Angle::normalized).or(join.thermal_angle);
                 if self.reason.is_some() {
                     join.reason = self.reason.clone();
+                }
+                // A pad that says what it is solid for is solid, unless it is told otherwise.
+                if let Some(purpose) = self.purpose {
+                    join.purpose = Some(purpose);
+                    if self.connection.is_none() && join.zone_connection.is_none() {
+                        join.zone_connection = Some(PadConnection::Solid);
+                    }
                 }
                 if join.is_empty() {
                     pf.pads.remove(number);
@@ -1182,6 +1231,9 @@ impl Command for ZonePad {
                 }
                 if let Some(v) = j.thermal_angle {
                     parts.push(format!("angle {v}"));
+                }
+                if let Some(v) = j.purpose {
+                    parts.push(format!("purpose {}", v.name()));
                 }
                 let why = j.reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default();
                 format!("{}: {}{why}", p.pad, parts.join(", "))

@@ -715,8 +715,15 @@ pub struct FootprintSet {
     /// instead of the zone's (default: 45° for round pads, 90° for others).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal_angle: Option<crate::units::Angle>,
+    /// What the pads are solid for on purpose: press_fit (press-fit pins, not soldered),
+    /// terminal (soldered, solid for their current), heat (an exposed pad, a tab) or stitching.
+    /// They are then joined solidly to zones unless a `zone_connection` is given or set, the
+    /// thermal relief rules leave them alone and `zone.relieve` keeps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<crate::model::footprint::PadPurpose>,
     /// Settings to reset to inherited: mask_margin, paste_margin, paste_ratio, clearance,
-    /// zone_connection, thermal_gap, thermal_spoke, thermal_angle; for pads also slot, stack.
+    /// zone_connection, thermal_gap, thermal_spoke, thermal_angle, purpose; for pads also slot,
+    /// stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unset: Vec<String>,
     /// Pads only: SMD pads on the other side of the footprint (true) or on its side (false).
@@ -848,6 +855,9 @@ fn overrides_text(o: &crate::model::footprint::Overrides) -> Vec<String> {
     if let Some(x) = o.thermal_angle {
         v.push(format!("thermal angle {x}"));
     }
+    if let Some(x) = o.purpose {
+        v.push(format!("purpose {}", x.name()));
+    }
     v
 }
 
@@ -876,7 +886,7 @@ impl Command for FootprintSet {
             )
             .with_hint("e.g. -0.05 for 5 % smaller openings"));
         }
-        const FIELDS: [&str; 10] = [
+        const FIELDS: [&str; 11] = [
             "mask_margin",
             "paste_margin",
             "paste_ratio",
@@ -885,6 +895,7 @@ impl Command for FootprintSet {
             "thermal_gap",
             "thermal_spoke",
             "thermal_angle",
+            "purpose",
             "slot",
             "stack",
         ];
@@ -937,6 +948,13 @@ impl Command for FootprintSet {
             if let Some(a) = self.thermal_angle {
                 o.thermal_angle = Some(a.normalized());
             }
+            // Pads that say what they are solid for are solid, unless told otherwise.
+            if let Some(purpose) = self.purpose {
+                o.purpose = Some(purpose);
+                if o.zone_connection.is_none() {
+                    o.zone_connection = Some(crate::model::board::PadConnection::Solid);
+                }
+            }
             for u in &self.unset {
                 match u.as_str() {
                     "mask_margin" => o.mask_margin = None,
@@ -947,6 +965,7 @@ impl Command for FootprintSet {
                     "thermal_gap" => o.thermal_gap = None,
                     "thermal_spoke" => o.thermal_spoke = None,
                     "thermal_angle" => o.thermal_angle = None,
+                    "purpose" => o.purpose = None,
                     _ => {}
                 }
             }

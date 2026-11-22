@@ -278,10 +278,20 @@ fn starved_thermal() {
         let pts: Vec<Value> = u.iter().map(|(a, b)| json!([mm(*a), mm(*b)])).collect();
         exec(r, s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}))
     };
-    fence(&r, &mut s, 1_500_000, 1_500_000);
+    // Short legs: the diagonals away from the U pass their ends whole. (With legs as long as
+    // the U is wide, what the legs' ends leave of those diagonals is narrower than the minimum
+    // track, and a spoke trimmed to less than a track is none: D119.)
+    fence(&r, &mut s, 1_500_000, 600_000);
     let js = joints(&s);
     let j = joint(&js, "J1.1", "B.Cu");
     assert!(j.spokes >= 2, "one spoke of the four along the axes survives, diagonals are added: {j:?}");
+    exec(&r, &mut s, "history.undo", json!({}));
+    fence(&r, &mut s, 1_500_000, 1_500_000);
+    let js = joints(&s);
+    let j = joint(&js, "J1.1", "B.Cu");
+    assert_eq!(j.spokes, 1, "slivers of the diagonals, narrower than a track, are no spokes: {j:?}");
+    exec(&r, &mut s, "history.undo", json!({}));
+    fence(&r, &mut s, 1_500_000, 600_000);
     assert!(findings(&exec(&r, &mut s, "drc.run", json!({})), "drc.starved_thermal").is_empty());
     // A zone with an angle of its own keeps to it: one spoke.
     exec(&r, &mut s, "zone.set", json!({"name": "GND", "thermal_angle": "90deg"}));
@@ -302,6 +312,20 @@ fn starved_thermal() {
     assert_eq!(diag["severity"], "warning");
     assert!(diag["subjects"].as_array().unwrap().iter().any(|s| s == "zone:GND"));
     assert!(diag["hint"].as_str().unwrap().contains("zone.relieve"), "{}", diag["hint"]);
+    // What stands where the other spokes would run is named: the track of the other net, as
+    // a subject, and the hint says whose it is to move (D119).
+    assert!(
+        starved[0].contains("in the way of the others: track#") && starved[0].contains("(net VIN)"),
+        "{}",
+        starved[0]
+    );
+    let subjects: Vec<&str> = diag["subjects"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(subjects.iter().any(|s| s.starts_with("track#")), "{subjects:?}");
+    assert!(diag["hint"].as_str().unwrap().contains("`route.rip VIN`"), "{}", diag["hint"]);
+    let o = exec(&r, &mut s, "zone.thermals", json!({}));
+    let listed = &o["output"]["pads"][0];
+    assert_eq!((listed["pad"].as_str(), listed["state"].as_str()), (Some("J1.1"), Some("starved")), "{listed}");
+    assert_eq!(listed["blocked"][0]["kind"], "track", "{listed}");
     assert_eq!(findings(&exec(&r, &mut s, "fab.check", json!({"fab": "generic"})), "fab.starved_thermal").len(), 1);
     // A minimum of one accepts it; zero turns the check off.
     exec(&r, &mut s, "board.rules", json!({"min_thermal_spokes": 1}));
@@ -639,4 +663,205 @@ fn normal_flow_says_what_routing_left() {
     assert_eq!(o["output"]["thermal"], Value::Null, "{}", o["output"]);
     let o = exec(&r, &mut s, "export.gerber", json!({"dir": d.path().join("out")}));
     assert!(o["output"].is_object());
+}
+
+/// `zone.relieve` fills the board and reads its pads after each change, taking from the time
+/// before what is as it was; the reference makes every fill and reading from scratch
+/// (`thermal::relieve_uncached`). Both leave the same board, the same report and the same
+/// joints (D119; `tests/zone_relieve.rs` has the corpus boards).
+#[test]
+fn relieve_is_the_relieve_from_scratch() {
+    fn same(s: &Session, what: &str) -> thermal::Relieved {
+        let p = s.project.as_ref().unwrap();
+        let (mut kept, mut scratch) = (p.clone(), p.clone());
+        let (a, ja) = thermal::relieve(&mut kept, None, false);
+        let (b, jb) = thermal::relieve_uncached(&mut scratch, None, false);
+        assert_eq!(a, b, "{what}: the report");
+        assert_eq!(ja, jb, "{what}: the joints");
+        assert!(kept == scratch, "{what}: the board");
+        // And once more, with everything the first run left.
+        let mut again = p.clone();
+        let (c, jc) = thermal::relieve(&mut again, None, false);
+        assert!(c == b && jc == jb && again == scratch, "{what}: a second run");
+        a
+    }
+    let all = json!(["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]);
+    // A solid zone on every layer.
+    let (_d, r, mut s) = setup();
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "GND", "net": "GND", "layers": all, "outline": "board", "pads": "solid"}),
+    );
+    let out = same(&s, "solid zone");
+    assert_eq!(out.zones.len(), 1);
+    // Spokes as wide as the small pads: narrowed on the footprint.
+    let (_d, r, mut s) = setup();
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "GND", "net": "GND", "layers": all, "outline": "board", "thermal_spoke": "0.5mm"}),
+    );
+    let out = same(&s, "wide spokes");
+    assert!(!out.narrowed.is_empty(), "{out:?}");
+    // A pin fenced by another net, with a slot: a track of the net through it; with a wider
+    // minimum track, solid on that layer; closed on three sides with long legs, left starved.
+    for (case, min_track) in [("slot", None), ("slot too narrow", Some("0.5mm"))] {
+        let (_d, r, mut s) = setup();
+        exec(
+            &r,
+            &mut s,
+            "zone.add",
+            json!({"name": "GND", "net": "GND", "layers": ["B.Cu", "In1.Cu"], "outline": "board", "pads": "solid"}),
+        );
+        let at = joint(&joints(&s), "J1.1", "B.Cu").at;
+        let (x, y, d) = (at.x.0, at.y.0, 1_300_000);
+        let fence = [(x + 100_000, y - d), (x - d, y - d), (x - d, y + d), (x + d, y + d), (x + d, y - d)];
+        let pts: Vec<Value> = fence.iter().map(|(a, b)| json!([format!("{a}nm"), format!("{b}nm")])).collect();
+        exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}));
+        if let Some(w) = min_track {
+            exec(&r, &mut s, "board.rules", json!({"min_track_width": w}));
+        }
+        let out = same(&s, case);
+        assert_eq!((out.tracks.len(), out.solid.len()), if min_track.is_none() { (1, 0) } else { (0, 1) }, "{out:?}");
+    }
+    let (_d, r, mut s) = setup();
+    exec(&r, &mut s, "zone.add", json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
+    let at = joint(&joints(&s), "J1.1", "B.Cu").at;
+    let (x, y, d) = (at.x.0, at.y.0, 1_300_000);
+    let u = [(x - d, y - 3_000_000), (x - d, y + d), (x + d, y + d), (x + d, y - 3_000_000)];
+    let pts: Vec<Value> = u.iter().map(|(a, b)| json!([format!("{a}nm"), format!("{b}nm")])).collect();
+    exec(&r, &mut s, "track.add", json!({"layer": "B.Cu", "net": "VIN", "points": pts}));
+    same(&s, "tight U");
+}
+
+/// A pad that says what it is solid for (D119): a press-fit pin, a terminal, a heat pad,
+/// stitching. It is solid without a connection being set, the rules leave it alone,
+/// `zone.thermals` shows it, `zone.relieve` keeps it where it removes a solid setting that
+/// says nothing, and the KiCad files carry the one purpose their format has a property for.
+#[test]
+fn solid_for_a_purpose() {
+    let (d, r, mut s) = setup();
+    let all = json!(["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]);
+    exec(&r, &mut s, "zone.add", json!({"name": "GND", "net": "GND", "layers": all, "outline": "board"}));
+    // One placed pad: a press-fit pin.
+    let o = exec(&r, &mut s, "zone.pad", json!({"pads": ["J1.1"], "purpose": "press_fit"}));
+    assert_eq!(o["output"]["pads"][0]["purpose"], "press_fit", "{}", o["output"]);
+    assert_eq!(o["output"]["pads"][0]["zone_connection"], "solid", "solid unless told otherwise");
+    let js = joints(&s);
+    for l in ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"] {
+        let j = joint(&js, "J1.1", l);
+        assert!(j.solid(67).is_some() && j.class == PadClass::Bare && j.meant(true), "{l}: {j:?}");
+    }
+    // Every part with a footprint: a terminal, which is soldered and solid for its current.
+    let fp = {
+        let p = s.project.as_ref().unwrap();
+        cadlab::board::footprint_for(p, "C1").unwrap().name.clone()
+    };
+    exec(&r, &mut s, "footprint.set", json!({"name": fp, "pads": ["2"], "purpose": "terminal"}));
+    let js = joints(&s);
+    let j = joint(&js, "C1.2", "F.Cu");
+    assert!(j.solid(67).is_some() && j.class == PadClass::Smd && j.meant(true), "{j:?}");
+    let o = exec(&r, &mut s, "drc.run", json!({}));
+    assert!(findings(&o, "drc.solid_pad").is_empty(), "{:#?}", findings(&o, "drc.solid_pad"));
+    let o = exec(&r, &mut s, "zone.thermals", json!({}));
+    let listed: Vec<(&str, &str, &str)> = o["output"]["pads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| (j["pad"].as_str().unwrap(), j["state"].as_str().unwrap(), j["purpose"].as_str().unwrap_or("")))
+        .collect();
+    assert!(
+        listed.contains(&("C1.2", "meant", "terminal")) && listed.contains(&("C2.2", "meant", "terminal")),
+        "{listed:?}"
+    );
+    // The repair keeps what says what it is for.
+    let o = exec(&r, &mut s, "zone.relieve", json!({}));
+    assert_eq!(o["output"]["removed"], json!([]), "{}", o["output"]);
+    let js = joints(&s);
+    assert!(joint(&js, "C1.2", "F.Cu").solid(67).is_some() && joint(&js, "J1.1", "In1.Cu").solid(67).is_some());
+    // KiCad: a heat pad has a pad property in the file format, the others have none.
+    exec(&r, &mut s, "zone.pad", json!({"pads": ["U2.1"], "purpose": "heat"}));
+    let pcb = d.path().join("purpose.kicad_pcb");
+    let o = exec(&r, &mut s, "board.export_kicad", json!({"path": pcb}));
+    let text = std::fs::read_to_string(&pcb).unwrap();
+    assert_eq!(text.matches("(property pad_prop_heatsink)").count(), 1, "U2.1 alone");
+    let note = findings(&o, "export.pad_purpose");
+    assert!(note.len() == 1 && note[0].contains("J1.1 (press_fit)") && note[0].contains("C1.2 (terminal)"), "{note:?}");
+    // Read back, the heat pad says so again.
+    let mut back = cadlab::model::Project::new("back");
+    let opts = cadlab::kicad_import::BoardImportOptions { file_name: "purpose.kicad_pcb".into(), ..Default::default() };
+    assert!(cadlab::kicad_import::import(&mut back, &text, &opts).is_ok());
+    let heat: Vec<String> = cadlab::board::placed_pads(&back)
+        .iter()
+        .filter(|pp| pp.overrides.purpose == Some(cadlab::model::footprint::PadPurpose::Heat))
+        .map(|pp| format!("{}.{}", pp.refdes, pp.number))
+        .collect();
+    assert_eq!(heat, ["U2.1"]);
+    // Unset: relieved again.
+    exec(&r, &mut s, "zone.pad", json!({"pads": ["J1.1"], "unset": ["all"]}));
+    let js = joints(&s);
+    let j = joint(&js, "J1.1", "In1.Cu");
+    assert!(j.solid(67).is_none() && j.class == PadClass::Through && j.spokes == 4, "{j:?}");
+}
+
+/// The rule `thermal_required` (D119): the thermal findings of the fab check are errors, which
+/// stop the export; a solid setting alone no longer says "meant", a purpose or a placed
+/// pad's reason does; `zone.relieve` clears them. Off, which is the default, they are warnings.
+#[test]
+fn thermal_relief_required() {
+    let (_d, r, mut s) = setup();
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "GND", "net": "GND", "layers": ["F.Cu"], "outline": "board", "pads": "solid"}),
+    );
+    let severities = |o: &Value, code: &str| -> Vec<String> {
+        o["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["code"] == code)
+            .map(|d| d["severity"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    assert_eq!(severities(&o, "fab.solid_pad"), vec!["warning"; 4]);
+    // A setting on the footprint: meant, while relief is not required.
+    let fp = {
+        let p = s.project.as_ref().unwrap();
+        cadlab::board::footprint_for(p, "J1").unwrap().name.clone()
+    };
+    exec(&r, &mut s, "footprint.set", json!({"name": fp, "pads": ["1"], "zone_connection": "solid"}));
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    assert_eq!(severities(&o, "fab.solid_pad").len(), 3);
+    // Required: errors, and the setting alone is not enough.
+    let o = exec(&r, &mut s, "board.rules", json!({"thermal_required": true}));
+    assert_eq!(o["output"]["thermal_required"], true, "{}", o["output"]);
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    assert_eq!(severities(&o, "fab.solid_pad"), vec!["error"; 4], "{o}");
+    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "fab.solid_pad").unwrap();
+    assert!(
+        d["hint"].as_str().unwrap().contains("--purpose") && d["hint"].as_str().unwrap().contains("thermal-required"),
+        "{d}"
+    );
+    // A waiver does not take an error away.
+    exec(&r, &mut s, "drc.waive", json!({"code": "drc.solid_pad", "subjects": ["zone:GND"], "reason": "reflow only"}));
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    assert_eq!(severities(&o, "fab.solid_pad").len(), 4);
+    // A purpose does, and so does a placed pad's setting with its reason.
+    exec(&r, &mut s, "footprint.set", json!({"name": fp, "pads": ["1"], "purpose": "press_fit"}));
+    exec(&r, &mut s, "zone.pad", json!({"pads": ["C1.2"], "connection": "solid", "reason": "carries 6 A"}));
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    let left = findings(&o, "fab.solid_pad");
+    assert!(left.len() == 2 && !left.iter().any(|m| m.contains("J1.1") || m.contains("C1.2")), "{left:#?}");
+    // The repair clears the rest.
+    exec(&r, &mut s, "zone.relieve", json!({}));
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
+    for code in ["fab.solid_pad", "fab.thermal_nominal", "fab.starved_thermal", "fab.thermal_size"] {
+        assert!(findings(&o, code).is_empty(), "{code}: {:#?}", findings(&o, code));
+    }
 }

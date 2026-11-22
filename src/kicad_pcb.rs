@@ -67,6 +67,9 @@ pub struct KicadExport {
     /// one connection per pad, so the file has the pad's connection for every layer (the
     /// fill written is cadlab's; KiCad's own refill differs on those layers).
     pub pad_layers: Vec<(String, String)>,
+    /// Pads that say what they are solid for in a way the file format has no pad property
+    /// for (press-fit, terminal, stitching): pad and purpose. Their zone connection is written.
+    pub pad_purposes: Vec<(String, String)>,
     /// Footprints written.
     pub footprints: usize,
     /// UUID of every written object → the cadlab object it comes from (`track#4`, `via#2`,
@@ -304,6 +307,7 @@ struct Writer<'a> {
     /// Placed pads whose connection is set per layer, with the layers: KiCad has one
     /// connection per pad.
     pad_layers: Vec<(String, String)>,
+    pad_purposes: Vec<(String, String)>,
 }
 
 /// The spoke width cadlab fits to small pads (half the shorter side, `zones::Relief::of`), per
@@ -418,6 +422,7 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
         uuids: Default::default(),
         fitted: fitted_widths(p),
         pad_layers: Vec::new(),
+        pad_purposes: Vec::new(),
     };
 
     let _ = writeln!(
@@ -491,6 +496,7 @@ pub fn export(p: &Project, name: &str) -> KicadExport {
         rules,
         warnings: w.warnings,
         pad_layers: w.pad_layers,
+        pad_purposes: w.pad_purposes,
         footprints,
         uuids: w.uuids.into_inner(),
     }
@@ -698,9 +704,14 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
         let join = pf.pads.get(&pad.number);
         let fitted = w.fitted.get(&(refdes.to_string(), pad.number.clone())).copied();
         let with_own;
+        let purpose = join.and_then(|j| j.purpose).or(pad.overrides.purpose).or(fp.overrides.purpose);
+        if let Some(q) = purpose.filter(|q| *q != crate::model::footprint::PadPurpose::Heat) {
+            w.pad_purposes.push((format!("{refdes}.{}", pad.number), q.name().to_string()));
+        }
         let pad = if join.is_some()
             || fitted.is_some()
             || (pad.overrides.thermal_angle.is_none() && fp.overrides.thermal_angle.is_some())
+            || (pad.overrides.purpose.is_none() && fp.overrides.purpose.is_some())
         {
             let mut c = pad.clone();
             if let Some(j) = join {
@@ -711,6 +722,7 @@ fn write_footprint(w: &mut Writer<'_>, refdes: &str, pf: &PlacedFootprint, fp: &
                 }
             }
             c.overrides.thermal_angle = c.overrides.thermal_angle.or(fp.overrides.thermal_angle);
+            c.overrides.purpose = purpose;
             if c.overrides.thermal_spoke.is_none() && fp.overrides.thermal_spoke.is_none() {
                 c.overrides.thermal_spoke = fitted;
             }
@@ -1045,6 +1057,11 @@ fn overrides_text(o: &crate::model::footprint::Overrides, pad: bool) -> String {
     // Pads only (see `write_footprint`, which hands a footprint's angle down to its pads).
     if let (true, Some(a)) = (pad, o.thermal_angle) {
         let _ = write!(s, " (thermal_bridge_angle {})", deg(a));
+    }
+    // The one purpose the file format has a pad property for; the others go over as the
+    // pad's zone connection alone (`export.pad_purpose`).
+    if let (true, Some(crate::model::footprint::PadPurpose::Heat)) = (pad, o.purpose) {
+        let _ = write!(s, " (property pad_prop_heatsink)");
     }
     s
 }

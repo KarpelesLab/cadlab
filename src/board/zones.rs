@@ -70,6 +70,9 @@ pub struct ZoneParams {
     /// rules' minimum track width), so that small pads are relieved too ([`Relief::of`]).
     /// `None`: the zone's width as given, for every pad.
     pub spoke_floor: Option<Nm>,
+    /// The narrowest copper a spoke may be left with where it is trimmed (the rules' minimum
+    /// track width; 0: half the spoke's width, as the trim asks on its own).
+    pub min_spoke: Nm,
 }
 
 /// Default number of thermal spokes per pad.
@@ -104,6 +107,7 @@ pub fn zone_params(p: &Project, z: &Zone) -> ZoneParams {
         thermal_angle: z.thermal_angle,
         thermal_spokes: z.thermal_spokes.unwrap_or(DEFAULT_SPOKES).clamp(1, MAX_SPOKES),
         spoke_floor: z.thermal_spoke.is_none().then_some(rules.min_track_width),
+        min_spoke: rules.min_track_width,
     }
 }
 
@@ -166,6 +170,9 @@ pub struct Relief {
     /// half a step (for four spokes, the other four of the eight directions), when neither
     /// the pad nor the zone sets an angle; else none (D112).
     pub alt: Vec<Angle>,
+    /// The narrowest copper a trimmed spoke may join the pad to the pour by (nm): the rules'
+    /// minimum track width, or the spoke's own width when that is less; 0: not asked (D119).
+    pub min: i64,
 }
 
 impl Relief {
@@ -188,7 +195,7 @@ impl Relief {
         let free = t.angle.is_none() && prm.thermal_angle.is_none();
         let alt =
             if free { dirs.iter().map(|d| (*d + Angle((180_000 / n) as i32)).normalized()).collect() } else { vec![] };
-        Relief { gap, w, dirs, alt }
+        Relief { gap, w, dirs, alt, min: prm.min_spoke.0.clamp(0, w.max(0)) }
     }
 
     /// Whether every spoke, the alternatives included, runs along an axis.
@@ -335,7 +342,8 @@ fn slanted_spoke(item: &CopperItem, b: &poly::Rect, a: Angle, gap: i64, w: i64) 
 /// A spoke trimmed where it would cross another item's clearance (a pad squeezed between
 /// other-net items, where no whole spoke fits): `spoke` ∩ `avail`, kept only within the pad's
 /// thermal gap and the pour, in pieces joining the pad to the pour over at least half the spoke
-/// width. Otherwise nothing.
+/// width, and by copper nowhere narrower than the relief's minimum (`Relief::min`: what is
+/// left of a spoke is still a track that can be made). Otherwise nothing.
 pub fn trimmed_spoke(
     it: &CopperItem,
     r: &Relief,
@@ -382,6 +390,15 @@ fn trimmed_spoke_in(
         .execute()?;
     if joint.is_empty() || poly::offset(&joint, -(r.w / 4), Join::Round, FILL_TOL)?.is_empty() {
         return Ok(vec![]);
+    }
+    // No narrower than a track may be: shrunk by half the minimum width (less the slack of
+    // the arcs), a piece must still reach from the pad to the pour.
+    let shrink = r.min / 2 - 2 * FILL_TOL.tolerance;
+    if shrink > r.w / 4 {
+        let core = poly::offset(&piece, -shrink, Join::Round, FILL_TOL)?;
+        if !core.iter().any(|q| poly::intersects(q, &it.shape) && poly::intersects(q, fill)) {
+            return Ok(vec![]);
+        }
     }
     Ok(piece)
 }
@@ -620,12 +637,167 @@ fn spoke_memo<T>(f: impl FnOnce(&mut SpokeMemo) -> Option<T>) -> Option<T> {
 
 /// Fills one zone layer. The result is canonical (deterministic).
 pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
-    fill_layer_with(input, false)
+    fill_layer_with(input, false, None)
+}
+
+/// What a fill makes of one copper item, and nothing else of the item: a zone layer whose
+/// items are these, in this order, has the same fill ([`LayerKey`]).
+#[derive(Clone, PartialEq, Eq)]
+struct ItemKey {
+    /// Of the zone's net.
+    same: bool,
+    /// A pad.
+    pad: bool,
+    shape: PolygonSet,
+    /// Of a same-net pad: where its spokes start, how it joins, its relief.
+    anchor: (i64, i64),
+    connection: Option<PadConnection>,
+    through: bool,
+    thermal: Option<crate::board::PadThermal>,
+    /// Of an item of another net: the clearance kept from it.
+    clearance: i64,
+}
+
+/// Everything the fill of one zone layer is made from ([`fill_layer`] is a function of it).
+#[derive(Clone, PartialEq, Eq)]
+struct LayerKey {
+    net: bool,
+    outline: Vec<poly::Point>,
+    board: Option<PolygonSet>,
+    items: Vec<ItemKey>,
+    keepaway: Vec<Polygon>,
+    params: ZoneParams,
+}
+
+impl LayerKey {
+    fn of(input: &LayerInput<'_>) -> LayerKey {
+        let items = input
+            .items
+            .iter()
+            .map(|(it, c)| {
+                let same = same_net(it.net.as_deref(), input.net);
+                let pad = matches!(it.item, ItemRef::Pad(..));
+                if same && pad {
+                    ItemKey {
+                        same,
+                        pad,
+                        shape: it.shape.clone(),
+                        anchor: (it.anchor.x.0, it.anchor.y.0),
+                        connection: it.local.connection,
+                        through: it.local.through,
+                        thermal: it.local.thermal,
+                        clearance: 0,
+                    }
+                } else {
+                    ItemKey {
+                        same,
+                        pad,
+                        shape: it.shape.clone(),
+                        anchor: (0, 0),
+                        connection: None,
+                        through: false,
+                        thermal: None,
+                        clearance: if same { 0 } else { c.0 },
+                    }
+                }
+            })
+            .collect();
+        LayerKey {
+            net: input.net.is_some(),
+            outline: input.outline.to_vec(),
+            board: input.board.cloned(),
+            items,
+            keepaway: input.keepaway.clone(),
+            params: input.params,
+        }
+    }
+
+    fn points(&self) -> usize {
+        let of = |s: &[Polygon]| s.iter().map(Polygon::vertex_count).sum::<usize>();
+        self.outline.len()
+            + self.board.as_deref().map_or(0, of)
+            + self.items.iter().map(|i| of(&i.shape)).sum::<usize>()
+            + of(&self.keepaway)
+    }
+}
+
+/// What is kept of the last fill of one zone on one layer: everything it was made from, the
+/// fill, and its allowed area (the zone's area less other nets' copper and the keep-aways,
+/// which a change of a pad's relief leaves as it was).
+struct LayerSlot {
+    key: LayerKey,
+    fill: Option<PolygonSet>,
+    avail: PolygonSet,
+}
+
+impl LayerKey {
+    /// Whether the allowed area of a fill made from `self` is that of one made from `o`:
+    /// the same area, the same copper of other nets with the same clearances, in the same
+    /// order, and the same keep-aways.
+    fn same_allowed(&self, o: &LayerKey) -> bool {
+        let (a, b) = (self.items.iter().filter(|i| !i.same), o.items.iter().filter(|i| !i.same));
+        self.net == o.net
+            && self.outline == o.outline
+            && self.board == o.board
+            && self.params.clearance == o.params.clearance
+            && self.keepaway == o.keepaway
+            && a.map(|i| (&i.shape, i.clearance)).eq(b.map(|i| (&i.shape, i.clearance)))
+    }
+}
+
+impl LayerSlot {
+    fn points(&self) -> usize {
+        let of = |s: &[Polygon]| s.iter().map(Polygon::vertex_count).sum::<usize>();
+        self.key.points() + self.fill.as_deref().map_or(0, of) + of(&self.avail)
+    }
+}
+
+/// The last fill of each zone layer made in this process ([`LayerSlot`]): a fill of a board
+/// that differs from an earlier one takes the zone layers whose every input is as it was, and
+/// of the others the allowed area where that is (D119). Emptied when it holds
+/// [`LAYER_POINTS`].
+#[derive(Default)]
+struct LayerMemo {
+    slots: BTreeMap<(ObjectId, String), LayerSlot>,
+    points: usize,
+}
+
+/// The most points [`LayerMemo`] holds (16 bytes each).
+const LAYER_POINTS: usize = 10_000_000;
+
+impl LayerMemo {
+    fn put(&mut self, slot: &(ObjectId, String), new: LayerSlot) {
+        let add = new.points();
+        if let Some(old) = self.slots.remove(slot) {
+            self.points = self.points.saturating_sub(old.points());
+        }
+        if self.points + add > LAYER_POINTS {
+            self.slots.clear();
+            self.points = 0;
+        }
+        if add <= LAYER_POINTS {
+            self.points += add;
+            self.slots.insert(slot.clone(), new);
+        }
+    }
+}
+
+static LAYERS: std::sync::Mutex<Option<LayerMemo>> = std::sync::Mutex::new(None);
+
+fn layer_memo<T>(f: impl FnOnce(&mut LayerMemo) -> Option<T>) -> Option<T> {
+    f(LAYERS.lock().ok()?.get_or_insert_with(LayerMemo::default))
 }
 
 /// [`fill_layer`]; with `reuse`, the reliefs of pads whose surroundings are as they were in an
-/// earlier fill of this process are taken from it ([`SpokeMemo`]), which gives the same fill.
-fn fill_layer_with(input: &LayerInput<'_>, reuse: bool) -> Result<PolygonSet, poly::Error> {
+/// earlier fill of this process are taken from it ([`SpokeMemo`]), and with `allowed` the
+/// allowed area is the one given when it holds one (that of an earlier fill made from the
+/// same area, copper of other nets and keep-aways, [`LayerMemo`]) and is left there when it
+/// does not; either gives the same fill.
+fn fill_layer_with(
+    input: &LayerInput<'_>,
+    reuse: bool,
+    allowed: Option<&mut Option<PolygonSet>>,
+) -> Result<PolygonSet, poly::Error> {
     let prm = &input.params;
     // Area: zone outline ∩ board area.
     let outline: Ring = input.outline.to_vec().into();
@@ -683,23 +855,37 @@ fn fill_layer_with(input: &LayerInput<'_>, reuse: bool) -> Result<PolygonSet, po
         // Nothing of the net on this layer: every island would be unconnected.
         return Ok(vec![]);
     }
-    let mut hard: Vec<Polygon> = input.keepaway.clone();
-    // Item outlines may overlap (a teardrop over its pad): merge each group first so `offset` gets
-    // canonical input; its linear "looks canonical" check cannot see overlaps, and growing
-    // overlapping rings unmerged rounds differently (docs/POLYGON_LIB.md §8).
-    for (c, shapes) in hard_groups {
-        let shapes = Boolean::new().subject(&shapes, FillRule::NonZero).op(Op::Union).execute()?;
-        hard.extend(poly::offset(&shapes, c + SAFETY, Join::Round, OBSTACLE_TOL)?);
-    }
+    // The allowed copper (where spokes may go) is the area less the hard keep-away.
+    let avail = match allowed {
+        Some(Some(kept)) => kept.clone(),
+        allowed => {
+            let mut hard: Vec<Polygon> = input.keepaway.clone();
+            // Item outlines may overlap (a teardrop over its pad): merge each group first so
+            // `offset` gets canonical input; its linear "looks canonical" check cannot see
+            // overlaps, and growing overlapping rings unmerged rounds differently
+            // (docs/POLYGON_LIB.md §8).
+            for (c, shapes) in hard_groups {
+                let shapes = Boolean::new().subject(&shapes, FillRule::NonZero).op(Op::Union).execute()?;
+                hard.extend(poly::offset(&shapes, c + SAFETY, Join::Round, OBSTACLE_TOL)?);
+            }
+            let avail = Boolean::new()
+                .subject(&area, FillRule::NonZero)
+                .clip(&hard, FillRule::NonZero)
+                .op(Op::Difference)
+                .execute()?;
+            if let Some(out) = allowed {
+                *out = Some(avail.clone());
+            }
+            avail
+        }
+    };
     let mut soft: Vec<Polygon> = Vec::new();
     for (d, shapes) in soft_groups {
         let shapes = Boolean::new().subject(&shapes, FillRule::NonZero).op(Op::Union).execute()?;
         soft.extend(poly::offset(&shapes, d, Join::Round, OBSTACLE_TOL)?);
     }
 
-    // Allowed copper (where spokes may go), then the pour proper.
-    let avail =
-        Boolean::new().subject(&area, FillRule::NonZero).clip(&hard, FillRule::NonZero).op(Op::Difference).execute()?;
+    // The pour proper.
     let mut fill = if soft.is_empty() {
         avail.clone()
     } else {
@@ -883,7 +1069,7 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     {
         return e.fills.clone();
     }
-    let fills = fill_with(p, base, &npth, &item_c, true);
+    let fills = fill_with(p, base, &npth, &item_c, Reuse::Keep);
     if let Ok(mut m) = MEMO.lock() {
         m.retain(|e| !e.matches(p, base, &npth, &item_c));
         let c = p.circuit();
@@ -913,11 +1099,22 @@ pub fn clear_fill_cache() {
     if let Ok(mut m) = SPOKES.lock() {
         *m = None;
     }
+    if let Ok(mut m) = LAYERS.lock() {
+        *m = None;
+    }
+    super::thermal::clear_joint_cache();
+}
+
+/// [`fill_zones`] for a board that is looked at once and not again (the pours as they would
+/// be with every pad solid, which `thermal::relieve` looks for tracks in): the same fills,
+/// made with what earlier fills left and not kept as a board's fills are.
+pub fn fill_zones_once(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
+    fill_with(p, base, &drill_holes(p), &item_clearances(p, base), Reuse::Take)
 }
 
 /// [`fill_zones`] without the in-process reuse, of whole fills or of parts of them.
 pub fn fill_zones_uncached(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
-    fill_with(p, base, &drill_holes(p), &item_clearances(p, base), false)
+    fill_with(p, base, &drill_holes(p), &item_clearances(p, base), Reuse::None)
 }
 
 /// The clearance the DRC requires around each base item: its custom rule's, else its local
@@ -965,9 +1162,22 @@ fn max_relief(items: &[(&CopperItem, Nm)], prm: &ZoneParams) -> i64 {
         .fold(zone, i64::max)
 }
 
-/// The fills, each zone layer from scratch; with `reuse`, parts of earlier fills are taken where
-/// everything they were made from is as it was (the reliefs of pads, [`SpokeMemo`]).
-fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm], reuse: bool) -> Vec<ZoneFill> {
+/// What a fill takes from earlier fills of this process and leaves for later ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reuse {
+    /// Nothing: every zone layer from scratch.
+    None,
+    /// Takes what is kept and keeps what it makes: zone layers and their allowed areas
+    /// ([`LayerMemo`]), reliefs of pads ([`SpokeMemo`]).
+    Keep,
+    /// Takes what is kept, and keeps reliefs and allowed areas but not its zone layers: a
+    /// board looked at once.
+    Take,
+}
+
+/// The fills; with `reuse`, parts of earlier fills are taken where everything they were made
+/// from is as it was: whole zone layers, their allowed areas, the reliefs of pads.
+fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm], reuse: Reuse) -> Vec<ZoneFill> {
     let board = p.board();
     if board.zones.is_empty() {
         return vec![];
@@ -1091,26 +1301,64 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
                         keepaway.push(Polygon::new(ring, vec![]));
                     }
                 }
-                fill_layer_with(
-                    &LayerInput {
-                        net: z.net.as_deref(),
-                        outline: &outline,
-                        board: barea,
-                        items: match window {
-                            Some(w) => {
-                                // Every distance `fill_layer` grows an item by, plus the arc and
-                                // rounding margins of `reaches`.
-                                let d = max_c.max(prm.clearance.0).max(max_relief(&items_on, &prm));
-                                let q = w.expand(d + OBSTACLE_TOL.tolerance + SAFETY + 1);
-                                index.query(&q).into_iter().map(|i| items_on[i as usize]).collect()
-                            }
-                            None => items_on.clone(),
-                        },
-                        keepaway,
-                        params: prm,
+                let input = LayerInput {
+                    net: z.net.as_deref(),
+                    outline: &outline,
+                    board: barea,
+                    items: match window {
+                        Some(w) => {
+                            // Every distance `fill_layer` grows an item by, plus the arc and
+                            // rounding margins of `reaches`.
+                            let d = max_c.max(prm.clearance.0).max(max_relief(&items_on, &prm));
+                            let q = w.expand(d + OBSTACLE_TOL.tolerance + SAFETY + 1);
+                            index.query(&q).into_iter().map(|i| items_on[i as usize]).collect()
+                        }
+                        None => items_on.clone(),
                     },
-                    reuse,
-                )
+                    keepaway,
+                    params: prm,
+                };
+                if reuse == Reuse::None {
+                    return fill_layer_with(&input, false, None);
+                }
+                // The whole zone layer, when everything it is made from is as it was; else its
+                // allowed area, when what that is made from is.
+                let slot = (z.id, layer.to_string());
+                let key = LayerKey::of(&input);
+                let mut allowed: Option<PolygonSet> = None;
+                if let Some(found) = layer_memo(|m| {
+                    let kept = m.slots.get(&slot)?;
+                    if kept.key == key
+                        && let Some(fill) = &kept.fill
+                    {
+                        return Some(fill.clone());
+                    }
+                    if kept.key.same_allowed(&key) {
+                        allowed = Some(kept.avail.clone());
+                    }
+                    None
+                }) {
+                    return Ok(found);
+                }
+                // An early return of `fill_layer_with` (no area, nothing of the net) leaves no
+                // allowed area: nothing is kept then.
+                let made = fill_layer_with(&input, true, Some(&mut allowed))?;
+                if let Some(avail) = allowed {
+                    // A board looked at once leaves its allowed areas and not its fills.
+                    let fill = (reuse == Reuse::Keep).then(|| made.clone());
+                    layer_memo(|m| {
+                        if fill.is_none()
+                            && let Some(kept) = m.slots.get(&slot)
+                            && kept.fill.is_some()
+                            && kept.key.same_allowed(&key)
+                        {
+                            return Some(());
+                        }
+                        m.put(&slot, LayerSlot { key, fill, avail });
+                        Some(())
+                    });
+                }
+                Ok(made)
             })();
             match result {
                 Ok(f) => fill.fill = f,
@@ -1134,8 +1382,13 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
 
 /// Zone fills as copper items: one item per island, `ItemRef::Zone(id, layer, island)`.
 pub fn zone_items(p: &Project, base: &[CopperItem]) -> Vec<CopperItem> {
+    fills_as_items(fill_zones(p, base))
+}
+
+/// Fills as copper items, as [`zone_items`] gives those of the board.
+pub fn fills_as_items(fills: Vec<ZoneFill>) -> Vec<CopperItem> {
     let mut out = Vec::new();
-    for f in fill_zones(p, base) {
+    for f in fills {
         for (i, poly) in f.fill.into_iter().enumerate() {
             let anchor = poly.outer.0.first().copied().map(Into::into).unwrap_or_default();
             out.push(CopperItem {

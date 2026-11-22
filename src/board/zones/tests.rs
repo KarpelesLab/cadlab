@@ -76,6 +76,7 @@ fn params(pads: PadConnection) -> ZoneParams {
         thermal_angle: None,
         thermal_spokes: 4,
         spoke_floor: None,
+        min_spoke: Nm::ZERO,
     }
 }
 
@@ -568,9 +569,18 @@ fn reliefs_reused_give_the_fill_made_from_scratch() {
     let prm = params(PadConnection::Thermal);
     let both = |items: &[(CopperItem, Nm)], what: &str| {
         let inp = input(Some("GND"), &outline, items, prm);
-        let (reused, fresh) = (fill_layer_with(&inp, true).unwrap(), fill_layer(&inp).unwrap());
+        // With the reliefs of earlier fills alone, and with the allowed area of a fill made
+        // from the same copper of other nets too.
+        let mut allowed = None;
+        let (reused, fresh) = (fill_layer_with(&inp, true, None).unwrap(), fill_layer(&inp).unwrap());
         assert_eq!(reused, fresh, "{what}");
-        assert_eq!(fill_layer_with(&inp, true).unwrap(), fresh, "{what}, again");
+        assert_eq!(fill_layer_with(&inp, true, Some(&mut allowed)).unwrap(), fresh, "{what}, again");
+        assert!(allowed.is_some(), "{what}: the allowed area is given back");
+        assert_eq!(
+            fill_layer_with(&inp, true, Some(&mut allowed)).unwrap(),
+            fresh,
+            "{what}, with the allowed area kept"
+        );
         fresh
     };
     let bare = both(&items, "no track");
@@ -593,4 +603,45 @@ fn reliefs_reused_give_the_fill_made_from_scratch() {
         both(&items, "a track out");
     }
     assert_eq!(both(&items, "no track again"), bare);
+    // A pad's own relief changes the pour and not the allowed area, which is taken from the
+    // fill before: the fill is still the one made from scratch.
+    for k in [0usize, 7, 20] {
+        items[k].0.local.thermal =
+            Some(crate::board::PadThermal { gap: Some(Nm(150_000)), spoke: Some(Nm(100_000)), ..Default::default() });
+        assert_ne!(both(&items, &format!("pad {k} with a relief of its own")), bare);
+    }
+    items[3].0.local.connection = Some(PadConnection::Solid);
+    both(&items, "a pad solid");
+}
+
+/// What is left of a trimmed spoke is copper that can be made (D119): a spoke squeezed to
+/// less than the minimum track width between two tracks of another net is dropped where the
+/// relief asks for that width (`Relief::min`, from the rules), and kept as before where it
+/// does not.
+#[test]
+fn trimmed_spoke_is_no_narrower_than_a_track() {
+    let outline = square(0, 0, 20 * MM, 20 * MM);
+    let (cx, cy) = (10 * MM, 10 * MM);
+    // A pad with a spoke of 0.4 mm to the right, and two tracks of another net that leave
+    // 0.24 mm of copper between their clearances where it crosses the relief gap.
+    let mut prm = params(PadConnection::Thermal);
+    prm.thermal_spoke = Nm(400_000);
+    prm.thermal_angle = Some(Angle::ZERO);
+    prm.thermal_spokes = 1;
+    let half = 120_000 + prm.clearance.0 + SAFETY + 100_000;
+    let items = vec![
+        (pad("GND", cx, cy, 500_000, 500_000), Nm::ZERO),
+        (track("A", (cx + 700_000, cy + half), (cx + 3 * MM, cy + half), 200_000), Nm::ZERO),
+        (track("A", (cx + 700_000, cy - half), (cx + 3 * MM, cy - half), 200_000), Nm::ZERO),
+    ];
+    let pad_shape = items[0].0.shape.clone();
+    let joined = |prm: ZoneParams| {
+        let fill = fill_layer(&input(Some("GND"), &outline, &items, prm)).unwrap();
+        fill.iter().any(|q| poly::intersects(q, &pad_shape))
+    };
+    assert!(joined(prm), "half the spoke's width is enough where no minimum is asked");
+    prm.min_spoke = Nm(200_000);
+    assert!(joined(prm), "0.24 mm is a track of 0.2 mm");
+    prm.min_spoke = Nm(320_000);
+    assert!(!joined(prm), "0.24 mm is no track of 0.32 mm");
 }

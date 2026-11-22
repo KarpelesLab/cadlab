@@ -130,6 +130,13 @@ fn read_overrides(e: &Sexpr) -> Overrides {
         thermal_gap: len("thermal_gap"),
         thermal_spoke: len("thermal_bridge_width").or_else(|| len("thermal_width")),
         thermal_angle: e.child_value("thermal_bridge_angle").and_then(super::deg).map(Angle::normalized),
+        // `(property pad_prop_heatsink)`: of the pad properties the file format documents, the
+        // one that says a pad is there to spread heat. The others (BGA, fiducial, test point,
+        // castellated) say nothing about how a pad joins a pour.
+        purpose: e
+            .all("property")
+            .any(|c| c.items().len() == 2 && c.items()[1].atom() == Some("pad_prop_heatsink"))
+            .then_some(crate::model::footprint::PadPurpose::Heat),
     }
 }
 

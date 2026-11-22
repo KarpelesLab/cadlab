@@ -591,6 +591,9 @@ pub struct ItemLocal {
     pub tie_nets: Vec<String>,
     /// Pads: thermal relief settings and orientation.
     pub thermal: Option<PadThermal>,
+    /// Pads: what the pad is solid for on purpose (its own, its placement's or its
+    /// footprint's `purpose`).
+    pub purpose: Option<crate::model::footprint::PadPurpose>,
 }
 
 /// A pad's thermal relief settings (its own, else its footprint's) and what its spokes'
@@ -702,6 +705,7 @@ pub fn base_copper_items(p: &Project) -> Vec<CopperItem> {
                     mirrored: pp.side == BoardSide::Bottom,
                     round: matches!(pad_shape, PadShape::Circle { .. }),
                 }),
+                purpose: pp.overrides.purpose,
             },
         };
         if matches!(pp.pad.kind, PadKind::Npth { .. }) {

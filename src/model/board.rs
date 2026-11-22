@@ -257,6 +257,13 @@ pub struct Rules {
     /// `drc.thermal_nominal`). 0: not checked.
     #[serde(skip_serializing_if = "is_default_thermal_contact")]
     pub thermal_max_contact: u8,
+    /// Thermal relief is required: a solder pad without relief or short of spokes is an error
+    /// of the fab check (`fab.solid_pad`, `fab.thermal_nominal`, `fab.starved_thermal`,
+    /// `fab.thermal_size`), which stops `fab.export`, and only a pad that says what it is solid
+    /// for (`PadPurpose`, or a placed pad's own setting with its reason) is left alone. Off:
+    /// they are warnings, and any connection set on the pad or its footprint counts as meant.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub thermal_required: bool,
 }
 
 /// Default `min_thermal_spokes` (left out of saved rules at this value).
@@ -340,6 +347,7 @@ impl Default for Rules {
             silk_check: SilkCheck::Mask,
             min_thermal_spokes: DEFAULT_MIN_THERMAL_SPOKES,
             thermal_max_contact: DEFAULT_THERMAL_MAX_CONTACT,
+            thermal_required: false,
         }
     }
 }
@@ -587,6 +595,10 @@ pub struct PadJoin {
     /// relief, and reports carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What this pad is solid for on purpose (a press-fit pin, a high-current terminal, a heat
+    /// pad, stitching), before the pad's and the footprint's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<crate::model::footprint::PadPurpose>,
 }
 
 impl PadJoin {
@@ -597,6 +609,7 @@ impl PadJoin {
             && self.thermal_spoke.is_none()
             && self.thermal_angle.is_none()
             && self.layers.is_empty()
+            && self.purpose.is_none()
     }
 
     /// These settings over a pad's resolved ones.
@@ -606,6 +619,7 @@ impl PadJoin {
             thermal_gap: self.thermal_gap.or(o.thermal_gap),
             thermal_spoke: self.thermal_spoke.or(o.thermal_spoke),
             thermal_angle: self.thermal_angle.or(o.thermal_angle),
+            purpose: self.purpose.or(o.purpose),
             ..o.clone()
         }
     }
