@@ -1611,6 +1611,121 @@ fn needless(
     (t.into_iter().map(|k| at_t[k]).collect(), v.into_iter().map(|k| at_v[k]).collect())
 }
 
+/// How much further inside its pad than its own half width a track's end is left
+/// ([`pad_ends`]).
+const PAD_END_MARGIN: i64 = 1_000;
+/// The least that an end is moved by.
+const PAD_END_LEAST: i64 = 10_000;
+
+/// Whether a disc of radius `r` round `at` is inside the convex ring `ring`, whose signed
+/// area has the sign `turn`.
+fn disc_in_ring(ring: &[polyclip::Point], turn: i128, at: (i64, i64), r: i64) -> bool {
+    (0..ring.len()).all(|k| {
+        let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+        let (ex, ey) = (i128::from(b.x - a.x), i128::from(b.y - a.y));
+        let cross = (ex * i128::from(at.1 - a.y) - ey * i128::from(at.0 - a.x)) * turn;
+        // The distance to the edge's line is the cross product over the edge's length.
+        let len = ((ex * ex + ey * ey) as f64).sqrt().ceil() as i128 + 1;
+        cross >= i128::from(r) * len
+    })
+}
+
+/// A ring's turn, 1 or -1, if it is convex; `None` if it is not, or has no area.
+fn convex_turn(ring: &[polyclip::Point]) -> Option<i128> {
+    let n = ring.len();
+    let mut turn = 0i128;
+    for k in 0..n {
+        let (a, b, c) = (ring[k], ring[(k + 1) % n], ring[(k + 2) % n]);
+        let cross = i128::from(b.x - a.x) * i128::from(c.y - b.y) - i128::from(b.y - a.y) * i128::from(c.x - b.x);
+        if cross != 0 {
+            if turn != 0 && cross.signum() != turn {
+                return None;
+            }
+            turn = cross.signum();
+        }
+    }
+    (n >= 3 && turn != 0).then_some(turn)
+}
+
+/// Ends the tracks where they are inside the pads of their net, as the native router's end
+/// (D118): guide routes to a pad's centre, the native router to the first point of its grid
+/// inside the pad, and the difference, copper on copper, was a fifth of the track of a board
+/// of through-hole pads (buspirate-rs232 +26 % by the nets both routers close, +7 % outside
+/// the pads). An end of a straight track inside a convex pad of its net on its layer is moved
+/// back along the track for as long as the track's round end stays inside the pad, by its
+/// half width and [`PAD_END_MARGIN`]: what is cut is inside the pad's copper from end to end,
+/// so the copper of the board is the same shape, and so are its fill, its clearances and its
+/// connections. A track with both ends so inside one pad goes. Not the tracks of `keep`
+/// (pairs and nets with a length to keep, whose lengths are counted along the track), nor in
+/// the pads of a net tie. Returns the length taken off.
+fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
+    let pads = geo::placed_pads(p);
+    let mut by_net: BTreeMap<&str, Vec<&PlacedPad>> = BTreeMap::new();
+    for pp in pads.iter().filter(|pp| pp.tie.is_none()) {
+        if let Some(n) = pp.net.as_deref() {
+            by_net.entry(n).or_default().push(pp);
+        }
+    }
+    let before = tracks_length(tracks);
+    let mut gone = vec![false; tracks.len()];
+    for (i, t) in tracks.iter_mut().enumerate() {
+        let Some(own) = t.net.as_deref().filter(|n| !keep.contains(n)).and_then(|n| by_net.get(n)) else { continue };
+        if t.mid.is_some() {
+            continue;
+        }
+        let r = t.width.0 / 2 + PAD_END_MARGIN;
+        for end in 0..2 {
+            let (e, o) = if end == 0 { (t.start, t.end) } else { (t.end, t.start) };
+            let (e, o) = ((e.x.0, e.y.0), (o.x.0, o.y.0));
+            // The pad that holds the end, with its shape on the track's layer.
+            let found = own.iter().filter(|pp| pp.layers.contains(&t.layer)).find_map(|pp| {
+                let shape = pp.layer_shapes.iter().find(|(l, _, _)| *l == t.layer).map_or(&pp.shape, |(_, _, s)| s);
+                let ring = &shape.outer.0;
+                let turn = convex_turn(ring).filter(|_| shape.holes.is_empty())?;
+                disc_in_ring(ring, turn, e, r).then_some((ring, turn))
+            });
+            let Some((ring, turn)) = found else { continue };
+            if disc_in_ring(ring, turn, o, r) {
+                gone[i] = true;
+                break;
+            }
+            // The furthest point towards the other end whose disc is inside: those that
+            // are make an interval from the end, the pad being convex.
+            const STEPS: i64 = 1 << 12;
+            let at = |k: i64| {
+                let on = |a: i64, b: i64| a + ((i128::from(b - a) * i128::from(k)) / i128::from(STEPS)) as i64;
+                (on(e.0, o.0), on(e.1, o.1))
+            };
+            let (mut lo, mut hi) = (0, STEPS);
+            while hi - lo > 1 {
+                let m = (lo + hi) / 2;
+                if disc_in_ring(ring, turn, at(m), r) {
+                    lo = m;
+                } else {
+                    hi = m;
+                }
+            }
+            let to = at(lo);
+            let moved = ((to.0 - e.0) as f64).hypot((to.1 - e.1) as f64);
+            if moved < PAD_END_LEAST as f64 {
+                continue;
+            }
+            let to = Point { x: Nm(to.0), y: Nm(to.1) };
+            if end == 0 {
+                t.start = to;
+            } else {
+                t.end = to;
+            }
+        }
+    }
+    let mut k = 0;
+    tracks.retain(|_| {
+        k += 1;
+        !gone[k - 1]
+    });
+    Nm(before.0 - tracks_length(tracks).0)
+}
+
 /// Verification, as the native router's: cadlab's DRC on `p` with the new copper (IDs from
 /// `p`'s allocator, in order); a piece of new copper holding a flagged item is taken out, a
 /// net's whole after three rounds. Returns the verified board; `reasons` gets the first error
@@ -2606,6 +2721,24 @@ pub(crate) fn route(
     } else {
         (stats.routed as f64 * 1000.0 / stats.connections as f64).round() / 10.0
     };
+    // The tracks end where they are inside their pads, as the native router's do.
+    {
+        let mut keep: BTreeSet<&str> = BTreeSet::new();
+        let nets_of = ad.design.pairs.iter().flat_map(|d| [d.positive, d.negative]);
+        for n in nets_of.chain(ad.design.lengths.iter().flat_map(|l| l.nets.iter().copied())) {
+            if let Some(name) = ad.nets.get(n.index()) {
+                keep.insert(name.as_str());
+            }
+        }
+        let off = pad_ends(&proj, &mut tracks, &keep);
+        if off.0 > 0 {
+            (hooks.progress)(
+                0,
+                None,
+                &format!("guide: {:.1} mm of track inside the pads of its net left out", off.0 as f64 / 1e6),
+            );
+        }
+    }
     stats.tracks = tracks.len();
     stats.vias = vias.len();
     stats.length = tracks_length(&tracks);
@@ -2893,6 +3026,45 @@ mod tests {
     /// buspirate5-rev10): each copper item goes over with its own outline. `board::exact` used
     /// to give both the first pad's, so guide saw a 0.6 mm circle for the 3 mm pad and routed
     /// other nets across it.
+    #[test]
+    fn a_track_ends_where_it_is_inside_the_pad_of_its_net() {
+        let p = project();
+        let r = route(&p, &Scope::Nets(vec!["SIG".into()]), &RouteOptions::default(), &Hooks::none()).expect("route");
+        let pads: Vec<PlacedPad> =
+            geo::placed_pads(&p).into_iter().filter(|pp| pp.net.as_deref() == Some("SIG")).collect();
+        assert!(pads.len() >= 2);
+        // No track of the result ends on a pad's centre, and the board is joined all the same.
+        let ends: Vec<Point> = r.tracks.iter().flat_map(|t| [t.start, t.end]).collect();
+        for pp in &pads {
+            assert!(!ends.contains(&pp.center), "{}.{} {:?}", pp.refdes, pp.number, r.tracks);
+        }
+        let mut q = p.clone();
+        q.board_mut().tracks.extend(r.tracks.iter().cloned());
+        q.board_mut().vias.extend(r.vias.iter().cloned());
+        assert!(geo::ratsnest(&q).iter().all(|l| l.net != "SIG"));
+        // Done again, nothing more comes off; a net that is kept is left as it is.
+        let mut again = r.tracks.clone();
+        assert_eq!(pad_ends(&p, &mut again, &BTreeSet::new()), Nm(0));
+        assert_eq!(again, r.tracks);
+        // A track from a pad's centre straight out of it loses what is inside the pad, less
+        // its own half width, and one that is kept loses nothing.
+        let pp = &pads[0];
+        let far = Point { x: Nm(pp.center.x.0 + 5_000_000), y: pp.center.y };
+        let mut t = r.tracks[0].clone();
+        (t.start, t.end, t.mid) = (pp.center, far, None);
+        t.layer = pp.layers[0].clone();
+        let mut kept = vec![t.clone()];
+        assert_eq!(pad_ends(&p, &mut kept, &BTreeSet::from(["SIG"])), Nm(0));
+        let mut cut = vec![t.clone()];
+        let off = pad_ends(&p, &mut cut, &BTreeSet::new());
+        assert!(off.0 > 0 && cut[0].end == far && cut[0].start.y == pp.center.y, "{off:?} {cut:?}");
+        assert!(cut[0].start.x.0 > pp.center.x.0 && cut[0].start.x.0 < far.x.0);
+        // What is left of it still ends inside the pad.
+        let ring = &pp.shape.outer.0;
+        let turn = convex_turn(ring).expect("a convex pad");
+        assert!(disc_in_ring(ring, turn, (cut[0].start.x.0, cut[0].start.y.0), t.width.0 / 2));
+    }
+
     #[test]
     fn pads_sharing_a_number_and_a_position_keep_their_own_shapes() {
         let text = BOARD.replace(
