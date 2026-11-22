@@ -270,7 +270,13 @@ about soldering. The DRC's own findings stay warnings either way (`drc.run` is a
 is made; the export is where a board leaves). The switch is a rule of the board, stored with it, and no fab
 profile sets it. A pad that tracks wider than itself or copper drawings make solid, with no pour
 (`drc.solid_pad`'s second form), is not repaired by `zone.relieve`; it is let through the same way, by a
-purpose or by its own `solid` setting with a reason, zone or no zone (D120). An imported board whose designer meant its pads solid is refused at export until its pads
+purpose or by its own `solid` setting with a reason, zone or no zone (D120). The routers do not make such a
+pad: a new track of either is laid no wider than a pad of its net where it meets it, at the pad's shorter side
+(`zones::short_side`, to the micrometre under it) and never under `min_track_width`, from the pad to where the
+track's own copper is clear of the band the pad's joints are read in (`router::guide::neck_at_pads`, guide's
+`pcb::neck_at_pads`, D121; `route.all --neck false` leaves every track at its net's width). A pad narrower than
+the minimum track is still met by a track wider than itself, and tracks drawn by hand or imported are as they
+were drawn. An imported board whose designer meant its pads solid is refused at export until its pads
 say so or the rule is switched off: that is the price of the default, taken knowingly (D120).
 
 **What is in the way** (`thermal::blockers`, D119). For a pad short of spokes, each direction of its relief
@@ -416,8 +422,16 @@ soldered and not held to a spoke count, `heat` may take vias of its net), and it
 unless set otherwise, as `zones::connection_on` already says. `thermal::blockers(p, items, pads)` names, for
 the pads short of spokes after a run, the tracks and vias of other nets that stand in their spokes'
 rectangles (`Blocker::Track`, `Blocker::Via`, class `route`): the nets to move for a pad to get its second
-spoke, which is what `drc.starved_thermal` tells the user to rip and route again. The adapter does not use it
-yet. The tracks that `zone.relieve` adds around obstacles are ordinary tracks of the net from the pad's
+spoke, which is what `drc.starved_thermal` tells the user to rip and route again. Since D121 the guide adapter
+does this itself once its runs are over, where they leave the time (`router::guide::spoke_rooms`): for each pad
+that is short, one direction of its relief (`dirs` then `alt`) whose rectangle, grown by the zone's clearance,
+holds nothing of another net but tracks and vias of that run; the parts of those tracks that touch the room and
+those vias are taken out, guide has the routes of their nets back to go on from (`pcb::route_from`) with the
+room as a keep-out for every net but the pad's, and what it makes is kept if the check takes nothing out of
+it, no connection is open that was not, and fewer pads are short; if a net does not come back whole, once more
+with the rooms of the nets that did. A direction with a pad, a pour or a drawing of another net in it, or one
+that leaves the zone's outline, is not a router's to free; the nets with zones, the pairs and the nets with a
+length to keep are not moved. The tracks that `zone.relieve` adds around obstacles are ordinary tracks of the net from the pad's
 middle; a router that takes routes back should take them as it takes the straight ones of D112.
 
 Not covered: the native router does not keep the sides of relieved pads free for their spokes (what the

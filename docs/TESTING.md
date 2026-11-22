@@ -914,10 +914,11 @@ on the RF feed with the matching parts, Touchstone, openEMS export, then DRC and
 
 Result: 24 components, 40x25 mm, JLC04161H-7628, GND on In1.Cu and B.Cu, VDD on In2.Cu. The RF path placed and routed
 by hand (nRF52832 ANT, shunt C3 0.8 pF, series L1 3.9 nH, 9.15 mm of line, U.FL), the rest automatic: ERC and lint
-clean, 100 % routed, DRC clean, JLCPCB bundle with the stackup and the controlled line in `fab-lock.json`. Since
-D120 (thermal relief required by default) the replay has one step the session did not: the router enters the SoC's
-VSS pin U1.45 with tracks wider than the 0.2 mm pin (`fab.solid_pad`, by tracks), the export refuses, and the replay
-says of that pin that it is meant (`zone.pad --connection solid --reason ..`) before it exports. Replayed by
+clean, 100 % routed, DRC clean, JLCPCB bundle with the stackup and the controlled line in `fab-lock.json`. With
+thermal relief required by default (D120) the router's tracks into the SoC's VSS pin U1.45, wider than the 0.2 mm
+pin, made the pad solid by its tracks (`fab.solid_pad`) and the export refused; since D121 a track is laid no wider
+than the pad where it meets it, and the replay asserts that `zone.thermals` lists no solid pad and exports the board
+as the router left it. Replayed by
 `tests/agent_session6.rs` (fixtures in `tests/fixtures/agent_session6/`; about a minute in a debug build), with the
 full-wave run behind `#[ignore]` (`cargo test --release --test agent_session6 -- --ignored`, 91 s on one thread).
 

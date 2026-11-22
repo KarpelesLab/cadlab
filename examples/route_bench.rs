@@ -49,7 +49,8 @@
 //! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
 //! `CADLAB_BENCH_THERMALS=1` adds, on stderr, the pads in pours of each board as it stands
 //! (`board::thermal`: by the necks that reach them, solid pads by kind, the thermal relief
-//! findings by code; with `CADLAB_BENCH_ORIGINAL=1` of the project's own routing), and
+//! findings by code, and the pads that copper which is no pour makes solid or meets wider than
+//! themselves, D121; with `CADLAB_BENCH_ORIGINAL=1` of the project's own routing), and
 //! `CADLAB_BENCH_THERMALS=relieve` the same after `zone.relieve`'s changes, with their time.
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets. `CADLAB_BENCH_ORIGINAL=1` lists the connections
 //! the projects' own routing leaves open instead (the reference for residual failures).
@@ -146,6 +147,28 @@ fn thermals(name: &str, what: &str, p: &Project) {
     };
     let (c, codes, fill, t) = count(p);
     eprintln!("{name} {what}: {} [{codes:?}] (fill {fill:.2?}, joints and checks {t:.2?})", c.text());
+    // The pads that copper other than a pour makes solid (a track wider than the pad, D120).
+    {
+        let items = cadlab::board::copper_items(p);
+        let max = p.board().rules.thermal_max_contact;
+        let js = cadlab::board::thermal::joints(p, &items);
+        let by_copper: Vec<String> = js
+            .iter()
+            .filter(|j| j.solid(max) == Some(cadlab::board::thermal::Solid::Copper))
+            .map(|j| format!("{}.{}@{}", j.refdes, j.number, j.layer))
+            .collect();
+        let wide: Vec<String> = js
+            .iter()
+            .filter(|j| j.wide)
+            .map(|j| format!("{}.{}@{}:{}", j.refdes, j.number, j.layer, j.short.0))
+            .collect();
+        eprintln!(
+            "{name} {what}: solid by copper that is no pour {} {by_copper:?}; met by copper wider than itself (minimum track {}) {} {wide:?}",
+            by_copper.len(),
+            p.board().rules.min_track_width.0,
+            wide.len()
+        );
+    }
     if mode == "relieve" {
         let mut q = p.clone();
         let t = Instant::now();
@@ -296,9 +319,19 @@ fn corpus(filters: &[String]) {
         };
         let ms = t.elapsed().as_millis();
         let length: f64 = r.tracks.iter().map(|t| cadlab::board::track_length(t).0 as f64).sum::<f64>() / 1e6;
+        // The new copper with identifiers of its own, as `route.all` gives it: what reads the
+        // board by them (a track's width at a pad, `thermal::joints`) is then told each track.
         let mut q = p.clone();
-        q.board_mut().tracks.extend(r.tracks.iter().cloned());
-        q.board_mut().vias.extend(r.vias.iter().cloned());
+        for t in &r.tracks {
+            let mut t = t.clone();
+            t.id = q.alloc_id();
+            q.board_mut().tracks.push(t);
+        }
+        for v in &r.vias {
+            let mut v = v.clone();
+            v.id = q.alloc_id();
+            q.board_mut().vias.push(v);
+        }
         let drc = drc_errors(&q).saturating_sub(errors_before);
         // The new errors by code: what the board has after routing, less what it had before.
         let mut by_code = routebench::drc_codes(&q);

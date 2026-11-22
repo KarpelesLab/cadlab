@@ -155,11 +155,12 @@ no `-o`.)
       saved); the export's refusal and each finding name `zone.relieve`, `zone.pad --purpose` and `board.rules
       --thermal-required false`; a pad solid by wide tracks is let through by its own setting with a reason
 - [ ] Thermal relief, left open (D119): the native router does not keep room for the spokes of relieved pads,
-      and neither router moves a track off a pad's spoke on being told (`thermal::blockers` names them); a
+      and the native router moves no track off a pad's spoke on being told (`thermal::blockers` names them;
+      the guide adapter does since D121, where its runs leave the time); a
       refill still costs the whole-layer booleans of each zone layer it changes, so `zone.relieve` is two to
       four fills, not one; no check of the copper on the two pads of a chip part against each other (no
-      published number); the 3D view draws no copper; no repair for a pad solid by tracks wider than itself (a
-      router that necks down into a fine-pitch pin, D120)
+      published number); the 3D view draws no copper; no repair for a pad that tracks drawn by hand or imported
+      make solid (the routers' own tracks are laid no wider than the pad where they meet it, D121)
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
 - [x] Legible silkscreen (D82): `drc.silk_edge` and `drc.silk_overlap` (rules `silk_to_edge`, `silk_clearance`),
@@ -365,10 +366,20 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       tinytapeout-demo's vias (372 to 427 against 243 to 290; ending its negotiation sooner cost connections,
       D117), glasgow-revD1 (84 to 120 open: a minute ends its first run, and five leave 14, all at its array), a
       track that leaves a net tie's pad within the tie (cynthion's eight: D116 has the geometry and D117 why no
-      rule was changed), and rule areas with a routed track width (D118, "Gaps"; D117, "Gaps"; D116, "Gaps";
+      rule was changed), and rule areas with a routed track width (D121, "Where guide is still behind"; D118,
+      "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D117 (D118): guide's
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D118 (D121, with the
+      direction that guide end equal to or better than the native router on every measure on every board,
+      which it does not): a negotiation at the first pitch that does not end begun again on finer grids, as
+      the native router's whole run is (guide 0.0.23: nrfmicro none open in any order, 11 over twelve orders
+      before); a via to its plane at the native router's price for a net with one (glasgow-revC3's track +14 %
+      over the native router's for +19 %); a track of either router laid no wider than the pad it meets
+      (`neck_at_pads`: no pad solid by its tracks on the corpus or in the session replays); routes moved out of
+      the room of a spoke of a pad short of its spokes, where the runs leave the time (kept in half its tries).
+      By board and measure against the native router, 21 better, 28 equal, 3 that overlap and 20 worse of 72
+      (19, 29, 2 and 22 in D118): vias on six boards, track on five, time on three. Done since D117 (D118): guide's
       negotiation routes the nets of a round eight at a time on its threads with the same routes on any number,
       keeps a search round its two ends late, and the balls deep in an array whose nets' own via fits have their
       vias planned (guide 0.0.22: glasgow-revD1 39 to 150 open at a minute for 84 to 120, 2 at five minutes for

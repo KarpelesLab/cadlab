@@ -177,6 +177,9 @@ pub struct RouteOptions {
     /// Neck-down (default on): a net whose width cannot leave one of its pads between the
     /// neighboring pads is routed at the widest width that can (not under the board's
     /// `min_track_width`), and widened back to its class width wherever that fits afterwards.
+    /// And, with either router, a track is laid no wider than a pad of its net where it meets
+    /// it (D121): a track wider than the pad makes the pad solid, which a board that requires
+    /// thermal relief does not export. With `false` every track has its net's width.
     pub neck: Option<bool>,
     /// With [`SearchKind::Guide`] only: let guide place vias in pads, as it does on its own
     /// (its escapes of shut-in pads use them). The default, false, keeps the native router's
@@ -471,12 +474,19 @@ fn costs(effort: Effort) -> Costs {
 /// Routes the connections in `scope`. The project is not modified. Differential pairs whose
 /// two nets are in scope are routed first, coupled (unless `opts.pairs` is `Some(false)`).
 pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
-    if opts.search == Some(SearchKind::Guide) {
-        return guide::route(p, scope, opts, hooks);
+    let mut r = if opts.search == Some(SearchKind::Guide) {
+        guide::route(p, scope, opts, hooks)?
+    } else {
+        let before = opts.work.used();
+        let mut r = route_phases(p, scope, opts, hooks)?;
+        r.stats.work = opts.work.used().saturating_sub(before);
+        r
+    };
+    // A track enters a pad no wider than the pad (D121): either router's, unless a run is asked
+    // for no track under its net's width (`neck: false`).
+    if opts.neck != Some(false) && guide::neck_at_pads(p, &mut r.tracks) > 0 {
+        r.stats.tracks = r.tracks.len();
     }
-    let before = opts.work.used();
-    let mut r = route_phases(p, scope, opts, hooks)?;
-    r.stats.work = opts.work.used().saturating_sub(before);
     Ok(r)
 }
 

@@ -1,6 +1,6 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
 //! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115,
-//! D116 and D117; docs/ROUTER.md, "guide as a backend").
+//! D116, D117, D118 and D121; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -42,7 +42,11 @@
 //! pad that a pour joins as well (`pcb::needless_between`, D116), the board filled without them
 //! and what a connection or a pad's relief needs put back; and where the runs leave the time,
 //! guide has the routes back once more to look for a shorter way for each run of tracks
-//! (`RouteOptions::shorten`, D116). What guide's API cannot express is passed the stricter way and named in
+//! (`RouteOptions::shorten`, D116). Last of what moves copper, the routes that stand in the room of a
+//! spoke of a pad short of its spokes are taken out, and guide joins their nets up again round that
+//! room, kept if nothing is open for it and fewer pads are short ([`spoke_rooms`], D121). The tracks of
+//! either router are laid no wider than the pads of their net where they meet them ([`neck_at_pads`],
+//! `pcb::neck_at_pads`, D121). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -1391,6 +1395,16 @@ fn phase(p: Phase) -> &'static str {
 /// machine.
 const REFILL_SHARE: f64 = 0.15;
 
+/// How many times that run is made: with every room, and then with the rooms whose nets all
+/// came back whole the first time.
+const SPOKE_AGAIN: usize = 2;
+
+/// The longest that run may take.
+const SPOKE_RUN: Duration = Duration::from_secs(5);
+
+/// The least time worth a run that moves routes out of the rooms of spokes.
+const SPOKE_MIN: Duration = Duration::from_millis(1500);
+
 /// The share of the whole budget that a fill may take for the later runs' deadline to leave the
 /// time of two after it, for the needless vias that the fill of the routed board tells
 /// ([`needless`], D115): on a board whose fill takes longer that time is the runs', and what
@@ -1724,6 +1738,262 @@ fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
         !gone[k - 1]
     });
     Nm(before.0 - tracks_length(tracks).0)
+}
+
+/// The room of a spoke that a pad short of its spokes could have if routes of other nets were
+/// moved out of it ([`spoke_rooms`]).
+struct SpokeRoom {
+    /// The pad's net, which may be there.
+    net: String,
+    /// The layer.
+    layer: String,
+    /// The spoke's rectangle grown by the clearance that copper of another net keeps from it.
+    room: PolygonSet,
+    /// The new tracks and vias of other nets in it, by their identifiers.
+    tracks: BTreeSet<u64>,
+    vias: BTreeSet<u64>,
+    /// Their nets.
+    nets: BTreeSet<String>,
+}
+
+/// For each pad of `short` (pads in a pour short of their spokes, `Joint::starved`), one
+/// direction of its relief in which nothing stands but tracks and vias that this run made
+/// (`new_t`, `new_v`), with those: the room that a spoke there needs (`zones::spokes` and
+/// `zones::alt_spokes`, grown by the zone's clearance, what `thermal::blockers` reads), of the
+/// directions that qualify the one with the fewest items in it. A direction with a pad, a pour
+/// or a drawing of another net in it, or one that leaves the zone's outline, is no router's to
+/// free, and one with nothing of another net in it is short for another reason. `items` are
+/// the copper items of `p`, fills included.
+fn spoke_rooms(
+    p: &Project,
+    items: &[CopperItem],
+    short: &BTreeSet<geo::thermal::Key3>,
+    new_t: &BTreeSet<u64>,
+    new_v: &BTreeSet<u64>,
+) -> Vec<SpokeRoom> {
+    use crate::geom::poly::{self, Geometry, Join, Polygon};
+    let board = p.board();
+    let mut out = Vec::new();
+    // A pad is looked at once on a layer, whatever items it has there.
+    let mut seen: BTreeSet<geo::thermal::Key3> = BTreeSet::new();
+    for it in items {
+        let ItemRef::Pad(refdes, number) = &it.item else { continue };
+        let Some(net) = it.net.as_deref() else { continue };
+        for layer in &it.layers {
+            let key = (refdes.clone(), number.clone(), layer.clone());
+            if !short.contains(&key) || !seen.insert(key) {
+                continue;
+            }
+            let Some(z) = board.zones.iter().find(|z| {
+                z.net.as_deref() == Some(net)
+                    && !geo::thermal::is_teardrop(z)
+                    && z.layers.contains(layer)
+                    && in_ring(&z.outline, it.anchor)
+            }) else {
+                continue;
+            };
+            let zp = geo::zones::zone_params(p, z);
+            if geo::zones::connection_on(it, layer, zp.pads) != PadConnection::Thermal {
+                continue;
+            }
+            let relief = geo::zones::Relief::of(it, &zp);
+            let c = zp.clearance.0.max(profile_key(p, Some(net)).clear.0).max(0) + geo::zones::SAFETY;
+            let ring: Vec<poly::Point> = z.outline.iter().map(|&q| q.into()).collect();
+            let outline = Polygon::new(ring, vec![]);
+            let mut best: Option<SpokeRoom> = None;
+            for s in geo::zones::spokes(it, &relief).iter().chain(&geo::zones::alt_spokes(it, &relief)) {
+                if !poly::contains(std::slice::from_ref(&outline), s) {
+                    continue;
+                }
+                let Ok(room) = poly::offset(std::slice::from_ref(s), c, Join::Round, geo::zones::OBSTACLE_TOL) else {
+                    continue;
+                };
+                let Some(reach) = s.bbox().map(|b| b.expand(c)) else { continue };
+                let mut found = SpokeRoom {
+                    net: net.to_string(),
+                    layer: layer.clone(),
+                    room: PolygonSet::new(),
+                    tracks: BTreeSet::new(),
+                    vias: BTreeSet::new(),
+                    nets: BTreeSet::new(),
+                };
+                let mut free = true;
+                for o in items {
+                    if o.net.as_deref() == Some(net)
+                        || !o.layers.contains(layer)
+                        || !o.shape.bbox().is_some_and(|b| b.intersects(&reach))
+                        || geo::tied(it, o)
+                        || !poly::intersects(&o.shape, &room)
+                    {
+                        continue;
+                    }
+                    match (&o.item, o.net.as_ref()) {
+                        (ItemRef::Track(id), Some(n)) if new_t.contains(&id.0) => {
+                            found.tracks.insert(id.0);
+                            found.nets.insert(n.clone());
+                        }
+                        (ItemRef::Via(id), Some(n)) if new_v.contains(&id.0) => {
+                            found.vias.insert(id.0);
+                            found.nets.insert(n.clone());
+                        }
+                        _ => {
+                            free = false;
+                            break;
+                        }
+                    }
+                }
+                let count = found.tracks.len() + found.vias.len();
+                if free && count > 0 && best.as_ref().is_none_or(|b| count < b.tracks.len() + b.vias.len()) {
+                    found.room = room;
+                    best = Some(found);
+                }
+            }
+            out.extend(best);
+        }
+    }
+    out
+}
+
+/// Of the tracks `gone` of `tracks`, which stand in the rooms `rooms`, the parts whose copper
+/// is clear of the room they stand in (without identifiers): told by guide's
+/// `pcb::neck_at_pads`, with each room as a pad of the track's net no wider than nothing, so
+/// that what it lays narrow is what touches the room. An arc is left out whole.
+fn clear_of_rooms(p: &Project, rooms: &[SpokeRoom], tracks: &[Track], gone: &BTreeSet<u64>) -> Vec<Track> {
+    let layers = p.board().stackup.copper_names();
+    let nets: Vec<&str> =
+        rooms.iter().flat_map(|r| r.nets.iter().map(String::as_str)).collect::<BTreeSet<_>>().into_iter().collect();
+    let mut shapes: Vec<(Shape, LayerSet, NetId)> = Vec::new();
+    for r in rooms {
+        let set = layer_set(&layers, std::slice::from_ref(&r.layer));
+        let Ok(pieces) = region(&r.room) else { continue };
+        for (k, _) in nets.iter().enumerate().filter(|(_, n)| r.nets.contains(**n)) {
+            shapes.extend(pieces.iter().map(|s| (s.clone(), set, NetId(k as u32))));
+        }
+    }
+    let pads: Vec<pcb::PadEntry<'_>> = shapes
+        .iter()
+        .map(|(shape, layers, net)| pcb::PadEntry { shape, layers: *layers, net: *net, width: 1 })
+        .collect();
+    let (mut given, mut of) = (Vec::new(), Vec::new());
+    for t in tracks.iter().filter(|t| gone.contains(&t.id.0) && t.mid.is_none()) {
+        let (Some(l), Some(n)) =
+            (layers.iter().position(|n| *n == t.layer), t.net.as_deref().and_then(|n| nets.binary_search(&n).ok()))
+        else {
+            continue;
+        };
+        given.push(gdrc::Track {
+            start: gp(t.start),
+            end: gp(t.end),
+            mid: None,
+            width: t.width.0,
+            layer: LayerId(l as u8),
+            net: Some(NetId(n as u32)),
+        });
+        of.push(t);
+    }
+    pcb::neck_at_pads(&pads, &given, 0)
+        .into_iter()
+        .filter(|(_, piece)| piece.width > 1)
+        .map(|(k, piece)| Track { id: ObjectId(0), start: back(piece.start), end: back(piece.end), ..of[k].clone() })
+        .collect()
+}
+
+/// How far beyond a pad's outline a track stays no wider than the pad ([`neck_at_pads`]): the
+/// band in which a pad's joints are read (`thermal::BAND`), as much again for what the band
+/// and the track are drawn outside their true shapes (`OBSTACLE_TOL`, `COPPER_TOL`), and half
+/// of it for good measure. With the band alone the pad of a track cut exactly there still read
+/// as met by the wide part.
+const ENTRY_BEYOND: i64 = 2 * geo::thermal::BAND + geo::thermal::BAND / 2;
+
+/// Lays `tracks`, new tracks of a router, no wider than the pads of their net where they meet
+/// them (D121, `guide::pcb::neck_at_pads`): a track wider than a pad's shorter side
+/// (`zones::short_side`, the measure of `drc.solid_pad`) is cut where its copper comes within
+/// [`ENTRY_BEYOND`] of the pad and laid at that side's width from there on, along the same
+/// line and never under the rules' minimum track width. What is laid is inside the copper that
+/// was there and every end is where it was, so the clearances and the connections are the
+/// same; the pad has a neck where the track covered its end. For either router's tracks:
+/// the adapter's and the native router's. Returns how many tracks were cut or narrowed.
+pub(crate) fn neck_at_pads(p: &Project, tracks: &mut Vec<Track>) -> usize {
+    if tracks.is_empty() {
+        return 0;
+    }
+    let layers = p.board().stackup.copper_names();
+    let least = p.board().rules.min_track_width.0.max(1);
+    // The nets of the tracks, in the order of their names.
+    let nets: Vec<&str> = tracks.iter().filter_map(|t| t.net.as_deref()).collect::<BTreeSet<_>>().into_iter().collect();
+    let net = |n: Option<&str>| n.and_then(|n| nets.binary_search(&n).ok()).map(|i| NetId(i as u32));
+    let widest = tracks.iter().map(|t| t.width.0).max().unwrap_or(0);
+    // The pads of those nets that are narrower than a track here, by the shape of each layer.
+    let mut shapes: Vec<(Shape, LayerSet, NetId, i64)> = Vec::new();
+    for pp in geo::placed_pads(p) {
+        let Some(id) = net(pp.net.as_deref()) else { continue };
+        let stacked = |l: &String| pp.layer_shapes.iter().any(|(name, _, _)| name == l);
+        let plain: Vec<String> = pp.layers.iter().filter(|l| !stacked(l)).cloned().collect();
+        let all = std::iter::once((plain, &pp.shape)).chain(
+            pp.layer_shapes.iter().map(|(l, _, s)| (vec![l.clone()], s)).filter(|(l, _)| pp.layers.contains(&l[0])),
+        );
+        for (on, shape) in all {
+            let set = layer_set(&layers, &on);
+            let shape = vec![shape.clone()];
+            // To the micrometre under it: a pad with rounded corners has a shorter side of
+            // no round number, and a track is not asked to be 0.497178 mm wide.
+            let width = (geo::zones::short_side(&shape) / 1_000 * 1_000).max(least);
+            if set == LayerSet::EMPTY || width >= widest {
+                continue;
+            }
+            let Ok(pieces) = region(&shape) else { continue };
+            shapes.extend(pieces.into_iter().map(|s| (s, set, id, width)));
+        }
+    }
+    if shapes.is_empty() {
+        return 0;
+    }
+    let pads: Vec<pcb::PadEntry<'_>> = shapes
+        .iter()
+        .map(|(shape, layers, net, width)| pcb::PadEntry { shape, layers: *layers, net: *net, width: *width })
+        .collect();
+    // The straight tracks of those nets on the board's layers, with their places.
+    let (mut given, mut at) = (Vec::new(), Vec::new());
+    for (i, t) in tracks.iter().enumerate() {
+        let (Some(l), Some(n)) = (layers.iter().position(|n| *n == t.layer), net(t.net.as_deref())) else { continue };
+        given.push(gdrc::Track {
+            start: gp(t.start),
+            end: gp(t.end),
+            mid: t.mid.map(gp),
+            width: t.width.0,
+            layer: LayerId(l as u8),
+            net: Some(n),
+        });
+        at.push(i);
+    }
+    let laid = pcb::neck_at_pads(&pads, &given, ENTRY_BEYOND);
+    // By track, its pieces if it was cut or narrowed.
+    let mut pieces: BTreeMap<usize, Vec<Track>> = BTreeMap::new();
+    for (k, piece) in &laid {
+        let (i, was) = (at[*k], &given[*k]);
+        if piece == was {
+            continue;
+        }
+        pieces.entry(i).or_default().push(Track {
+            start: back(piece.start),
+            end: back(piece.end),
+            width: Nm(piece.width),
+            ..tracks[i].clone()
+        });
+    }
+    if pieces.is_empty() {
+        return 0;
+    }
+    let changed = pieces.len();
+    let mut out = Vec::with_capacity(tracks.len() + changed);
+    for (i, t) in std::mem::take(tracks).into_iter().enumerate() {
+        match pieces.remove(&i) {
+            Some(cut) => out.extend(cut),
+            None => out.push(t),
+        }
+    }
+    *tracks = out;
+    changed
 }
 
 /// Verification, as the native router's: cadlab's DRC on `p` with the new copper (IDs from
@@ -2559,6 +2829,201 @@ pub(crate) fn route(
         }
     }
 
+    // A track moved off a pad's spoke (D121; BOARD.md, "What a router must be told"). A pad in
+    // a pour that the routes leave short of its spokes (`Joint::starved`) where a direction of
+    // its relief holds nothing but tracks and vias of this run ([`spoke_rooms`]): those are
+    // taken out, guide has the routes of their nets back as routes to go on from, with the
+    // spoke's room closed to every net but the pad's, and joins the nets up again round it
+    // (a run that moves no other route). Verified as any run, the board filled, and kept if
+    // the check takes nothing out, no connection is open that was not, and fewer pads are
+    // short. Once the runs are over and the needless copper is out, with the time of the run,
+    // of its two fills and of its counts: the last thing that moves copper. Not after a run
+    // that a work budget stopped, nor for the nets of pairs and with lengths to keep.
+    let spokes_room = opts.budget.is_none_or(|b| {
+        let count = joint_took.get().unwrap_or(after / 3);
+        Instant::now() + SPOKE_MIN + after.mul_f64(AFTER_SHARE) + fill * 2 + count * 2 + REPORT < start + b
+    });
+    if spokes_room && stopped != Some(Stopped::WorkBudget) && !poured.is_empty() && !tracks.is_empty() {
+        let short_of = |q: &Project, items: &[CopperItem]| -> BTreeSet<geo::thermal::Key3> {
+            let rules = &q.board().rules;
+            geo::thermal::joints_of(q, items, &|net| poured.contains(net))
+                .into_iter()
+                .filter(|j| j.starved(rules.min_thermal_spokes, rules.thermal_max_contact))
+                .map(|j| (j.refdes, j.number, j.layer))
+                .collect()
+        };
+        let short = short_of(&proj, &fitems);
+        let held: BTreeSet<String> = ad
+            .design
+            .pairs
+            .iter()
+            .flat_map(|d| [d.positive, d.negative])
+            .chain(ad.design.lengths.iter().flat_map(|l| l.nets.iter().copied()))
+            .filter_map(|n| ad.nets.get(n.index()).cloned())
+            .collect();
+        let new_t: BTreeSet<u64> = tracks.iter().map(|t| t.id.0).collect();
+        let new_v: BTreeSet<u64> = vias.iter().map(|v| v.id.0).collect();
+        let mut rooms: Vec<SpokeRoom> = spoke_rooms(&proj, &fitems, &short, &new_t, &new_v)
+            .into_iter()
+            .filter(|r| r.nets.iter().all(|n| !held.contains(n) && wanted(n) && !poured.contains(n.as_str())))
+            .collect();
+        if !rooms.is_empty() {
+            (hooks.progress)(
+                0,
+                None,
+                &format!(
+                    "guide: {} pad(s) short of spokes, {} with routes in a spoke's room",
+                    short.len(),
+                    rooms.len()
+                ),
+            );
+        }
+        let was = open(&fitems, &fisl);
+        let had: BTreeSet<(&str, &str, &str)> =
+            was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
+        // With every room, and then once more with those whose nets all came back whole: a net
+        // that guide does not join up again round a room costs the whole try, and its old
+        // routes are no longer free once the others have moved.
+        for attempt in 0..SPOKE_AGAIN {
+            let in_time = opts.budget.is_none_or(|b| {
+                let count = joint_took.get().unwrap_or(after / 3);
+                Instant::now() + SPOKE_MIN + after.mul_f64(AFTER_SHARE) + fill * 2 + count * 2 + REPORT < start + b
+            });
+            if rooms.is_empty() || !in_time {
+                break;
+            }
+            let gone_t: BTreeSet<u64> = rooms.iter().flat_map(|r| r.tracks.iter().copied()).collect();
+            let gone_v: BTreeSet<u64> = rooms.iter().flat_map(|r| r.vias.iter().copied()).collect();
+            let moving: BTreeSet<String> = rooms.iter().flat_map(|r| r.nets.iter().cloned()).collect();
+            // The board without what stands in the rooms, on the fills it has: those were made
+            // round that copper, and are no more than a fill without it.
+            let mut less = proj.clone();
+            less.board_mut().tracks.retain(|t| !gone_t.contains(&t.id.0));
+            less.board_mut().vias.retain(|v| !gone_v.contains(&v.id.0));
+            // Of a track in a room, what is clear of the room stays, as a route of its net
+            // that guide goes on from: the way round a room is then from one side of it to
+            // the other, not the length of the tracks that crossed it.
+            let mut piece_ids: BTreeSet<ObjectId> = BTreeSet::new();
+            for mut t in clear_of_rooms(&proj, &rooms, &tracks, &gone_t) {
+                t.id = less.alloc_id();
+                piece_ids.insert(t.id);
+                less.board_mut().tracks.push(t);
+            }
+            let items_less: Vec<CopperItem> = fitems
+                .iter()
+                .filter(|it| match &it.item {
+                    ItemRef::Track(id) => !gone_t.contains(&id.0),
+                    ItemRef::Via(id) => !gone_v.contains(&id.0),
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+            let mut ad = adapt(&less, &items_less, &BTreeSet::new(), opts)?;
+            for (k, r) in rooms.iter().enumerate() {
+                let (Some(l), Ok(n)) = (ad.layers.iter().position(|n| *n == r.layer), ad.nets.binary_search(&r.net))
+                else {
+                    continue;
+                };
+                for shape in region(&r.room).map_err(|e| geom_err("a spoke's room", e))? {
+                    ad.design.board.keepouts.push(gdrc::Keepout {
+                        shape,
+                        layers: LayerSet::EMPTY.with(LayerId(l as u8)),
+                        tracks: true,
+                        vias: true,
+                        pads: false,
+                        except: vec![NetId(n as u32)],
+                    });
+                    ad.keepouts.push(format!("the room of a spoke ({k})"));
+                }
+            }
+            let of_moving = |net: &Option<String>| net.as_deref().is_some_and(|n| moving.contains(n));
+            let mine: BTreeSet<ObjectId> = tracks
+                .iter()
+                .filter(|t| !gone_t.contains(&t.id.0) && of_moving(&t.net))
+                .map(|t| t.id)
+                .chain(vias.iter().filter(|v| !gone_v.contains(&v.id.0) && of_moving(&v.net)).map(|v| v.id))
+                .chain(piece_ids.iter().copied())
+                .collect();
+            let handed = ad.take_back(&mine);
+            let mut g = gopts;
+            g.whole = false;
+            g.seed = (opts.seed != 0).then_some(opts.seed);
+            g.work_budget = opts.work.left();
+            let until = opts
+                .budget
+                .and_then(|b| {
+                    let count = joint_took.get().unwrap_or(after / 3);
+                    (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + fill * 2 + count * 2 + REPORT)
+                })
+                .map(|t| t.min(Instant::now() + SPOKE_RUN));
+            let more = call(&ad, None, &g, until, hooks)?;
+            opts.work.charge(more.stats.work);
+            work += more.stats.work;
+            calls += 1;
+            (hooks.progress)(0, None, &said(&more));
+            let (mut t, mut v) = convert(&ad, &more);
+            let (spare_t, spare_v) = convert_copper(&ad, &more.spare.0, &more.spare.1);
+            t.extend(spare_t);
+            v.extend(spare_v);
+            // What guide took back it gives whole: the rest of what it was handed, the pieces
+            // among it, stays as it is.
+            let moved: BTreeSet<&str> =
+                more.taken_back.iter().filter_map(|n| ad.nets.get(n.index())).map(String::as_str).collect();
+            let new = |net: &Option<String>| net.as_deref().is_some_and(|n| moved.contains(n));
+            let (mut tracks2, mut vias2) = (tracks.clone(), vias.clone());
+            tracks2.retain(|t| !(gone_t.contains(&t.id.0) || (handed.contains(&t.id) && new(&t.net))));
+            vias2.retain(|v| !(gone_v.contains(&v.id.0) || (handed.contains(&v.id) && new(&v.net))));
+            tracks2.extend(less.board().tracks.iter().filter(|t| piece_ids.contains(&t.id) && !new(&t.net)).cloned());
+            tracks2.extend(t);
+            vias2.extend(v);
+            let (mut reasons, mut removed) = (drc_reason.clone(), stats.drc_removed);
+            let proj2 = verify(p, &mut tracks2, &mut vias2, &mut reasons, &mut removed);
+            let items2 = geo::copper_items(&proj2);
+            let isl2 = geo::islands(&items2);
+            let now = open(&items2, &isl2);
+            let mut failed: BTreeSet<String> = now
+                .iter()
+                .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                .map(|l| l.net.clone())
+                .collect();
+            failed.extend(reasons.keys().filter(|n| !drc_reason.contains_key(*n)).cloned());
+            let short2 = short_of(&proj2, &items2);
+            let clean = removed == stats.drc_removed && failed.is_empty() && now.len() <= was.len();
+            let kept = clean && short2.len() < short.len();
+            (hooks.progress)(
+                0,
+                None,
+                &format!(
+                    "guide: {} track(s) and {} via(s) of {} net(s) out of {} room(s) of spokes, {} pad(s) short for {}, \
+                     {} connection(s) open for {}, {} item(s) taken out by the check: {}",
+                    gone_t.len(),
+                    gone_v.len(),
+                    moving.len(),
+                    rooms.len(),
+                    short2.len(),
+                    short.len(),
+                    now.len(),
+                    was.len(),
+                    removed - stats.drc_removed,
+                    if kept { "kept" } else { "not kept" }
+                ),
+            );
+            if kept {
+                (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
+                break;
+            }
+            if clean || attempt + 1 == SPOKE_AGAIN {
+                break;
+            }
+            // Once more with the rooms whose nets all came back whole, and those alone.
+            let before = rooms.len();
+            rooms.retain(|r| r.nets.iter().all(|n| !failed.contains(n)));
+            if rooms.len() == before {
+                break;
+            }
+        }
+    }
+
     // The report, from the board with its zones filled again around the new copper (D80).
     (hooks.progress)(0, None, "reporting");
     let index = |items: &[CopperItem], isl: &[usize]| {
@@ -3063,6 +3528,108 @@ mod tests {
         let ring = &pp.shape.outer.0;
         let turn = convex_turn(ring).expect("a convex pad");
         assert!(disc_in_ring(ring, turn, (cut[0].start.x.0, cut[0].start.y.0), t.width.0 / 2));
+    }
+
+    /// A track wider than a pad of its net is laid at the pad's shorter side where it meets
+    /// it (D121): R1.1 is 0.6 by 0.5 mm with rounded corners, and a track of 0.8 mm into it from
+    /// the side is as wide as the pad until its own copper would be clear of the pad's band, with the same ends; the
+    /// pad is then not solid by its track (`Joint::wide`). A track no wider than the pad, one
+    /// of another net and an arc are left as they are.
+    #[test]
+    fn a_track_enters_a_pad_no_wider_than_the_pad() {
+        let p = project();
+        let pp = geo::placed_pads(&p).into_iter().find(|pp| pp.refdes == "R1" && pp.number == "1").expect("R1.1");
+        // Its corners are rounded: the shorter side of the rectangle of its area and outline,
+        // and the width to the micrometre under it.
+        let short = geo::zones::short_side(&vec![pp.shape.clone()]);
+        assert!((490_000..500_000).contains(&short), "{short}");
+        let width = short / 1_000 * 1_000;
+        let far = Point { x: Nm(pp.center.x.0 - 3_000_000), y: pp.center.y };
+        let track = |width: i64, net: &str| Track {
+            id: ObjectId(0),
+            layer: "F.Cu".into(),
+            width: Nm(width),
+            net: Some(net.into()),
+            start: pp.center,
+            end: far,
+            mid: None,
+            locked: false,
+        };
+        let wide = track(800_000, "SIG");
+        let mut arc = track(800_000, "SIG");
+        arc.mid = Some(Point { x: Nm(pp.center.x.0 - 1_500_000), y: Nm(pp.center.y.0 + 200_000) });
+        let mut same = vec![track(width, "SIG"), track(800_000, "GND"), arc];
+        let before = same.clone();
+        assert_eq!(neck_at_pads(&p, &mut same), 0);
+        assert_eq!(same, before);
+        let mut cut = vec![wide.clone()];
+        assert_eq!(neck_at_pads(&p, &mut cut), 1);
+        assert_eq!(cut.len(), 2, "{cut:?}");
+        assert_eq!((cut[0].start, cut[0].width, cut[0].end), (wide.start, Nm(width), cut[1].start));
+        assert_eq!((cut[1].end, cut[1].width), (wide.end, Nm(800_000)));
+        // The pad's edge is 0.3 mm from its centre: half the track and the margin beyond it.
+        let at = pp.center.x.0 - cut[0].end.x.0;
+        assert!((300_000 + 400_000 + ENTRY_BEYOND..300_000 + 400_000 + ENTRY_BEYOND + 1_000).contains(&at), "{at}");
+        // Done again, nothing changes.
+        let mut again = cut.clone();
+        assert_eq!(neck_at_pads(&p, &mut again), 0);
+        assert_eq!(again, cut);
+        // The check reads the pad as its copper is.
+        let wide_at = |tracks: &[Track]| {
+            let mut q = p.clone();
+            q.board_mut().tracks.clear();
+            q.board_mut().vias.clear();
+            for t in tracks {
+                let mut t = t.clone();
+                t.id = q.alloc_id();
+                q.board_mut().tracks.push(t);
+            }
+            let items = geo::copper_items(&q);
+            geo::thermal::joints(&q, &items)
+                .into_iter()
+                .find(|j| j.refdes == "R1" && j.number == "1" && j.layer == "F.Cu")
+                .is_some_and(|j| j.wide)
+        };
+        assert!(wide_at(std::slice::from_ref(&wide)));
+        assert!(!wide_at(&cut));
+    }
+
+    /// The room of a spoke with a track of this run in it is told with the track and its
+    /// net (D121): J1.2 is a through-hole pad of GND in the pour on the back, and a track of
+    /// SIG on the back across the spoke above or below it stands in that spoke's room. The
+    /// same track as copper the board had before the run is no router's to move, and a pad
+    /// that is not asked about has no room told.
+    #[test]
+    fn the_room_of_a_spoke_with_a_route_in_it() {
+        let mut p = project();
+        for z in &mut p.board_mut().zones {
+            z.pads = PadConnection::Thermal;
+        }
+        let pp = geo::placed_pads(&p).into_iter().find(|pp| pp.refdes == "J1" && pp.number == "2").expect("J1.2");
+        let id = p.alloc_id();
+        let (x, y) = (pp.center.x.0, pp.center.y.0 - 1_300_000);
+        p.board_mut().tracks.push(Track {
+            id,
+            layer: "B.Cu".into(),
+            width: Nm(250_000),
+            net: Some("SIG".into()),
+            start: Point { x: Nm(x - 1_000_000), y: Nm(y) },
+            end: Point { x: Nm(x + 1_000_000), y: Nm(y) },
+            mid: None,
+            locked: false,
+        });
+        let items = geo::copper_items(&p);
+        let short: BTreeSet<geo::thermal::Key3> = [("J1".to_string(), "2".to_string(), "B.Cu".to_string())].into();
+        let new: BTreeSet<u64> = [id.0].into();
+        let rooms = spoke_rooms(&p, &items, &short, &new, &BTreeSet::new());
+        assert_eq!(rooms.len(), 1);
+        let r = &rooms[0];
+        assert_eq!((r.net.as_str(), r.layer.as_str()), ("GND", "B.Cu"));
+        assert_eq!((r.tracks.clone(), r.vias.len()), (new.clone(), 0));
+        assert_eq!(r.nets, BTreeSet::from(["SIG".to_string()]));
+        assert!(!r.room.is_empty());
+        assert!(spoke_rooms(&p, &items, &short, &BTreeSet::new(), &BTreeSet::new()).is_empty());
+        assert!(spoke_rooms(&p, &items, &BTreeSet::new(), &new, &BTreeSet::new()).is_empty());
     }
 
     #[test]
