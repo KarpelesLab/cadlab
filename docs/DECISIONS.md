@@ -6611,7 +6611,8 @@ would move every golden file of a generated footprint for nothing.
 **4. Relief required.** `board.rules --thermal-required true` (`Rules::thermal_required`, stored with the
 board, false by default, in no preset and no fab profile): the thermal findings of the fab check
 (`fab.solid_pad`, `fab.thermal_nominal`, `fab.starved_thermal`, `fab.thermal_size`) are errors, so
-`fab.export` refuses, and no waiver takes an error away. A pad is let through by what item 3 says: a purpose,
+`fab.export` refuses (`fab.check_failed`, nothing written; `force` exports all the same, as it does past
+any error of the fab check), and no waiver takes an error away. A pad is let through by what item 3 says: a purpose,
 or a placed pad's own setting with its reason, which is also what the repair writes for the pads it keeps
 solid. A bare `solid` on a pad or footprint is then not taken as meant. `drc.run`'s own findings stay
 warnings. *The default stays as it was*, warnings: the user was asked which they want and has not said, and

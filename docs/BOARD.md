@@ -253,8 +253,9 @@ each pad a second time under its `fab.` code). An error would refuse the export 
 imported board whose designer meant its pads solid.
 
 **Relief required** (`board.rules --thermal-required true`, D119; off by default). With it the four `fab.`
-findings are **errors**: `fab.check` fails and `fab.export` writes nothing until they are gone, and a waiver
-does not take them away (waivers are for warnings). What takes one away is the repair (`zone.relieve`), or the
+findings are **errors**: `fab.check` fails and `fab.export` refuses (`fab.check_failed`, nothing written)
+until they are gone, as for any error of the fab check and with the same way round (`force`); a waiver does
+not take them away (waivers are for warnings). What takes one away is the repair (`zone.relieve`), or the
 pad saying what it is solid for: a `purpose` (below) on the placed pad, the pad or the footprint, or a placed
 pad's own setting with its `reason` (`zone.pad J1.3 --connection solid --reason "carries 12 A"`, which is also
 what `zone.relieve` writes for the pads it keeps solid). A `solid` setting that says neither, on a pad or a

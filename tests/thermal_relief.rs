@@ -838,6 +838,13 @@ fn thermal_relief_required() {
         d["hint"].as_str().unwrap().contains("--purpose") && d["hint"].as_str().unwrap().contains("thermal-required"),
         "{d}"
     );
+    // The export refuses, as for any error of the fab check.
+    let out = _d.path().join("fab");
+    let refused = r
+        .execute(&mut s, "fab.export", json!({"fab": "generic", "dir": out}), RunOptions::default())
+        .expect_err("fab.export with thermal errors");
+    assert_eq!(refused.error.diagnostic.code, "fab.check_failed", "{}", refused.error);
+    assert!(!out.exists(), "nothing is written");
     // A waiver does not take an error away.
     exec(&r, &mut s, "drc.waive", json!({"code": "drc.solid_pad", "subjects": ["zone:GND"], "reason": "reflow only"}));
     let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic"}));
