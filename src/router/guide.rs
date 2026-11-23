@@ -45,7 +45,9 @@
 //! guide has the routes back once more to look for a shorter way for each run of tracks
 //! (`RouteOptions::shorten`, D116). Last of what moves copper, the routes that stand in the room of a
 //! spoke of a pad short of its spokes are taken out, and guide joins their nets up again round that
-//! room, kept if nothing is open for it and fewer pads are short ([`spoke_rooms`], D121). The tracks of
+//! room, kept if nothing is open for it and the board is nearer its relief, the pads with no spoke
+//! first ([`spoke_rooms`], [`relief_score`], D121, D126). In those two runs the last spoke of a pad is
+//! no room at all for another net (`RouteOptions::kept_spokes`, [`KEPT_SPOKES`], D126). The tracks of
 //! either router are laid no wider than the pads of their net where they meet them ([`neck_at_pads`],
 //! `pcb::neck_at_pads`, D121). What guide's API cannot express is passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
@@ -1400,9 +1402,75 @@ fn phase(p: Phase) -> &'static str {
 /// machine.
 const REFILL_SHARE: f64 = 0.15;
 
-/// How many times that run is made: with every room, and then with the rooms whose nets all
-/// came back whole the first time.
-const SPOKE_AGAIN: usize = 2;
+/// How many spokes of a pad are no room at all for another net in the run for shorter ways
+/// and in the run that moves routes out of the rooms of spokes (guide 0.0.30,
+/// `RouteOptions::kept_spokes`, D126): of the spokes that the fill makes for a pad on a layer,
+/// the last that no route stands in the room of is as copper of the pad's net to every route
+/// of another, for as long as it is the last. The room of a spoke has a price in every run
+/// (`spoke_cost`), and at a price the run for shorter ways laid the tracks of two nets through
+/// both rooms of a header's ground pin on tinytapeout-demo, and the step for the spokes took
+/// the last of one pad for the second of another (D125). Not in the runs that route: with it
+/// in the first, glasgow-revD1 had 465 connections open at 40 million nodes over three orders
+/// for 411, and with it in the runs that move routes lumenpnp-mobo had 341 vias for 331 at
+/// 150 million in one order of two.
+const KEPT_SPOKES: u8 = 1;
+
+/// How many times that run is made at most: with every room, then with the rooms whose nets
+/// all came back whole, or with half of them, those of the pads with no spoke first, where
+/// every net came back and the pads are no better off; and once more from the board as a run
+/// that was kept leaves it, for as long as that has rooms.
+const SPOKE_AGAIN: usize = 6;
+
+/// What the pads in pours of their nets that thermal reliefs join have of their relief, by
+/// pad and layer: the necks that its copper is worth (`Joint::worth`), and how many more it
+/// is to have by the rules' `min_thermal_spokes` and what its footprint leaves room for
+/// (`Joint::starved`), with where the pad is.
+type Reliefs = BTreeMap<geo::thermal::Key3, (u8, u8, Point)>;
+
+/// [`Reliefs`] of a board, for the nets `poured`.
+fn reliefs(q: &Project, items: &[CopperItem], poured: &BTreeSet<&str>) -> Reliefs {
+    let rules = &q.board().rules;
+    geo::thermal::joints_of(q, items, &|net| poured.contains(net))
+        .into_iter()
+        .filter(|j| {
+            j.in_pour() && j.style == Some(PadConnection::Thermal) && j.solid(rules.thermal_max_contact).is_none()
+        })
+        .map(|j| {
+            let need = rules.min_thermal_spokes.min(j.possible.max(1));
+            let worth = j.worth();
+            ((j.refdes, j.number, j.layer), (worth, need.saturating_sub(worth), j.at))
+        })
+        .collect()
+}
+
+/// The pads of [`Reliefs`] short of their spokes, each with how many it lacks.
+fn short_pads(r: &Reliefs) -> BTreeMap<geo::thermal::Key3, u8> {
+    r.iter().filter(|(_, (_, lack, _))| *lack > 0).map(|(k, (_, lack, _))| (k.clone(), *lack)).collect()
+}
+
+/// How far a board is from the relief it is to have: the pads with no neck that are to have
+/// one, the pads short of their spokes, and the spokes those lack in all. Less is better, in
+/// that order: a pad with no neck is not soldered to its pour at all.
+fn relief_score(r: &Reliefs) -> (usize, usize, usize) {
+    let short = r.values().filter(|(_, lack, _)| *lack > 0);
+    (
+        short.clone().filter(|(worth, _, _)| *worth == 0).count(),
+        short.clone().count(),
+        short.map(|(_, lack, _)| usize::from(*lack)).sum(),
+    )
+}
+
+/// Where the pads of `now` are that are worse off for their relief than they were in `was`:
+/// short of their spokes with fewer necks than they had, and with `none` those of them that
+/// have no neck left.
+fn relief_worse(now: &Reliefs, was: &Reliefs, none: bool) -> Vec<Point> {
+    now.iter()
+        .filter(|(k, (worth, lack, _))| {
+            *lack > 0 && (!none || *worth == 0) && was.get(*k).is_some_and(|(had, _, _)| worth < had)
+        })
+        .map(|(_, (_, _, at))| *at)
+        .collect()
+}
 
 /// The longest that run may take.
 const SPOKE_RUN: Duration = Duration::from_secs(5);
@@ -1765,6 +1833,8 @@ fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
 /// The room of a spoke that a pad short of its spokes could have if routes of other nets were
 /// moved out of it ([`spoke_rooms`]).
 struct SpokeRoom {
+    /// The pad and the layer.
+    pad: geo::thermal::Key3,
     /// The pad's net, which may be there.
     net: String,
     /// The layer.
@@ -1778,18 +1848,19 @@ struct SpokeRoom {
     nets: BTreeSet<String>,
 }
 
-/// For each pad of `short` (pads in a pour short of their spokes, `Joint::starved`), one
-/// direction of its relief in which nothing stands but tracks and vias that this run made
-/// (`new_t`, `new_v`), with those: the room that a spoke there needs (`zones::spokes` and
-/// `zones::alt_spokes`, grown by the zone's clearance, what `thermal::blockers` reads), of the
-/// directions that qualify the one with the fewest items in it. A direction with a pad, a pour
+/// For each pad of `short` (pads in a pour short of their spokes, `Joint::starved`, with how
+/// many each lacks), the directions of its relief in which nothing stands but tracks and vias
+/// that this run made (`new_t`, `new_v`), with those: the room that a spoke there needs
+/// (`zones::spokes` and `zones::alt_spokes`, grown by the zone's clearance, what
+/// `thermal::blockers` reads), of the directions that qualify as many as the pad lacks, those
+/// with the fewest items in them first. A direction with a pad, a pour
 /// or a drawing of another net in it, or one that leaves the zone's outline, is no router's to
 /// free, and one with nothing of another net in it is short for another reason. `items` are
 /// the copper items of `p`, fills included.
 fn spoke_rooms(
     p: &Project,
     items: &[CopperItem],
-    short: &BTreeSet<geo::thermal::Key3>,
+    short: &BTreeMap<geo::thermal::Key3, u8>,
     new_t: &BTreeSet<u64>,
     new_v: &BTreeSet<u64>,
 ) -> Vec<SpokeRoom> {
@@ -1803,7 +1874,8 @@ fn spoke_rooms(
         let Some(net) = it.net.as_deref() else { continue };
         for layer in &it.layers {
             let key = (refdes.clone(), number.clone(), layer.clone());
-            if !short.contains(&key) || !seen.insert(key) {
+            let Some(&lack) = short.get(&key) else { continue };
+            if !seen.insert(key.clone()) {
                 continue;
             }
             let Some(z) = board.zones.iter().find(|z| {
@@ -1822,7 +1894,7 @@ fn spoke_rooms(
             let c = zp.clearance.0.max(profile_key(p, Some(net)).clear.0).max(0) + geo::zones::SAFETY;
             let ring: Vec<poly::Point> = z.outline.iter().map(|&q| q.into()).collect();
             let outline = Polygon::new(ring, vec![]);
-            let mut best: Option<SpokeRoom> = None;
+            let mut found_all: Vec<SpokeRoom> = Vec::new();
             for s in geo::zones::spokes(it, &relief).iter().chain(&geo::zones::alt_spokes(it, &relief)) {
                 if !poly::contains(std::slice::from_ref(&outline), s) {
                     continue;
@@ -1832,6 +1904,7 @@ fn spoke_rooms(
                 };
                 let Some(reach) = s.bbox().map(|b| b.expand(c)) else { continue };
                 let mut found = SpokeRoom {
+                    pad: key.clone(),
                     net: net.to_string(),
                     layer: layer.clone(),
                     room: PolygonSet::new(),
@@ -1864,13 +1937,15 @@ fn spoke_rooms(
                         }
                     }
                 }
-                let count = found.tracks.len() + found.vias.len();
-                if free && count > 0 && best.as_ref().is_none_or(|b| count < b.tracks.len() + b.vias.len()) {
+                if free && !(found.tracks.is_empty() && found.vias.is_empty()) {
                     found.room = room;
-                    best = Some(found);
+                    found_all.push(found);
                 }
             }
-            out.extend(best);
+            // The fewest items first, and in the order of the directions among as many.
+            found_all.sort_by_key(|r| r.tracks.len() + r.vias.len());
+            found_all.truncate(usize::from(lack.max(1)));
+            out.extend(found_all);
         }
     }
     out
@@ -2352,13 +2427,7 @@ pub(crate) fn route(
                 && !poured.is_empty()
                 && !tracks.is_empty();
             let rooms = wanted_step && {
-                let rules = &proj.board().rules;
-                let short: BTreeSet<geo::thermal::Key3> =
-                    geo::thermal::joints_of(proj, fitems, &|net| poured.contains(net))
-                        .into_iter()
-                        .filter(|j| j.starved(rules.min_thermal_spokes, rules.thermal_max_contact))
-                        .map(|j| (j.refdes, j.number, j.layer))
-                        .collect();
+                let short = short_pads(&reliefs(proj, fitems, &poured));
                 let new_t: BTreeSet<u64> = tracks.iter().map(|t| t.id.0).collect();
                 let new_v: BTreeSet<u64> = vias.iter().map(|v| v.id.0).collect();
                 !short.is_empty() && !spoke_rooms(proj, fitems, &short, &new_t, &new_v).is_empty()
@@ -2606,6 +2675,7 @@ pub(crate) fn route(
         g.negotiate = false;
         g.fine_pass = false;
         g.rip_ups = 0;
+        g.kept_spokes = KEPT_SPOKES;
         g.seed = (opts.seed != 0).then_some(opts.seed);
         g.work_budget = opts.work.left();
         // With no fill asked of the host: guide tells what it cuts off by its own count of
@@ -2630,6 +2700,10 @@ pub(crate) fn route(
         let mut old: BTreeSet<String> = BTreeSet::new();
         let had: BTreeSet<(&str, &str, &str)> =
             was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
+        // And no pad that had a neck is left with none (D126): a shorter way through the room
+        // of a pad's last spoke is no gain, and the nets with new copper at such a pad have
+        // their old routes back as those at a connection that opened.
+        let relief_was = (!poured.is_empty()).then(|| reliefs(&proj, &fitems, &poured));
         for _ in 0..SHORTER_AGAIN {
             let new = |net: &Option<String>| net.as_deref().is_some_and(|n| moved.contains(n) && !old.contains(n));
             let (mut tracks2, mut vias2) = (tracks.clone(), vias.clone());
@@ -2644,7 +2718,10 @@ pub(crate) fn route(
             let items2 = geo::copper_items(&proj2);
             let isl2 = geo::islands(&items2);
             let now = open(&items2, &isl2);
-            if removed == stats.drc_removed && now.len() <= was.len() {
+            let worse: Vec<Point> = relief_was
+                .as_ref()
+                .map_or_else(Vec::new, |r| relief_worse(&reliefs(&proj2, &items2, &poured), r, true));
+            if removed == stats.drc_removed && now.len() <= was.len() && worse.is_empty() {
                 let (mm, n) =
                     (tracks_length(&tracks).0 - tracks_length(&tracks2).0, vias.len() as i64 - vias2.len() as i64);
                 (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
@@ -2668,6 +2745,7 @@ pub(crate) fn route(
                 .iter()
                 .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
                 .flat_map(|l| [l.from_at, l.to_at])
+                .chain(worse)
                 .collect();
             // A track by its box, which is near enough for one that passes a pad.
             let at = |a: Point, b: Point| {
@@ -3007,15 +3085,6 @@ pub(crate) fn route(
             Instant::now() + spoke_step(after, fill, count) + REPORT < start + b
         });
         if spokes_room && stopped != Some(Stopped::WorkBudget) && !poured.is_empty() && !tracks.is_empty() {
-            let short_of = |q: &Project, items: &[CopperItem]| -> BTreeSet<geo::thermal::Key3> {
-                let rules = &q.board().rules;
-                geo::thermal::joints_of(q, items, &|net| poured.contains(net))
-                    .into_iter()
-                    .filter(|j| j.starved(rules.min_thermal_spokes, rules.thermal_max_contact))
-                    .map(|j| (j.refdes, j.number, j.layer))
-                    .collect()
-            };
-            let short = short_of(&proj, &fitems);
             let held: BTreeSet<String> = ad
                 .design
                 .pairs
@@ -3024,30 +3093,39 @@ pub(crate) fn route(
                 .chain(ad.design.lengths.iter().flat_map(|l| l.nets.iter().copied()))
                 .filter_map(|n| ad.nets.get(n.index()).cloned())
                 .collect();
-            let new_t: BTreeSet<u64> = tracks.iter().map(|t| t.id.0).collect();
-            let new_v: BTreeSet<u64> = vias.iter().map(|v| v.id.0).collect();
-            let mut rooms: Vec<SpokeRoom> = spoke_rooms(&proj, &fitems, &short, &new_t, &new_v)
-                .into_iter()
-                .filter(|r| r.nets.iter().all(|n| !held.contains(n) && wanted(n) && !poured.contains(n.as_str())))
-                .collect();
-            if !short.is_empty() {
+            // The rooms of the board as it is: of each pad short of its spokes, as many as it
+            // lacks.
+            let rooms_of = |proj: &Project, fitems: &[CopperItem], tracks: &[Track], vias: &[Via], relief: &Reliefs| {
+                let new_t: BTreeSet<u64> = tracks.iter().map(|t| t.id.0).collect();
+                let new_v: BTreeSet<u64> = vias.iter().map(|v| v.id.0).collect();
+                spoke_rooms(proj, fitems, &short_pads(relief), &new_t, &new_v)
+                    .into_iter()
+                    .filter(|r| r.nets.iter().all(|n| !held.contains(n) && wanted(n) && !poured.contains(n.as_str())))
+                    .collect::<Vec<SpokeRoom>>()
+            };
+            let mut relief = reliefs(&proj, &fitems, &poured);
+            let mut rooms = rooms_of(&proj, &fitems, &tracks, &vias, &relief);
+            let (none, short, _) = relief_score(&relief);
+            if short > 0 {
                 (hooks.progress)(
                     0,
                     None,
                     &format!(
-                        "guide: {} pad(s) short of spokes, {} with routes in a spoke's room",
-                        short.len(),
+                        "guide: {short} pad(s) short of spokes, {none} with none, {} room(s) of spokes with routes in them",
                         rooms.len()
                     ),
                 );
             }
-            let was = open(&fitems, &fisl);
-            let had: BTreeSet<(&str, &str, &str)> =
-                was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
-            // With every room, and then once more with those whose nets all came back whole: a net
-            // that guide does not join up again round a room costs the whole try, and its old
-            // routes are no longer free once the others have moved.
-            for attempt in 0..SPOKE_AGAIN {
+            // With every room; then, where a net did not come back whole round its rooms, with
+            // the rooms whose nets all did: a net that guide does not join up again costs the
+            // whole try, and its old routes are no longer free once the others have moved.
+            // Where every net came back and the pads are no better off for it, with half of
+            // the rooms, those of the pads with no spoke first: one room that the fill does
+            // not use, or a route that went round it through the room of another pad, costs
+            // the others their try. A try that is kept is the board, and the rooms it has
+            // then are tried the same way (D126): what one try gains is kept whatever the
+            // next does.
+            for _ in 0..SPOKE_AGAIN {
                 let in_time = opts.budget.is_none_or(|b| {
                     let count = joint_took.get().unwrap_or(after / 3);
                     Instant::now() + spoke_step(after, fill, count) + REPORT < start + b
@@ -3055,6 +3133,9 @@ pub(crate) fn route(
                 if rooms.is_empty() || !in_time {
                     break;
                 }
+                let was = open(&fitems, &fisl);
+                let had: BTreeSet<(&str, &str, &str)> =
+                    was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
                 let gone_t: BTreeSet<u64> = rooms.iter().flat_map(|r| r.tracks.iter().copied()).collect();
                 let gone_v: BTreeSet<u64> = rooms.iter().flat_map(|r| r.vias.iter().copied()).collect();
                 let moving: BTreeSet<String> = rooms.iter().flat_map(|r| r.nets.iter().cloned()).collect();
@@ -3111,6 +3192,7 @@ pub(crate) fn route(
                 let handed = ad.take_back(&mine);
                 let mut g = gopts;
                 g.whole = false;
+                g.kept_spokes = KEPT_SPOKES;
                 g.seed = (opts.seed != 0).then_some(opts.seed);
                 g.work_budget = opts.work.left();
                 let until = opts
@@ -3152,21 +3234,28 @@ pub(crate) fn route(
                     .map(|l| l.net.clone())
                     .collect();
                 failed.extend(reasons.keys().filter(|n| !drc_reason.contains_key(*n)).cloned());
-                let short2 = short_of(&proj2, &items2);
+                let relief2 = reliefs(&proj2, &items2, &poured);
                 let clean = removed == stats.drc_removed && failed.is_empty() && now.len() <= was.len();
-                let kept = clean && short2.len() < short.len();
+                // Kept if the board is nearer its relief, the pads with no neck first, and no pad
+                // that had a neck is left with none: counted by the pads short alone, a try that
+                // took the last spoke of one pad for the second of two others was kept (D125,
+                // J14.5 of tinytapeout-demo).
+                let (score, score2) = (relief_score(&relief), relief_score(&relief2));
+                let kept = clean && score2 < score && relief_worse(&relief2, &relief, true).is_empty();
                 (hooks.progress)(
                     0,
                     None,
                     &format!(
                         "guide: {} track(s) and {} via(s) of {} net(s) out of {} room(s) of spokes, {} pad(s) short for {}, \
-                         {} connection(s) open for {}, {} item(s) taken out by the check: {}",
+                         {} with no spoke for {}, {} connection(s) open for {}, {} item(s) taken out by the check: {}",
                         gone_t.len(),
                         gone_v.len(),
                         moving.len(),
                         rooms.len(),
-                        short2.len(),
-                        short.len(),
+                        score2.1,
+                        score.1,
+                        score2.0,
+                        score.0,
                         now.len(),
                         was.len(),
                         removed - stats.drc_removed,
@@ -3174,15 +3263,23 @@ pub(crate) fn route(
                     ),
                 );
                 if kept {
+                    drop(had);
                     (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
-                    break;
+                    relief = relief2;
+                    rooms = rooms_of(&proj, &fitems, &tracks, &vias, &relief);
+                    continue;
                 }
-                if clean || attempt + 1 == SPOKE_AGAIN {
-                    break;
-                }
-                // Once more with the rooms whose nets all came back whole, and those alone.
                 let before = rooms.len();
-                rooms.retain(|r| r.nets.iter().all(|n| !failed.contains(n)));
+                if failed.is_empty() {
+                    // Every net came back: half of the rooms, those of the pads with no spoke
+                    // first, and then in their order.
+                    let none = |r: &SpokeRoom| relief.get(&r.pad).is_some_and(|(worth, _, _)| *worth == 0);
+                    rooms.sort_by_key(|r| !none(r));
+                    rooms.truncate(before / 2);
+                } else {
+                    // Once more with the rooms whose nets all came back whole, and those alone.
+                    rooms.retain(|r| r.nets.iter().all(|n| !failed.contains(n)));
+                }
                 if rooms.len() == before {
                     break;
                 }
@@ -3784,7 +3881,8 @@ mod tests {
             locked: false,
         });
         let items = geo::copper_items(&p);
-        let short: BTreeSet<geo::thermal::Key3> = [("J1".to_string(), "2".to_string(), "B.Cu".to_string())].into();
+        let short: BTreeMap<geo::thermal::Key3, u8> =
+            [(("J1".to_string(), "2".to_string(), "B.Cu".to_string()), 1)].into();
         let new: BTreeSet<u64> = [id.0].into();
         let rooms = spoke_rooms(&p, &items, &short, &new, &BTreeSet::new());
         assert_eq!(rooms.len(), 1);
@@ -3794,7 +3892,70 @@ mod tests {
         assert_eq!(r.nets, BTreeSet::from(["SIG".to_string()]));
         assert!(!r.room.is_empty());
         assert!(spoke_rooms(&p, &items, &short, &BTreeSet::new(), &BTreeSet::new()).is_empty());
-        assert!(spoke_rooms(&p, &items, &BTreeSet::new(), &new, &BTreeSet::new()).is_empty());
+        assert!(spoke_rooms(&p, &items, &BTreeMap::new(), &new, &BTreeSet::new()).is_empty());
+    }
+
+    /// A pad short of its spokes has as many rooms told as it lacks, those with the fewest
+    /// routes in them first (D126): a second track of this run, across the spoke on the
+    /// other side of J1.2, is the room of a second spoke for a pad that lacks two, and is not
+    /// told for one that lacks one.
+    #[test]
+    fn a_pad_has_as_many_rooms_told_as_it_lacks() {
+        let mut p = project();
+        for z in &mut p.board_mut().zones {
+            z.pads = PadConnection::Thermal;
+        }
+        let pp = geo::placed_pads(&p).into_iter().find(|pp| pp.refdes == "J1" && pp.number == "2").expect("J1.2");
+        let mut new: BTreeSet<u64> = BTreeSet::new();
+        for dy in [-1_300_000, 1_300_000] {
+            let id = p.alloc_id();
+            new.insert(id.0);
+            let (x, y) = (pp.center.x.0, pp.center.y.0 + dy);
+            p.board_mut().tracks.push(Track {
+                id,
+                layer: "B.Cu".into(),
+                width: Nm(250_000),
+                net: Some("SIG".into()),
+                start: Point { x: Nm(x - 1_000_000), y: Nm(y) },
+                end: Point { x: Nm(x + 1_000_000), y: Nm(y) },
+                mid: None,
+                locked: false,
+            });
+        }
+        let items = geo::copper_items(&p);
+        let key = ("J1".to_string(), "2".to_string(), "B.Cu".to_string());
+        let lacking = |n: u8| -> BTreeMap<geo::thermal::Key3, u8> { [(key.clone(), n)].into() };
+        let one = spoke_rooms(&p, &items, &lacking(1), &new, &BTreeSet::new());
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].pad, key);
+        let two = spoke_rooms(&p, &items, &lacking(2), &new, &BTreeSet::new());
+        assert_eq!(two.len(), 2);
+        let tracks: BTreeSet<u64> = two.iter().flat_map(|r| r.tracks.iter().copied()).collect();
+        assert_eq!(tracks, new);
+    }
+
+    /// How far a board is from its relief is told by the pads with no neck first (D126):
+    /// one pad more with its two necks for another's last is fewer pads short and no nearer,
+    /// and the pad left with none is told as worse off.
+    #[test]
+    fn a_board_is_no_nearer_its_relief_for_a_pad_left_with_no_neck() {
+        let key = |n: &str| ("J1".to_string(), n.to_string(), "F.Cu".to_string());
+        let at = |x: i64| Point { x: Nm(x), y: Nm(0) };
+        let was: Reliefs = [(key("1"), (1, 1, at(1))), (key("2"), (1, 1, at(2))), (key("3"), (2, 0, at(3)))].into();
+        let now: Reliefs = [(key("1"), (2, 0, at(1))), (key("2"), (0, 2, at(2))), (key("3"), (2, 0, at(3)))].into();
+        assert_eq!(relief_score(&was), (0, 2, 2));
+        assert_eq!(relief_score(&now), (1, 1, 2));
+        assert!(relief_score(&now) > relief_score(&was));
+        assert_eq!(relief_worse(&now, &was, true), vec![at(2)]);
+        assert_eq!(short_pads(&now), [(key("2"), 2)].into());
+        // A pad with one neck less that still has one is worse off, and not left with none.
+        let less: Reliefs = [(key("1"), (1, 1, at(1))), (key("2"), (1, 1, at(2))), (key("3"), (1, 1, at(3)))].into();
+        assert_eq!(relief_worse(&less, &was, false), vec![at(3)]);
+        assert!(relief_worse(&less, &was, true).is_empty());
+        // And with a pad's two necks made, the board is nearer.
+        let better: Reliefs = [(key("1"), (2, 0, at(1))), (key("2"), (1, 1, at(2))), (key("3"), (2, 0, at(3)))].into();
+        assert!(relief_score(&better) < relief_score(&was));
+        assert!(relief_worse(&better, &was, false).is_empty());
     }
 
     #[test]
@@ -4279,6 +4440,9 @@ mod tests {
         // The room of the spokes of pads in pours costs other nets' tracks (D110), and a via
         // what guide has it cost.
         assert_eq!((g.spoke_cost, g.via_cost), (4.0, pcb::RouteOptions::default().via_cost));
+        // And the last spoke of a pad is kept in the run for shorter ways and in the step for
+        // the spokes alone, which set it themselves (D126): no run that routes has it.
+        assert_eq!((g.kept_spokes, KEPT_SPOKES), (0, 1));
         // Every net at once before the passes in a run with a budget, of time or of work, and
         // in no other (D113); on the threads that the native router's batches have.
         assert!(!g.whole && g.threads >= 1);

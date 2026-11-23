@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,25 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.30* (D126) keeps a pad's last spoke, and keeps a net that it routed again only if every track
+  of it is free. *The last spoke*: the room of a spoke has a price (`spoke_cost`, D110), and a price let
+  the run for shorter ways lay the tracks of two nets through both rooms of a header's ground pin on
+  tinytapeout-demo (J14.5, one order of sixteen with 0.0.29). `RouteOptions::kept_spokes` is a wall: of the
+  spokes that the fill makes for a pad on a layer, the last that no route of another net stands in the room
+  of is in guide's world as copper of the pad's net, for as long as it is the last, from when the nets are
+  routed a net at a time. The adapter sets it in the two runs that move routes that are otherwise final,
+  the run for shorter ways and the step for the spokes (`KEPT_SPOKES`, and in no run that routes: D126
+  has what that cost). Both are also held to the pads by the adapter: a shorter way that leaves a pad that
+  had a neck with none has the nets at that pad back as they were, and the step for the spokes is kept by
+  how far the board is from its relief, the pads with no spoke first (`relief_score`), tries as many rooms
+  for a pad as it lacks spokes, and goes on from each try that it keeps, with half the rooms where a try
+  that came back whole gained nothing. *The routes kept across a track*: guide 0.0.25's pass that routes
+  each net again where the others are told whether the new route is free by counting the tracks that
+  `NetCopper::free_in` keeps of it, which cuts a track where something is in its way and joins what is in
+  line; a route across another net's track could be as many tracks as before, and was kept. cadlab's check
+  then took out every piece of copper that touched it (tinytapeout-demo at 150 million nodes: 120, 107 and
+  323 tracks and vias in three orders of eight; at 60 s 62 and 23 in two of eight), which the later runs
+  joined up again. 0.0.30 asks the world of every track and via, and the check takes nothing out.
 - *The time of the step for the spokes is kept from the first run on* (D124). Where the board as the first
   run leaves it has pads short of their spokes with routes in a spoke's room, every run after the first ends
   in time for the step, as the run for shorter ways did (D122); the step that takes out the tracks between
@@ -2689,6 +2708,75 @@ Vias and track, the medians of the runs, guide against the native router:
   first round of both routers joined connection by connection, and what was tried and not kept.
 
 The default is unchanged (DECISIONS D125).
+
+**Native router and guide 0.0.30, D126** (the corpus at the default 60 s; four runs of the native router, seeds 1
+to 4, three threads, and four orders of guide, three threads for its negotiation, one run of each at a time,
+side by side in the same half hour, and four more of each on tinytapeout-demo, seeds 5 to 8; the machine's load
+0.5 to 4.7, noted every two minutes, median 3.1, where D125's was 9.8 to 34. Measured with a checkout of the
+commit that 0.0.30 was released from behind the adapter of this decision; 0.0.30 from crates.io routes five
+boards to the same connections and vias at 40 million nodes):
+
+| board | layers | native: open by run (min / median / max); vias, length, time | guide 0.0.30: open by run (min / median / max); vias, length, time |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 6, 439.7 mm, 1.1 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 5, 293.8 mm, 0.9 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 1, 176.5 mm, 0.3 s | 0, 0, 0, 0 (0 / 0 / 0); 1, 168.4 mm, 0.7 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 12.1 s | 0, 0, 0, 0 (0 / 0 / 0); 47, 439.4 mm, 6.5 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 51.8 s | 3, 3, 3, 3 (3 / 3 / 3); 22, 2107.5 mm, 39.8 s |
+| corne-cherry | 2 | 3, 3, 2, 4 (2 / 3 / 4); 451, 8100.6 mm, 19.4 s | 1, 0, 1, 1 (0 / 1 / 1); 421, 7511.1 mm, 54.5 s cut |
+| tinytapeout-demo | 4 | 19, 2, 5, 5, 2, 2, 3, 9 (2 / 4 / 19); 244, 4947.5 mm, 61.1 s | 0, 1, 0, 0, 0, 0, 2, 4 (0 / 0 / 4); 270, 4914.7 mm, 51.2 s |
+| buspirate5-rev10 | 4 | 4, 2, 4, 8 (2 / 4 / 8); 296, 3156.9 mm, 23.6 s | 0, 0, 0, 0 (0 / 0 / 0); 316, 2998.4 mm, 24.7 s |
+| lumenpnp-mobo | 4 | 8, 12, 7, 14 (7 / 10 / 14); 342, 5561.4 mm, 63.6 s | 0, 0, 0, 0 (0 / 0 / 0); 339, 5516.5 mm, 57.0 s |
+| cynthion | 4 | 28, 29, 29, 28 (28 / 28.5 / 29); 476, 3176.6 mm, 61.9 s cut | 8, 8, 8, 8 (8 / 8 / 8); 425, 3036.7 mm, 40.0 s |
+| glasgow-revC3 | 4 | 36, 31, 35, 31 (31 / 33 / 36); 415, 3436.4 mm, 61.5 s cut | 9, 6, 9, 7 (6 / 8 / 9); 427, 3623.4 mm, 59.1 s cut |
+| glasgow-revD1 | 6 | 139, 117, 94, 102 (94 / 109.5 / 139); 1046, 8967.0 mm, 61.2 s cut | 9, 14, 7, 12 (7 / 10.5 / 14); 1200, 10772.3 mm, 57.1 s cut |
+| all twelve | | 240, 199, 179, 195 (179 / 197 / 240) | 30, 32, 28, 31 (28 / 30.5 / 32) |
+| the eleven without glasgow-revD1 | | 101, 82, 85, 93 (82 / 89 / 101) | 21, 18, 21, 19 (18 / 20 / 21) |
+
+The totals are of the first four runs of each. Pads in pours by the necks that reach them, over the twelve
+boards, by those runs:
+
+| | pads in pours | no neck | short of two necks (`drc.starved_thermal`) | solid solder pads |
+|---|---|---|---|---|
+| native router, seeds 1 to 4 | 2348 to 2361 | 23, 8, 1, 3 | 100, 75, 80, 76 | 477 to 481 |
+| guide 0.0.30, four orders | 2367 to 2371 | 0, 0, 0, 0 | 20, 30, 31, 36 | 499 to 510 |
+
+Vias and track, the medians of the runs, guide against the native router:
+
+| board | vias | track, mm | track outside the pads of its net, mm |
+|---|---|---|---|
+| buspirate-flash-sop | 5 against 4 (+25 %) | 440 against 461 (-4 %) | 429 against 431 (-0 %) |
+| buspirate-rs232 | 5 against 10 (-50 %) | 297 against 281 (+6 %) | 286 against 272 (+5 %) |
+| lumenpnp-ringlight | 3 against 3 (+0 %) | 167 against 177 (-6 %) | 158 against 159 (-1 %) |
+| nrfmicro | 42.5 against 47.5 (-11 %) | 437 against 450 (-3 %) | 418 against 414 (+1 %) |
+| sweep-v2.2 | 20 against 25.5 (-22 %) | 2122 against 2159 (-2 %) | 2111 against 2122 (-1 %) |
+| corne-cherry | 427 against 459 (-7 %) | 7567 against 8103 (-7 %) | 7460 against 7915 (-6 %) |
+| tinytapeout-demo | 285.5 against 273 (+5 %) | 5054 against 4894 (+3 %) | 4977 against 4672 (+7 %) |
+| buspirate5-rev10 | 308.5 against 302 (+2 %) | 3018 against 3129 (-4 %) | 2896 against 2911 (-0 %) |
+| lumenpnp-mobo | 335 against 345.5 (-3 %) | 5407 against 5462 (-1 %) | 5278 against 5177 (+2 %) |
+| cynthion | 417 against 478 (-13 %) | 3069 against 3190 (-4 %) | 2979 against 2986 (-0 %) |
+| glasgow-revC3 | 403.5 against 416.5 (-3 %) | 3688 against 3478 (+6 %) | 3582 against 3216 (+11 %) |
+| glasgow-revD1 | 1190.5 against 1080.5 (+10 %) | 10763 against 9048 (+19 %) | 10433 against 8527 (+22 %) |
+
+- *0 DRC errors other than unrouted* in the 104 runs; no pad solid by copper that is no pour with either router.
+- *No pad of guide's without a neck*, on any board in any of its 52 runs, and in none of tinytapeout-demo's
+  sixteen orders measured before the release (D126): D125 had one in each of two orders of that board. Pads
+  short of two necks over the twelve boards 20, 30, 31 and 36 against the native router's 100, 75, 80 and 76.
+- *Beside 0.0.29 in the same quarter of an hour* (D126, load 2.4 to 4.1): tinytapeout-demo over the same eight
+  orders 0, 1, 0, 0, 0, 0, 0 and 4 connections open with both, 285.5 vias with both, 5070 mm for 5108, 47 pads
+  short of two necks for 49, none with no neck for one (J14.5, the fourth order), and nothing taken out by the
+  check for 62 and 23 items in two orders; corne-cherry over four orders the same connections, vias and track.
+  D125's 275.5 vias for that board were measured at a load of 30 and more, with either release.
+- *Budgets of nodes*, 0.0.29 and 0.0.30: 40 million, three orders, the nine boards: 583 open for 589,
+  tinytapeout-demo 3, 7 and 4 for 3, 7 and 10 and the eight others as they had. 150 million, two orders: the
+  six others the same connections open (corne-cherry 8 and 0); tinytapeout-demo none and 1, for none and none,
+  with 270 and 332 vias for 269 and 331: the second order's run is cut by the budget at 150 million, where
+  0.0.29's ended at 148.7.
+- D126 has the table of equal, better and worse by board and measure (29, 27, 1 and 15 of 72 cells; D125: 26,
+  29, 3 and 14 under its load; D124: 29, 29, 1 and 13), the same by the nets that both routers complete (13,
+  11 and 12 of 36 for 13, 10 and 13), what was tried and not kept, and what of the direction was not attempted.
+
+The default is unchanged (DECISIONS D126).
 
 **Native router and guide 0.0.27, D124** (guide 0.0.27 from crates.io behind the adapter of D124, which keeps the
 time of the step for the spokes from the first run on; the corpus at the default 60 s; four runs of the native

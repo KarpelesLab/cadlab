@@ -370,7 +370,25 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D124 (D125, the same
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D125 (D126, the same
+      direction, not met, and no nearer by the count of the cells): a pad left with no spoke by 0.0.29
+      (a ground pin of a header on tinytapeout-demo, in one order of sixteen) traced to the run for
+      shorter ways and to the step for the spokes, and closed three ways: guide 0.0.30 keeps a pad's last
+      spoke as copper of its net in those two runs (`RouteOptions::kept_spokes`), a shorter way that
+      leaves a pad that had a neck with none is not kept, and the step for the spokes is kept by the pads
+      with no spoke first, a try at a time from what the last one kept. No pad without a neck on any
+      board in any order measured (52 runs at 60 s, and tinytapeout-demo's sixteen orders before the
+      release). And a fault of guide's own, found on the way: a net that it routed again was kept across
+      another net's track, and cadlab's check took the pieces out (tinytapeout-demo: up to 323 tracks and
+      vias in three orders of eight at 150 million nodes, none with 0.0.30). By board and measure 29
+      better, 27 equal, 1 with ranges that overlap and 15 worse of 72, measured on a quiet machine (26,
+      29, 3 and 14 in D125 under its load; 29, 29, 1 and 13 in D124); by the nets both routers complete
+      13, 11 and 12 of 36 (13, 10 and 13). Worse than 0.0.29: one connection open in one order of eight
+      of tinytapeout-demo at 150 million nodes for none, and two or three vias in single orders of two boards
+      at a budget of nodes. Open (D126, "Not attempted"): all four of the direction's other items, the
+      planning of a net with a plane on outer pours with the routes made legal first, the glasgows'
+      track, corne-cherry's time, buspirate-flash-sop's via and buspirate-rs232's track, the last two
+      looked at by net. Done since D124 (D125, the same
       direction, not met): the first round of both routers joined connection by connection and the
       differences counted by their kind (the planning of a net with a plane, the room of a spoke, the
       order, the tree, where a route ends at a pad, and the widths of the nets); the native router's rule
