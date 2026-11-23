@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,21 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.34* (D130) has this router's negotiation itself, as a first stage that the adapter leaves off.
+  `RouteOptions::rounds` at `Rounds::Native`: `router::{engine, grid, index, pours, fanout, components,
+  scoped}` as they are, with the board made from guide's design, and of `router::mod` the grid, the plan of
+  the nets, the rounds, the legalisation, the rounds for the pours, the rip-up and retry and the pass for
+  fewer vias; the nets narrowed by `fanout::necks` and the ways out by `fanout`, for which the adapter gives
+  guide the part of each pad (`Design::parts`). It ends its rounds as this router ends them: the same nets,
+  shared points, vias and track in every round on corne-cherry and buspirate5-rev10, with this router's rules
+  for a via at a pad and a route through a pour, and within a few vias in a hundred on tinytapeout-demo and
+  glasgow-revD1 (below, and D130). guide gives a board up after the stage's first round, for its own rounds,
+  if its share has no room for the stage or its grid does not reach the pads (cynthion, glasgow-revC3,
+  glasgow-revD1). With guide's passes after it, at 60 s over four orders, tinytapeout-demo has 271.5 vias and
+  4723 mm for 284.5 and 5038 mm with guide's own rounds, and four to seven connections open for none or one;
+  buspirate5-rev10 293 and 2871 mm for 307.5 and 3056 mm, in 34 to 40 s for 20 to 33 s; lumenpnp-mobo
+  339 and 5467 mm for 334 and 5300 mm. The stage's routes shut in pads that its own rounds leave open, as
+  this router's do, and guide's passes have no room left to reach them.
 - *guide 0.0.33* (D129) can negotiate for the connections that its negotiation leaves open, as an option that
   the adapter leaves off. `RouteOptions::whole_finer`: when the rounds at twice the pitch end and what is
   still shared has been taken out, a net that found no way where nothing is claimed has a connection open;
@@ -2821,6 +2836,26 @@ Vias and track, the medians of the runs, guide against the native router:
   the time of a run goes on three boards, what was tried and not kept, and what is not done.
 
 The default is unchanged (DECISIONS D127).
+
+**Native router and guide 0.0.34, D130** (not measured again at 60 s: the adapter leaves the stage of 0.0.34
+off, and with it off guide routes as 0.0.33 does, the same connections open and vias in each of 27 runs at 40
+million nodes; the table below stands. The rounds of the stage beside this router's, seed 1, one run of each
+at a time, as released: the rounds; the vias, the mm of track and the connections open as they end):
+
+| board | native | guide's stage | first round, native: vias, mm | guide's stage |
+|---|---|---|---|---|
+| tinytapeout-demo | 40; 251, 4615.3, 2 | 40; 250, 4552.7, 3 | 184, 4494.2 | 185, 4503.2 |
+| corne-cherry | 33; 492, 8007.2, 1 | 40; 550, 8494.4, 3 | 238, 7150.6 | 238, 7165.8 |
+| buspirate5-rev10 | 29; 257, 2869.0, 3 | 27; 255, 2901.4, 4 | 115, 2812.3 | 113, 2814.9 |
+| glasgow-revD1 | 9; 956, 8984.0, 92 | 9; 967, 9080.3, 76 | 743, 8778.1 | 723, 8678.7 |
+
+- With this router's own rules for a via at a pad and a route through a pour, corne-cherry (33 rounds, 492
+  vias, 8007.2 mm, 1 open; 496 and 8089.8 mm after the rounds for the pours) and buspirate5-rev10 (29 rounds,
+  257, 2869.0 mm, 3 open; 312 and 3085.0 mm after 68) are the same in every round in both routers.
+- D130 has the rounds by round, how the two were made the same, the stage with guide's passes after it, the
+  boards it is not begun on, what was tried and not kept, and what remains open.
+
+The default is unchanged (DECISIONS D130).
 
 **Native router and guide 0.0.33, D129** (the corpus at the default 60 s; four runs of the native router, seeds 1
 to 4, three threads, and four orders of guide, three threads for its negotiation, tinytapeout-demo eight of

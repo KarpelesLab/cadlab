@@ -413,7 +413,13 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       with a plane planned on its outer pours (`outer_pours`), and measured stage by stage: the first
       round's difference is closed and is gone by the end of the run, glasgow-revD1 has 42 to 71
       connections open with it for 12 to 17, and the order alone gains nothing; both are left off. Since
-      D128 (D129, the same direction, not met): the connections that the negotiation leaves open
+      D129 (D130, the same direction, not met): the native router's negotiation itself in guide, whole,
+      as a first stage that a host can ask for (guide 0.0.34, `Rounds::Native`), which ends its rounds as
+      the native router does, round for round on corne-cherry and buspirate5-rev10; with guide's passes
+      after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
+      for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
+      both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D128 (D129, the same direction, not met): the connections that the negotiation leaves open
       negotiated for on the grid of the pitch before the passes (guide 0.0.33, `whole_finer`), measured
       stage by stage: it halves what the passes are given and the nets they take out, and the board ends
       as it did, so it is left off; the round's table on a quiet machine, 29 better, 30 equal, 2 that

@@ -93,6 +93,13 @@ use super::{
 /// leaves 91 in 13 s (D88).
 const PLANE_COVERAGE: f64 = 0.0;
 
+/// Which negotiation guide's first run has for every net at once: its own
+/// (`Rounds::Own`), or the native router's as guide has it (`Rounds::Native`, guide 0.0.34),
+/// which is measured and left off (D130). With the native router's, guide is told of the
+/// zones that have no fill yet as well ([`adapt`]), and the later runs have the rounds that
+/// the first ended with (`Stats::rounds_given_up`).
+const ROUNDS: pcb::Rounds = pcb::Rounds::Own;
+
 /// The share of the time budget guide's first run may take: the rest is for the verification,
 /// the refill, a second run on the routed board and the report. guide itself ends its routing
 /// at 0.92 of what it is given, with no zones to join, and cleans up in the rest. Measured
@@ -516,6 +523,13 @@ pub(crate) fn adapt(
     let mut zones = Zones { min_spokes: p.board().rules.min_thermal_spokes, ..Default::default() };
     let mut obstacles: Vec<(Shape, LayerId)> = Vec::new();
     let (mut pad_names, mut copper_names, mut obstacle_names) = (Vec::new(), Vec::new(), Vec::new());
+    // By pad, the part it is of, as a number of the part's own (`Design::parts`, guide 0.0.34).
+    let mut part_ids: BTreeMap<String, u32> = BTreeMap::new();
+    let mut parts: Vec<u32> = Vec::new();
+    let mut part_of = |refdes: &str| -> u32 {
+        let next = part_ids.len() as u32;
+        *part_ids.entry(refdes.to_string()).or_insert(next)
+    };
 
     // Pads: one guide pad per pad, a pad stack's other shapes as its `stack` (one piece of
     // copper through its hole). Zone fills: the zones they are of, with them as host fills.
@@ -575,6 +589,7 @@ pub(crate) fn adapt(
                     stack: shapes.map(|s| (set, s)).collect(),
                 });
                 pad_names.push(it.item.to_string());
+                parts.push(part_of(refdes));
                 if let Some(k) = it.local.stack {
                     stack_at.insert(k, at);
                     stack_own.insert(at, custom.own[i]);
@@ -725,6 +740,34 @@ pub(crate) fn adapt(
             }
         }
     }
+    // With the native router's rounds ([`ROUNDS`]), the zones with a net that have no fill on
+    // this board, a pour that reaches no pad of its net yet: guide is told of them all the
+    // same, so that the fill it asks for around its routes (`RunControl::refill`) can name
+    // them. A pour of a supply under an array of balls is one, which the vias of the balls'
+    // ways out join them by (glasgow-revD1's +1V1 and +3V3, D130).
+    for z in board.zones.iter().filter(|z| ROUNDS == pcb::Rounds::Native && z.net.is_some()) {
+        if zone_at.contains_key(&z.id.0) || layer_set(&layers, &z.layers) == LayerSet::EMPTY {
+            continue;
+        }
+        zone_at.insert(z.id.0, zones.zones.len());
+        zone_ids.push(z.id);
+        let zp = geo::zones::zone_params(p, z);
+        zones.zones.push(CopperZone {
+            outline: z.outline.iter().map(|q| gp(*q)).collect(),
+            layers: layer_set(&layers, &z.layers),
+            net: id(&z.net),
+            priority: z.priority,
+            clearance: zp.clearance.0.max(0),
+            min_width: zp.min_width.0.max(0),
+            connection: connection(zp.pads),
+            thermal_gap: zp.thermal_gap.0.max(0),
+            spoke_width: zp.thermal_spoke.0.max(1),
+            islands: Islands::Remove,
+            spokes: zp.thermal_spokes,
+            plane: None,
+            ..Default::default()
+        });
+    }
     // Net ties: the copper between the pads of a group is where its nets may touch, as in the
     // DRC (`board::tied`). The pads themselves are not: a track of one net keeps its clearance
     // from the pad of the other there too.
@@ -747,6 +790,7 @@ pub(crate) fn adapt(
         pad.hole = Some(shape);
         gb.pads.push(pad);
         pad_names.push(pp.refdes.clone());
+        parts.push(part_of(&pp.refdes));
     }
     // Existing tracks and vias: fixed.
     let (mut track_ids, mut via_ids) = (Vec::new(), Vec::new());
@@ -890,6 +934,7 @@ pub(crate) fn adapt(
         pairs,
         lengths,
         zones,
+        parts,
     };
     Ok(Adapted {
         design,
@@ -1248,6 +1293,15 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // out, and the board ends as it did; at 60 s glasgow-revC3 has 25 connections open over
     // four orders for 31 with 2.7 % more track, and tinytapeout-demo 2.6 % fewer vias (D129).
     gopts.whole_finer = false;
+    // That negotiation is guide's own. guide has the native router's too since 0.0.34
+    // (`Rounds::Native`: its grid at the pitch, its plan of the nets, its order and its prices,
+    // with the nets narrowed by its rule and its ways out of the rows of fine pitch), which ends
+    // its rounds as the native router ends them, round for round on corne-cherry and
+    // buspirate5-rev10. With guide's passes after it, at 60 s over four orders, tinytapeout-demo
+    // has 5 % fewer vias and 6 % less track and four to seven connections open where guide's own
+    // rounds leave none or one, buspirate5-rev10 5 % and 6 % less in half as much time again, and
+    // lumenpnp-mobo 1.5 % and 3 % more: left off (D130).
+    gopts.rounds = ROUNDS;
     gopts.seed = (opts.seed != 0).then_some(opts.seed);
     if !opts.layers.is_empty() {
         gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
@@ -2392,6 +2446,11 @@ pub(crate) fn route(
     let first = Host { base: p, took: &fill_took, over: &over };
     let routed = call(&ad, Some(&first), &gopts, deadline, hooks)?;
     gopts.whole = false;
+    // The later runs lay this one's routes again: by the rounds that made them, which say how
+    // wide a net is at a row of pads.
+    if routed.stats.rounds_given_up {
+        gopts.rounds = pcb::Rounds::Own;
+    }
     opts.work.charge(routed.stats.work);
     (hooks.progress)(0, None, &said(&routed));
     let mut stopped = routed.stopped;

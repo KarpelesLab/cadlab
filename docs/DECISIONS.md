@@ -8913,3 +8913,197 @@ million nodes.
 *Not measured:* more than one period at 60 s for the option; `whole_finer` on the two-layer boards at 60 s,
 where the rounds are at the first pitch and it does nothing; the generated boards; freerouting; KiCad's DRC on
 a board guide routed; cadlab's oracles locally; cadlab's whole test suite, which is run at the merge.
+
+### D130. guide 0.0.34 adopted: the native router's negotiation itself in guide, as a first stage that a host can ask for, which ends its rounds as the native router does, round for round on two boards; with guide's passes after it a board has fewer vias and less track and more connections open, and it is left off; the default unchanged (2026-11-24)
+The direction is D121's to D129's: guide is to end equal to or better than the native router on every measure on
+every board, by taking from the native router what it still does better. Six rounds took a piece at a time
+(the set routed again, a net at a time, the price of a plane, the order, the tree, where a route ends at a pad,
+the widths, the plan on the outer pours, the routes made legal first), each explained a part, and guide's
+negotiation still did not end where the native router's does. **So this round the native router's negotiation
+is in guide as it is, whole: `RouteOptions::rounds`, `Rounds::Native`, guide 0.0.34. It ends its rounds as the
+native router ends them: the same nets, shared points, vias and track in every round on corne-cherry and
+buspirate5-rev10, and within a few vias in a hundred on tinytapeout-demo and glasgow-revD1. With guide's
+passes after it, of the three boards whose rounds end in their share, tinytapeout-demo and buspirate5-rev10
+have some 5 % fewer vias and 6 % less track than with guide's own rounds, the first with four to seven
+connections open for none or one and the second in 34 to 40 s for 20 to 33 s, and lumenpnp-mobo has 1.5 %
+more vias and 3 % more track. The adapter leaves it off ([`ROUNDS`], `router::guide`), and cadlab's results with guide are those of
+0.0.33, to the via at a budget of nodes.** `guide = { version = "0.0.34", default-features = false, features =
+["pcb"] }`; nothing else in `Cargo.lock` moves.
+**What is in guide** (its `pcb::rounds`; `docs/benchmarks.md` there has the tables). `router::{engine, grid,
+index, pours, fanout, components, scoped, work}` as they are here, less the gridless search, with the board
+made from guide's `Design` in place of the project (`model`), and of `router::mod` what a negotiation is:
+- the grid (`make_grid`, `snap_pitch`, `alignment`), the plan of the nets (`plan`, `plan_net`: islands, the
+  fills among them, the tree by the crow's distance), the access of the pads (`Engine::access`), the batches,
+  the search and its prices, the set routed again each round with the partial rip-up of a net of 64
+  connections, the order, the seeded shuffle, forty rounds or twelve with none better, the best round kept;
+- the legalisation, the rounds for the pours (`pour_round`, `replan_pours`, `pour_truth` by cadlab's fill
+  through guide's `RunControl::refill`, with the look at two thirds of the stage), the rip-up and retry of
+  a connection with the nets in its way (`blocking_keys`), and the pass for fewer vias (`minimize_vias`);
+- the widths (`fanout::necks`) and the ways out (`fanout::plan`, `crossovers`, `escape`), which guide has in
+  place of its own necks and escapes in every run of a board whose first run has these rounds. Both tell a
+  row and an array by the pads of one part, which guide's design did not have: `Design::parts`, by pad,
+  from this adapter.
+Not ported: the gridless searches and their retry, push-and-shove, the re-plan of boxed pads, the finer
+grids, the optimiser and the verification, which are after the negotiation and are guide's passes there.
+The scoped rules are guide's two: an area's clearance between two pieces of copper that both touch it, and
+a clearance of an item's own (`scoped::Scoped::new` from guide's `Rules`); guide has no rule by kind or
+containment, which this adapter already passes the stricter way (D96). Each net's route goes to guide's
+passes as a tree, as its own negotiation's does, with the places where routes end that are no pad's centre.
+**The rounds beside the native router's** (measured; both print each round: the nets routed again, the
+points shared after it, the vias and the mm of track as the routes stand. The native router with seed 1 at
+60 s, the stage with the same seed in a run of 120 s, its share 42 s for the native router's 45 s; the nets
+planned on every fill, `outer_pours`; one run of each at a time, the load 3.4 to 7.7).
+- *With the native router's rules for a via at a pad and a route through a pour* (a build of the round,
+  before three rules were changed, below): corne-cherry and buspirate5-rev10 are the same in every round and
+  through the rounds for the pours. The first round's work, 17,542,033 units for 17,542,023 on corne-cherry.
+
+| round | corne-cherry, native: nets, shared, vias, mm | guide's stage | buspirate5-rev10, native | guide's stage |
+|---|---|---|---|---|
+| 1 | 152, 4792, 238, 7150.6 | 152, 4792, 238, 7150.6 | 183, 2645, 115, 2812.3 | 183, 2645, 115, 2812.3 |
+| 2 | 137, 2220, 292, 7244.4 | 137, 2220, 292, 7244.4 | 155, 1151, 166, 2829.2 | 155, 1151, 166, 2829.2 |
+| 3 | 125, 1457, 321, 7287.4 | 125, 1457, 321, 7287.4 | 127, 507, 202, 2852.8 | 127, 507, 202, 2852.8 |
+| 5 | 112, 712, 401, 7359.6 | 112, 712, 401, 7359.6 | 88, 153, 250, 2860.8 | 88, 153, 250, 2860.8 |
+| 8 | 87, 280, 428, 7483.7 | 87, 280, 428, 7483.7 | 44, 43, 251, 2880.4 | 44, 43, 251, 2880.4 |
+| 12 | 68, 60, 478, 7966.5 | 68, 60, 478, 7966.5 | 26, 51, 254, 2889.2 | 26, 51, 254, 2889.2 |
+| 18 | 18, 12, 494, 8043.1 | 18, 12, 494, 8043.1 | 12, 4, 258, 2887.5 | 12, 4, 258, 2887.5 |
+| the rounds end | after 33: 492, 8007.2 mm, 1 open, 10.6 s | after 33: 492, 8007.2 mm, 1 open, 10.7 s | after 29: 257, 2869.0 mm, 3 open, 4.3 s | after 29: 257, 2869.0 mm, 3 open, 4.0 s |
+| after the rounds for the pours | after 38: 496, 8089.8 mm, 1 open | after 38: 496, 8089.8 mm, 1 open | after 68: 312, 3085.0 mm, 3 open | after 68: 312, 3085.0 mm, 3 open |
+
+- *tinytapeout-demo and glasgow-revD1, the same build*: the plan is the same (the pitch, 137 nets and 366
+  connections with the same widths and the same lengths, 561 nets and 1583 connections), and the rounds are
+  near. tinytapeout-demo's rule areas are one clearance each in guide's rules (D96); some pads of
+  glasgow-revD1 are not at the centre of their shape, where guide has a pad, and the grid is 72 µm aside.
+
+| round | tinytapeout-demo, native | guide's stage | glasgow-revD1, native | guide's stage |
+|---|---|---|---|---|
+| 1 | 137, 2007, 184, 4494.2 | 137, 2284, 185, 4494.0 | 561, 8013, 743, 8778.1 | 561, 7741, 722, 8688.0 |
+| 2 | 104, 895, 206, 4519.1 | 108, 948, 210, 4537.5 | 359, 3803, 824, 8900.5 | 354, 3813, 805, 8797.7 |
+| 3 | 96, 548, 219, 4529.6 | 94, 587, 220, 4534.3 | 323, 2269, 873, 8978.7 | 299, 2324, 855, 8884.7 |
+| 5 | 85, 178, 238, 4572.7 | 79, 215, 237, 4580.4 | 245, 918, 939, 9123.1 | 264, 1111, 927, 9024.3 |
+| 9 | 55, 57, 248, 4637.7 | 63, 50, 246, 4639.0 | 188, 387, 998, 9400.5 | 204, 500, 972, 9336.2 |
+| the rounds end | after 40: 251, 4615.3 mm, 2 open, 23 s | after 33: 261, 4743.0 mm, none open, 23 s | after 9, at their share: 956, 8984.0 mm, 92 open | after 9: 941, 9033.9 mm, 93 open |
+
+- *As released*, with three rules that are guide's (below):
+
+| board | native: rounds; vias, mm, open as they end | guide's stage | first round, native: vias, mm | guide's stage |
+|---|---|---|---|---|
+| tinytapeout-demo | 40; 251, 4615.3, 2 | 40; 250, 4552.7, 3 | 184, 4494.2 | 185, 4503.2 |
+| corne-cherry | 33; 492, 8007.2, 1 | 40; 550, 8494.4, 3 | 238, 7150.6 | 238, 7165.8 |
+| buspirate5-rev10 | 29; 257, 2869.0, 3 | 27; 255, 2901.4, 4 | 115, 2812.3 | 113, 2814.9 |
+| glasgow-revD1 | 9; 956, 8984.0, 92 | 9; 967, 9080.3, 76 | 743, 8778.1 | 723, 8678.7 |
+
+**How the two were made the same** (each found by joining the two routers' plans or first rounds, and fixed
+in the port, not tuned): guide's own necks for the native router's (the pitch 0.1625 mm for 0.1766 on
+buspirate5-rev10 and 0.1 for 0.158 on glasgow-revD1; 146 vias in the first round for 115); the fills of the
+zones that guide takes as copper before routing, teardrops and narrow pours, which were terminals of their
+nets (corne-cherry: half the connections of the first round another way); the fills of the board with the
+ways out on it, asked of cadlab through `refill`, and the zones that have no fill before them told to guide
+(glasgow-revD1's +1V1 and +3V3 under its array: four connections more); and the seed.
+**Where the release is not the native router's**, because guide's passes take out what they do not allow, and
+each cost connections at the hand-over: a via a tolerance from a pad of its own net (guide: no via touches a
+pad; 5 vias of buspirate5-rev10 and 9 of lumenpnp-mobo), an area's clearance for a via where the area is on
+one layer (13 vias of tinytapeout-demo), and a route through a fill that guide has as copper (122 tracks of
+one net of lumenpnp-mobo). With these the stage hands over what guide keeps: tinytapeout-demo 6 connections apart
+as given and 7 as kept, buspirate5-rev10 8 and 11, lumenpnp-mobo 11 and 11. corne-cherry's rounds are the
+worse for the third (the table above).
+**With guide's passes after it** (measured at 60 s; the stage beside guide's own rounds in the same build,
+two orders of each at a time, three threads each, the load 4.0 to 5.9. The nets planned as guide plans them,
+a net with a plane on its planes alone: planned on every fill, as the native router plans, tinytapeout-demo
+has 6 connections open in one order and 15 without the rounds for the pours, supply pads that the routes
+shut in). Open by order; medians of the vias and the track:
+
+| board | guide's own rounds: open; vias; track; time | the native router's in guide |
+|---|---|---|
+| tinytapeout-demo | 0/1/0/0; 284.5; 5038 mm; 53 to 56 s | 5/5/4/7; 271.5; 4723 mm; 55 to 57 s |
+| buspirate5-rev10 | 0/0/0/0; 307.5; 3056 mm; 20 to 33 s | 0/0/0/0; 293; 2871 mm; 34 to 40 s |
+| lumenpnp-mobo | 0/0/0/0; 334; 5300 mm; 50 to 54 s | 0/0/0/0; 339; 5467 mm; 57 to 58 s |
+
+- Open is what the router reports failed, as in D122's tables. The ratsnest of the board filled after the run
+  has 2, 1, 3 and 1 lines on buspirate5-rev10 with the stage for 0, 0, 1 and 2, and 1, 0, 0 and 0 on
+  lumenpnp-mobo for none.
+
+- Two of the twelve runs with the stage have a pad with no spoke (tinytapeout-demo); none with guide's own.
+- *With guide's own escapes* in place of the stage's ways out: tinytapeout-demo 1/0/3/2 open, 281.5 vias and
+  4741 mm, one run with a pad with no spoke; buspirate5-rev10 294.5 vias and 2883 mm.
+- *At 120 s*, one order, planned on every fill: tinytapeout-demo none open, 261 to 264 vias and 4689 to
+  4751 mm in 86 to 90 s (the native router at 60 s: 273 and 4894 mm with four open; guide 0.0.33: 287.5 and
+  5034 mm with none); buspirate5-rev10 none open, 288 to 303 vias and 2755 to 2799 mm.
+- *What stays open*: of tinytapeout-demo's 458 connections the stage hands over all but three to eight, pads
+  of +3V3 on the QFN-80 and pads of the header that its own routes shut in; guide's passes have those to
+  make on a board with no room left by the pads, and leave four to seven. The native router leaves two to
+  nineteen there. guide's own rounds, at twice the pitch, leave the room. And the stage takes the time: 30
+  to 40 rounds are 18 to 28 s of the 42 s that guide's first run has, at 0.6 to 0.8 s a round.
+- *The boards it is not begun on.* guide gives a board up after the stage's first round, and begins the run
+  again with its own rounds, necks and escapes (`Stats::rounds_given_up`), if eight times what that round
+  took is more than the stage's share, or if more than one connection in fifty has no way on the stage's
+  grid whatever the other nets do. cynthion (2.6 s of 19 s; 32 of 868), glasgow-revC3 (40 of 753) and
+  glasgow-revD1 (4.2 s of 20 s; 52 of 1914) are given up 5 s into the minute and end as with guide's own
+  rounds, to the via in the default order on cynthion and glasgow-revC3 (8 open, 413 vias, 2828.3 mm; 5 open,
+  444 vias) and with 25 connections open for 13 on glasgow-revD1. Not given up, in one order: cynthion 29
+  open for 8, glasgow-revC3 31 for 5, glasgow-revD1 119 to 187 for 13.
+- *Two layers*, where guide's own rounds are at the pitch already: corne-cherry 2 to 8 open and 434 to 498
+  vias over six runs for 1 and 437, nrfmicro 51 vias for 42.5.
+**The rule that would choose it**, were it adopted: more than two layers, and the stage's own first round
+(room in the share, the grid reaching the pads). It separates tinytapeout-demo, buspirate5-rev10 and
+lumenpnp-mobo from the rest, and on those three it would move tinytapeout-demo's vias, track and track
+outside the pads from worse to equal or better beside the native router, and its connections open from none
+to five; buspirate5-rev10's vias from equal to better and its time from equal to worse; and lumenpnp-mobo's
+vias and track from better to equal or worse. A change that is adopted is to make no cell worse (D122): so
+it is not adopted.
+**What is adopted**: guide 0.0.34 with the option off. The adapter gives guide the part of each pad
+(`Design::parts`), which only the stage reads, and has the stage's choice as a constant, [`ROUNDS`], with what
+goes with it: guide told of the zones with no fill, and the later runs with the rounds that the first ended
+with.
+**Budgets of nodes** (one thread, guide alone, the option off; D128's sets). 40 million, nine boards and three
+orders: 583 connections open, and each of the 27 runs has the connections open and the vias that 0.0.33 has
+(nrfmicro none; sweep-v2.2 3, 3 and 3; corne-cherry 36, 28 and 22; tinytapeout-demo 3, 7 and 4; buspirate5-rev10
+and lumenpnp-mobo none; cynthion 8, 8 and 8; glasgow-revC3 12, 15 and 12; glasgow-revD1 145, 136 and 130).
+150 million, seven boards and two orders: 43, and again each run as 0.0.33 has it (sweep-v2.2 3 and 3;
+corne-cherry 8 and none; tinytapeout-demo none and 1, 280 and 332 vias; buspirate5-rev10 and lumenpnp-mobo
+none; cynthion 8 and 8; glasgow-revC3 7 and 5). glasgow-revD1 at 150 million, which is not of that set: 56
+and 75 open. These with the release's source behind a `[patch]` that is in no commit; 0.0.34 from crates.io
+behind this commit routes corne-cherry, tinytapeout-demo, buspirate5-rev10, lumenpnp-mobo and glasgow-revC3
+to the same connections open and vias at 40 million nodes in the default order (36 and 438, 3 and 297, none
+and 317, none and 343, 12 and 404).
+**At 60 s with the option off** (the build of the release's source behind this adapter; the twelve boards in
+the default order and corne-cherry in three more, four runs at a time on three threads each, the load 3.6 to
+6.6): no pad with no spoke in the fifteen runs, 0 DRC errors other than unrouted, no solder pad made solid by
+a track. corne-cherry 4, 0, 1 and 1 connections open, 421, 450, 443 and 419 vias, 34 to 55 s (D129: 2, 0, 1
+and 1; 437; 34 to 55 s). The census of every order of D129's table, 52 runs, was not made again.
+**What got worse.** Nothing in cadlab's results: the option is off, and with it off guide 0.0.34 routes as
+0.0.33 does (the budgets above). Had it been set by the rule above: tinytapeout-demo's connections open (four
+to seven for none or one) and a pad with no spoke in two orders of four, buspirate5-rev10's time (34 to 40 s
+for 20 to 33 s), lumenpnp-mobo's vias and track (+1.5 % and +3 %) and time, and 5 s of the minute on the
+boards given up.
+**Tried and not kept** (each measured; one order at 60 s unless said).
+- *The nets planned on every fill*, the native router's plan (`outer_pours`): tinytapeout-demo 5 to 6 open
+  and 291 to 326 vias; without the stage's rounds for the pours 15 open; glasgow-revD1 125 to 187 open and 9
+  to 12 pads with no spoke.
+- *A larger share for the stage*, 0.75 of the first run for 0.5, planned on every fill: tinytapeout-demo 6
+  open and 291 vias for 5 and 326, corne-cherry 2 for 7, glasgow-revD1 125 for 187.
+- *The stage without its rounds for the pours*: tinytapeout-demo 1 open and 271 vias for 1 and 273,
+  buspirate5-rev10 none and 302 for 1 and 297, corne-cherry 2 and 496 for 3 and 481: no difference to tell.
+- *The stage on every board*, whatever its first round says: cynthion, glasgow-revC3 and glasgow-revD1, above.
+- *A route's end joined to its pad's centre by a track*, as guide's own routes end: a track from the cell
+  where the route ends on the pad to the centre is out of the pad at a narrow one, and guide took such
+  tracks out (one or two a run on buspirate5-rev10 and tinytapeout-demo); the route's end is a place of its
+  pad.
+- *The first round's share by the nets' length*, as guide's own negotiation asks whether it has room: the
+  native router's order is the shortest net first, and the first 15 % of the length is 0.1 s of a round of
+  4 s on glasgow-revD1.
+**Not attempted, and what remains open, with what was measured of each.**
+1. *The connections that the stage's routes shut in* (tinytapeout-demo: +3V3 at U6, the header's pins). The
+   native router leaves them open too. What it would take is room kept by those pads through the rounds, as
+   guide's price for a spoke's room does in its own, or the stage's routes moved for them after it; neither
+   was built.
+2. *The stage's time*: its rounds are the native router's, 0.6 to 3 s each, and guide's first run has 42 s for
+   them and its passes. Not looked at.
+3. *The secondary items of the round* (corne-cherry's time, tinytapeout-demo's time, lumenpnp-mobo's track
+   outside the pads): not begun.
+4. *The 72 cells beside the native router at 60 s*: not measured again. With the option off guide 0.0.34
+   routes as 0.0.33 does at a budget of nodes, and D129's table is the one that stands: 31 better, 29 equal,
+   2 that overlap and 10 worse; by the nets both complete 13, 14 and 9 of 36.
+**Default: unchanged.** `router: guide` stays the second opinion and the native router stays the default.
+*Not measured:* the twelve boards at 60 s beside the native router with 0.0.34; the stage at a budget of
+nodes; the generated boards; freerouting; KiCad's DRC on a board guide routed; cadlab's oracles locally;
+cadlab's whole test suite, which is run at the merge.
