@@ -370,7 +370,21 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D122 (D123, the same
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D123 (D124, the same
+      direction, not met): a net of two pads that has no way on the board told once, by the search for it
+      whole with no route on the board and by a search across every route, and no search of the whole
+      board for it in each pass; the time of the step for the spokes kept from the first run on, and the
+      tracks between pads taken out after it; each net routed again before the fills are joined again
+      (guide 0.0.26 and 0.0.27: cynthion 1, 1, 1 and 1 pads short of two necks for 5, 5, 1 and 1 and none
+      without a neck on any board, in 39 to 44 s for 56 to 59 s; glasgow-revC3's track +6 % for +8 %). By
+      board and measure 29 better, 29 equal, 1 with ranges that overlap and 13 worse of 72 (27, 29, 1 and 15
+      in D123): vias on three boards, track on four and outside the pads on the same four, time on two; by
+      the nets both routers complete 14, 10 and 12 of 36 (13, 11 and 12). Worse than 0.0.25: one or two
+      connections more open on glasgow-revD1 and glasgow-revC3 (the twelve boards 28 to 35 for 27 to 32),
+      for the time kept for the spokes; 0.0.26 at a budget of nodes, which 0.0.27 is for. Open (D124, "Not
+      attempted"): glasgow-revD1's track (+20 %), which D123 made worse and this round did not mend; why
+      guide's negotiation settles less than the native router's; corne-cherry's time; the step for the
+      spokes on glasgow-revD1, kept in no order. Done since D122 (D123, the same
       direction, not met): each net routed again where the others are by the negotiation's search, once
       every route is where it is, with claims for copper that is off its grid; the native router's gridless
       pass in the run for shorter ways; a plane at no price in guide's negotiation and the native router's
