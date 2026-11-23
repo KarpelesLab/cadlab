@@ -370,7 +370,23 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D123 (D124, the same
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D124 (D125, the same
+      direction, not met): the first round of both routers joined connection by connection and the
+      differences counted by their kind (the planning of a net with a plane, the room of a spoke, the
+      order, the tree, where a route ends at a pad, and the widths of the nets); the native router's rule
+      for the width of the nets of a row of pads of fine pitch in a rule area with a clearance of its own,
+      and a lattice of their pitch (guide 0.0.28 and 0.0.29: tinytapeout-demo's vias +3 % for +10 %, its
+      track +5 % for +10 % and +8 % for +13 % outside the pads; beside 0.0.27 under the same load 275.5
+      vias for 309 and 5059 mm for 5318). By board and measure 26 better, 29 equal, 3 with ranges that
+      overlap and 14 worse of 72 (29, 29, 1 and 13 in D124), measured on a machine at a load of 10 to 34
+      where D124 had 2 to 5; by the nets both routers complete 13, 10 and 13 of 36 (14, 10 and 12). Worse
+      than 0.0.27: one pad without a neck on tinytapeout-demo in two orders of eight, one of them a pin
+      of the ground in a header that the narrower nets now pass beside, not mended; 0.0.28 itself on
+      corne-cherry, which 0.0.29 is for. Open (D125, "Not attempted"): the planning of a net with a plane
+      on the pours of the outer layers, which needs the native router's order of rounds, legal routes and
+      fills; glasgow-revD1's and glasgow-revC3's track, there after guide's first round at twice the
+      pitch; corne-cherry's time; the step for the spokes a room at a time; buspirate-flash-sop's via
+      and buspirate-rs232's track. Done since D123 (D124, the same
       direction, not met): a net of two pads that has no way on the board told once, by the search for it
       whole with no route on the board and by a search across every route, and no search of the whole
       board for it in each pass; the time of the step for the spokes kept from the first run on, and the
