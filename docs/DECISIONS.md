@@ -8509,3 +8509,187 @@ release; one order of each board, guide 0.0.30's code).
 *Not measured:* the generated boards; more than four runs of either router; tinytapeout-demo in eight orders
 and sixteen, as D126 had it; freerouting beside the two; KiCad's DRC on a board guide routed; cadlab's oracles
 locally; cadlab's whole test suite, which is run at the merge; the table on a quiet machine.
+
+### D128. guide 0.0.32 adopted: the native router's order for the pours built in guide, the routes made legal before the fill, and a net with a plane planned on its outer pours; measured stage by stage, neither is a gain, both left off; the default unchanged (2026-11-23)
+The direction is D121's to D126's: guide is to end equal to or better than the native router on every measure on
+every board, by taking from the native router what it still does better. This round had one item, the largest
+difference that D125 measured in the first round of the two routers: the native router takes the pads that a
+pour of an outer layer joins as joined, and guide plans a net with a plane on its inner planes alone. Planned on
+every pour guide lost twice (D123, D125), and D126 read the cause as the order: guide tells the pads cut off on
+routes that are not yet legal. **The order was built, and the planning with it, and measured: it is not the
+cause. Planned on outer pours with the native router's order guide still ends worse than 0.0.30, and the order
+alone gains nothing. Both are options of guide that are off, and the adapter leaves them off; cadlab's results
+with guide are those of the release before.** `guide = { version = "0.0.32", default-features = false, features
+= ["pcb"] }`; nothing else in `Cargo.lock` moves. (D127 is the other change of this round, made beside this
+one.)
+**What was built** (guide 0.0.32, read from `router::mod`'s `pour_round`, `pour_truth` and `replan_pours` and
+written again for guide's negotiation).
+1. *`RouteOptions::legal_pours`.* When the rounds end, at nothing shared, at twelve with none better or at their
+   most, the routes go back to the best round and are made legal: what is shared is taken out, the net with the
+   most first, and routed again where nothing is claimed (`whole::legalise`, which was the end of the
+   negotiation and is now a step of it). cadlab's fill around those routes is asked for (`RunControl::refill`),
+   and the connections open on that board are counted, the pads cut off their fills among them
+   (`whole::open_on_fills`), as the native router counts its ratsnest on `pour_truth`. The nets whose pads the
+   fill no longer joins are planned again and the rounds go on for them, the other nets making room. When
+   those rounds end the routes are made legal and the pours filled again, and with more connections open than
+   on the legal board that the nets were planned again from, the routes go back to that board
+   (`Stats::pours_back`; the native router's `PourSnapshot`). Three times at most.
+2. *One step is not the native router's.* The rounds go on from the routes of the best round as they were, and
+   not from the legal ones. Made as the native router has it, a net that was taken out and found no way where
+   nothing is claimed has no round again, and is left to guide's passes, which take other nets out for it:
+   tinytapeout-demo, the default order at 150 million nodes, 16 connections apart as the passes begin for 10,
+   202 rip-ups in them for 44, 439 vias after them for 365, and 291 at the end for 270 (measured, below).
+3. *`RouteOptions::outer_pours`.* A net with a plane is planned as one with none is: on every fill of its
+   zones, so that the pads a pour of an outer layer joins are one terminal. With it, a negotiation that is
+   still at its first rounds at 0.73 of its share looks once at what its routes cut off, by guide's cells, and
+   ends those rounds for the pours if that is a piece of fill for every hundred connections: the native
+   router's look at 0.55 of its budget, where its rounds end at 0.75.
+**Stage by stage** (measured, with prints in guide that are in no release; tinytapeout-demo, the default order,
+150 million nodes, one thread; vias and mm of track of the routes as they stand). The native router beside
+them is D122's run at 60 s: 255 vias and 4686 mm as its rounds end, 251 and 4615 made legal, 287 and 4899 after
+its rounds for the pours, 248 and 5013 after its pass for fewer vias, 244 and 4947 at the end, 19 connections
+open.
+
+| stage | guide 0.0.30 | `legal_pours` | `legal_pours` and `outer_pours` |
+|---|---|---|---|
+| connections planned; vias and track after the first round | 458; 248, 4994 | 458; 248, 4994 | 366; 178, 4843 |
+| first time the rounds end: round, points shared, connections open on the fill of the legal routes, pieces of fill cut off | 31, 32, not counted | 31, 32, 28, 8 | 40, 30, 61, 35 |
+| second | | 60, 27, 14, 1 | 64, 65, 22, 6 |
+| third | | 73, 35, 14, 1 | 98, 31, 24 for 22: back to the second |
+| fourth | | 96, 31, 19 for 14: back to the third | |
+| the negotiation's routes after its pass for fewer vias | 109 rounds; 350, 5564 | 96 rounds; 310, 5429 | 98 rounds; 250, 5307 |
+| given to the passes: vias, of them on the nets with planes; connections apart | 339, 110; 10 | 299, 109; 12 | 245, 59; 14 |
+| after the passes: vias, track; rip-ups | 365, 5774; 44 | 372, 5868; 82 | 298, 5695; 59 |
+| after each net again and the stubs to the fills; pieces cut off told in the run | 337, 5631; 26 | 351, 5688; 14 | 293, 5668; 66 |
+| the first run ends | 326, 5559 | 330, 5584 | 285, 5571 |
+| the board, after the later runs | 270, 4918 mm, none open | 290, 5128 mm, none open | 282, 5193 mm, none open |
+
+- *The first round's difference is closed, and does not reach the end.* Planned on outer pours guide has the
+  native router's 178 vias after the first round (D123: 184), the nets with planes are given to the passes
+  with 59 vias for 110, and the board is 41 vias ahead as its first run ends. Then the run for shorter ways
+  finds 204 mm and 13 vias on 0.0.30's board and 7.5 mm and no via on the other, 102 nets left as they were;
+  and the fill of the routed board makes 44 of 0.0.30's stub vias needless and 12 of the other's. What the
+  planning saves in stubs, the end of the run already takes out (D115's `needless`), and what it costs stays:
+  the nets with no zone have 4653 mm and 216 vias for 4434 mm and 205 (one order of each, by net).
+- *buspirate5-rev10 the same way* (the default order, 150 million nodes): 169 vias after the first round for
+  269; 62 vias on nets with planes given to the passes for 165, of which the fill makes 12 needless for 69;
+  307 vias and 3028 mm at the end for 317 and 2996 mm; 19 pads short of two spokes for 6. By net, +VUSB has 14
+  vias and 345 mm for 0.0.30's 43 and 293 mm and the native router's 19 and 285 mm (D126's fourth item), and
+  the five nets with zones 84 vias and 596 mm for 102 and 518 mm, the native router's 86 and 662 mm.
+- *Where the vias of the nets with no plane are made*: in guide's passes after the negotiation, whatever the
+  order. With the native router's order made as it is (item 2) those nets have 174 vias as the passes begin
+  for 229, 326 after them for 258, and 265 as the first run ends for 217. The passes complete what the grid of
+  twice the pitch left apart by taking nets out, on the finer lattice, and each net taken out comes back with
+  more vias: that, and not the pours, is where the board is lost after a negotiation that ended well.
+**Measured at 60 s** (ROUTER.md, "Native router and guide 0.0.32, D128"). D122's method, held to eight threads
+for this work: two runs at a time, side by side, three threads each. First guide 0.0.30 from crates.io beside
+`legal_pours` alone, four orders, tinytapeout-demo eight (the load 4.3 to 10.7, median 6.0); then the native
+router, seeds 1 to 4 (8), beside `legal_pours` with `outer_pours` (the load 5.5 to 11.6, median 7.4). Seven
+boards. The two options were measured, here and at the budgets of nodes, on guide 0.0.30's commit with this
+change and a switch in the adapter that is in no commit, before the change was rebased on 0.0.31; with both off
+that build routed the 41 runs at a budget of nodes as 0.0.30 does. Medians of the vias and the track; connections open and pads short of two necks by run or in all:
+
+| board | native router | guide 0.0.30 | `legal_pours` | `legal_pours` and `outer_pours` |
+|---|---|---|---|---|
+| corne-cherry, open | 1/3/2/4 | 7/0/1/1 | 5/0/1/2 | 0/0/0/0 |
+| vias; track; outside pads | 459; 8103; 7915 | 434; 7565; 7456 | 429; 7565; 7456 | 430; 7540; 7431 |
+| short of two necks; time | 10; 21 to 32 s | 6; 35 to 55 s | 6; 35 to 55 s | 7; 38 to 52 s |
+| tinytapeout-demo, open | 19/1/4/5/1/2/2/9 | 0/1/0/0/0/0/0/4 | 0/0/0/1/1/0/0/0 | 0/0/0/0/0/0/0/0 |
+| vias; track; outside pads | 273; 4894; 4672 | 285.5; 5054; 4977 | 293; 5179; 5101 | 296.5; 5221; 5140 |
+| short of two necks; time | 124; 35 to 61 s | 46; 52 to 58 s | 39; 56 to 58 s | 64; 55 to 58 s |
+| buspirate5-rev10, open | 4/2/4/4 | 0/0/0/0 | 0/0/0/0 | 0/0/0/0 |
+| vias; track; outside pads | 302; 3129; 2911 | 308.5; 3018; 2896 | 309; 3027; 2904 | 305; 3074; 2954 |
+| short of two necks; time | 97; 20 to 33 s | 33; 24 to 36 s | 37; 30 to 38 s | 51; 35 to 46 s |
+| glasgow-revC3, open | 33/30/39/31 | 9/6/9/8 | 7/8/8/6 | 7/10/8/8 |
+| vias; track; outside pads | 417.5; 3467; 3204 | 403.5; 3663; 3558 | 411.5; 3756; 3651 | 419; 3840; 3740 |
+| short of two necks; time | 0; 60 to 61 s | 0; 59 s | 0; 59 s | 0; 59 s |
+| glasgow-revD1, open | 146/137/145/144 | 17/14/12/12 | 17/16/7/10 | 42/49/71/54 |
+| vias; track; outside pads | 1024; 8906; 8385 | 1169; 10756; 10427 | 1182; 10747; 10418 | 1131; 10187; 9860 |
+| short of two necks; time | 183; 60 to 62 s | 50; 56 to 57 s | 50; 56 to 58 s | 83; 54 to 56 s |
+| lumenpnp-mobo, open | 9/24/10/12 | 0/0/0/0 | 1/0/0/0 | 0/6/0/0 |
+| vias; track; outside pads | 337; 5446; 5160 | 335; 5407; 5278 | 335; 5407; 5279 | 340; 5494; 5371 |
+| short of two necks; time | 6; 61 to 62 s | 0; 55 to 58 s | 0; 55 to 57 s | 0; 49 to 57 s |
+| cynthion, open | 28/29/30/28 | 8/8/8/8 | 8/8/8/8 | 10/8/10/8 |
+| vias; track; outside pads | 478; 3184; 2981 | 417; 3069; 2979 | 410.5; 3055; 2964 | 422.5; 3146; 3059 |
+| short of two necks; time | 4; 62 s | 4; 40 to 45 s | 4; 50 to 53 s | 8; 57 to 58 s |
+
+0 DRC errors other than unrouted in the 128 runs. **Pads with no spoke** (`thermal::census`): none on any of
+the seven boards in any order for guide 0.0.30 and for `legal_pours`; with `outer_pours` cynthion 2 in one
+order and glasgow-revD1 1 in each of three, which D120 does not allow; the native router tinytapeout-demo 5, 0,
+0, 2, 2, 1, 1 and 2, glasgow-revD1 15, 5, 15 and 13, lumenpnp-mobo 2, 1, 1 and 0.
+- *`legal_pours` alone against 0.0.30*: tinytapeout-demo 2.6 % more vias and 2.5 % more track, with 2
+  connections open over eight orders for 5; glasgow-revC3 2 % more vias and 2.5 % more track, 29 open over four
+  orders for 32; glasgow-revD1 50 open for 55; lumenpnp-mobo one connection open in one order for none;
+  cynthion 8 to 10 s more; buspirate5-rev10 and corne-cherry level. Nothing here is more than the same code
+  moves from one measurement to the next but the time and the track, which are against it: making the routes
+  legal and a fill each time the rounds end is time that the routing after them does not have.
+- *With `outer_pours` against 0.0.30*: glasgow-revD1 42 to 71 connections open for 12 to 17, with 3 % fewer
+  vias and 5 % less track, of which the connections not made are a part (not counted by net); in the one run
+  looked at its rounds are at their eleventh at 0.75 of their share with 551 points shared and 64 pieces of
+  fill cut off, making those routes legal takes 38 nets out and what is left of the share, and no net is
+  planned again. tinytapeout-demo 4 % more vias and 3 % more track, none open in eight orders; buspirate5-rev10 1 %
+  fewer vias and 2 % more track, 51 pads short of two necks for 33; glasgow-revC3 4 % more vias and 5 % more
+  track; lumenpnp-mobo six connections open in one order; cynthion two more open in two orders.
+- *Against the native router*, of the 15 cells that D126 has worse, `outer_pours` would move one:
+  buspirate5-rev10's vias, 305 against 302, +1 %, are equal by the rule. glasgow-revD1's vias and track stay
+  worse (+10 % and +14 %), tinytapeout-demo's and glasgow-revC3's are further away, and lumenpnp-mobo's track
+  outside the pads, equal in D126, is +4 %.
+**Budgets of nodes**, which do not move with the machine (one thread, guide alone). 40 million, three orders,
+the nine boards that a budget cuts, connections open: 583 with 0.0.30, 582 with `legal_pours` (tinytapeout-demo
+5, 7 and 4 for 3, 7 and 4; glasgow-revC3 12, 15 and 9 for 12, 15 and 12; the others as they were), 606 with
+`outer_pours` too (tinytapeout-demo 8, 23 and 23; lumenpnp-mobo 0, 6 and 0 for none; cynthion 9, 8 and 8;
+corne-cherry 31, 29 and 20 for 36, 28 and 22; glasgow-revC3 13, 11 and 9; glasgow-revD1 150, 119 and 130 for
+145, 136 and 130). 150 million, two orders, seven boards: 43 with 0.0.30 and 39 with `legal_pours`
+(tinytapeout-demo none and none for none and 1, with 290 and 272 vias for 270 and 332; glasgow-revC3 4 and 5
+for 7 and 5, with 413 and 407 vias for 409 and 384; lumenpnp-mobo 343 and 336 vias for 334 and 336; the others
+within eight vias). tinytapeout-demo in eight orders at 150 million: none open with `legal_pours` for one in
+one order, 289.5 vias and 5016 mm for 292.5 and 5050 (medians), 38 pads short of two necks for 47; with
+`outer_pours` and the rounds going on from the legal routes 308.5 vias and 5310 mm, one open, 57 pads short.
+**The release as cadlab has it, both options off** (measured before the release, on its commit rebased on
+guide 0.0.31's, behind this adapter, beside guide's commit before it): the same connections open, vias and
+track in each of the 41 runs at a budget of nodes, 583 open over the nine boards and three orders at 40 million
+and 43 over the seven boards and two orders at 150 million; corne-cherry at 60 s in four orders, the two side
+by side (the load 5.1 to 10.2): 1, 0, 1 and 1 open, 430 vias and 7564 mm with both, in 34 to 55 s, no pad
+with no spoke. Those figures are of guide 0.0.31's routes behind D126's adapter, which is this commit's:
+0.0.31 is D127's, and what D127 changes in the adapter is not here. 0.0.32 from
+crates.io behind this commit routes corne-cherry, tinytapeout-demo, buspirate5-rev10, lumenpnp-mobo and
+glasgow-revC3 to the same connections open, vias and track at 40 million nodes in the default order.
+**What got worse.** Nothing in cadlab's results: the adapter sets neither option. Had `legal_pours` been set:
+the track and the vias of tinytapeout-demo and glasgow-revC3 at 60 s (+2.5 %), cynthion's time, one connection
+of lumenpnp-mobo in one order. Had `outer_pours`: the connections of glasgow-revD1, lumenpnp-mobo and cynthion,
+pads with no spoke on two boards, the pads short of two necks of tinytapeout-demo, buspirate5-rev10 and
+glasgow-revD1, and the track of every board of more than two layers but glasgow-revD1.
+**Tried and not kept** (tinytapeout-demo at 150 million nodes over eight orders unless said; guide's
+`docs/benchmarks.md` has them).
+- *The rounds going on from the legal routes*, the native router's order to the letter (item 2): 292.5 vias,
+  5047 mm, none open, 36 pads short; with `outer_pours` 308.5 vias, 5310 mm, one open, 57 pads short.
+- *The nets that making the routes legal left open routed in the rounds for the pours too*: with `outer_pours`
+  285 vias and 5238 mm, 4 connections open over the eight orders and a pad with no spoke; without, 292 vias and
+  5027 mm.
+- *The pass for fewer vias before each fill*, where the native router has its own before its last rounds for
+  the pours: with `outer_pours` 295.5 vias, 5186 mm, 70 pads short.
+- *`outer_pours` in 0.0.30's order*: 304.5 vias, 5177 mm, 2 open, 63 pads short; buspirate5-rev10 319.5 vias
+  over four orders for 309.5, and one connection open.
+- *`outer_pours` with no look at the pours late in the share*: tinytapeout-demo at 40 million nodes 27, 24 and
+  33 open.
+**Not attempted, and what remains open, with what was measured of each.**
+1. *The second item, the track of glasgow-revD1 and glasgow-revC3*: not begun; the first took the round. What
+   this round adds to D124's and D125's findings: planning on outer pours is not it (5 % of D1's track with 30
+   to 60 more connections open, and C3's track is longer with it).
+2. *The passes after a negotiation that ended well* (the third bullet under the table of stages): a
+   negotiation that leaves 174 to 245 vias on the nets with no plane is taken to 258 to 326 by the passes that
+   complete 10 to 17 connections, 44 to 219 rip-ups. A completion of those connections that takes no net out
+   to the finer lattice, by rounds of the negotiation on the finer grid for the nets concerned, was not built.
+3. *Why the other nets are longer once the pours are terminals*: the native router lays them through the same
+   pours and ends with less track. Its rounds are at half the pitch, and its pours are cells that a route may
+   end on anywhere near (`router::pours`), where guide gives a net eight places beside each pad cut off.
+   Neither was changed.
+4. *The pads short of spokes with `outer_pours`*: a pad with a stub has its own copper beside it while the
+   others are routed, and the stub goes at the end; a pad joined by its pour has only the price of the room of
+   its spokes. `kept_spokes` in the rounds was D126's "wall from the start", which lost.
+**Default: unchanged.** `router: guide` stays the second opinion and the native router stays the default.
+*Not measured:* the five boards of the corpus that are not in the table; `outer_pours` at 150 million nodes as
+released; more than one period at 60 s, and the two periods are not the same one, so the columns of the native
+router and of 0.0.30 are side by side with their own neighbour only; the nets that both routers complete; the
+generated boards; freerouting; KiCad's DRC on a board guide routed; cadlab's oracles locally; cadlab's whole
+test suite, which is run at the merge.

@@ -1234,6 +1234,14 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // only: the later ones go on from its routes. On as many threads as the native router has.
     gopts.whole = opts.budget.is_some() || opts.work.left().is_some();
     gopts.threads = threads();
+    // A net with a plane stays planned on its planes alone, and the negotiation tells the pads
+    // cut off their fills on its routes as they are (guide 0.0.32 has the native router's order
+    // for both, `outer_pours` and `legal_pours`, off by default there and left off here): at
+    // 60 s the first leaves glasgow-revD1 with 42 to 71 connections open for 12 to 17 and two
+    // boards with a pad with no spoke, and the second has 2.5 % more track on tinytapeout-demo
+    // and glasgow-revC3 for nothing gained (D128).
+    gopts.outer_pours = false;
+    gopts.legal_pours = false;
     gopts.seed = (opts.seed != 0).then_some(opts.seed);
     if !opts.layers.is_empty() {
         gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
@@ -4490,6 +4498,8 @@ mod tests {
         let g = options(&p, &RouteOptions::default(), &[0, 1]);
         assert!(!g.fills && !g.join && !g.vias_in_pads && g.keep_partial);
         assert!(g.pour_cuts && g.settle && g.negotiate && !g.row_fanout && g.crossings && !g.negotiate_places);
+        // The native router's order for the pours and its planning on outer pours are left off (D128).
+        assert!(!g.outer_pours && !g.legal_pours);
         // The room of the spokes of pads in pours costs other nets' tracks (D110), and a via
         // what guide has it cost.
         assert_eq!((g.spoke_cost, g.via_cost), (4.0, pcb::RouteOptions::default().via_cost));

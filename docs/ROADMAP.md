@@ -408,7 +408,13 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       at a budget of nodes. Open (D126, "Not attempted"): all four of the direction's other items, the
       planning of a net with a plane on outer pours with the routes made legal first, the glasgows'
       track, corne-cherry's time, buspirate-flash-sop's via and buspirate-rs232's track, the last two
-      looked at by net. Done since D124 (D125, the same
+      looked at by net. Since D126 (D128, the same direction, not met): the first of those built in guide
+      0.0.32, the routes made legal before the fill in the native router's order (`legal_pours`) and a net
+      with a plane planned on its outer pours (`outer_pours`), and measured stage by stage: the first
+      round's difference is closed and is gone by the end of the run, glasgow-revD1 has 42 to 71
+      connections open with it for 12 to 17, and the order alone gains nothing; both are left off. Open:
+      the passes after a negotiation that ended well, which take its vias back (D128, "Not attempted"),
+      and the glasgows' track, not begun. Done since D124 (D125, the same
       direction, not met): the first round of both routers joined connection by connection and the
       differences counted by their kind (the planning of a net with a plane, the room of a spoke, the
       order, the tree, where a route ends at a pad, and the widths of the nets); the native router's rule

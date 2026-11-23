@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,17 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.32* (D128) has the native router's order for the pours, and its planning of a net with a plane,
+  as two options that the adapter leaves off. `RouteOptions::legal_pours`: when the rounds of guide's
+  negotiation end, the routes of the best round are made legal, cadlab's fill around them is asked for, the
+  connections open on that board are counted with the pads cut off, the nets with pads cut off are planned
+  again and the rounds go on for them, from the routes of the best round; with more open on the next legal
+  board the routes go back to the one before. `RouteOptions::outer_pours`: a net with a plane is planned on
+  its pours of the outer layers too, the pads that a pour joins as one terminal. Measured stage by stage and
+  at 60 s (below, and D128): the first round's difference is closed by the second, 178 vias on
+  tinytapeout-demo for 248, and is gone by the end of the run, where the fill of the routed board already
+  takes the needless stubs out; with it glasgow-revD1 has 42 to 71 connections open for 12 to 17 and two
+  boards a pad with no spoke. The first alone has 2.5 % more track on two boards for nothing gained.
 - *guide 0.0.30* (D126) keeps a pad's last spoke, and keeps a net that it routed again only if every track
   of it is free. *The last spoke*: the room of a spoke has a price (`spoke_cost`, D110), and a price let
   the run for shorter ways lay the tracks of two nets through both rooms of a header's ground pin on
@@ -2799,6 +2810,31 @@ Vias and track, the medians of the runs, guide against the native router:
   the time of a run goes on three boards, what was tried and not kept, and what is not done.
 
 The default is unchanged (DECISIONS D127).
+
+**Native router and guide 0.0.32, D128** (seven boards at 60 s, two runs at a time side by side, three threads
+each: guide 0.0.30 from crates.io beside guide 0.0.32's `legal_pours`, the load 4.3 to 10.7, median 6.0; then
+the native router, seeds 1 to 4 and 5 to 8 on tinytapeout-demo, beside `legal_pours` with `outer_pours`, the
+load 5.5 to 11.6, median 7.4. Both options are off in the adapter: with them off the release routes as the
+commit before it does. Medians of the vias and of the track in mm; connections open by run):
+
+| board | native router: open; vias; track | guide 0.0.30 | `legal_pours` | `legal_pours` and `outer_pours` |
+|---|---|---|---|---|
+| corne-cherry | 1/3/2/4; 459; 8103 | 7/0/1/1; 434; 7565 | 5/0/1/2; 429; 7565 | 0/0/0/0; 430; 7540 |
+| tinytapeout-demo | 19/1/4/5/1/2/2/9; 273; 4894 | 0/1/0/0/0/0/0/4; 285.5; 5054 | 0/0/0/1/1/0/0/0; 293; 5179 | 0/0/0/0/0/0/0/0; 296.5; 5221 |
+| buspirate5-rev10 | 4/2/4/4; 302; 3129 | 0/0/0/0; 308.5; 3018 | 0/0/0/0; 309; 3027 | 0/0/0/0; 305; 3074 |
+| glasgow-revC3 | 33/30/39/31; 417.5; 3467 | 9/6/9/8; 403.5; 3663 | 7/8/8/6; 411.5; 3756 | 7/10/8/8; 419; 3840 |
+| glasgow-revD1 | 146/137/145/144; 1024; 8906 | 17/14/12/12; 1169; 10756 | 17/16/7/10; 1182; 10747 | 42/49/71/54; 1131; 10187 |
+| lumenpnp-mobo | 9/24/10/12; 337; 5446 | 0/0/0/0; 335; 5407 | 1/0/0/0; 335; 5407 | 0/6/0/0; 340; 5494 |
+| cynthion | 28/29/30/28; 478; 3184 | 8/8/8/8; 417; 3069 | 8/8/8/8; 410.5; 3055 | 10/8/10/8; 422.5; 3146 |
+
+- Pads with no spoke: none for guide 0.0.30 and for `legal_pours` on the seven boards; with `outer_pours`
+  cynthion 2 in one order and glasgow-revD1 1 in each of three. 0 DRC errors other than unrouted in the 128
+  runs.
+- D128 has the track outside the pads, the pads short of two necks and the times, the stages of
+  tinytapeout-demo and buspirate5-rev10 beside the native router's, the budgets of nodes, what was tried and
+  not kept, and what remains open.
+
+The default is unchanged (DECISIONS D128).
 
 **Native router and guide 0.0.30, D126** (the corpus at the default 60 s; four runs of the native router, seeds 1
 to 4, three threads, and four orders of guide, three threads for its negotiation, one run of each at a time,
