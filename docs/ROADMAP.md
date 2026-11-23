@@ -419,6 +419,18 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D131 (D132, the same direction, not met): the stage adopted for a run with a budget on a board
+      of more than two layers, with guide 0.0.36: the board looked at before the run plans anything for the
+      stage, and one given up routed as if the stage were never asked for (to the track at a budget of
+      nodes, 1.3 to 1.9 s later at 60 s for 4 to 5 s); a route that begins on another pad of its net handed
+      over as that pad's, which was buspirate5-rev10's connections lost after its first run; no run for
+      shorter ways after the stage. Beside the native router 35 cells better, 28 equal, 1 overlapping and
+      8 worse of 72, for 31, 29, 2 and 10: tinytapeout-demo's track and track outside the pads and
+      buspirate5-rev10's vias and track outside the pads a class better, none a class worse; buspirate5-rev10
+      in 18 to 24 s and lumenpnp-mobo in 33 to 36 s. Worse than with the stage off: tinytapeout-demo's vias,
+      299.5 for 287.5 (273 with the native router), its first run ending at its deadline; and two pads of
+      lumenpnp-mobo apart on a board reported whole. Open: tinytapeout-demo's first run, those two pads,
+      two layers, the glasgows' track, corne-cherry's time.
       Since D130 (D131, the same direction, not met): where the stage's open connections come from,
       stage by stage, and five changes to it in guide 0.0.35 (what is still shared taken out a wire at a
       time, the price of a spoke's room and the last spoke kept, no net planned on a pour of an outer

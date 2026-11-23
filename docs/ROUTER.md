@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,29 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.36* (D132), and the adapter asks for that stage in a run with a budget on a board of more than
+  two copper layers (`rounds_for`). guide looks at the board before it plans anything for the stage but its
+  ways out (`rounds::look`): the connections that have no way on the stage's grid whatever the other nets do,
+  and what a first round takes by 48 connections searched for alone; more than one in fifty of the first, or
+  eight first rounds with no room in the stage's share, and the board is given up, and is then routed with
+  guide's own rounds as if the stage had never been asked for, to the track at a budget of nodes, on the
+  design without the zones that have no fill (`Zones::unfilled_from`, which the adapter tells after the
+  others). cynthion, glasgow-revC3 and glasgow-revD1 are given up so, their routing beginning 1.3 to 1.9 s
+  later than with the stage off, where they lost 4 to 5 s. A route of the stage that begins on another pad of
+  its net is handed to guide's passes as that pad's: taken for a pad of the island that its connection names,
+  it had the passes take the track between two pads out and report the board whole (buspirate5-rev10, seven
+  connections after the first run in one order). A unit of work is six nodes of the stage's search, and its
+  rounds end once the price of a shared point is at its most and no more than one point for every 32
+  connections is shared. After the stage the adapter makes no run for shorter ways, which laid the stage's
+  routes again longer in every run measured. At 60 s beside guide's own rounds in the same minutes:
+  buspirate5-rev10 286 vias and 2930 mm in 18 to 24 s for 306.5, 2977 mm and 23 to 34 s; lumenpnp-mobo 330.5
+  and 5234 mm in 33 to 36 s for 334, 5326 mm and 51 to 54 s; tinytapeout-demo 4748 mm for 5025 with as many
+  connections open (4 in eight runs for 7) and 299.5 vias for 287.5, its first run ending at its deadline with
+  its cleanup cut (278 vias in the median of eight orders at 150 million nodes, where nothing is cut). Beside
+  this router in the same minutes, of 72 cells 35 are better, 28 equal, 1 overlaps and 8 are worse, for 31,
+  29, 2 and 10: tinytapeout-demo's track and track outside the pads and buspirate5-rev10's vias and track
+  outside the pads are a class better and none is a class worse. On two layers the stage is worse
+  (corne-cherry 8 connections open over four orders and 459.5 vias for 4 and 437.5) and is not asked for.
 - *guide 0.0.35* (D131) changes five things in that stage, which the adapter still leaves off. What is still
   shared when the rounds end is taken out a wire at a time, the wire that shares the most first, and a
   connection that then finds no way has the wires in its way taken out for it, where this router takes out the

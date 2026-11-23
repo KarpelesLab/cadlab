@@ -93,12 +93,16 @@ use super::{
 /// leaves 91 in 13 s (D88).
 const PLANE_COVERAGE: f64 = 0.0;
 
-/// Which negotiation guide's first run has for every net at once: its own
-/// (`Rounds::Own`), or the native router's as guide has it (`Rounds::Native`, guide 0.0.34),
-/// which is measured and left off (D130, and D131 with the rounds of 0.0.35). With the native
-/// router's, guide is told of the zones that have no fill yet as well ([`adapt`]), and the
-/// later runs have the rounds that the first ended with (`Stats::rounds_given_up`).
-const ROUNDS: pcb::Rounds = pcb::Rounds::Own;
+/// Which negotiation guide's first run has for every net at once: the native router's as guide
+/// has it (`Rounds::Native`) on a board of more than two copper layers, and guide's own
+/// (`Rounds::Own`) on one of two. guide looks at the board before it routes anything and gives
+/// the native router's rounds up where more than one connection in fifty has no way on their
+/// grid, or eight first rounds have no room in their share of the run: that run is then the
+/// run with guide's own rounds, to the track (`Stats::rounds_given_up`, D132). The later runs
+/// have the rounds that the first ended with.
+fn rounds_for(copper_layers: usize) -> pcb::Rounds {
+    if copper_layers > 2 { pcb::Rounds::Native } else { pcb::Rounds::Own }
+}
 
 /// The share of the time budget guide's first run may take: the rest is for the verification,
 /// the refill, a second run on the routed board and the report. guide itself ends its routing
@@ -449,6 +453,19 @@ fn custom_rules(
     Ok(out)
 }
 
+impl Adapted {
+    /// Takes out the zones that have no fill on the board (`Zones::unfilled_from`), which only
+    /// the native router's rounds in guide plan on: for the runs and the steps of a board that
+    /// has guide's own rounds, so that they are those of a board that was never told them.
+    fn without_unfilled(&mut self) {
+        let z = &mut self.design.zones;
+        let kept = z.unfilled_from.take().map_or(z.zones.len(), |n| n.min(z.zones.len()));
+        z.zones.truncate(kept);
+        z.fills.retain(|f| f.zone < kept);
+        self.zones.truncate(kept);
+    }
+}
+
 /// Builds guide's design from the project. `items` are the board's copper items, zone fills
 /// included (`board::copper_items`); `route` the nets guide is to route (every other net's
 /// copper is fixed). The zones go over with cadlab's fills of them, which guide plans on in
@@ -740,12 +757,15 @@ pub(crate) fn adapt(
             }
         }
     }
-    // With the native router's rounds ([`ROUNDS`]), the zones with a net that have no fill on
-    // this board, a pour that reaches no pad of its net yet: guide is told of them all the
-    // same, so that the fill it asks for around its routes (`RunControl::refill`) can name
-    // them. A pour of a supply under an array of balls is one, which the vias of the balls'
-    // ways out join them by (glasgow-revD1's +1V1 and +3V3, D130).
-    for z in board.zones.iter().filter(|z| ROUNDS == pcb::Rounds::Native && z.net.is_some()) {
+    // The zones with a net that have no fill on this board, a pour that reaches no pad of its
+    // net yet: guide is told of them after the others (`Zones::unfilled_from`), so that the
+    // fill it asks for around its routes (`RunControl::refill`) can name them. A pour of a
+    // supply under an array of balls is one, which the vias of the balls' ways out join them
+    // by (glasgow-revD1's +1V1 and +3V3, D130). Only the native router's rounds in guide plan
+    // on them: a run with guide's own, or one of a board that those rounds gave up, is the
+    // run of the board without them (D132).
+    zones.unfilled_from = Some(zones.zones.len());
+    for z in board.zones.iter().filter(|z| z.net.is_some()) {
         if zone_at.contains_key(&z.id.0) || layer_set(&layers, &z.layers) == LayerSet::EMPTY {
             continue;
         }
@@ -1293,23 +1313,24 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // out, and the board ends as it did; at 60 s glasgow-revC3 has 25 connections open over
     // four orders for 31 with 2.7 % more track, and tinytapeout-demo 2.6 % fewer vias (D129).
     gopts.whole_finer = false;
-    // That negotiation is guide's own. guide has the native router's too since 0.0.34
-    // (`Rounds::Native`: its grid at the pitch, its plan of the nets, its order and its prices,
-    // with the nets narrowed by its rule and its ways out of the rows of fine pitch), which ends
-    // its rounds as the native router ends them, round for round on corne-cherry and
-    // buspirate5-rev10. With guide's passes after it, at 60 s over four orders, tinytapeout-demo
-    // has 5 % fewer vias and 6 % less track and four to seven connections open where guide's own
-    // rounds leave none or one, buspirate5-rev10 5 % and 6 % less in half as much time again, and
-    // lumenpnp-mobo 1.5 % and 3 % more: left off (D130). guide 0.0.35 makes those rounds legal a
-    // wire at a time, prices a spoke's room in them, plans no net on a pour of an outer layer and
-    // leaves their rounds for the pours out: tinytapeout-demo then has as many connections open
-    // as with guide's own rounds (eleven in sixteen runs), 5 % less track and 3 % more vias,
-    // buspirate5-rev10 4 % fewer vias and 3 % less track in 30 to 37 s for 22 to 34 s, and
-    // lumenpnp-mobo as much of both; but the three boards that the stage gives up lose 4 to 5 s
-    // of the minute to it, glasgow-revC3 ends with 443 vias for 403.5 and glasgow-revD1 with 10
-    // to 35 connections open for 6 to 14, and no rule that is cheaper than the stage's own
-    // look at the board tells those three from the others: still left off (D131).
-    gopts.rounds = ROUNDS;
+    // That negotiation is guide's own on a board of two layers. guide has the native router's
+    // too (`Rounds::Native`, 0.0.34: its grid at the pitch, its plan of the nets, its order and
+    // its prices, with the nets narrowed by its rule and its ways out of the rows of fine pitch),
+    // and a run with a budget asks for it on a board of more than two copper layers
+    // ([`rounds_for`]). Left off in D130 and D131 for the connections it left open, its time,
+    // and the 4 to 5 s that a board it gave up had lost. guide 0.0.36 looks at the board before
+    // the run plans anything for those rounds and gives it up there where more than one
+    // connection in fifty has no way on their grid (cynthion, glasgow-revC3, glasgow-revD1),
+    // and that run is then the run with guide's own rounds, to the track at a budget of nodes;
+    // and it hands a route that begins on another pad of its net to its passes as that pad's,
+    // which was the connections lost after the first run. At 60 s, beside guide's own rounds
+    // in the same minutes: buspirate5-rev10 286 vias and 2930 mm in 18 to 24 s for 306.5, 2977
+    // and 23 to 34 s; lumenpnp-mobo 330.5 and 5234 mm in 33 to 36 s for 334, 5326 and 51 to
+    // 54 s; tinytapeout-demo 4748 mm for 5025 with as many connections open, and 299.5 vias for
+    // 287.5, its first run ending at its deadline. On two layers the rounds are worse:
+    // corne-cherry 8 connections open over four orders and 459.5 vias for 4 and 437.5 (D132).
+    // A run with no budget has no negotiation for every net at once, and guide's own necks.
+    gopts.rounds = if gopts.whole { rounds_for(layers) } else { pcb::Rounds::Own };
     gopts.seed = (opts.seed != 0).then_some(opts.seed);
     if !opts.layers.is_empty() {
         gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
@@ -2425,7 +2446,7 @@ pub(crate) fn route(
     // The plan: the board's open connections in scope, as the ratsnest has them.
     let planned: Vec<RatLine> = geo::ratsnest_from(&items, &isl).into_iter().filter(|l| wanted(&l.net)).collect();
     let nets: BTreeSet<String> = planned.iter().map(|l| l.net.clone()).collect();
-    let ad = adapt(p, &items, &first_nets(p, &nets, &wanted), opts)?;
+    let mut ad = adapt(p, &items, &first_nets(p, &nets, &wanted), opts)?;
     let mut stats = RouteStats { grid: opts.grid.unwrap_or(ad.pitch), completion: 100.0, ..Default::default() };
     if planned.is_empty() {
         (hooks.progress)(1, Some(1), "done");
@@ -2449,6 +2470,12 @@ pub(crate) fn route(
     let deadline = opts.budget.map(|b| start + b.mul_f64(FIRST_SHARE));
     let mut gopts = options(p, opts, &slots);
     gopts.work_budget = opts.work.left();
+    // Whether the board has guide's own rounds: asked for, or because the native router's
+    // gave it up.
+    let mut own_rounds = gopts.rounds == pcb::Rounds::Own;
+    if own_rounds {
+        ad.without_unfilled();
+    }
     let short = opts.budget.map_or(Duration::MAX, |b| b.mul_f64(SHORT_FILL));
     let over = Cell::new(Duration::ZERO);
     let first = Host { base: p, took: &fill_took, over: &over };
@@ -2458,6 +2485,8 @@ pub(crate) fn route(
     // wide a net is at a row of pads.
     if routed.stats.rounds_given_up {
         gopts.rounds = pcb::Rounds::Own;
+        own_rounds = true;
+        ad.without_unfilled();
     }
     opts.work.charge(routed.stats.work);
     (hooks.progress)(0, None, &said(&routed));
@@ -2607,6 +2636,9 @@ pub(crate) fn route(
             &format!("guide: run {}, {} net(s) open on the filled board", round + 1, again.len()),
         );
         let mut ad = adapt(&proj, &fitems, &again, opts)?;
+        if own_rounds {
+            ad.without_unfilled();
+        }
         // The routes of the runs before are this run's to move (D106): a pad that the fill
         // no longer reaches, or one that the first run left shut in, can then have a route
         // moved for it, where on a board with them fixed it had none.
@@ -2753,7 +2785,13 @@ pub(crate) fn route(
     };
     // With the time to get the routes back, to look, and to verify what comes of it.
     let room = opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| Instant::now() + after + SHORTER_MIN < t));
-    if room && stopped != Some(Stopped::WorkBudget) && !tracks.is_empty() {
+    // Not after the native router's rounds in guide: their routes are negotiated at the pitch
+    // and have had their own pass for fewer vias, and the run for shorter ways laid them
+    // again longer or with more vias in each of the 11 runs measured that got to it
+    // (buspirate5-rev10 31 to 132 mm and 5 to 28 vias more in four orders, lumenpnp-mobo 249 to
+    // 304 mm and 80 to 91 vias, tinytapeout-demo 7 to 20 vias more for 16 mm more to 15 mm
+    // less), in 6 to 16 s of the minute (D132).
+    if room && stopped != Some(Stopped::WorkBudget) && !tracks.is_empty() && own_rounds {
         (hooks.progress)(0, None, "guide: looking for shorter ways");
         let was = open(&fitems, &fisl);
         // The routes of a net with a connection open stay where they are, as copper of the
@@ -2769,6 +2807,9 @@ pub(crate) fn route(
             .filter_map(|n| ad.nets.get(n.index()).cloned())
             .collect();
         let mut ad = adapt(&proj, &fitems, &BTreeSet::new(), opts)?;
+        if own_rounds {
+            ad.without_unfilled();
+        }
         let whole = |net: &Option<String>| {
             net.as_deref().is_some_and(|n| !held.contains(n) && (poured.contains(n) || !was.iter().any(|l| l.net == n)))
         };
@@ -3274,6 +3315,9 @@ pub(crate) fn route(
                     .cloned()
                     .collect();
                 let mut ad = adapt(&less, &items_less, &BTreeSet::new(), opts)?;
+                if own_rounds {
+                    ad.without_unfilled();
+                }
                 for (k, r) in rooms.iter().enumerate() {
                     let (Some(l), Ok(n)) =
                         (ad.layers.iter().position(|n| *n == r.layer), ad.nets.binary_search(&r.net))
@@ -4435,6 +4479,32 @@ mod tests {
         assert_eq!(r.stats.failed, 0, "{:?}", r.connections);
     }
 
+    /// The zones that have no fill on the board are told to guide after the others
+    /// (`Zones::unfilled_from`), and a board that has guide's own rounds is one without them
+    /// (D132).
+    #[test]
+    fn the_zones_with_no_fill_are_told_after_the_others_and_taken_out_for_guide_s_own_rounds() {
+        let p = project();
+        let mut ad = adapted(&p, &["GND", "SIG"]);
+        // Every zone of this board has a fill: none is told after them.
+        let filled = ad.design.zones.zones.len();
+        assert!(filled > 0);
+        assert_eq!(ad.design.zones.unfilled_from, Some(filled));
+        // One that has none, as `adapt` tells it: after the others, by its id.
+        let mut zone = ad.design.zones.zones[0].clone();
+        zone.outline.clear();
+        ad.design.zones.zones.push(zone);
+        ad.zones.push(ObjectId(u64::MAX));
+        let fills = ad.design.zones.fills.clone();
+        ad.without_unfilled();
+        assert_eq!((ad.design.zones.zones.len(), ad.zones.len()), (filled, filled));
+        assert_eq!(ad.design.zones.unfilled_from, None);
+        assert_eq!(ad.design.zones.fills, fills);
+        // And again, with nothing told: as it is.
+        ad.without_unfilled();
+        assert_eq!((ad.design.zones.zones.len(), ad.zones.len()), (filled, filled));
+    }
+
     /// guide has cadlab's own fill around its routes when it asks for it (`RunControl::refill`,
     /// D114): with nothing routed, the fill that the design went over with, zone for zone, and
     /// with a track of another net through the pour, that fill with the track's room cut out.
@@ -4595,6 +4665,18 @@ mod tests {
             .expect("import");
         assert_eq!(q.board().stackup.copper_names().len(), 4);
         assert!(!options(&q, &RouteOptions::default(), &[0, 1, 2, 3]).row_fanout);
+        // The native router's rounds in guide in a run with a budget on more than two copper
+        // layers, guide's own on two, and in a run with no budget, which has no negotiation
+        // for every net at once (D132).
+        assert_eq!(options(&q, &timed, &[0, 1, 2, 3]).rounds, pcb::Rounds::Native);
+        assert_eq!(options(&q, &counted, &[0, 1, 2, 3]).rounds, pcb::Rounds::Native);
+        assert_eq!(options(&q, &RouteOptions::default(), &[0, 1, 2, 3]).rounds, pcb::Rounds::Own);
+        assert_eq!(options(&p, &timed, &[0, 1]).rounds, pcb::Rounds::Own);
+        assert_eq!(g.rounds, pcb::Rounds::Own);
+        assert_eq!(
+            [1, 2, 3, 4, 6].map(rounds_for),
+            [pcb::Rounds::Own, pcb::Rounds::Own, pcb::Rounds::Native, pcb::Rounds::Native, pcb::Rounds::Native]
+        );
         assert_eq!(g.fanout_via, Some(ViaSize { diameter: 400_000, drill: 200_000 }));
         assert_eq!((g.seed, g.layers, g.work_budget), (None, None, None));
         let opts = RouteOptions { seed: 7, layers: vec!["B.Cu".into()], ..Default::default() };
