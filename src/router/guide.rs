@@ -95,9 +95,9 @@ const PLANE_COVERAGE: f64 = 0.0;
 
 /// Which negotiation guide's first run has for every net at once: its own
 /// (`Rounds::Own`), or the native router's as guide has it (`Rounds::Native`, guide 0.0.34),
-/// which is measured and left off (D130). With the native router's, guide is told of the
-/// zones that have no fill yet as well ([`adapt`]), and the later runs have the rounds that
-/// the first ended with (`Stats::rounds_given_up`).
+/// which is measured and left off (D130, and D131 with the rounds of 0.0.35). With the native
+/// router's, guide is told of the zones that have no fill yet as well ([`adapt`]), and the
+/// later runs have the rounds that the first ended with (`Stats::rounds_given_up`).
 const ROUNDS: pcb::Rounds = pcb::Rounds::Own;
 
 /// The share of the time budget guide's first run may take: the rest is for the verification,
@@ -1300,7 +1300,15 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // buspirate5-rev10. With guide's passes after it, at 60 s over four orders, tinytapeout-demo
     // has 5 % fewer vias and 6 % less track and four to seven connections open where guide's own
     // rounds leave none or one, buspirate5-rev10 5 % and 6 % less in half as much time again, and
-    // lumenpnp-mobo 1.5 % and 3 % more: left off (D130).
+    // lumenpnp-mobo 1.5 % and 3 % more: left off (D130). guide 0.0.35 makes those rounds legal a
+    // wire at a time, prices a spoke's room in them, plans no net on a pour of an outer layer and
+    // leaves their rounds for the pours out: tinytapeout-demo then has as many connections open
+    // as with guide's own rounds (eleven in sixteen runs), 5 % less track and 3 % more vias,
+    // buspirate5-rev10 4 % fewer vias and 3 % less track in 30 to 37 s for 22 to 34 s, and
+    // lumenpnp-mobo as much of both; but the three boards that the stage gives up lose 4 to 5 s
+    // of the minute to it, glasgow-revC3 ends with 443 vias for 403.5 and glasgow-revD1 with 10
+    // to 35 connections open for 6 to 14, and no rule that is cheaper than the stage's own
+    // look at the board tells those three from the others: still left off (D131).
     gopts.rounds = ROUNDS;
     gopts.seed = (opts.seed != 0).then_some(opts.seed);
     if !opts.layers.is_empty() {

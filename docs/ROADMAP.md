@@ -419,6 +419,14 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D130 (D131, the same direction, not met): where the stage's open connections come from,
+      stage by stage, and five changes to it in guide 0.0.35 (what is still shared taken out a wire at a
+      time, the price of a spoke's room and the last spoke kept, no net planned on a pour of an outer
+      layer, the rounds for the pours an option, a board given up before its first round): with guide's
+      passes after it tinytapeout-demo has as many connections open as with guide's own rounds, 5 % less
+      track and 3 % more vias, and buspirate5-rev10 4 % fewer vias and 3 % less track, later; the boards
+      that the stage gives up lose 4 to 5 s of the minute, glasgow-revC3 its lead in vias, so it is left
+      off; open: the stage's look at the board before the run's escapes, its time, and two layers.
       Since D128 (D129, the same direction, not met): the connections that the negotiation leaves open
       negotiated for on the grid of the pitch before the passes (guide 0.0.33, `whole_finer`), measured
       stage by stage: it halves what the passes are given and the nets they take out, and the board ends

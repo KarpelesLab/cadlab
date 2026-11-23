@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,22 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.35* (D131) changes five things in that stage, which the adapter still leaves off. What is still
+  shared when the rounds end is taken out a wire at a time, the wire that shares the most first, and a
+  connection that then finds no way has the wires in its way taken out for it, where this router takes out the
+  net that shares the most, whole (tinytapeout-demo: 7 to 15 connections failed as the stage ends, then 1 to
+  3); the room of a spoke has guide's price in the rounds, and a pad's last spoke is kept from their routes; on
+  more than two layers a net is planned on its fills of the inner layers alone, so that the pads of a supply
+  with no plane and a pour under a package of fine pitch are routed as any net's; the rounds for the pours are
+  an option, off (`RouteOptions::rounds_pours`); and a board whose pads the stage's grid does not reach is
+  given up before the first round, 1.2 s into the stage. With guide's passes after it, at 60 s:
+  tinytapeout-demo has eleven connections open in sixteen runs, as with guide's own rounds, 293 to 297 vias
+  for 288 and 4792 to 4809 mm for 5034 to 5079, and no pad without a spoke in 32 runs; buspirate5-rev10 294
+  vias and 2890 mm for 306.5 and 2977, in 30 to 37 s for 22 to 34 s; lumenpnp-mobo 332 and 5208 mm for 334 and
+  5326. cynthion, glasgow-revC3 and glasgow-revD1 are given up and begin their run again, 4 to 5 s of the
+  minute later: glasgow-revC3 then ends with 443 vias for 403.5 and glasgow-revD1 with 10 to 35 connections
+  open for 7 to 15. The rule that would choose the stage, more than two layers, makes two cells worse beside
+  this router (buspirate5-rev10's time, glasgow-revC3's vias), so it is not adopted.
 - *guide 0.0.34* (D130) has this router's negotiation itself, as a first stage that the adapter leaves off.
   `RouteOptions::rounds` at `Rounds::Native`: `router::{engine, grid, index, pours, fanout, components,
   scoped}` as they are, with the board made from guide's design, and of `router::mod` the grid, the plan of
@@ -2836,6 +2852,16 @@ Vias and track, the medians of the runs, guide against the native router:
   the time of a run goes on three boards, what was tried and not kept, and what is not done.
 
 The default is unchanged (DECISIONS D127).
+
+**Native router and guide 0.0.35, D131** (guide measured again at 60 s with the stage off, the twelve boards in
+four orders and tinytapeout-demo in eight, 52 runs at a load of 4.0 to 6.1; this router's numbers are D129's,
+its code being as it was): the 72 cells are D129's cell for cell, 31 better, 29 equal, 2 with ranges that
+overlap and 10 worse, no pad has no spoke, and at 40 and 150 million nodes each run has the connections open
+and the vias that 0.0.34 has (583 and 43). D131 has the table, where the open connections of the stage came
+from, the stage with guide's passes after it on six boards, the rule that would choose it and what it would
+make worse, what was tried and not kept, and what remains open.
+
+The default is unchanged (DECISIONS D131).
 
 **Native router and guide 0.0.34, D130** (not measured again at 60 s: the adapter leaves the stage of 0.0.34
 off, and with it off guide routes as 0.0.33 does, the same connections open and vias in each of 27 runs at 40
