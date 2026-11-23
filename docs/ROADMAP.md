@@ -370,7 +370,27 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       "Gaps"; D117, "Gaps"; D116, "Gaps";
       D115, "Gaps"; D114, "Gaps"; D113, "Gaps"; D110, "Gaps";
       D108, "Gaps"; D106, "Gaps"; D104, "Gaps"; D101, "Gaps"; D97, "Gaps"; D96, "Gaps"; D95, "Gaps"; D93,
-      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D125 (D126, the same
+      "Gaps"; D91, "What got in the way"; D88, "What still blocks it"). Done since D126 (D127, the same
+      direction, not met, six cells nearer): the items that several rounds had left. buspirate-flash-sop's
+      via: guide 0.0.31, in its run for shorter ways, lays the route that cut a pad off its pour another
+      way where it has one with no more vias that is not much longer, and takes out the via that joined
+      the pad again (4 vias in three orders of four, as the native router has, and 6 in one).
+      buspirate-rs232's track: a run ends on a pad where it comes to it, a track at the first copper of
+      its pad, and a via costs a run that is searched for again 2 mm for 3 (8 vias and 284 mm for 5 and
+      297 mm, beside the native router's 10 and 281 mm). The time: what a run spends was measured stage by
+      stage on three boards, and the one stage that made nothing, the fills measured again against the
+      whole board in every call (4.3 s of buspirate5-rev10's 25 s), is told what the fills are clear of
+      (`Zones::fills_clear_of`, 1.6 s); a run that moves routes and comes back with more open is the
+      last. By board and measure 30 better, 32 equal, 1 with ranges that overlap and 9 worse of 72,
+      measured under a load of 3 to 10 (29, 27, 1 and 15 in D126); by the nets both routers complete 13,
+      14 and 9 of 36 (13, 11 and 12). No pad without a neck on any board in any order; 583 connections
+      open at 40 million nodes over the nine boards, as 0.0.30. Worse than 0.0.30: tinytapeout-demo's
+      vias by some five of 280 and single orders of three boards at a budget of nodes, for the via at
+      2 mm. Open (D127, "Not done"): corne-cherry's time, whose rounds cost what the native router's do
+      and are four times as many at a price that every try to raise paid for in vias or connections;
+      tinytapeout-demo's time on a quiet machine, 29 of whose 53 s come after its last connection;
+      buspirate-flash-sop's sixth via in one order; corne-cherry at budgets of nodes; and another
+      round's items, the planning of a net with a plane on outer pours and the glasgows' track. Done since D125 (D126, the same
       direction, not met, and no nearer by the count of the cells): a pad left with no spoke by 0.0.29
       (a ground pin of a header on tinytapeout-demo, in one order of sixteen) traced to the run for
       shorter ways and to the step for the spokes, and closed three ways: guide 0.0.30 keeps a pad's last

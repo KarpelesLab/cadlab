@@ -43,7 +43,10 @@
 //! pad that a pour joins as well (`pcb::needless_between`, D116), the board filled without them
 //! and what a connection or a pad's relief needs put back; and where the runs leave the time,
 //! guide has the routes back once more to look for a shorter way for each run of tracks
-//! (`RouteOptions::shorten`, D116). Last of what moves copper, the routes that stand in the room of a
+//! (`RouteOptions::shorten`, D116), and in that run for another way for the route that cut a pad off
+//! its pour, for the via that joined the pad again (`Stats::uncut`, guide 0.0.31, D127). The fills
+//! that guide is given are cadlab's own of the board it is given with them, and it is told so
+//! (`Zones::fills_clear_of`, D127). Last of what moves copper, the routes that stand in the room of a
 //! spoke of a pad short of its spokes are taken out, and guide joins their nets up again round that
 //! room, kept if nothing is open for it and the board is nearer its relief, the pads with no spoke
 //! first ([`spoke_rooms`], [`relief_score`], D121, D126). In those two runs the last spoke of a pad is
@@ -873,6 +876,10 @@ pub(crate) fn adapt(
         });
     }
 
+    // The fills are cadlab's own, of the board that these tracks, vias and copper are of:
+    // guide has them measured against what its run adds alone (`Zones::fills_clear_of`,
+    // guide 0.0.31, D127).
+    zones.fills_clear_of = Some([gb.tracks.len(), gb.vias.len(), gb.zones.len()]);
     let design = Design {
         board: gb,
         rules,
@@ -932,6 +939,11 @@ impl Adapted {
             }
         }
         (board.vias, self.vias) = (vias, via_ids);
+        // What is left of the board is still what the fills were made around.
+        if let Some(clear) = self.design.zones.fills_clear_of.as_mut() {
+            clear[0] = self.design.board.tracks.len();
+            clear[1] = self.design.board.vias.len();
+        }
         for n in self.earlier.tracks.iter().filter_map(|t| t.net).chain(self.earlier.vias.iter().filter_map(|v| v.net))
         {
             if let Some(spec) = self.design.nets.get_mut(n.index()) {
@@ -1715,7 +1727,7 @@ fn needless(
     (t.into_iter().map(|k| at_t[k]).collect(), v.into_iter().map(|k| at_v[k]).collect())
 }
 
-/// How much further inside its pad than its own half width a track's end is left
+/// How far inside its pad the middle of a track is at least where it counts as inside
 /// ([`pad_ends`]).
 const PAD_END_MARGIN: i64 = 1_000;
 /// The least that an end is moved by.
@@ -1752,16 +1764,21 @@ fn convex_turn(ring: &[polyclip::Point]) -> Option<i128> {
 }
 
 /// Ends the tracks where they are inside the pads of their net, as the native router's end
-/// (D118): guide routes to a pad's centre, the native router to the first point of its grid
-/// inside the pad, and the difference, copper on copper, was a fifth of the track of a board
-/// of through-hole pads (buspirate-rs232 +26 % by the nets both routers close, +7 % outside
-/// the pads). An end of a straight track inside a convex pad of its net on its layer is moved
-/// back along the track for as long as the track's round end stays inside the pad, by its
-/// half width and [`PAD_END_MARGIN`]: what is cut is inside the pad's copper from end to end,
-/// so the copper of the board is the same shape, and so are its fill, its clearances and its
-/// connections. A track with both ends so inside one pad goes. Not the tracks of `keep`
-/// (pairs and nets with a length to keep, whose lengths are counted along the track), nor in
-/// the pads of a net tie. Returns the length taken off.
+/// (D118, D127): guide routes to a pad's centre, the native router to the first point of its
+/// grid inside the pad, and the difference, copper on copper, was a fifth of the track of a
+/// board of through-hole pads (buspirate-rs232 +26 % by the nets both routers close, +7 %
+/// outside the pads). An end of a straight track inside a convex pad of its net on its layer is
+/// moved back along the track to half the track's width before the point where its middle
+/// leaves the pad: its round end then reaches to that point, as a track of the native router
+/// that ends on the first cell of the pad does. D118 moved it back only for as long as the
+/// whole of the round end stayed inside the pad, which left a track that runs along a pad
+/// beside its middle line, in the pad from end to end but for a part of its width, as long as
+/// it was: 14 mm of buspirate-rs232's 293 against the native router's 9 of 281. What is cut
+/// is copper of the pad's net over the pad or within half a track's width of it, so nothing
+/// is nearer another net than it was and the pad is joined as it was. A track with both ends
+/// so inside one pad goes. Not the tracks of `keep` (pairs and nets with a length to keep,
+/// whose lengths are counted along the track), nor in the pads of a net tie. Returns the
+/// length taken off.
 fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
     let pads = geo::placed_pads(p);
     let mut by_net: BTreeMap<&str, Vec<&PlacedPad>> = BTreeMap::new();
@@ -1777,7 +1794,8 @@ fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
         if t.mid.is_some() {
             continue;
         }
-        let r = t.width.0 / 2 + PAD_END_MARGIN;
+        let r = PAD_END_MARGIN;
+        let half = t.width.0 / 2;
         for end in 0..2 {
             let (e, o) = if end == 0 { (t.start, t.end) } else { (t.end, t.start) };
             let (e, o) = ((e.x.0, e.y.0), (o.x.0, o.y.0));
@@ -1809,7 +1827,11 @@ fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
                     hi = m;
                 }
             }
-            let to = at(lo);
+            // And half the track's width back from there: its round end then reaches to where
+            // its middle leaves the pad.
+            let length = ((o.0 - e.0) as f64).hypot((o.1 - e.1) as f64);
+            let back = if length > 0.0 { (half as f64 / length * STEPS as f64).ceil() as i64 } else { STEPS };
+            let to = at((lo - back).max(0));
             let moved = ((to.0 - e.0) as f64).hypot((to.1 - e.1) as f64);
             if moved < PAD_END_LEAST as f64 {
                 continue;
@@ -2567,7 +2589,15 @@ pub(crate) fn route(
         // runs before left it.
         let left2 = open(&items2, &isl2);
         if left2.len() >= left.len() {
-            idle += fruitless;
+            // And a run that moves routes, ended on its own and left the board with more open
+            // than it was given, is the last: what it moved for the connections it was given
+            // broke more than it made, and another order of the nets moves the same routes
+            // for the same connections (D127; corne-cherry, two orders of four: a pad of a
+            // ground cut off its pour, a run that came back with 7 and with 78 connections
+            // open for the one, and a second in another order with as many, 10 s of the
+            // minute each).
+            let worse = moves && more.stopped.is_none() && left2.len() > left.len();
+            idle += if worse { MOVE_STALE } else { fruitless };
             continue;
         }
         // A run that is kept, ended on its own, and found no way for any net that the board
@@ -3715,6 +3745,9 @@ mod tests {
         assert_eq!(d.zones.fills.len(), fills);
         assert!(d.zones.fills.iter().all(|f| f.zone == 0 && f.layer == LayerId(1)));
         assert!(d.zones.fills.iter().any(|f| f.shape.rings().is_some_and(|r| r.len() > 1)), "holes around the pads");
+        // The fills are cadlab's own of this board: guide measures them against none of it
+        // (`Zones::fills_clear_of`, D127).
+        assert_eq!(d.zones.fills_clear_of, Some([d.board.tracks.len(), d.board.vias.len(), d.board.zones.len()]));
         // The keep-out with the net it excepts, and no other: no via in a pad is guide's own
         // rule now (`vias_in_pads`), not a keep-out over every pad.
         let [k] = &d.board.keepouts[..] else { panic!("one keep-out: {:?}", d.board.keepouts) };
@@ -3789,7 +3822,24 @@ mod tests {
         // What is left of it still ends inside the pad.
         let ring = &pp.shape.outer.0;
         let turn = convex_turn(ring).expect("a convex pad");
-        assert!(disc_in_ring(ring, turn, (cut[0].start.x.0, cut[0].start.y.0), t.width.0 / 2));
+        assert!(disc_in_ring(ring, turn, (cut[0].start.x.0, cut[0].start.y.0), t.width.0 / 2 - 2_000));
+        // A track along the pad beside its middle line, on the pad for its middle and off it
+        // for a part of its width (D127): D118 left all of it, as its round end is nowhere
+        // inside the pad. It ends half its width before where its middle leaves the pad.
+        let top = ring.iter().map(|q| q.y).max().expect("a ring");
+        let right = ring.iter().map(|q| q.x).max().expect("a ring");
+        let y = Nm(top - t.width.0 / 4);
+        let mut beside = t.clone();
+        (beside.start, beside.end) = (Point { x: pp.center.x, y }, Point { x: far.x, y });
+        assert!(!disc_in_ring(ring, turn, (pp.center.x.0, y.0), t.width.0 / 2), "its end is not inside the pad");
+        let mut along = vec![beside.clone()];
+        let off = pad_ends(&p, &mut along, &BTreeSet::new());
+        assert!(off.0 > 0 && along[0].end == beside.end && along[0].start.y == y, "{off:?} {along:?}");
+        assert!(disc_in_ring(ring, turn, (along[0].start.x.0, y.0), PAD_END_MARGIN), "its middle is on the pad");
+        assert!(along[0].start.x.0 <= right - t.width.0 / 2 + 2_000, "{along:?} {right}");
+        let was = along.clone();
+        assert_eq!(pad_ends(&p, &mut along, &BTreeSet::new()), Nm(0));
+        assert_eq!(along, was);
     }
 
     /// A track wider than a pad of its net is laid at the pad's shorter side where it meets
@@ -4232,6 +4282,9 @@ mod tests {
         assert_eq!(ad.earlier.vias.len(), r.vias.len());
         assert_eq!(ad.design.board.tracks.len(), fixed - r.tracks.len());
         assert_eq!(ad.tracks.len(), ad.design.board.tracks.len());
+        // What stays is still all that the fills were made around.
+        let b = &ad.design.board;
+        assert_eq!(ad.design.zones.fills_clear_of, Some([b.tracks.len(), b.vias.len(), b.zones.len()]));
         assert!(ad.design.nets[sig].route);
         let gopts = options(&q, &RouteOptions::default(), &[0, 1]);
         let again = call(&ad, None, &gopts, None, &Hooks::none()).expect("route");

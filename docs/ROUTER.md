@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1046,6 +1046,23 @@ exports and the count all read cadlab's fill). The result is then treated as the
   then took out every piece of copper that touched it (tinytapeout-demo at 150 million nodes: 120, 107 and
   323 tracks and vias in three orders of eight; at 60 s 62 and 23 in two of eight), which the later runs
   joined up again. 0.0.30 asks the world of every track and via, and the check takes nothing out.
+- *guide 0.0.31* (D127) has three things in its run for shorter ways, and one for every run. *A pour left
+  whole*: a pad of a net with a pour on its own layer that the routes of other nets cut off the pour is joined
+  to it again by a stub with a via; for each such stub guide now asks its cells whose routes are round the
+  pad's piece of the pour and where the fill would join the pad without one, two or three of those nets,
+  keeps that way free and routes them again round it, and takes the stub out if they have no more vias, are
+  not much longer and cut no other pad off (`Stats::uncut`; buspirate-flash-sop's fifth via). *A run's end at
+  a pad*: guide's searches end at a pad's centre and step aside for a pad beside their line before they are
+  at it; each run's end is aimed at where on the pad the run comes to it. *A via at 2 mm in a run searched for
+  again*, for 3 mm, at which a way round a row of pads cost as much as the way with a via (buspirate-rs232).
+  And *what the fills are clear of*: the fills that the adapter gives are cadlab's own of the board it gives
+  with them, and guide measured each against every pad and track of that board in every call, a second a
+  call on a board of four layers; `Zones::fills_clear_of` says so, and guide measures them against what its
+  run adds alone. In the adapter: *a track ends at the first copper of its pad*, half its width before where
+  its middle leaves the pad (`pad_ends`), where D118 moved an end back only while its whole round end stayed
+  inside the pad and left a track that runs along a pad beside its middle line as long as it was; and *a run
+  that moves routes, ends on its own and leaves more open than it was given is the last*, where a second in
+  another order came back the same (corne-cherry, two orders of four).
 - *The time of the step for the spokes is kept from the first run on* (D124). Where the board as the first
   run leaves it has pads short of their spokes with routes in a spoke's room, every run after the first ends
   in time for the step, as the run for shorter ways did (D122); the step that takes out the tracks between
@@ -2708,6 +2725,80 @@ Vias and track, the medians of the runs, guide against the native router:
   first round of both routers joined connection by connection, and what was tried and not kept.
 
 The default is unchanged (DECISIONS D125).
+
+**Native router and guide 0.0.31, D127** (the corpus at the default 60 s; four runs of the native router, seeds 1
+to 4, three threads, and four orders of guide, three threads for its negotiation, one run of each at a time,
+side by side in the same half hour; the machine's load 2.9 to 10.3, noted every two minutes, median 7.3, with
+another round's measurements on eight of its threads, where D126's was 0.5 to 4.7: the times are to be read
+against the native router's here, not against D126's. Measured with a checkout of the commit that 0.0.31 was
+released from behind the adapter of this decision):
+
+| board | layers | native: open by run (min / median / max); vias, length, time | guide 0.0.31: open by run (min / median / max); vias, length, time |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.4 s | 0, 0, 0, 0 (0 / 0 / 0); 6, 438.9 mm, 0.7 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 6, 285.7 mm, 0.5 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 1, 176.5 mm, 0.3 s | 0, 0, 0, 0 (0 / 0 / 0); 1, 166.9 mm, 0.6 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 12.9 s | 0, 0, 0, 0 (0 / 0 / 0); 48, 431.0 mm, 7.1 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 53.4 s | 3, 3, 3, 3 (3 / 3 / 3); 23, 2104.1 mm, 36.8 s |
+| corne-cherry | 2 | 3, 3, 2, 4 (2 / 3 / 4); 451, 8100.6 mm, 20.5 s | 7, 0, 1, 1 (0 / 1 / 7); 432, 7023.2 mm, 54.7 s cut |
+| tinytapeout-demo | 4 | 19, 2, 5, 5 (2 / 5 / 19); 244, 4947.5 mm, 60.6 s | 0, 1, 0, 0 (0 / 0 / 1); 274, 4884.5 mm, 54.5 s |
+| buspirate5-rev10 | 4 | 4, 2, 4, 8 (2 / 4 / 8); 296, 3156.9 mm, 23.5 s | 0, 0, 0, 0 (0 / 0 / 0); 317, 2963.3 mm, 22.5 s |
+| lumenpnp-mobo | 4 | 9, 27, 10, 14 (9 / 12 / 27); 339, 5447.7 mm, 61.7 s | 0, 0, 0, 0 (0 / 0 / 0); 341, 5473.7 mm, 54.7 s |
+| cynthion | 4 | 27, 29, 30, 28 (27 / 28.5 / 30); 478, 3176.1 mm, 62.2 s cut | 8, 8, 8, 8 (8 / 8 / 8); 428, 2995.4 mm, 36.2 s |
+| glasgow-revC3 | 4 | 34, 32, 40, 43 (32 / 37 / 43); 413, 3426.4 mm, 60.2 s cut | 9, 6, 9, 8 (6 / 8.5 / 9); 427, 3610.9 mm, 59.1 s cut |
+| glasgow-revD1 | 6 | 135, 128, 94, 99 (94 / 113.5 / 135); 1067, 9050.8 mm, 60.6 s cut | 16, 16, 7, 12 (7 / 14 / 16); 1181, 10497.2 mm, 55.0 s cut |
+| all twelve | | 234, 226, 188, 204 (188 / 215 / 234) | 43, 34, 28, 32 (28 / 33 / 43) |
+| the eleven without glasgow-revD1 | | 99, 98, 94, 105 (94 / 98.5 / 105) | 27, 18, 21, 20 (18 / 20.5 / 27) |
+
+Pads in pours by the necks that reach them, over the twelve boards, by those runs:
+
+| | pads in pours | no neck | short of two necks (`drc.starved_thermal`) | solid solder pads |
+|---|---|---|---|---|
+| native router, seeds 1 to 4 | 2350 to 2361 | 15, 7, 2, 6 | 93, 79, 82, 75 | 475 to 480 |
+| guide 0.0.31, four orders | 2366 to 2371 | 0, 0, 0, 0 | 33, 32, 30, 35 | 498 to 509 |
+
+Vias and track, the medians of the runs, guide against the native router:
+
+| board | vias | track, mm | track outside the pads of its net, mm |
+|---|---|---|---|
+| buspirate-flash-sop | 4 against 4 (+0 %) | 442 against 461 (-4 %) | 431 against 431 (-0 %) |
+| buspirate-rs232 | 8 against 10 (-20 %) | 284 against 281 (+1 %) | 275 against 272 (+1 %) |
+| lumenpnp-ringlight | 3 against 3 (+0 %) | 165 against 177 (-7 %) | 158 against 159 (-1 %) |
+| nrfmicro | 42.5 against 47.5 (-11 %) | 429 against 450 (-5 %) | 413 against 414 (-0 %) |
+| sweep-v2.2 | 21 against 25.5 (-18 %) | 2115 against 2159 (-2 %) | 2104 against 2122 (-1 %) |
+| corne-cherry | 432 against 459 (-6 %) | 7490 against 8103 (-8 %) | 7421 against 7915 (-6 %) |
+| tinytapeout-demo | 284.5 against 272.5 (+4 %) | 5038 against 4913 (+3 %) | 4972 against 4692 (+6 %) |
+| buspirate5-rev10 | 306.5 against 302 (+1 %) | 2977 against 3129 (-5 %) | 2880 against 2911 (-1 %) |
+| lumenpnp-mobo | 334 against 337 (-1 %) | 5326 against 5446 (-2 %) | 5236 against 5160 (+1 %) |
+| cynthion | 417 against 479 (-13 %) | 3032 against 3184 (-5 %) | 2961 against 2980 (-1 %) |
+| glasgow-revC3 | 403.5 against 417.5 (-3 %) | 3647 against 3448 (+6 %) | 3559 against 3192 (+11 %) |
+| glasgow-revD1 | 1176.5 against 1081 (+9 %) | 10603 against 9117 (+16 %) | 10359 against 8595 (+21 %) |
+
+- *0 DRC errors other than unrouted* in the 96 runs; no pad solid by copper that is no pour with either router.
+- *No pad of guide's without a neck*, on any board in any of its 48 runs. Pads short of two necks over the
+  twelve boards 33, 32, 30 and 35 against the native router's 93, 79, 82 and 75.
+- *buspirate-flash-sop* has the native router's four vias in three orders of four, and six in one (D127: the
+  route that cut a pad off its pour goes another way, 2.1 mm longer, and the via that joined the pad is gone).
+  *buspirate-rs232* has 8 vias and 284 mm for 5 and 297 mm, beside the native router's 10 and 281 mm: its runs
+  end on a pad where they come to it, its tracks at the first copper of the pad, and two of its nets have a
+  via and 3 mm less.
+- *corne-cherry's first order*, 7 connections open here: run again beside 0.0.30 in the same minutes (load 8.4
+  to 11.3), the four orders have 1, 0, 1 and 1 open with 0.0.31 and 1, 0, 1 and 2 with 0.0.30, in 55, 35, 50
+  and 53 s for 55, 35, 55 and 55. That order's first run ends at its deadline in the middle of its settling.
+- *The times of tinytapeout-demo and buspirate5-rev10* are equal to the native router's by these runs, under
+  this load; on D126's quiet machine the native router ended five of eight runs of tinytapeout-demo in 34 to
+  43 s. guide's own are 53 to 56 s for 50 to 58, and 22 to 34 s for 23 to 34; of buspirate5-rev10's 25 s, 4.3 s
+  were its fills measured again in each of six calls, and are 1.6 s (`Zones::fills_clear_of`).
+- *Budgets of nodes*, 0.0.30 and 0.0.31: 40 million, three orders, the nine boards: 583 open for 583, each
+  board the connections it had. 150 million, two orders, seven boards: the same connections open (corne-cherry
+  8 and 0, tinytapeout-demo none and 1), the track 0.2 to 1.5 % shorter on each, and up to ten vias more in
+  single orders (tinytapeout-demo 280 for 270, lumenpnp-mobo 344 for 334), for the via at 2 mm in a run that
+  is searched for again.
+- D127 has the table of equal, better and worse by board and measure (30, 32, 1 and 9 of 72 cells; D126: 29,
+  27, 1 and 15), the same by the nets that both routers complete (13, 14 and 9 of 36 for 13, 11 and 12), where
+  the time of a run goes on three boards, what was tried and not kept, and what is not done.
+
+The default is unchanged (DECISIONS D127).
 
 **Native router and guide 0.0.30, D126** (the corpus at the default 60 s; four runs of the native router, seeds 1
 to 4, three threads, and four orders of guide, three threads for its negotiation, one run of each at a time,
