@@ -412,9 +412,18 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       0.0.32, the routes made legal before the fill in the native router's order (`legal_pours`) and a net
       with a plane planned on its outer pours (`outer_pours`), and measured stage by stage: the first
       round's difference is closed and is gone by the end of the run, glasgow-revD1 has 42 to 71
-      connections open with it for 12 to 17, and the order alone gains nothing; both are left off. Open:
-      the passes after a negotiation that ended well, which take its vias back (D128, "Not attempted"),
-      and the glasgows' track, not begun. Done since D124 (D125, the same
+      connections open with it for 12 to 17, and the order alone gains nothing; both are left off. Since
+      D128 (D129, the same direction, not met): the connections that the negotiation leaves open
+      negotiated for on the grid of the pitch before the passes (guide 0.0.33, `whole_finer`), measured
+      stage by stage: it halves what the passes are given and the nets they take out, and the board ends
+      as it did, so it is left off; the round's table on a quiet machine, 29 better, 30 equal, 2 that
+      overlap and 11 worse of 72 cells, and by the nets both complete 13, 14 and 9 of 36; glasgow-revD1
+      lost no connection from 0.0.30 to 0.0.32 (the three side by side); glasgow-revC3's track is level on
+      the nets both complete, and glasgow-revD1's is in the nets taken out as its share ends the rounds,
+      the twenty longest of them 374 to 482 mm, half of it gone at 240 s; corne-cherry with `legal_pours`
+      has twelve connections open over eight orders for nine. Open (D129, "Not attempted"):
+      tinytapeout-demo's vias and track, which are not made by the passes; rounds that end in their share
+      on six layers; corne-cherry's time; the node cost of guide's rounds at the first pitch. Done since D124 (D125, the same
       direction, not met): the first round of both routers joined connection by connection and the
       differences counted by their kind (the planning of a net with a plane, the room of a spoke, the
       order, the tree, where a route ends at a pad, and the widths of the nets); the native router's rule

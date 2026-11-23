@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,17 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.33* (D129) can negotiate for the connections that its negotiation leaves open, as an option that
+  the adapter leaves off. `RouteOptions::whole_finer`: when the rounds at twice the pitch end and what is
+  still shared has been taken out, a net that found no way where nothing is claimed has a connection open;
+  the nets are put as they are on a grid with a cell between every two of theirs, and there are rounds on it
+  for the nets with a connection open and the nets whose claims they are in, sixteen at most in a tenth of
+  what the run has left, kept only if fewer connections are open on the grid after them (the native router's
+  rule for its rip-up and retry). Measured stage by stage and at 60 s (below, and D129): on tinytapeout-demo
+  the passes are given 2 to 10 connections apart for 8 to 15 and take 406 nets out over eight orders for 852,
+  and the boards end with 298 vias and 4998 mm for 296.5 and 5024 mm; at 60 s glasgow-revC3 has 25
+  connections open over four orders for 31 with 2.7 % more track. What the passes add is taken out again by
+  the end of the run either way.
 - *guide 0.0.32* (D128) has the native router's order for the pours, and its planning of a net with a plane,
   as two options that the adapter leaves off. `RouteOptions::legal_pours`: when the rounds of guide's
   negotiation end, the routes of the best round are made legal, cadlab's fill around them is asked for, the
@@ -2810,6 +2821,42 @@ Vias and track, the medians of the runs, guide against the native router:
   the time of a run goes on three boards, what was tried and not kept, and what is not done.
 
 The default is unchanged (DECISIONS D127).
+
+**Native router and guide 0.0.33, D129** (the corpus at the default 60 s; four runs of the native router, seeds 1
+to 4, three threads, and four orders of guide, three threads for its negotiation, tinytapeout-demo eight of
+each, one run of each router at a time; measured twice in the round. First guide 0.0.32 from crates.io, the
+load 2.9 to 8.5, median 5.9: 29 better, 30 equal, 2 with ranges that overlap and 11 worse of 72 cells. Then,
+below, guide 0.0.33's source with `whole_finer` off, the load 2.5 to 6.0, median 3.8: 31, 29, 2 and 10, where
+the three cells that differ are the native router's own from one period to the next. Medians of the vias and
+of the track in mm, connections open and pads short of two necks by run):
+
+| board | open | vias | track | track outside pads | short of two necks | time |
+|---|---|---|---|---|---|---|
+| buspirate-flash-sop | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| buspirate-rs232 | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 1 s against 0 to 0 s) |
+| lumenpnp-ringlight | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 3 against 3 | better (-7 %) 165 against 177 | equal (-1 %) 158 against 159 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 1 s against 0 to 0 s) |
+| nrfmicro | equal (0/0/0/0 against 0/0/0/0) | better (-11 %) 42.5 against 47.5 | better (-5 %) 429 against 450 | equal (-0 %) 413 against 414 | equal (0/0/0/0 against 0/0/0/0) | equal (3 to 22 s against 2 to 13 s) |
+| sweep-v2.2 | equal (3/3/3/3 against 3/3/3/3) | better (-18 %) 21 against 25.5 | better (-2 %) 2115 against 2159 | equal (-1 %) 2104 against 2122 | better (0/1/0/1 against 2/1/2/1) | better (35 to 36 s against 51 to 51 s) |
+| corne-cherry | overlap, median 1.0 against 3.0 (2/0/1/1 against 3/3/2/4) | better (-5 %) 437 against 459 | better (-8 %) 7490 against 8103 | better (-6 %) 7421 against 7915 | better (2/2/1/1 against 3/3/2/2) | worse (34 to 55 s against 21 to 32 s) |
+| tinytapeout-demo | overlap, median 0.0 against 4.0 (0/1/0/0/0/0/1/4 against 19/2/5/5/2/2/3/9) | worse (+5 %) 287.5 against 273 | worse (+3 %) 5034 against 4894 | worse (+6 %) 4968 against 4672 | better (4/7/10/4/5/4/7/6 against 20/12/10/16/16/14/17/19) | worse (46 to 55 s against 33 to 61 s) |
+| buspirate5-rev10 | better (0/0/0/0 against 4/2/4/8) | equal (+1 %) 306.5 against 302 | better (-5 %) 2977 against 3129 | equal (-1 %) 2880 against 2911 | better (6/11/8/6 against 22/24/30/21) | equal (22 to 33 s against 19 to 32 s) |
+| lumenpnp-mobo | better (0/0/0/0 against 8/12/7/18) | better (-3 %) 334 against 343.5 | better (-2 %) 5326 against 5461 | equal (+1 %) 5236 against 5177 | better (0/0/0/0 against 2/4/0/0) | better (48 to 53 s against 61 to 64 s) |
+| cynthion | better (8/8/8/8 against 28/29/29/28) | better (-13 %) 417 against 478 | better (-5 %) 3032 against 3184 | equal (-1 %) 2961 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (33 to 39 s against 62 to 62 s) |
+| glasgow-revC3 | better (9/6/9/7 against 36/31/40/32) | better (-3 %) 403.5 against 415 | worse (+5 %) 3635 against 3468 | worse (+11 %) 3549 against 3210 | equal (0/0/0/0 against 0/0/0/0) | equal (59 to 59 s against 60 to 62 s) |
+| glasgow-revD1 | better (9/14/6/12 against 128/121/94/108) | worse (+11 %) 1191.5 against 1074.5 | worse (+19 %) 10721 against 9012 | worse (+23 %) 10480 against 8491 | better (8/10/10/22 against 43/31/35/37) | better (53 to 57 s against 62 to 63 s) |
+
+- No pad with no spoke for guide on any of the twelve boards in any order, in both measurements; 0 DRC errors
+  other than unrouted in the 208 runs.
+- By the nets that both routers complete, 13 better, 14 equal and 9 worse of 36 cells in both.
+- `whole_finer`, 0.0.32 beside it at 60 s, two orders of each at a time (connections open; medians of the
+  vias; track): tinytapeout-demo 0/0/2/0/0/0/2/4; 280; 5003 for 0/1/0/0/0/0/2/4; 287.5; 5044. buspirate5-rev10
+  0/0/0/0; 309.5; 2976 for 0/0/0/0; 306.5; 2977. lumenpnp-mobo 0/0/0/0; 335; 5369 for 0/0/0/0; 334; 5326.
+  cynthion 8/8/8/8; 419.5; 3026 for 8/8/8/8; 417; 3032. glasgow-revC3 8/5/7/5; 413.5; 3732 for 9/6/9/7;
+  403.5; 3635. glasgow-revD1 16/23/7/8; 1196.5; 10577 for 15/30/7/8; 1182; 10615.
+- D129 has the stages of tinytapeout-demo and buspirate5-rev10, the budgets of nodes, the glasgows' track by
+  net, corne-cherry's connections and time, what was tried and not kept, and what remains open.
+
+The default is unchanged (DECISIONS D129).
 
 **Native router and guide 0.0.32, D128** (seven boards at 60 s, two runs at a time side by side, three threads
 each: guide 0.0.30 from crates.io beside guide 0.0.32's `legal_pours`, the load 4.3 to 10.7, median 6.0; then

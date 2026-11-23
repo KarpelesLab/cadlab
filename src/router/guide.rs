@@ -1242,6 +1242,12 @@ fn options(p: &Project, opts: &RouteOptions, slots: &[usize]) -> pcb::RouteOptio
     // and glasgow-revC3 for nothing gained (D128).
     gopts.outer_pours = false;
     gopts.legal_pours = false;
+    // Nor are the connections that the negotiation at twice the pitch leaves open negotiated
+    // on the grid of the pitch before the passes (guide 0.0.33, `whole_finer`, off by default
+    // there and left off here): it halves what the passes are given and the nets they take
+    // out, and the board ends as it did; at 60 s glasgow-revC3 has 25 connections open over
+    // four orders for 31 with 2.7 % more track, and tinytapeout-demo 2.6 % fewer vias (D129).
+    gopts.whole_finer = false;
     gopts.seed = (opts.seed != 0).then_some(opts.seed);
     if !opts.layers.is_empty() {
         gopts.layers = Some(slots.iter().fold(LayerSet::EMPTY, |s, &i| s.with(LayerId(i as u8))));
