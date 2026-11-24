@@ -571,11 +571,11 @@ fn reliefs_reused_give_the_fill_made_from_scratch() {
         let inp = input(Some("GND"), &outline, items, prm);
         // With the reliefs of earlier fills alone, and with the allowed area of a fill made
         // from the same copper of other nets too.
-        let mut allowed = None;
+        let mut allowed = Stage::default();
         let (reused, fresh) = (fill_layer_with(&inp, true, None).unwrap(), fill_layer(&inp).unwrap());
         assert_eq!(reused, fresh, "{what}");
         assert_eq!(fill_layer_with(&inp, true, Some(&mut allowed)).unwrap(), fresh, "{what}, again");
-        assert!(allowed.is_some(), "{what}: the allowed area is given back");
+        assert!(allowed.allowed.is_some(), "{what}: the allowed area is given back");
         assert_eq!(
             fill_layer_with(&inp, true, Some(&mut allowed)).unwrap(),
             fresh,
@@ -650,4 +650,127 @@ fn trimmed_spoke_is_no_narrower_than_a_track() {
     assert!(!joined(prm), "less than half the spoke, with no minimum to go by");
     prm.min_spoke = Nm(200_000);
     assert!(joined(prm), "trimmed down to the minimum track width");
+}
+
+/// The pour before its islands are told is made from the allowed area, the settings and the
+/// pads of the net alone (`Stage::before`): the one of an earlier fill made from the same is
+/// taken, the islands told of it as of one made from scratch, and one made in another allowed
+/// area is not.
+#[test]
+fn pour_of_an_earlier_fill_gives_the_fill_made_from_scratch() {
+    let outline = square(0, 0, 20 * MM, 10 * MM);
+    let prm = params(PadConnection::Thermal);
+    // A foreign track splits the zone; the net has a pad on the left of it.
+    let mut items = vec![
+        (track("A", (10 * MM, -MM), (10 * MM, 11 * MM), 300_000), Nm::ZERO),
+        (pad("GND", 4 * MM, 5 * MM, 500_000, 400_000), Nm::ZERO),
+    ];
+    let mut first = Stage::default();
+    let left = fill_layer_with(&input(Some("GND"), &outline, &items, prm), true, Some(&mut first)).unwrap();
+    assert_eq!(left, fill_layer(&input(Some("GND"), &outline, &items, prm)).unwrap());
+    assert_eq!(left.len(), 1, "the right half is an island");
+    let (area, allowed, whole) = (first.area.unwrap(), first.allowed.unwrap(), first.whole.unwrap());
+    assert_eq!(whole.len(), 2, "both halves before the islands are told");
+    // A via of the net on the right: the allowed area and the pads are as they were, and the
+    // right half is no island now.
+    items.push((via("GND", 16 * MM, 5 * MM), Nm::ZERO));
+    let fresh = fill_layer(&input(Some("GND"), &outline, &items, prm)).unwrap();
+    assert_eq!(fresh.len(), 2);
+    let mut kept =
+        Stage { area: Some(area), allowed: Some(allowed.clone()), before: Some((None, whole.clone())), whole: None };
+    assert_eq!(fill_layer_with(&input(Some("GND"), &outline, &items, prm), true, Some(&mut kept)).unwrap(), fresh);
+    assert_eq!(kept.whole.as_ref(), Some(&whole), "given back as it was");
+    assert_eq!(kept.allowed.as_ref(), Some(&allowed));
+    // With an allowed area that is not known to be the earlier one: told by comparing them.
+    let mut kept = Stage { before: Some((Some(allowed.clone()), whole.clone())), ..Default::default() };
+    assert_eq!(fill_layer_with(&input(Some("GND"), &outline, &items, prm), true, Some(&mut kept)).unwrap(), fresh);
+    // It is the pour given that the fill is made of: one that only this test could give.
+    let marker = vec![rect(MM, MM, 6 * MM, 9 * MM)];
+    let mut kept = Stage { before: Some((Some(allowed.clone()), marker.clone())), ..Default::default() };
+    assert_eq!(fill_layer_with(&input(Some("GND"), &outline, &items, prm), true, Some(&mut kept)).unwrap(), marker);
+    // Another foreign track: another allowed area, and the pour is made anew.
+    items.push((track("B", (2 * MM, 2 * MM), (6 * MM, 2 * MM), 200_000), Nm::ZERO));
+    let other = fill_layer(&input(Some("GND"), &outline, &items, prm)).unwrap();
+    assert!(other != fresh, "the track changes the fill");
+    let mut kept = Stage { before: Some((Some(allowed), marker)), ..Default::default() };
+    assert_eq!(fill_layer_with(&input(Some("GND"), &outline, &items, prm), true, Some(&mut kept)).unwrap(), other);
+}
+
+/// The parts of earlier fills that a fill of another board takes (`LayerMemo`, `GrownMemo`)
+/// give the fills made from scratch, board after board: a via of the pour's net that makes an
+/// island a part of it and goes again, a track of another net inside one that is there (the
+/// allowed area as it was), copper of another net far from a pour of higher priority (that
+/// pour as it was, and grown as it was for the pour below it), a pour with nothing of its net
+/// (empty, and kept so) that gets a via and loses it.
+#[test]
+fn parts_of_earlier_fills_give_the_fills_made_from_scratch() {
+    let mut p = Project::new("t");
+    let pt = |x: i64, y: i64| Point::new(Nm(x * MM), Nm(y * MM));
+    let line = |x, y| Segment::Line { to: pt(x, y) };
+    let b = p.board_mut();
+    b.outline.contours =
+        vec![Contour { start: pt(0, 0), segments: vec![line(40, 0), line(40, 20), line(0, 20), line(0, 0)] }];
+    // Zone numbers that no other test has: the memo is by zone and layer, and of the process.
+    b.zones.push(zone(9110, "GND", &["F.Cu"], vec![pt(-5, -5), pt(45, -5), pt(45, 25), pt(-5, 25)], 0, None));
+    b.zones.push(zone(9111, "A", &["F.Cu"], vec![pt(2, 2), pt(8, 2), pt(8, 8), pt(2, 8)], 3, None));
+    b.zones.push(zone(9112, "X", &["F.Cu"], vec![pt(9, 11), pt(13, 11), pt(13, 17), pt(9, 17)], 2, None));
+    let via = |id: u64, net: &str, x: i64, y: i64| Via {
+        id: ObjectId(id),
+        at: pt(x, y),
+        drill: Nm(300_000),
+        diameter: Nm(600_000),
+        net: Some(net.into()),
+        from: "F.Cu".into(),
+        to: "B.Cu".into(),
+        locked: false,
+    };
+    let track = |id: u64, net: &str, a: Point, b: Point| Track {
+        id: ObjectId(id),
+        layer: "F.Cu".into(),
+        width: Nm(300_000),
+        net: Some(net.into()),
+        start: a,
+        end: b,
+        mid: None,
+        locked: false,
+    };
+    b.vias.push(via(9120, "GND", 15, 5));
+    b.vias.push(via(9121, "A", 5, 5));
+    // A track of another net from edge to edge: the pour's right half is an island.
+    b.tracks.push(track(9130, "SIG", pt(22, -1), pt(22, 21)));
+    let check = |p: &Project, what: &str| -> Vec<PolygonSet> {
+        let base = crate::board::base_copper_items(p);
+        let (kept, fresh) = (fill_zones(p, &base), fill_zones_uncached(p, &base));
+        assert_eq!(kept.len(), fresh.len(), "{what}");
+        for (a, b) in kept.iter().zip(&fresh) {
+            assert!(a.error.is_none() && b.error.is_none(), "{what}: {:?} {:?}", a.error, b.error);
+            assert_eq!(a.fill, b.fill, "{what}: {} on {}", a.name, a.layer);
+        }
+        kept.into_iter().map(|f| f.fill).collect()
+    };
+    let first = check(&p, "first");
+    assert_eq!(first[0].len(), 1, "the right half is an island");
+    assert!(!first[1].is_empty() && first[2].is_empty(), "A is filled, X has nothing of its net");
+    p.board_mut().vias.push(via(9122, "GND", 30, 5));
+    let both = check(&p, "a via of the net in the island");
+    assert_eq!(both[0].len(), 2);
+    assert_eq!((&both[1], &both[2]), (&first[1], &first[2]));
+    p.board_mut().tracks.push(track(9131, "SIG", pt(22, 5), pt(22, 10)));
+    assert_eq!(check(&p, "a track inside the track that is there"), both);
+    p.board_mut().vias.push(via(9123, "SIG", 15, 15));
+    let holed = check(&p, "a via of another net in the pour");
+    assert!(holed[0] != both[0], "the pour keeps away from the via");
+    assert_eq!(holed[1], both[1], "far from A");
+    p.board_mut().vias.retain(|v| v.id != ObjectId(9122));
+    let left = check(&p, "the via in the island out again");
+    assert_eq!(left[0].len(), 1);
+    p.board_mut().vias.push(via(9124, "X", 11, 14));
+    let with_x = check(&p, "a via of X");
+    assert!(!with_x[2].is_empty(), "X is filled round its via");
+    assert!(with_x[0] != left[0], "and the pour below keeps away from it");
+    p.board_mut().vias.retain(|v| v.id != ObjectId(9124));
+    assert_eq!(check(&p, "the via of X out again"), left);
+    p.board_mut().vias.retain(|v| v.id != ObjectId(9123));
+    p.board_mut().tracks.retain(|t| t.id != ObjectId(9131));
+    assert_eq!(check(&p, "as at first"), first);
 }

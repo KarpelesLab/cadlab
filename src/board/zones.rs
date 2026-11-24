@@ -651,6 +651,25 @@ pub fn fill_layer(input: &LayerInput<'_>) -> Result<PolygonSet, poly::Error> {
     fill_layer_with(input, false, None)
 }
 
+/// What [`fill_layer_with`] takes from an earlier fill of the zone layer and gives back for
+/// the next one.
+#[derive(Default)]
+struct Stage {
+    /// Given: the zone's area on the board, when an earlier fill was made from the same
+    /// outline and board area. Given back: the area of this fill.
+    area: Option<PolygonSet>,
+    /// Given: the allowed area, when an earlier fill was made from the same area, copper of
+    /// other nets and keep-aways. Given back: the allowed area of this fill.
+    allowed: Option<PolygonSet>,
+    /// Given: the pour of an earlier fill made from the same area, settings and pads of the
+    /// net as it was before its islands were told ([`Stage::whole`]), with the allowed area
+    /// it was made in, or none where that is the one given in `allowed`.
+    before: Option<(Option<PolygonSet>, PolygonSet)>,
+    /// Given back: the pour before its islands are told, which is made from the allowed
+    /// area, the settings and the net's pads alone.
+    whole: Option<PolygonSet>,
+}
+
 /// What a fill makes of one copper item, and nothing else of the item: a zone layer whose
 /// items are these, in this order, has the same fill ([`LayerKey`]).
 #[derive(Clone, PartialEq, Eq)]
@@ -733,12 +752,18 @@ impl LayerKey {
 }
 
 /// What is kept of the last fill of one zone on one layer: everything it was made from, the
-/// fill, and its allowed area (the zone's area less other nets' copper and the keep-aways,
-/// which a change of a pad's relief leaves as it was).
+/// fill, the zone's area on the board, its allowed area (that area less other nets' copper
+/// and the keep-aways, which a change of a pad's relief leaves as it was) and the pour before
+/// its islands were told (which a change of the net's own tracks and vias leaves as it was,
+/// and a change of other nets' copper that leaves the allowed area as it was).
 struct LayerSlot {
     key: LayerKey,
     fill: Option<PolygonSet>,
-    avail: PolygonSet,
+    /// The zone's area on the board (its outline within the board area).
+    area: PolygonSet,
+    /// The allowed area and the pour before its islands were told; none of a fill that had
+    /// no area or nothing of its net to join, which is empty and has neither.
+    made: Option<(PolygonSet, PolygonSet)>,
 }
 
 impl LayerKey {
@@ -754,18 +779,30 @@ impl LayerKey {
             && self.keepaway == o.keepaway
             && a.map(|i| (&i.shape, i.clearance)).eq(b.map(|i| (&i.shape, i.clearance)))
     }
+
+    /// Whether a fill made from `self` in a given allowed area is, before its islands are
+    /// told, that of one made from `o` in the same allowed area: the same area and settings
+    /// and the same pads of the net, in the same order.
+    fn same_pour(&self, o: &LayerKey) -> bool {
+        let (a, b) = (self.items.iter().filter(|i| i.same && i.pad), o.items.iter().filter(|i| i.same && i.pad));
+        self.net == o.net && self.outline == o.outline && self.board == o.board && self.params == o.params && a.eq(b)
+    }
 }
 
 impl LayerSlot {
     fn points(&self) -> usize {
         let of = |s: &[Polygon]| s.iter().map(Polygon::vertex_count).sum::<usize>();
-        self.key.points() + self.fill.as_deref().map_or(0, of) + of(&self.avail)
+        self.key.points()
+            + self.fill.as_deref().map_or(0, of)
+            + of(&self.area)
+            + self.made.as_ref().map_or(0, |(avail, whole)| of(avail) + of(whole))
     }
 }
 
 /// The last fill of each zone layer made in this process ([`LayerSlot`]): a fill of a board
 /// that differs from an earlier one takes the zone layers whose every input is as it was, and
-/// of the others the allowed area where that is (D119). Emptied when it holds
+/// of the others the area, the allowed area and the pour before its islands were told, each
+/// where what it is made from is as it was (D119, D139). Emptied when it holds
 /// [`LAYER_POINTS`].
 #[derive(Default)]
 struct LayerMemo {
@@ -799,31 +836,87 @@ fn layer_memo<T>(f: impl FnOnce(&mut LayerMemo) -> Option<T>) -> Option<T> {
     f(LAYERS.lock().ok()?.get_or_insert_with(LayerMemo::default))
 }
 
+/// A part of a zone layer's fill grown by a keep-away distance, as a later zone of the layer
+/// keeps away from it: the zone and layer of the fill, the distance and the rings kept of it
+/// ([`cull_selection`]).
+type GrownKey = ((ObjectId, String), i64, Vec<u32>);
+
+/// The parts of the fills last made in this process as they were grown for the later zones
+/// of their layers, each with the part it was grown from: a fill of a board that leaves such
+/// a part as it was takes it grown as it was. Emptied when it holds [`GROWN_POINTS`].
+#[derive(Default)]
+struct GrownMemo {
+    parts: BTreeMap<GrownKey, (PolygonSet, PolygonSet)>,
+    points: usize,
+}
+
+/// The most points [`GrownMemo`] holds (16 bytes each).
+const GROWN_POINTS: usize = 4_000_000;
+
+impl GrownMemo {
+    fn points_of(part: &PolygonSet, grown: &PolygonSet) -> usize {
+        part.iter().chain(grown).map(Polygon::vertex_count).sum::<usize>()
+    }
+
+    fn get(&self, key: &GrownKey, part: &PolygonSet) -> Option<PolygonSet> {
+        self.parts.get(key).filter(|(p, _)| p == part).map(|(_, g)| g.clone())
+    }
+
+    fn put(&mut self, key: GrownKey, part: PolygonSet, grown: PolygonSet) {
+        let add = Self::points_of(&part, &grown);
+        if let Some((p, g)) = self.parts.remove(&key) {
+            self.points = self.points.saturating_sub(Self::points_of(&p, &g));
+        }
+        if self.points + add > GROWN_POINTS {
+            self.parts.clear();
+            self.points = 0;
+        }
+        if add <= GROWN_POINTS {
+            self.points += add;
+            self.parts.insert(key, (part, grown));
+        }
+    }
+}
+
+static GROWN: std::sync::Mutex<Option<GrownMemo>> = std::sync::Mutex::new(None);
+
+fn grown_memo<T>(f: impl FnOnce(&mut GrownMemo) -> Option<T>) -> Option<T> {
+    f(GROWN.lock().ok()?.get_or_insert_with(GrownMemo::default))
+}
+
 /// [`fill_layer`]; with `reuse`, the reliefs of pads whose surroundings are as they were in an
-/// earlier fill of this process are taken from it ([`SpokeMemo`]), and with `allowed` the
-/// allowed area is the one given when it holds one (that of an earlier fill made from the
-/// same area, copper of other nets and keep-aways, [`LayerMemo`]) and is left there when it
-/// does not; either gives the same fill.
+/// earlier fill of this process are taken from it ([`SpokeMemo`]), and with `stage` the
+/// zone's area, the allowed area and the pour before its islands are told are the ones given
+/// where it holds them (those of an earlier fill of the zone layer, each made from what this
+/// one is made from, [`LayerMemo`]) and all are left there ([`Stage`]); each gives the same
+/// fill.
 fn fill_layer_with(
     input: &LayerInput<'_>,
     reuse: bool,
-    allowed: Option<&mut Option<PolygonSet>>,
+    mut stage: Option<&mut Stage>,
 ) -> Result<PolygonSet, poly::Error> {
     let prm = &input.params;
     // Area: zone outline ∩ board area.
-    let outline: Ring = input.outline.to_vec().into();
-    let area = match input.board {
-        Some(b) => Boolean::new()
-            .subject(&outline, FillRule::NonZero)
-            .clip(b, FillRule::NonZero)
-            .op(Op::Intersection)
-            .execute()?,
-        None => poly::union_all(&outline, FillRule::NonZero)?,
+    let area = match stage.as_mut().and_then(|s| s.area.take()) {
+        Some(kept) => kept,
+        None => {
+            let outline: Ring = input.outline.to_vec().into();
+            match input.board {
+                Some(b) => Boolean::new()
+                    .subject(&outline, FillRule::NonZero)
+                    .clip(b, FillRule::NonZero)
+                    .op(Op::Intersection)
+                    .execute()?,
+                None => poly::union_all(&outline, FillRule::NonZero)?,
+            }
+        }
     };
-    if area.is_empty() {
+    let Some(abox) = area.bbox() else {
+        if let Some(s) = stage {
+            s.area = Some(area);
+        }
         return Ok(vec![]);
-    }
-    let abox = area.bbox().expect("non-empty");
+    };
 
     // Hard keep-away: other-net copper inflated by its clearance (grouped by clearance so each
     // group is offset in one pass) plus the given regions. Soft keep-away: gaps around same-net
@@ -864,12 +957,15 @@ fn fill_layer_with(
     }
     if input.net.is_some() && same.is_empty() {
         // Nothing of the net on this layer: every island would be unconnected.
+        if let Some(s) = stage {
+            s.area = Some(area);
+        }
         return Ok(vec![]);
     }
     // The allowed copper (where spokes may go) is the area less the hard keep-away.
-    let avail = match allowed {
-        Some(Some(kept)) => kept.clone(),
-        allowed => {
+    let avail = match stage.as_mut().and_then(|s| s.allowed.take()) {
+        Some(kept) => kept,
+        None => {
             let mut hard: Vec<Polygon> = input.keepaway.clone();
             // Item outlines may overlap (a teardrop over its pad): merge each group first so
             // `offset` gets canonical input; its linear "looks canonical" check cannot see
@@ -879,17 +975,44 @@ fn fill_layer_with(
                 let shapes = Boolean::new().subject(&shapes, FillRule::NonZero).op(Op::Union).execute()?;
                 hard.extend(poly::offset(&shapes, c + SAFETY, Join::Round, OBSTACLE_TOL)?);
             }
-            let avail = Boolean::new()
+            Boolean::new()
                 .subject(&area, FillRule::NonZero)
                 .clip(&hard, FillRule::NonZero)
                 .op(Op::Difference)
-                .execute()?;
-            if let Some(out) = allowed {
-                *out = Some(avail.clone());
-            }
-            avail
+                .execute()?
         }
     };
+    // The pour before its islands are told is made from the allowed area, the settings and
+    // the net's pads: an earlier one made from the same is this one.
+    let before = stage.as_mut().and_then(|s| s.before.take());
+    let before = before.filter(|(a, _)| a.as_ref().is_none_or(|a| *a == avail)).map(|(_, whole)| whole);
+    let mut fill = match before {
+        Some(whole) => whole,
+        None => pour(input, reuse, &avail, soft_groups, &thermal)?,
+    };
+    if let Some(s) = stage {
+        s.area = Some(area);
+        s.allowed = Some(avail);
+        s.whole = Some(fill.clone());
+    }
+    // Unconnected islands go (netless zones keep everything).
+    if input.net.is_some() {
+        fill.retain(|poly| same.iter().any(|it| poly::intersects(poly, &it.shape)));
+    }
+    Ok(fill)
+}
+
+/// The pour of [`fill_layer_with`] before its islands are told: the allowed area less the
+/// gaps round the net's pads (`soft_groups`, by distance), opened to the least width, with
+/// the spokes of the pads in `thermal`.
+fn pour(
+    input: &LayerInput<'_>,
+    reuse: bool,
+    avail: &PolygonSet,
+    soft_groups: BTreeMap<i64, Vec<Polygon>>,
+    thermal: &[(&CopperItem, Relief)],
+) -> Result<PolygonSet, poly::Error> {
+    let prm = &input.params;
     let mut soft: Vec<Polygon> = Vec::new();
     for (d, shapes) in soft_groups {
         let shapes = Boolean::new().subject(&shapes, FillRule::NonZero).op(Op::Union).execute()?;
@@ -900,7 +1023,7 @@ fn fill_layer_with(
     let mut fill = if soft.is_empty() {
         avail.clone()
     } else {
-        Boolean::new().subject(&avail, FillRule::NonZero).clip(&soft, FillRule::NonZero).op(Op::Difference).execute()?
+        Boolean::new().subject(avail, FillRule::NonZero).clip(&soft, FillRule::NonZero).op(Op::Difference).execute()?
     };
     // Minimum width: morphological opening. Both offsets approximate arcs inward, so the result
     // stays inside the fill up to vertex rounding (< 2 nm), which SAFETY covers.
@@ -924,7 +1047,7 @@ fn fill_layer_with(
                 .op(Op::Intersection)
                 .execute()
         };
-        let (local_avail, local_fill) = (clip(&avail)?, clip(&fill)?);
+        let (local_avail, local_fill) = (clip(avail)?, clip(&fill)?);
         let (avail_index, fill_index) =
             (RTree::new(local_avail.iter().map(Polygon::bbox)), RTree::new(local_fill.iter().map(Polygon::bbox)));
         // A pad's relief depends on the pad, on the allowed area and the pour where its
@@ -1003,10 +1126,6 @@ fn fill_layer_with(
     }
     if !kept.is_empty() {
         fill = Boolean::new().subject(&fill, FillRule::NonZero).subject(&kept, FillRule::NonZero).execute()?;
-    }
-    // Unconnected islands go (netless zones keep everything).
-    if input.net.is_some() {
-        fill.retain(|poly| same.iter().any(|it| poly::intersects(poly, &it.shape)));
     }
     Ok(fill)
 }
@@ -1111,6 +1230,9 @@ pub fn clear_fill_cache() {
         *m = None;
     }
     if let Ok(mut m) = LAYERS.lock() {
+        *m = None;
+    }
+    if let Ok(mut m) = GROWN.lock() {
         *m = None;
     }
     super::thermal::clear_joint_cache();
@@ -1288,7 +1410,27 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
                         }
                         let g = match grown.entry((k, c, sel)) {
                             Entry::Occupied(e) => e.into_mut(),
-                            Entry::Vacant(e) => e.insert(poly::offset(&part, c, Join::Round, OBSTACLE_TOL)?),
+                            Entry::Vacant(e) => {
+                                // As it was grown for an earlier fill of a board, where the
+                                // part is as it was then.
+                                let key = || ((f.zone, f.layer.clone()), c, e.key().2.clone());
+                                let kept =
+                                    if reuse == Reuse::None { None } else { grown_memo(|m| m.get(&key(), &part)) };
+                                let made = match kept {
+                                    Some(g) => g,
+                                    None => {
+                                        let g = poly::offset(&part, c, Join::Round, OBSTACLE_TOL)?;
+                                        if reuse != Reuse::None {
+                                            grown_memo(|m| {
+                                                m.put(key(), part, g.clone());
+                                                Some(())
+                                            });
+                                        }
+                                        g
+                                    }
+                                };
+                                e.insert(made)
+                            }
                         };
                         keepaway.extend(g.iter().cloned());
                     }
@@ -1333,10 +1475,11 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
                     return fill_layer_with(&input, false, None);
                 }
                 // The whole zone layer, when everything it is made from is as it was; else its
-                // allowed area, when what that is made from is.
+                // area, its allowed area and its pour before the islands are told, each when
+                // what that is made from is.
                 let slot = (z.id, layer.to_string());
                 let key = LayerKey::of(&input);
-                let mut allowed: Option<PolygonSet> = None;
+                let mut stage = Stage::default();
                 if let Some(found) = layer_memo(|m| {
                     let kept = m.slots.get(&slot)?;
                     if kept.key == key
@@ -1344,28 +1487,38 @@ fn fill_with(p: &Project, base: &[CopperItem], npth: &[DrillHole], item_c: &[Nm]
                     {
                         return Some(fill.clone());
                     }
-                    if kept.key.same_allowed(&key) {
-                        allowed = Some(kept.avail.clone());
+                    if kept.key.outline == key.outline && kept.key.board == key.board {
+                        stage.area = Some(kept.area.clone());
+                    }
+                    if let Some((avail, whole)) = &kept.made {
+                        let same = kept.key.same_allowed(&key);
+                        if kept.key.same_pour(&key) {
+                            stage.before = Some(((!same).then(|| avail.clone()), whole.clone()));
+                        }
+                        if same {
+                            stage.allowed = Some(avail.clone());
+                        }
                     }
                     None
                 }) {
                     return Ok(found);
                 }
-                // An early return of `fill_layer_with` (no area, nothing of the net) leaves no
-                // allowed area: nothing is kept then.
-                let made = fill_layer_with(&input, true, Some(&mut allowed))?;
-                if let Some(avail) = allowed {
+                let made = fill_layer_with(&input, true, Some(&mut stage))?;
+                if let Some(area) = stage.area {
+                    // A fill with no area or nothing of its net to join is empty and has no
+                    // allowed area: it is kept as the fill of what it was made from.
+                    let parts = stage.allowed.zip(stage.whole);
                     // A board looked at once leaves its allowed areas and not its fills.
                     let fill = (reuse == Reuse::Keep).then(|| made.clone());
                     layer_memo(|m| {
                         if fill.is_none()
                             && let Some(kept) = m.slots.get(&slot)
                             && kept.fill.is_some()
-                            && kept.key.same_allowed(&key)
+                            && (parts.is_none() || kept.key.same_allowed(&key))
                         {
                             return Some(());
                         }
-                        m.put(&slot, LayerSlot { key, fill, avail });
+                        m.put(&slot, LayerSlot { key, fill, area, made: parts });
                         Some(())
                     });
                 }

@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,28 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *Built in guide and not released* (D139; guide's pull request 85, on 0.0.42, which this crate stays at). Two
+  things, each measured behind this adapter. *The nets round a pad shut in* (`pcb::shut`): a pad that the routes cut
+  off its fill and that the stubs have no way for among the routes as they are has the nets with copper within
+  1.2 mm of it taken out, one and then two together, the stub laid and those nets routed again round it, by a search
+  that moves nothing or a chain of settling, kept only if every net is whole again and the cells tell no pad of any
+  pour cut off for it. It joins 17 of 30 nets with such a pad on tinytapeout-demo, and a run in which it joins every
+  one ends with nothing open; the board's count of open connections over sixteen orders at 60 s is 0.0.42's all the
+  same (24 for 30 in four sets side by side, 13 for 12 in the two at the lower load), this adapter's second run, on
+  the filled board, joining after the first what the step joins in it. *The stairs laid straight*
+  (`RouteOptions::straighten`): what pulls a run tight takes the two tracks, one along an axis and one at 45°, for a
+  stretch only if they are shorter, and a stair is as long to the nanometre, so guide has 1.9 to 2.6 times the
+  jogs and stair steps of this router on the nets both complete; with the option cleanup lays the way that is as
+  long with fewer tracks too, where nothing of another net is between, and glasgow-revC3 has 6962 tracks for 7449
+  against this router's 6314 on those nets (tinytapeout-demo 6569 for 7457 against 7258), with the track, the vias
+  and the track outside the pads it had. Asked for in every run it loses corne-cherry a connection in one order of
+  four (the run that moves every route for a pad cut off its fill ends with 2 open from the straightened routes
+  where it closes it from 0.0.42's), and one run of 41 at budgets of nodes left with a connection open more than
+  its report: a stair laid straight came to a pad along a diagonal that ends where a track's round end just
+  touches the pad, the piece inside the pad went as copper on copper, and `neck_at_pads`, which `router::route`
+  applies after this adapter's report, laid the end 10 µm narrower and 5 µm short of the pad. What it would take
+  here: `straighten` in the last run alone, as `shorten`, and the tracks narrowed before the checks and the report.
+  Neither is a gain that the 72 cells have, and the round's rule was a release only for one: not released.
 - *guide 0.0.42* (D138). One change to guide and one to this adapter. In guide, the round that joins what the routes
   cut off the fills to them again, once routing is over, was begun only with time left and ended at the deadline
   between two of its searches or in one: a run whose passes had all of its time returned such pads cut off and

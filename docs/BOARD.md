@@ -192,6 +192,19 @@ area and makes the pour, the opening and the spokes again. Emptied when it holds
 compares the two on every corpus board in eight states, holds for it as it did for the reliefs. This is what
 `zone.relieve` runs on (below): its fills differ from one another in a few pads' settings and a few tracks.
 
+**Stages of a zone layer kept (D139).** Beside the allowed area, a slot keeps the zone's area on the board (the
+outline within the board area, reused where both are as they were) and the pour before its islands are told
+(reused where the area, the settings and the net's pads are the same and the allowed area is equal, known so or
+compared by value: a change of the net's own tracks and vias, or of other nets' copper that leaves the allowed
+area as it was). A zone layer with no area or nothing of its net, whose fill is empty, is kept too. And the
+parts of fills grown as keep-aways for the later zones of their layer are kept from one fill of a board to the
+next (`zones::GrownMemo`, by zone, layer, distance and the rings kept, reused where the part is equal; four
+million points). Each reuse is keyed by all that the step it leaves out is made from, so the fills are the same
+to the vertex: the fills of a guide-routed run are 13 to 58 % cheaper by board (cynthion 19.3 s for 16.9 s on one
+thread, corne-cherry 2.9 s for 1.2 s), every one of 9918 zone-layer fills of the eleven boards with zones compared byte by byte.
+What is left is polyclip's offset with round joins (the opening to the least width and the keep-aways), ten
+times a boolean by vertex.
+
 ## Thermal relief (D109, `src/board/thermal.rs`)
 
 A pad soldered by hand, by wave or in an oven that sits solidly in a large copper area cannot be heated

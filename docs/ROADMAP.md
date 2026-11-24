@@ -419,6 +419,21 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D138 (D139, the same direction, not met): guide stays 0.0.42. `board::zones` keeps the stages of a zone
+      layer's fill from one fill to the next (the zone's area on the board, the pour before its islands are told,
+      the empty fills, the parts grown as keep-aways): the fills of a run are 13 to 58 % cheaper by board and the
+      same to the vertex over 9918 zone-layer fills; what is left is polyclip's offset with round joins. Built in
+      guide and not released (its pull request 85): the nets round a pad that the routes shut in laid another way
+      for its stub, which joins 17 of 30 nets with such a pad and leaves tinytapeout-demo's count over sixteen orders
+      where it was (24 for 30 in four sets, 13 for 12 in the two at the lower load); and the steps of stairs laid
+      straight, a tenth of the tracks of the nets both routers complete, which loses corne-cherry a connection in
+      one order of four and left one run of 41 with a connection open more than its report said (this adapter
+      narrows its tracks at the pads after its report). Beside the native router 35 cells better, 29 equal, none
+      overlapping and 8 worse of 72 with this and with master's build in the same minutes, for 34, 31, none and 7:
+      tinytapeout-demo's vias worse for equal by the runs. Open: tinytapeout-demo's pads that the routes
+      shut in; what each of the two would take (a way for the pad where the second run has none either;
+      `straighten` in the last run alone and the tracks narrowed before the report); the track of the two glasgows
+      and tinytapeout-demo's vias on the nets both complete; corne-cherry's time; polyclip's offset.
       Since D137 (D138, the same direction, not met): guide 0.0.42. The round that joins what the routes cut off the
       fills to them again is made also when the deadline is past, where a run whose passes had all of its time
       returned such pads cut off and counted joined; and the step for the spokes keeps the nets that guide found no
