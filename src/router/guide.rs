@@ -1489,6 +1489,18 @@ fn stub_pieces(
 /// before it routes anything.
 const MOVE_MIN: Duration = Duration::from_secs(3);
 
+/// How many times what the first run needed after it, the verification and the refill, a
+/// run that moves routes ends sooner than the runs that do not. Such a run ends later after
+/// its deadline than the first did, and its board takes longer to verify; the time kept
+/// for the steps after the runs ([`AFTER_SHARE`], the fills, the report) is what they take
+/// if the run ends on its deadline and verifies as the first did. glasgow-revC3, whose run
+/// that moves routes is ended by its deadline in every order: back 58.0 to 58.2 s into the
+/// minute and verified 0.7 s later, for the first run's 0.4 s, which left the step for the
+/// tracks between pads that a pour joins, begun only with the time of two fills and three
+/// counts, about a second, and it was not made in three orders of four: 127 to 145 mm of
+/// track between pads that stayed, 60 to 68 mm of it on the board that left (D134).
+const MOVE_AFTER: f64 = 2.5;
+
 /// By pad and layer (designator, number, layer), where the pad is, its net, the necks of copper
 /// that reach it (as many as there can be for a pad in no pour) and whether it is short of its
 /// spokes (D116).
@@ -1617,6 +1629,16 @@ fn spoke_step(after: Duration, fill: Duration, count: Duration) -> Duration {
 /// verify, and 3.5 s before a run of ten nets had its first search, with 2 s to its deadline).
 fn least_run(moves: bool, after: Duration) -> Duration {
     (if moves { MOVE_MIN } else { SECOND_MIN }).max(after * 2)
+}
+
+/// The deadline of a run after the first, of the runs' own `second`. Less twice what the
+/// last run that was stopped needed to end after its deadline (`over`): a run that has the
+/// routes back has more to end with (glasgow-revC3: 0.6 s after the first run's deadline,
+/// 1.1 s after the third's). And a run that moves routes ends [`MOVE_AFTER`] times what the
+/// first run needed after it (`after`) sooner still.
+fn run_until(second: Instant, over: Duration, moves: bool, after: Duration) -> Instant {
+    let less = over * 2 + if moves { after.mul_f64(MOVE_AFTER) } else { Duration::ZERO };
+    second.checked_sub(less).unwrap_or(second)
 }
 
 /// The share of the whole budget that a fill may take for the later runs' deadline to leave the
@@ -2742,10 +2764,7 @@ pub(crate) fn route(
             gopts.seed = Some(opts.seed.wrapping_add((round - POUR_ROUNDS) as u64 * AGAIN_SEED));
         }
         let least = least_run(moves, after);
-        // Less twice what the last run that was stopped needed to end after its deadline: a
-        // run that has the routes back has more to end with (glasgow-revC3: 0.6 s after the
-        // first run's deadline, 1.1 s after the third's).
-        let until = second.map(|d| d.checked_sub(over.get() * 2).unwrap_or(d));
+        let until = second.map(|d| run_until(d, over.get(), moves, after));
         if stopped == Some(Stopped::WorkBudget) || until.is_some_and(|d| Instant::now() + least >= d) {
             break;
         }
@@ -4663,6 +4682,17 @@ mod tests {
 
     /// The step for the spokes has its time kept by what it asks for before it begins, and
     /// no run is begun on a board with less time than making it ready takes (D124).
+    #[test]
+    fn a_run_that_moves_routes_ends_sooner_than_one_that_does_not() {
+        let (ms, d) = (Duration::from_millis, Instant::now() + Duration::from_secs(60));
+        // Twice what the last run that was stopped took to end after its deadline.
+        assert_eq!(run_until(d, ms(100), false, ms(400)), d - ms(200));
+        assert_eq!(run_until(d, Duration::ZERO, false, ms(400)), d);
+        // And, for a run that moves routes, what the first run needed after it, 2.5 times.
+        assert_eq!(run_until(d, ms(100), true, ms(400)), d - ms(1200));
+        assert_eq!(run_until(d, Duration::ZERO, true, ms(400)), d - ms(1000));
+    }
+
     #[test]
     fn the_spoke_step_s_time_and_the_least_of_a_run() {
         let (after, fill, count) =

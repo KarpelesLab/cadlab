@@ -419,6 +419,21 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D133 (D134, the same direction, not met): guide 0.0.38, in which a negotiation that ended with
+      one point shared is not begun again on other grids (nrfmicro's slowest order 15 s for 21 s, the board
+      as it was in the two orders of eight that had such tries), and in the adapter a run that moves routes
+      ended sooner, for the step that takes out the tracks between pads that a pour joins to have its time
+      (glasgow-revC3: skipped in two or three orders of four, now in none). Measured and dropped: the native
+      router's rounds on two layers (corne-cherry 477 vias and 8140 mm for 439 to 453 and 7470 mm, with the
+      teardrops as fills alone 491 and 8196 mm; nrfmicro a connection open in two orders of four), a pass for
+      the long ways round on glasgow-revD1 (46 to 169 mm in a second that its first run does not have), the
+      stage's pass for fewer vias repeated (1.3 % of tinytapeout-demo's vias for 4 to 7 s). Beside the native
+      router 35 cells better, 29 equal, 1 overlapping and 7 worse of 72, for 36, 27, none and 9: nrfmicro's
+      time equal for worse; tinytapeout-demo's vias equal for worse at the rule's edge, with either release;
+      corne-cherry's connections open overlapping for better, a run's variance with either release. Open:
+      corne-cherry's time (its rounds, 18 to 24 s for the native router's 10), glasgow-revD1's track and vias
+      (the price of the connections its rip-up makes), glasgow-revC3's and tinytapeout-demo's track outside
+      the pads.
       Since D132 (D133, the same direction, not met): the report made of the board that leaves, with guide
       0.0.37. The tracks were ended inside their pads after the report, and a track that was the only copper
       between its pad and something else of its net went: lumenpnp-mobo's two pads apart, one of

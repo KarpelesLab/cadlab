@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,28 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.38* (D134). In guide, a negotiation for every net that ended with one point still shared is not
+  begun again on finer grids and in other orders (D121's nine tries): one point is one wire, which the passes
+  lay again, and on nrfmicro the tries after it took 7 to 8 s of the two slowest orders of eight and left the
+  board as it is without them; its slowest order of four ends in 15 s for 21 s, and its time beside this
+  router is equal for worse. In the adapter, a run that moves routes ends 2.5 times what the first run needed
+  after it sooner (`run_until`, `MOVE_AFTER`): glasgow-revC3's is ended by its deadline in every order and came
+  back with a second left, too little for the step that takes out the tracks between pads that a pour joins,
+  which was skipped in two or three orders of four, 53 to 60 mm of its track outside the pads; it is now made
+  in every order. Measured and not adopted (D134 has each): this router's rounds in guide on two layers, which
+  lose on corne-cherry with its teardrops as copper of their nets (477 vias, 8140 mm and 3 open at 150 million
+  nodes for 439 to 453 vias and 7470 mm with guide's own) and as fills alone (491, 8196 mm and 2), and on
+  nrfmicro, where they end with 50 points shared; a pass in guide's cleanup for the nets that go the long way
+  round, where there is no time to route every net again, which takes out 46 to 169 mm of glasgow-revD1's
+  10 600 in a second and, in the time that the board's first run has for cleanup, under a second, less than
+  the searches it displaces; and the stage's pass for fewer vias repeated to its end, 1.3 % of tinytapeout-demo's vias for 4 to
+  7 s. What the track of glasgow-revD1 is paid for: with less of its first run for rip-up and more for cleanup
+  it has 3 and 25 connections open more in two orders for 138 and 1040 mm less; and the track outside the pads is copper, not the measure, this router
+  having two to three times as much of its track inside the pads of its nets. Beside this router in the same
+  minutes, of 72 cells 35 are better, 29 equal, 1 overlaps and 7 are worse, for 36, 27, none and 9:
+  nrfmicro's time equal for worse; tinytapeout-demo's vias equal for worse at +2 %, as 0.0.37 has them in the
+  same minutes; corne-cherry's connections open overlapping for better, its default order being 1, 4 or 5 open
+  from run to run with either release.
 - *guide 0.0.37* (D133). The report is of the board that leaves: the tracks are ended inside the pads of their
   net before it is made, not after, the board is filled once more, and a net with more open on it for that has
   its tracks back as they were. A track is cut or taken out there only if whatever of its net touches it,
