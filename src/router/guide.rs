@@ -109,7 +109,8 @@ fn rounds_for(copper_layers: usize) -> pcb::Rounds {
 
 /// The share of the time budget guide's first run may take: the rest is for the verification,
 /// the refill, a second run on the routed board and the report. guide itself ends its routing
-/// at 0.92 of what it is given, with no zones to join, and cleans up in the rest. Measured
+/// at 0.92 of what it is given after the native router's rounds and at three quarters after
+/// its own (guide 0.0.41, D137), with no zones to join, and cleans up in the rest. Measured
 /// with guide 0.0.8 (D97) on the twelve corpus boards at 60 s, connections open summed over
 /// three orders of the nets: 917 with 0.45 and 783 with 0.7, and in a run of the release's
 /// source before it, 863 with 0.45, 786 with 0.6, 781 with 0.7 and 821 with 0.8. Until

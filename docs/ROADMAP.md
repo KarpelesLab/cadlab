@@ -419,6 +419,18 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D136 (D137, the same direction, not met): guide 0.0.41. A run that cleanup pulls tight goes no nearer a
+      pad across the gap of its spoke, and after guide's own rounds cleanup has a quarter of a deadline's time for a
+      twelfth: glasgow-revD1 at 60 s has 10, 12, 14 and 10 pads short of two spokes for 8, 23, 23 and 22, 2 % fewer
+      vias and 10, 17, 8 and 13 connections open for 12, 17, 4 and 12 with 0.0.40 in the same minutes; every run at a
+      budget of nodes has the connections open that it had. Measured and not changed: glasgow-revD1's track on the
+      nets both complete (+8 % at 60 s, +5 % at 240 s, spread over the nets), tinytapeout-demo's vias (the nets that
+      go under a bundle and back; 259 to 303 vias by the run), corne-cherry's time (its run for shorter ways is
+      5.7 s for a thousandth of its track, and its default order's first run ends at its deadline all the same).
+      Beside the native router 33 cells better, 30 equal, one overlapping and 8 worse of 72, for 36, 28, none and 8.
+      Open: the track of the two glasgows and tinytapeout-demo's vias on the nets both complete; tinytapeout-demo's
+      first run ended by its deadline before its fills are joined again (one run in sixteen with 3 open);
+      corne-cherry's time; the step for the spokes on glasgow-revD1, kept in none of 20 runs; the fills.
       Since D135 (D136, the same direction, not met): guide 0.0.40, speed with no result changed, on the threads. A
       net's search for a route with fewer vias is made ahead of its turn on the other threads, in a copy of the
       board, and stands if no net before it ended with other copper, as 92 to 97 in a hundred do not; the nets of a
