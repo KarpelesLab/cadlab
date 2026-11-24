@@ -419,6 +419,18 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D135 (D136, the same direction, not met): guide 0.0.40, speed with no result changed, on the threads. A
+      net's search for a route with fewer vias is made ahead of its turn on the other threads, in a copy of the
+      board, and stands if no net before it ended with other copper, as 92 to 97 in a hundred do not; the nets of a
+      round are begun the longest first. The same routes and nodes on one thread and on three with an hour for a
+      budget, each of 43 runs at budgets of nodes as 0.0.39 has it, and at 60 s the same board 1 to 4 s sooner where
+      a run ends on its own; tinytapeout-demo out of its budget in one order of sixteen for six. Measured and nothing
+      gained: the search of guide's passes (four changes to a node of it, no time), the fills (each of another board;
+      the pours over the whole board made again with any track), this adapter between the runs (its fills). Beside
+      the native router 36 cells better, 28 equal, none overlapping and 8 worse of 72, for 34, 28, 1 and 9 (the same
+      with 0.0.39 in the same minutes). Open: corne-cherry's time (28 to 54 s for 21 to 32 s; 1, 0, 4 and 1 open at
+      a budget of 40 s), whose settling and cleanup are one thread; the track in the open of the two glasgows and
+      tinytapeout-demo; the passes and the native router's rounds in guide on one thread; the fills.
       Since D134 (D135, the same direction, not met): guide 0.0.39, speed with no result changed. A profile of the
       minute put 31 % of glasgow-revD1's processor time in the question whether an end of a connection is walled in,
       asked of 20 000 nodes in a wandering order, and a quarter of a search of guide's own rounds in its heap; the

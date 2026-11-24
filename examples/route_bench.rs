@@ -46,7 +46,10 @@
 //! keeps the DSN, the session, freerouting's log and its result manifest per board
 //! (`CADLAB_BENCH_FR_REUSE=1` then counts the kept sessions again without running it). The run fails
 //! when a board has no result (docs/ROUTER.md, "freerouting on the corpus"; D102).
-//! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations;
+//! `CADLAB_BENCH_TRACE=1` prints a timeline of the router's phases and negotiation iterations
+//! (`CADLAB_BENCH_TRACE=cpu` with the processor time of the whole process so far at each line, on
+//! Linux, D136: a stage that takes more of the clock than of the processor waits, and one that
+//! takes more of the processor has more than one thread at work);
 //! `CADLAB_BENCH_THERMALS=1` adds, on stderr, the pads in pours of each board as it stands
 //! (`board::thermal`: by the necks that reach them, solid pads by kind, the thermal relief
 //! findings by code, and the pads that copper which is no pour makes solid or meets wider than
@@ -203,6 +206,18 @@ fn thermals(name: &str, what: &str, p: &Project) {
     }
 }
 
+/// The processor time of the whole process so far, user and system, in seconds: on Linux, from
+/// `/proc/self/stat` at its usual 100 ticks a second, and nowhere else.
+fn cpu_seconds() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // After the command's name, which may hold spaces: the fields from the state on.
+    let rest = stat.rsplit(')').next()?;
+    let mut fields = rest.split_whitespace().skip(11);
+    let user: f64 = fields.next()?.parse().ok()?;
+    let system: f64 = fields.next()?.parse().ok()?;
+    Some((user + system) / 100.0)
+}
+
 /// Re-routes the corpus boards (see the module docs).
 fn corpus(filters: &[String]) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -299,9 +314,12 @@ fn corpus(filters: &[String]) {
         let meter = ropts.work.clone();
         // `CADLAB_BENCH_TRACE=1`: a timeline of the router's phases and iteration summaries.
         let trace = std::env::var_os("CADLAB_BENCH_TRACE").is_some();
+        let trace_cpu = std::env::var("CADLAB_BENCH_TRACE").is_ok_and(|v| v == "cpu");
         let progress = |_: u64, _: Option<u64>, msg: &str| {
             if trace && !msg.contains(": routing ") && !msg.starts_with("gridless: ") {
-                eprintln!("  [{:7.2} s {:7.1} M] {msg}", t.elapsed().as_secs_f64(), meter.used() as f64 / 1e6);
+                let cpu =
+                    trace_cpu.then(cpu_seconds).flatten().map_or_else(String::new, |c| format!(" <cpu {c:.2} s>"));
+                eprintln!("  [{:7.2} s {:7.1} M] {msg}{cpu}", t.elapsed().as_secs_f64(), meter.used() as f64 / 1e6);
             }
         };
         let hooks = Hooks { progress: &progress, cancelled: &|| false };

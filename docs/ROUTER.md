@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,30 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.40* (D136). Speed with no result changed again, on the threads. guide's cleanup routes each net with
+  vias again, with vias ten times as dear, and keeps the route if it has fewer; 3 to 8 nets in a hundred end with
+  another route. In a run with no budget of nodes the world is copied as it is, each thread makes a world of its own
+  of the copy and takes the nets to come in their order, the net's copper out, the search, the copper back; a net's
+  turn has the search that was made for it, and what was made ahead is left when a net ends with other copper. And
+  the eight nets that guide's own rounds route at once are begun the longest first. With an hour for a budget eight
+  boards have on three threads the connections open, the vias, the track and the count of nodes that they have on
+  one; at budgets of nodes each of 43 runs is 0.0.39's. At 60 s a run that ends on its own returns the board it
+  returned 1 to 4 s sooner (buspirate5-rev10 14.7 to 16.5 s for 16.0 to 17.9 s, cynthion 35 to 40 s for 36 to 42 s,
+  corne-cherry 28, 45 and 43 s for 30, 46.5 and 44 s in the three orders that end on their own), and
+  tinytapeout-demo is out of its budget in one order of sixteen over two sets for six. Measured and nothing gained or
+  changed (D136 has each): the search of guide's passes, a node of which is twelve numbers of nodes, four pads looked
+  at and half a question to the index of shapes, with four changes to it that leave every run the same to the node
+  and gain no time; the fills, 14 in a run of cynthion and each of another board, three quarters of their zone layers
+  made again for being pours over the whole board, the opening and the allowed area four fifths of a zone layer;
+  this adapter's steps between the runs, which are those fills and 1 % of a run beside them. The minute by stage,
+  on the clock and on the processor (`CADLAB_BENCH_TRACE=cpu`): guide's own rounds have 1.3 to 1.5 threads' worth of
+  three, this router's rounds in guide one (tinytapeout-demo: 33 s of its minute), what settles the open connections
+  and cleanup one, this adapter's steps two. corne-cherry's time is still outside this router's, 28 to 54 s against
+  21 to 32 s, with its board better on every other measure, and the board it has at a budget of 40 s has 1, 0, 4 and
+  1 connections open for 1, 0, 1 and 1 at 60 s, so no end is made sooner. Beside this router in the same minutes, of
+  72 cells 36 are better, 28 equal, none overlaps and 8 are worse, for 34, 28, 1 and 9, and the same 36, 28, none
+  and 8 with 0.0.39's runs of those minutes: tinytapeout-demo's connections open by a run that either release has,
+  and lumenpnp-mobo's track and track outside the pads by this router's own runs.
 - *guide 0.0.39* (D135). Speed with no result changed, by a profile of where the minute goes (the process's own
   samples, `perf` not being on the machine; `callgrind` for the lines of one function). In guide's own rounds, whether
   an end of a connection is walled in by the board's own copper was asked of 20 000 nodes in the order of a stack,
@@ -1415,7 +1439,8 @@ limit ("freerouting on the corpus", at the end of this file).
 `CADLAB_BENCH_ROUTER=guide` the guide backend (here and in the corpus mode, under the same budgets; without
 `CADLAB_BENCH_SEED` it gets no seed, its own default), and `CADLAB_BENCH_SEED=<n>` the seed.
 `route_bench --corpus [names...]` re-routes the open-source corpus instead (below); there `CADLAB_BENCH_TRACE=1`
-prints a timeline of the router's phases and negotiation iterations (time and work), `CADLAB_BENCH_NETS=a,b` routes only
+prints a timeline of the router's phases and negotiation iterations (time and work; `CADLAB_BENCH_TRACE=cpu` with the
+processor time of the whole process at each line, on Linux, D136), `CADLAB_BENCH_NETS=a,b` routes only
 those nets, `CADLAB_BENCH_ORIGINAL=1` lists the connections each project's own routing leaves open instead of
 routing (the reference for residuals), `CADLAB_BENCH_WORK=<units>` uses a work budget (repeatable: compare builds this way, not on time; the job
 `corpus-route` of CI does it for three seeds) and `CADLAB_BENCH_SEED=<n>` sets the seed. For one place on a board,
