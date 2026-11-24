@@ -1558,6 +1558,36 @@ const KEPT_SPOKES: u8 = 1;
 /// that was kept leaves it, for as long as that has rooms.
 const SPOKE_AGAIN: usize = 6;
 
+/// How far apart, copper from copper, a track or via laid anew in that run and one of a net
+/// that has its old routes back are for the two to be taken as clear of each other: no
+/// clearance of a board's rules is more.
+const SPOKE_CLASH: i64 = 300_000;
+
+/// A track as its centre line with half its width and its layer, a via as a point on every
+/// layer with half its diameter ([`clash`]).
+type CopperRun<'a> = (Option<&'a str>, super::geo::P, super::geo::P, f64);
+
+/// The tracks and vias as [`CopperRun`]s.
+fn runs_of<'a>(tracks: impl Iterator<Item = &'a Track>, vias: impl Iterator<Item = &'a Via>) -> Vec<CopperRun<'a>> {
+    let at = |q: Point| super::geo::P::new(q.x.0 as f64, q.y.0 as f64);
+    tracks
+        .map(|t| (Some(t.layer.as_str()), at(t.start), at(t.end), t.width.0 as f64 / 2.0))
+        .chain(vias.map(|v| (None, at(v.at), at(v.at), v.diameter.0 as f64 / 2.0)))
+        .collect()
+}
+
+/// Whether any copper of `laid` is nearer copper of `old` on its layer than [`SPOKE_CLASH`]:
+/// the routes that the step for the spokes laid anew, against the old routes of the nets
+/// that it found no way for round their rooms, which go back where they were.
+fn clash(old: &[CopperRun<'_>], laid: &[CopperRun<'_>]) -> bool {
+    laid.iter().any(|n| {
+        old.iter().any(|o| {
+            (o.0.is_none() || n.0.is_none() || o.0 == n.0)
+                && super::geo::seg_seg_dist(o.1, o.2, n.1, n.2) < o.3 + n.3 + SPOKE_CLASH as f64
+        })
+    })
+}
+
 /// What the pads in pours of their nets that thermal reliefs join have of their relief, by
 /// pad and layer: the necks that its copper is worth (`Joint::worth`), and how many more it
 /// is to have by the rules' `min_thermal_spokes` and what its footprint leaves room for
@@ -3530,11 +3560,54 @@ pub(crate) fn route(
                 let moved: BTreeSet<&str> =
                     more.taken_back.iter().filter_map(|n| ad.nets.get(n.index())).map(String::as_str).collect();
                 let new = |net: &Option<String>| net.as_deref().is_some_and(|n| moved.contains(n));
+                // The nets that guide says it found no way for round their rooms stay as they
+                // were, with what stood in the rooms: the try is of the others' rooms, in the
+                // one check it has the time for on a board that takes long to make ready for a
+                // run (glasgow-revD1: a try in 5 s, a net or two of eight to eleven with no way
+                // round its room, and no try kept in 20 runs, D137; 6 of 16 kept so, D138).
+                let mut lost: BTreeSet<String> = more
+                    .failed
+                    .iter()
+                    .filter_map(|n| ad.nets.get(n.index()))
+                    .filter(|n| moving.contains(*n))
+                    .cloned()
+                    .collect();
+                // Not where a route laid anew stands where theirs stood, or nearer than any
+                // clearance ([`clash`]): the check then takes the new route out, the nets it
+                // joined with it, and twice as long (glasgow-revD1, one order of four: 307
+                // tracks and vias out, 73 connections open for 17, and no time left for the
+                // step for the tracks between pads, 190 mm of the board's track).
+                {
+                    let of_lost = |net: &Option<String>| net.as_deref().is_some_and(|n| lost.contains(n));
+                    let back_again = |id: &ObjectId, net: &Option<String>, gone: bool| {
+                        of_lost(net) && (gone || (handed.contains(id) && new(net)))
+                    };
+                    let old = runs_of(
+                        tracks.iter().filter(|t| back_again(&t.id, &t.net, gone_t.contains(&t.id.0))),
+                        vias.iter().filter(|v| back_again(&v.id, &v.net, gone_v.contains(&v.id.0))),
+                    );
+                    let laid = runs_of(t.iter().filter(|t| !of_lost(&t.net)), v.iter().filter(|v| !of_lost(&v.net)));
+                    if clash(&old, &laid) {
+                        lost.clear();
+                    }
+                }
+                let as_was = |net: &Option<String>| net.as_deref().is_some_and(|n| lost.contains(n));
                 let (mut tracks2, mut vias2) = (tracks.clone(), vias.clone());
-                tracks2.retain(|t| !(gone_t.contains(&t.id.0) || (handed.contains(&t.id) && new(&t.net))));
-                vias2.retain(|v| !(gone_v.contains(&v.id.0) || (handed.contains(&v.id) && new(&v.net))));
-                tracks2
-                    .extend(less.board().tracks.iter().filter(|t| piece_ids.contains(&t.id) && !new(&t.net)).cloned());
+                tracks2.retain(|t| {
+                    as_was(&t.net) || !(gone_t.contains(&t.id.0) || (handed.contains(&t.id) && new(&t.net)))
+                });
+                vias2.retain(|v| {
+                    as_was(&v.net) || !(gone_v.contains(&v.id.0) || (handed.contains(&v.id) && new(&v.net)))
+                });
+                tracks2.extend(
+                    less.board()
+                        .tracks
+                        .iter()
+                        .filter(|t| piece_ids.contains(&t.id) && !new(&t.net) && !as_was(&t.net))
+                        .cloned(),
+                );
+                t.retain(|t| !as_was(&t.net));
+                v.retain(|v| !as_was(&v.net));
                 tracks2.extend(t);
                 vias2.extend(v);
                 let (mut reasons, mut removed) = (drc_reason.clone(), stats.drc_removed);
@@ -3562,12 +3635,14 @@ pub(crate) fn route(
                     0,
                     None,
                     &format!(
-                        "guide: {} track(s) and {} via(s) of {} net(s) out of {} room(s) of spokes, {} pad(s) short for {}, \
+                        "guide: {} track(s) and {} via(s) of {} net(s) out of {} room(s) of spokes, {} net(s) with no \
+                         way round as they were, {} pad(s) short for {}, \
                          {} with no spoke for {}, {} connection(s) open for {}, {} item(s) taken out by the check: {}",
                         gone_t.len(),
                         gone_v.len(),
                         moving.len(),
                         rooms.len(),
+                        lost.len(),
                         score2.1,
                         score.1,
                         score2.0,
@@ -3582,6 +3657,7 @@ pub(crate) fn route(
                     (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
                     relief = relief2;
                     rooms = rooms_of(&proj, &fitems, &tracks, &vias, &relief);
+                    rooms.retain(|r| r.nets.iter().all(|n| !lost.contains(n)));
                     continue;
                 }
                 let before = rooms.len();
@@ -4704,6 +4780,50 @@ mod tests {
         assert_eq!(least_run(true, Duration::from_millis(300)), MOVE_MIN);
         assert_eq!(least_run(false, Duration::from_secs(2)), Duration::from_secs(4));
         assert_eq!(least_run(true, Duration::from_secs(2)), Duration::from_secs(4));
+    }
+
+    /// What the step for the spokes laid anew is told from the old routes of a net that goes
+    /// back where it was by the copper, on its layer (D138).
+    #[test]
+    fn a_route_laid_anew_beside_one_that_goes_back_is_told_by_the_copper() {
+        let track = |layer: &str, a: (i64, i64), b: (i64, i64)| Track {
+            id: ObjectId(0),
+            layer: layer.to_string(),
+            width: Nm(200_000),
+            net: Some("a".to_string()),
+            start: Point { x: Nm(a.0), y: Nm(a.1) },
+            end: Point { x: Nm(b.0), y: Nm(b.1) },
+            mid: None,
+            locked: false,
+        };
+        let old = [track("F.Cu", (0, 0), (5_000_000, 0))];
+        let old = runs_of(old.iter(), [].iter());
+        // A track 0.6 mm off it has 0.4 mm of room, which is clear of it; one 0.4 mm off has
+        // 0.2 mm, and is not, whatever its box; on another layer it is clear.
+        let beside = |layer: &str, y: i64| {
+            let new = [track(layer, (1_000_000, y), (4_000_000, y))];
+            clash(&old, &runs_of(new.iter(), [].iter()))
+        };
+        assert!(!beside("F.Cu", 600_000));
+        assert!(beside("F.Cu", 400_000));
+        assert!(!beside("B.Cu", 400_000));
+        // A track on a slant whose box holds the old one, and is nowhere near it.
+        let slant = [track("F.Cu", (-3_000_000, 2_000_000), (2_000_000, 7_000_000))];
+        assert!(!clash(&old, &runs_of(slant.iter(), [].iter())));
+        // A via is on every layer.
+        let via = |y: i64| Via {
+            id: ObjectId(0),
+            at: Point { x: Nm(2_000_000), y: Nm(y) },
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some("b".to_string()),
+            from: "F.Cu".to_string(),
+            to: "B.Cu".to_string(),
+            locked: false,
+        };
+        assert!(clash(&old, &runs_of([].iter(), [via(600_000)].iter())));
+        assert!(!clash(&old, &runs_of([].iter(), [via(800_000)].iter())));
+        assert!(!clash(&[], &runs_of([].iter(), [via(0)].iter())));
     }
 
     /// No run that moves routes after a first run that moved none and found no way (D123).

@@ -10858,3 +10858,263 @@ four orders (the load 3.7 to 5.4) corne-cherry to 1, 0, 0 and 1 connections open
 *Not measured:* the generated boards; freerouting; KiCad's DRC on a board guide routed; cadlab's oracles locally;
 cadlab's whole test suite, which is run at the merge; guide on more than three threads at 60 s; the rule for the
 spokes at 60 s apart from the share, on the boards other than glasgow-revD1.
+
+### D138. guide 0.0.42 adopted: the pads that the routes cut off their fills joined to them also in a run that its deadline cuts, and the step for the spokes kept for the nets that have a way round their rooms; what tinytapeout-demo's open connections are, a round of the joining after cleanup, a run that moves only the routes near what is open, the track outside the pads by net: measured, none a gain; the default unchanged (2026-11-24)
+The direction is D121's to D137's: guide is to end equal to or better than the native router on every measure on every
+board. D137 left eight cells worse and one whose ranges overlap, and this round had an order: the run of
+tinytapeout-demo that its deadline cuts and that leaves 3 connections open; the time that buys nothing (the step for
+the spokes on glasgow-revD1, corne-cherry's run for shorter ways and its settling); the track outside the pads; the
+fills. **Two things are changed. In guide, the round that joins what the routes cut off the fills to them again was
+begun only with time left and ended at the deadline between two of its searches or in one, and a run whose passes had
+all of its time returned such pads cut off and counted joined: the first such round is now made whatever the clock
+says. In this adapter, the step that moves routes out of the rooms of spokes keeps the nets that guide found no way
+for round their rooms as they were and is checked for the others: on glasgow-revD1 it is kept in 6 tries of 16 where
+it was kept in none of 20, a pad or two fewer short of two spokes each time, with the track, the connections and the
+time that the board had. Neither closes tinytapeout-demo's 3 connections: those, and nearly every connection that the
+board is left with, are pads of nets with pours that the routes shut in and that no search joins among the routes as
+they are, in runs that the deadline cuts and in runs that end on their own alike. Beside the native router measured in
+the same minutes, of 72 cells 34 are better, 31 equal, none overlaps and 7 are worse, for 33, 30, one and 8 in D137:
+the three cells that moved are the runs' and the native router's, not this release's.**
+`guide = { version = "0.0.42", default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock` moves.
+**What is in guide 0.0.42** (its `docs/benchmarks.md` has the trace).
+- *The round that joins what the routes cut off the fills is made past a deadline* (`Run::overtime`, in the round of
+  `route_all` that comes before cleanup). Once routing is over, every net with a fill is asked for the pads and stubs
+  that the routes cut off it, by this adapter's fill where it gives one, and a search joins each to the fill again by
+  stubs that move nothing. The round was begun only with time left, and ended at the deadline between two of its
+  searches or in one, each search taking the run's stop flag: a run whose passes had all of its time returned such
+  pads on pieces of their own and counted their connections as made. The first such round is now made whatever the
+  clock says, each search with the nodes it may expand; the caller's flag stops it as it did, and a budget of work.
+  A run with no deadline is what it was, to the node. Tested in guide by a strip of fill with a pad behind another
+  net's track and a host that answers when the deadline is past (0.0.41 returns the pad cut off, `stopped: Deadline`,
+  the net unrouted; 0.0.42 returns it joined), and by what stops a run in overtime.
+**What is changed in this adapter**: the step that moves routes out of the rooms of spokes (D124).
+- *The nets that guide found no way for round their rooms stay as they were.* A try takes the tracks and vias out of
+  the rooms of the pads short of their spokes, closes the rooms to every net but the pad's and has guide join the
+  nets up again round them; it was kept or not as a whole, and where a net did not come back whole it was made again
+  with the rooms whose nets all had. On glasgow-revD1 a try is 5 s (guide's preparing 2.3 s, its routing 0.6 s, the
+  check with its fill 1.6 s), one net or two of eight to eleven has no way round its room in every run, and the time
+  for a second try is never there: kept in none of 20 runs (D137), nor in any run of this round without the change.
+  guide says which nets its own search found no way for (`Routed::failed`): those now have their old routes back,
+  what stood in the rooms with them, before the one check, and the try is of the other nets' rooms. Not where a
+  track or via laid anew is
+  nearer copper of those old routes on its layer than 0.3 mm (`clash`, by the copper and not by the boxes, which
+  always meet): the check then takes the new route out, with it the nets that it joined, and twice as long
+  (glasgow-revD1's second order: 307 tracks and vias out, 73 connections open for 17, 1.5 s more, and no time left for
+  the step for the tracks between pads, 190 mm of the board's track).
+  glasgow-revD1, four orders four times with it (the load 6.3): 6 tries of 16 kept, each with one pad or two less
+  short of its spokes (9 for 10 three times, 8 for 10, 10 for 11 twice) and the connections open that the board had;
+  9, 12, 14 and 8, 10, 12, 14 and 10, 9, 12, 14 and 10 and 9, 12, 14 and 12 pads short of two spokes (the last in a
+  run with 14 connections open for 12, another board) where the same build without it has 10, 12, 14 and 11 in each of
+  four sets of the same hour; 10 501 to 10 537 mm of track for 10 513 to 10 515 mm; 56 to 59 s for 56 to 58 s. The step
+  costs what it did.
+  *Tried on the way and not kept*: the try checked a second time with the nets that the board, filled, has more open
+  of back as they were as well (4 of 8 tries kept, in 1.5 to 3 s more each: it took the time of the step for the
+  tracks between pads, 330 mm, in two runs and of the ends inside the pads, 650 mm of the track that is counted, in
+  one; with its time guarded for those steps it was made in none of eight runs).
+**A. A run that its deadline cuts (the round's first item).** D137 had tinytapeout-demo's one run in sixteen with 3
+connections open as a first run ended by its deadline before what the routes cut off the fills was joined again.
+Measured by a trace of guide's stages (in no release) over three sets of sixteen orders at 60 s:
+- *The order with 3 open has 3 in every set* (five sets of sixteen, 0.0.41 and this). The native router's rounds in
+  guide end at 27.2 s with 7 nets to route; guide's passes take 246 nets out for them, are ended by their share at
+  45.2 s and go back to the routes that made the most, 2 nets open; the round of the joining begins at 45.8 s, finds 3
+  pieces of the ground's fill and one of +3V3's cut off, and the deadline is at 46.8 s. 0.0.41: the round ends there,
+  the run is back at 46.9 s, the board filled has 4 nets open, the second run makes the ground's stubs. 0.0.42: the
+  round goes on, the ground's three pieces are joined by 47.65 s, +3V3's pad (U6.68) has no way, the run is back at
+  47.8 s and the board has 3 nets open. Either way the board leaves with U6.68, U6.75 (BOOT) and U6.26 (uio0) open,
+  each `shut in by` the pads beside it and two tracks; at 51.8 s for 56.5 s.
+- *What tinytapeout-demo's other open connections are.* In 6 to 8 first runs of 16 a pad of GND or +3V3, or a via of
+  its stubs, is off its fill when the rounds of the joining end, and the search for it has come back with nothing:
+  its way out is between its neighbours' tracks on the RP2350's package (0.4 mm pitch) or among the capacitors beside
+  it. So in the runs that end on their own, with 8 s of the minute unused, as in those cut. The second run, on the
+  filled board with the routes fixed, finds no way for it either (`1 with no way of their own`); a run that has every
+  route back takes 137 to 195 nets out for the one pad and closed it in none of 7 tries, in 3 to 12 s each. guide's
+  own count has such a pad joined (it is counted on the fill that the run planned on, this adapter giving no fill
+  at a run's end, D117), and the report's count is the DRC's, which has it open: no mismatch, D133.
+- *Cleanup cuts a pad off too*, in about one first run in four: this adapter's fill asked for after cleanup, sixteen
+  orders, has a pad cut off in 6 runs, in most the one that the rounds before cleanup had left, in two one more.
+  A round of the joining after every cleanup, built in guide: it joined such a pad in 4 runs of 16 and saved the
+  second run there (1.5 s), and it asks for a fill more in every run with cleanup: cynthion's first run back at 19.9 s
+  for 17.4 s with the board it had, sweep-v2.2 a second later; over four orders no connection, via or millimetre
+  differs for it on buspirate5-rev10, cynthion, lumenpnp-mobo, sweep-v2.2 and corne-cherry. Not in the release.
+- *A run that moves only the routes near what is open*, built in this adapter between the run on the fixed board and
+  the runs that move every route: the nets with copper within 2 mm of an end of an open connection are guide's to
+  move, the others fixed. tinytapeout-demo: 5 tries, one pad closed, 1.5 to 7 s each with up to 73 nets taken out
+  among the 14 to 51 handed back. corne-cherry's first order: 12 s, 119 nets taken out among 17, 2 open for the 1, not
+  kept, and the run that moves every route after it as before. Seven boards in four orders with and without it: the
+  connections open that they had but one of glasgow-revC3's (7 for 8 in one order, with 24 mm more track). Not kept.
+- **Sixteen orders at 60 s, the round past the deadline alone, beside 0.0.41 in the same minutes** (the load 4.4 to
+  4.5): 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 3, 0, 0 and 0 for 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 0, 0, 3, 0, 0 and 0; 276.5
+  vias and 4848 mm for 287 and 4867 mm. **Six connections for eight is not told from noise, and the run with 3 is the
+  same run: what the round fixes is what a run cut by its deadline returns, which the second run mended where it had the
+  time; the connections that tinytapeout-demo is left with are not that.** What would close them is a way kept for such
+  a pad while the nets round it are still negotiated; settling by chains for the pieces cut off was measured in an
+  earlier round and made no more of them (guide's `settle.rs`).
+**B. Time that buys nothing (the second item).**
+- *(a) The step for the spokes on glasgow-revD1*: above. No test was found that tells before the try that it will
+  not be kept: it fails by the one net or two that have no way round their rooms, which the run itself finds. It is
+  not cheaper (5 s a try, 2.3 s of it guide making the board of 561 nets ready for a run of ten); it is kept in 6
+  tries of 16 for none.
+- *(b) corne-cherry's run for shorter ways*: not changed. What was measured of the board's time instead: its slowest
+  order (56 s) has a first run that ends on its own at 37 s, a second run on the fixed board, and then a run that
+  moves every route for one connection, 11 s with 294 nets taken out, which ends with that connection open still;
+  the run for shorter ways after it is 4.3 s. The run near what is open (A) took 12 s there for the same. An end of
+  the run for shorter ways by what its first nets gain gives back 2 s of 28 in the orders that end on their own and
+  nothing in the slowest: the time cell needs the slowest order at 35 s. Not built.
+- *(c) corne-cherry's settling*: in the default order the passes end at 22.6 s with 24 of 152 nets not routed and 99
+  waiting, and settling routes them, 128 nets to 151 in 10.4 s; in the order that ends at 28 s it is 0.04 s. It is
+  the routing of what rip-up left, it ends with the first round that makes nothing (`Settle::all`), and it is not
+  time that buys nothing. tinytapeout-demo's order with 3 open is the case that is: 8 s of settling from 131 nets to
+  131, after passes that went from 135 routed to 123 and back.
+**C. The track outside the pads (the third item).** D135 measured it at the pads and found it elsewhere; measured
+here by net on the nets both complete, from D137's final sets (four orders, 0.0.41 beside the native router in the
+same minutes), by whether guide's net has fewer vias than the native router's, as many, or more:
+
+| board | nets with fewer vias: nets, outside the pads, track, vias | as many | more |
+|---|---|---|---|
+| glasgow-revC3 | 48, +22 mm of 1002 (+2.2 %), -14 mm, -83 | 135, +47 mm of 1189 (+3.9 %), -16 mm | 17, +16 mm of 313 (+5.2 %), -4 mm, +32 |
+| tinytapeout-demo | 28, -1 mm of 1545 (-0.1 %), -49 mm, -44 | 71, +45 mm of 1452 (+3.1 %), +2 mm | 36, +181 mm of 1412 (+12.9 %), +144 mm, +60 |
+| glasgow-revD1 | 70, +114 mm of 2876 (+3.9 %), +50 mm, -126 | 379, +304 mm of 3061 (+9.9 %), +184 mm | 52, +296 mm of 1217 (+24.4 %), +277 mm, +74 |
+| lumenpnp-mobo | 22, -8 mm of 1039 (-0.8 %), -44 mm, -50 | 132, -10 mm of 2229 (-0.5 %), -125 mm | 34, +97 mm of 1557 (+6.2 %), +57 mm, +61 |
+| buspirate5-rev10 | 24, +4 mm of 578 (+0.7 %), -19 mm, -40 | 135, +15 mm of 1389 (+1.1 %), -46 mm | 22, +48 mm of 751 (+6.4 %), +6 mm, +40 |
+
+- *It is not a trade of track for vias*: the nets on which guide has fewer vias have the track outside their pads that
+  the native router has (tinytapeout-demo, lumenpnp-mobo, buspirate5-rev10) or 2 to 4 % more (the glasgows). On
+  tinytapeout-demo, lumenpnp-mobo and buspirate5-rev10 the excess is on the nets with more vias (+181 mm of +225 mm,
+  +97 mm where the others have -18 mm, +48 mm of +67 mm): the nets that go under a bundle and back (D137), longer and
+  with more vias at once.
+- *What the native router does at a pad*: its tracks end at the pad's centre, 164 to 187 mm of track inside the pads
+  on glasgow-revC3 and tinytapeout-demo (D135) where this adapter ends guide's tracks where they are inside the pad
+  (D133) and leaves 52 to 58 mm. The measure leaves both out. So glasgow-revC3's track is equal on the nets both
+  complete (-34 mm of 2675) with 85 mm more outside the pads: the difference is the native router's 119 mm more inside
+  them, and guide's routes are 3 % longer than the native router's outside the pads there.
+  Nothing of the native router's at the pads is to port: within 2 mm of its pads guide has the track it has (D135).
+- *Nor is it the way the tracks are laid*: on the nets both complete, glasgow-revC3's track is 49 % along the axes,
+  49 % at 45° and 2 % at other angles for the native router's 46, 50 and 4 %; tinytapeout-demo 45, 54 and 1 for 46, 52
+  and 2; glasgow-revD1 53, 46 and 2 for 53, 43 and 3. guide's has more bends: 1915 segments for 1584 on glasgow-revC3
+  and 5834 for 4640 on glasgow-revD1, 1780 for 1794 on tinytapeout-demo.
+- **Not changed.** glasgow-revC3's and glasgow-revD1's is spread over nets that have as many vias as the native
+  router's (+3.9 % and +9.9 %), on boards where guide completes 19 and 50 nets more, the room of which the native
+  router's routes have (D135: 1 to 4 points of glasgow-revC3's 5 to 8); tinytapeout-demo's is D137's nets under bundles.
+**D. The fills, and E. an adaptive share for the first run and cleanup on spare threads**: not looked at and not
+built.
+**At 60 s, beside the native router measured in the same minutes** (guide 0.0.42's source behind the adapter as
+committed; the twelve boards in four orders and tinytapeout-demo in eight, guide, the native router and, on nrfmicro,
+sweep-v2.2, corne-cherry, tinytapeout-demo, glasgow-revC3 and glasgow-revD1, 0.0.41 from crates.io behind D137's
+adapter, side by side, four runs at a time on three threads each, the load 2.8 at the start and 5.9 at the end; open
+is the DRC's count of unrouted on the board that left, for both; open and the pads short of two necks by order;
+medians of the vias, the track and the track outside the pads; the fastest and the slowest run; judged by D129's
+script):
+
+| board | open | vias | track | track outside pads | short of two necks | time |
+|---|---|---|---|---|---|---|
+| buspirate-flash-sop | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| buspirate-rs232 | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 0 s against 0 to 0 s) |
+| lumenpnp-ringlight | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 3 against 3 | better (-7 %) 166 against 177 | equal (-1 %) 158 against 159 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 1 s against 0 to 0 s) |
+| nrfmicro | equal (0/0/0/0 against 0/0/0/0) | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | equal (0/0/0/0 against 0/0/0/0) | equal (2 to 14 s against 2 to 12 s) |
+| sweep-v2.2 | equal (3/3/3/3 against 3/3/3/3) | better (-20 %) 20.5 against 25.5 | equal (-2 %) 2120 against 2159 | equal (-1 %) 2109 against 2122 | better (0/0/0/0 against 2/1/2/1) | better (35 to 36 s against 53 to 54 s) |
+| corne-cherry | better (1/0/0/1 against 1/3/2/4) | better (-7 %) 429 against 459 | better (-8 %) 7482 against 8103 | better (-6 %) 7411 against 7915 | better (2/1/1/1 against 3/3/2/2) | worse (27 to 56 s against 20 to 31 s) |
+| tinytapeout-demo | better (1/0/0/0/0/0/1/1 against 19/1/4/5/1/2/2/9) | equal (-1 %) 271.5 against 273 | equal (-1 %) 4838 against 4894 | worse (+2 %) 4784 against 4672 | better (1/2/0/0/1/2/4/2 against 20/12/10/16/16/14/17/19) | equal (40 to 55 s against 35 to 62 s) |
+| buspirate5-rev10 | better (0/0/0/0 against 4/2/4/4) | better (-6 %) 284.5 against 302 | better (-8 %) 2886 against 3129 | better (-4 %) 2802 against 2911 | better (8/10/8/10 against 22/24/30/21) | better (13 to 18 s against 20 to 33 s) |
+| lumenpnp-mobo | better (0/0/0/0 against 9/23/7/13) | equal (-2 %) 331 against 337.5 | better (-3 %) 5294 against 5455 | equal (+1 %) 5218 against 5169 | better (0/0/0/0 against 2/4/0/2) | better (30 to 33 s against 60 to 61 s) |
+| cynthion | better (8/8/8/8 against 28/29/30/28) | better (-13 %) 416.5 against 478 | better (-5 %) 3037 against 3184 | equal (-1 %) 2963 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (32 to 37 s against 60 to 62 s) |
+| glasgow-revC3 | better (8/6/9/7 against 35/29/39/30) | better (-5 %) 395.5 against 417.5 | worse (+5 %) 3632 against 3448 | worse (+11 %) 3542 against 3190 | equal (0/0/0/0 against 0/0/0/0) | equal (58 to 59 s against 60 to 62 s) |
+| glasgow-revD1 | better (12/17/4/12 against 146/109/145/144) | worse (+10 %) 1130 against 1024 | worse (+18 %) 10520 against 8916 | worse (+22 %) 10267 against 8397 | better (9/12/14/10 against 51/31/49/47) | better (55 to 57 s against 60 to 63 s) |
+
+Counted over the 72 cells by the script: 34 better, 31 equal, none with ranges that overlap, 7 worse. D137 had 33, 30,
+one and 8. The worse cells: corne-cherry's time; tinytapeout-demo's track outside the pads; glasgow-revC3's track and
+track outside the pads; glasgow-revD1's vias, track and track outside the pads. The cells that are not D137's:
+- *tinytapeout-demo's connections open*, better for ranges that overlap: 1, 0, 0, 0, 0, 0, 1 and 1 where the native
+  router has 1 in two orders and more in six. The runs: the same eight orders of 0.0.41 in these minutes have 0, 0, 0,
+  0, 0, 0, 1 and 1, and over sixteen orders this build has 1, 0, 0, 0, 0, 0, 1, 1, 1, 2, 0, 0, 3, 0, 0 and 0: the order
+  with 3 is the thirteenth, as in every set (A), and the table's eight do not have it. **Not this release's.**
+- *lumenpnp-mobo's vias, track and track outside the pads*, equal for better (-2 % for -2 %, 331 against 337.5 for
+  338.5), better for equal (-3 % for -2 %) and equal for worse (+1 % for +2 %): guide's four boards are D137's to the
+  via and the millimetre (331 vias, 5294 mm, 5218 mm outside the pads), and the native router has 5455 mm and 5169 mm
+  for 5393 mm and 5108 mm, with 9, 23, 7 and 13 connections open for 9, 10, 7 and 13. The native router's runs, as in
+  D135 and D137.
+- *glasgow-revD1's vias*, worse as they were, +10 % for +6 %: 1130 for 1122 against the native router's 1024 for
+  1059.5, which has 146, 109, 145 and 144 connections open for 127, 109, 119 and 144.
+- *0.0.41 in the same minutes, by board* (open by order; medians): nrfmicro, sweep-v2.2, corne-cherry and glasgow-revC3
+  the same boards to the via and the millimetre (corne-cherry 1/0/0/1 open, 429 vias, 7482 mm, 27 to 56 s;
+  glasgow-revC3 8/6/9/7, 395.5 vias, 3632 mm); tinytapeout-demo 0/0/0/0/0/0/1/1 open for 1/0/0/0/0/0/1/1, 282 vias for
+  271.5, 4850 mm for 4838 mm; glasgow-revD1 12/17/7/12 open for 12/17/4/12 (the third order has 4 and 7 with either
+  build from one set to the next, eight runs of eight with 7 in one hour), 1130 vias for 1130, 10 513 mm for
+  10 520 mm, 10/12/14/11 pads short of two spokes for 9/12/14/10, the step for the spokes kept in two orders of four
+  for none.
+*The same runs by the nets that both routers complete*:
+
+| board | nets both complete (median of the pairs) | vias on them | track on them | track outside pads on them | nets only guide completes, their track and vias; only native |
+|---|---|---|---|---|---|
+| buspirate-flash-sop | 12 | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | 0 nets, 0 mm, 0 vias; 0 |
+| buspirate-rs232 | 30 | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | 0 nets, 0 mm, 0 vias; 0 |
+| lumenpnp-ringlight | 12 | equal (+0 %) 3 against 3 | better (-7 %) 166 against 177 | equal (-1 %) 157 against 159 | 0 nets, 0 mm, 0 vias; 0 |
+| nrfmicro | 41 | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | 0 nets, 0 mm, 0 vias; 0 |
+| sweep-v2.2 | 40 | better (-23 %) 18.5 against 24 | equal (-1 %) 2039 against 2060 | equal (+0 %) 2029 against 2028 | 0 nets, 0 mm, 0 vias; 0 |
+| corne-cherry | 149.5 | better (-5 %) 423 against 446 | better (-8 %) 7324 against 7991 | better (-7 %) 7256 against 7807 | 2.5 nets, 158 mm, 12 vias; 0.5 |
+| tinytapeout-demo | 135 | worse (+5 %) 245 against 233 | equal (+2 %) 4743 against 4661 | worse (+5 %) 4693 against 4477 | 1 nets, 58 mm, 24 vias; 0 |
+| buspirate5-rev10 | 181 | equal (+1 %) 251.5 against 250 | better (-2 %) 2869 against 2927 | worse (+2 %) 2788 against 2720 | 2 nets, 28 mm, 33.5 vias; 0 |
+| lumenpnp-mobo | 188.5 | worse (+5 %) 258 against 245 | better (-3 %) 4932 against 5066 | equal (+1 %) 4867 against 4819 | 4.5 nets, 312 mm, 70 vias; 3.5 |
+| cynthion | 310.5 | better (-23 %) 276.5 against 360.5 | better (-6 %) 2695 against 2870 | better (-3 %) 2635 against 2714 | 15.5 nets, 348 mm, 134.5 vias; 0 |
+| glasgow-revC3 | 199.5 | better (-15 %) 249 against 294 | better (-2 %) 2725 against 2788 | worse (+2 %) 2660 against 2600 | 19 nets, 912 mm, 145 vias; 6.5 |
+| glasgow-revD1 | 499.5 | better (-5 %) 748 against 788 | worse (+7 %) 8095 against 7548 | worse (+10 %) 7901 against 7150 | 49.5 nets, 2371 mm, 377.5 vias; 10 |
+
+Over these 36 cells: 17 better, 12 equal, 7 worse, for 16, 14 and 6 in D137. The worse cells: tinytapeout-demo's vias
+and track outside the pads, buspirate5-rev10's track outside the pads, lumenpnp-mobo's vias (+5 %, 258 against 245,
+for equal at +2 %, 264 against 259.5: the native router's set of nets, as in D136), glasgow-revC3's track outside the
+pads (+2 % for +4 %, with its track better at -2 % for equal), glasgow-revD1's track and track outside the pads (+7 %
+and +10 %, as they were).
+**The router's count beside the DRC's**: in none of the 60 runs as adopted, of the 28 with 0.0.41 or of the 41 at
+budgets of nodes does guide's differ; the native router's does in 17 of 52, by what it counts (D133).
+**Thermal relief** (D120), as adopted: the twelve boards in four orders and tinytapeout-demo in sixteen, 60 runs with
+the table: no pad of a pour without a spoke in any, no DRC error other than unrouted, no solder pad made solid by a
+track. The pads short of two necks by order, beside D137's: glasgow-revD1 9/12/14/10 for 10/12/14/10 (10/12/14/11 with
+0.0.41 in these minutes), tinytapeout-demo 1/2/0/0/1/2/4/2 for 1/2/1/0/1/3/0/3 (1/2/3/0/1/1/4/2 with 0.0.41 in these
+minutes), sweep-v2.2 0/0/0/0, corne-cherry 2/1/1/1, buspirate5-rev10 8/10/8/10, cynthion 1/1/1/1 and the others none,
+as they were. The step for the spokes over the 60 runs: 19 tries kept of 29, 14 of them on tinytapeout-demo, 2 on
+sweep-v2.2, 2 on glasgow-revD1 and 1 on buspirate5-rev10. tinytapeout-demo is out of its budget in 3 orders of sixteen.
+**Budgets of nodes** (one thread, guide alone, ten runs at a time; the release's source behind a `[patch]` and the
+adapter as committed, beside D137's sets of 0.0.41). At 40 million nodes, nine boards in three orders: every one of 27
+runs has the connections open by the run's count and by the DRC's, the vias and the track that it had: 570 open, 9997
+vias, 109 321 mm. At 150 million, seven boards in two orders: every one of 14 likewise (glasgow-revD1 56 and 75 open).
+A run with a budget of nodes has no deadline, and the step for the spokes is not made after a run that its budget
+stopped.
+*0.0.42 from crates.io behind this commit* routes the nine boards at 40 million nodes in the default order to the
+connections open, the DRC's count, the vias, the track and the work of the build that was measured (nrfmicro none and
+41 vias, sweep-v2.2 3 and 24, corne-cherry 36 and 438, tinytapeout-demo none and 263, buspirate5-rev10 none and 284,
+lumenpnp-mobo none and 344, cynthion 8 and 428, glasgow-revC3 12 and 404, glasgow-revD1 145 and 1101), and at 60 s in
+four orders (the load 4.7 to 4.8) corne-cherry to 1, 0, 0 and 1 connections open with 429 vias and 7482 mm in 28 to
+56 s, as 0.0.41, and glasgow-revD1 to 12, 17, 8 and 12 open with 1130 vias, 10 513 mm and 9, 12, 14 and 10 pads short
+of two spokes in 54 to 58 s, the step for the spokes kept in two orders of four.
+**What got worse.**
+- *Nothing in the table that is this release's*: the three cells that moved are above, each with 0.0.41 beside it.
+- *A run that its deadline cuts in the round of the joining is back later by what the round takes*: 0.9 s in
+  tinytapeout-demo's thirteenth order, which then has no second run and leaves 5 s sooner with the connections it
+  had. No other first run of the sets was cut there: glasgow-revD1's round ends 0.5 to 0.8 s before its deadline.
+- *lumenpnp-mobo's vias on the nets both complete*, worse for equal: above, the native router's nets.
+**Tried and not kept, or not built** (each above with its numbers).
+- A round of the joining after every cleanup (guide).
+- A run that moves only the routes near what is open (this adapter).
+- The try of the step for the spokes checked a second time with more nets back; a clash told by the boxes of the
+  tracks.
+- *Not built*: an end of the run for shorter ways by what its first nets gain; a fill of the part of a pour that
+  changed; an adaptive share for the first run; cleanup of the finished nets on spare threads.
+**What remains open, with what was measured of each.**
+1. *tinytapeout-demo's pads that the routes shut in*: 6 to 8 first runs of 16 have one when the joining ends, and
+   the board leaves with 1 to 3 connections open in 5 or 6 orders of 16. Nothing after the rounds closes them (the
+   run on the fixed board, a run that moves every route in none of 7 tries, one that moves the routes near in 1 of
+   5); the thirteenth order's passes take 246 nets out for 7 and end where they began, with 8 s of settling from
+   131 nets to 131.
+2. *glasgow-revD1's vias, track and track outside the pads*: +10 %, +18 % and +22 % by the whole board, -5 %, +7 %
+   and +10 % on the nets both complete, as in D137.
+3. *glasgow-revC3's track and track outside the pads*: +5 % and +11 % by the whole board; -2 % and +2 % on the nets
+   both complete, where the native router has 119 mm more inside its pads.
+4. *tinytapeout-demo's vias and track outside the pads on the nets both complete*: +5 % and +5 %, on the 36 nets a
+   run that go under a bundle and back.
+5. *corne-cherry's time*: 27 to 56 s against 20 to 31 s; its slowest order is a first run to 37 s and a run that
+   moves every route for one connection, 11 s for nothing.
+6. *The step for the spokes on glasgow-revD1*: 5 s a try, 2.3 s of it guide making the board ready; kept in 6 of 16.
+7. *The fills* (D136's sixth): not looked at.
+**Default: unchanged.** `router: guide` stays the second opinion and the native router stays the default.
+*Not measured:* the generated boards; freerouting; KiCad's DRC on a board guide routed; cadlab's oracles locally;
+cadlab's whole test suite, which is run at the merge; guide on more than three threads at 60 s; the round past the
+deadline on a board other than tinytapeout-demo, no other first run of the sets being cut in it.

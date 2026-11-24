@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,33 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.42* (D138). One change to guide and one to this adapter. In guide, the round that joins what the routes
+  cut off the fills to them again, once routing is over, was begun only with time left and ended at the deadline
+  between two of its searches or in one: a run whose passes had all of its time returned such pads cut off and
+  counted joined. The first such round is now made whatever the clock says, each search with the nodes it may
+  expand, and the caller's flag stops it; a run with no deadline is what it was (every one of 41 runs at budgets of
+  nodes has the connections, the vias and the track of 0.0.41). In this adapter, the step that moves routes out of
+  the rooms of spokes keeps the nets that guide found no way for round their rooms as they were, with what stood in
+  the rooms, and is checked for the others, unless a route laid anew is nearer their old copper than 0.3 mm
+  (`clash`): on glasgow-revD1, where a try is 5 s and a net or two of eight to eleven has no way in every run, 6
+  tries of 16 are kept for none of 20, a pad or two fewer short of two spokes each (9, 12, 14 and 10 at 60 s for
+  10, 12, 14 and 11 with 0.0.41 in the same minutes), with the track, the connections and the time the board had.
+  Measured and not changed (D138 has each): tinytapeout-demo's open connections are pads of GND and +3V3 that the
+  routes shut in on the RP2350's package, in 6 to 8 first runs of 16 whether the deadline cuts the run or not, which
+  the run on the fixed board finds no way for, a run that moves every route closed in none of 7 tries and one that
+  moves only the routes within 2 mm in 1 of 5 (not kept: corne-cherry's first order spent 12 s on one for nothing);
+  the order with 3 open has 3 with either release, its passes taking 246 nets out for the 7 that the rounds left; a
+  round of the joining after every cleanup joined a pad in 4 runs of 16 and cost a fill in every run (cynthion's
+  first run 2.4 s later), with no board's result changed, and is not in the release; the track outside the pads by
+  net is on the nets where guide has more vias as well on tinytapeout-demo (+181 mm of +225 mm), and spread over the
+  nets with as many on the glasgows, with nothing at the pads but the native router's tracks to their centres
+  (119 mm of glasgow-revC3's, which the measure leaves out); corne-cherry's settling is the routing of what rip-up
+  left (128 nets to 151 in 10 s in the default order) and ends when a round makes nothing. Beside this router in the
+  same minutes, of 72 cells 34 are better, 31 equal, none overlaps and 7 are worse, for 33, 30, one and 8:
+  tinytapeout-demo's connections open better for overlapping by the eight runs of the table (sixteen orders have
+  the one with 3 as before), lumenpnp-mobo's track outside the pads equal for worse by this router's own runs.
+  The worse cells are corne-cherry's time, tinytapeout-demo's track outside the pads, glasgow-revC3's track and
+  track outside the pads, and glasgow-revD1's vias, track and track outside the pads.
 - *guide 0.0.41* (D137). Two changes to guide's cleanup. Pulling a net's runs tight, which takes no search, laid a run
   that went round the end of another net's thermal spoke straight across the gap that the spoke bridges: the room of
   the spoke was occupied before and after, nearer the spoke than the clearance, and neither its price nor a wall round
@@ -1359,7 +1386,9 @@ exports and the count all read cadlab's fill). The result is then treated as the
   left when it begins after this router's rounds in guide and at three quarters after guide's own (0.0.41, D137;
   three quarters as well with zones to join, which cadlab turns off), cleanup and the stubs to
   what was cut off the fills have the rest, and every phase looks at the deadline, the plan before
-  routing included; a run whose routing ended for its share says that it was stopped, though it comes back
+  routing included, but the first round of those stubs, which is made whatever the clock says (0.0.42, D138:
+  0.9 s past the deadline in the one first run of the sets that was cut there); a run whose routing ended for
+  its share says that it was stopped, though it comes back
   before its deadline. It makes no fill at the end and joins no zone's pieces (`RouteOptions::fills`,
   `RouteOptions::join`, `RunControl::fill_on_stop`). No call on the twelve corpus boards took longer than its
   60 s (D93, D95, D96, D97). The share was 0.45 until guide 0.0.7 (D95, D96; half before, D91, D93): over three

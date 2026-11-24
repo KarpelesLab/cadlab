@@ -419,6 +419,19 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D137 (D138, the same direction, not met): guide 0.0.42. The round that joins what the routes cut off the
+      fills to them again is made also when the deadline is past, where a run whose passes had all of its time
+      returned such pads cut off and counted joined; and the step for the spokes keeps the nets that guide found no
+      way for round their rooms as they were: kept in 6 tries of 16 on glasgow-revD1 for none of 20, a pad or two
+      fewer short of two spokes each. Every run at a budget of nodes is 0.0.41's. Measured and not changed:
+      tinytapeout-demo's open connections are pads of nets with pours that the routes shut in, in runs cut by the
+      deadline and not, which no run after the rounds closes (the order with 3 open has 3 still); a round of the
+      joining after cleanup and a run that moves only the routes near what is open, neither a gain; the track
+      outside the pads by net (on tinytapeout-demo the nets with more vias as well, on the glasgows spread, nothing
+      at the pads); corne-cherry's settling is routing. Beside the native router 34 cells better, 31 equal, none
+      overlapping and 7 worse of 72, for 33, 30, one and 8, the three cells that moved being the runs' and the
+      native router's. Open: tinytapeout-demo's pads that the routes shut in; the track of the two glasgows and
+      tinytapeout-demo's vias on the nets both complete; corne-cherry's time; the fills.
       Since D136 (D137, the same direction, not met): guide 0.0.41. A run that cleanup pulls tight goes no nearer a
       pad across the gap of its spoke, and after guide's own rounds cleanup has a quarter of a deadline's time for a
       twelfth: glasgow-revD1 at 60 s has 10, 12, 14 and 10 pads short of two spokes for 8, 23, 23 and 22, 2 % fewer
