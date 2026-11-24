@@ -419,6 +419,19 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D132 (D133, the same direction, not met): the report made of the board that leaves, with guide
+      0.0.37. The tracks were ended inside their pads after the report, and a track that was the only copper
+      between its pad and something else of its net went: lumenpnp-mobo's two pads apart, one of
+      lumenpnp-ringlight's, and 5 to 8 connections of corne-cherry that the report did not have; now none of
+      60 runs at 60 s and 43 at budgets of nodes has a count other than the DRC's, and open is the DRC's count
+      for both routers in the tables. The stage's rounds brought to their end sooner in guide (a point that
+      stays shared at 2 a round for 0.5), their pass for fewer vias given its time, the look's maps the
+      stage's, and the first run 0.78 of the budget with the stage: tinytapeout-demo 282.5 vias for 300.5 and
+      3 connections open in eight orders for 10, for 1.6 % more track; guide's own rounds 288.5, the native
+      router 273. Beside the native router 36 cells better, 27 equal and 9 worse of 72, for 34, 27, 1
+      overlapping and 10 counted the same way. A class worse: tinytapeout-demo's track (equal) and its track
+      outside the pads (worse). Open: tinytapeout-demo's vias (+3 %) and track outside the pads, the time of
+      nrfmicro and corne-cherry (measured, two rules tried and dropped), two layers, the glasgows' track.
       Since D131 (D132, the same direction, not met): the stage adopted for a run with a budget on a board
       of more than two layers, with guide 0.0.36: the board looked at before the run plans anything for the
       stage, and one given up routed as if the stage were never asked for (to the track at a budget of

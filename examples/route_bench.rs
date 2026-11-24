@@ -490,12 +490,9 @@ fn corpus(filters: &[String]) {
                 for v in &r.vias {
                     per.entry(v.net.as_deref().unwrap_or("")).or_default().1 += 1;
                 }
-                let open: std::collections::BTreeSet<&str> = r
-                    .connections
-                    .iter()
-                    .filter(|c| c.status == cadlab::router::ConnStatus::Failed)
-                    .map(|c| c.net.as_str())
-                    .collect();
+                // Open by the board that left, not by the router's report of it (D133).
+                let lines = cadlab::board::ratsnest(&q);
+                let open: std::collections::BTreeSet<&str> = lines.iter().map(|l| l.net.as_str()).collect();
                 let text: String = per
                     .iter()
                     .map(|(n, (l, v))| {

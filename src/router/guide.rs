@@ -1,6 +1,6 @@
 //! The [guide](https://crates.io/crates/guide) routing engine as a second backend
 //! (`router: guide`, DECISIONS D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115,
-//! D116, D117, D118 and D121; docs/ROUTER.md, "guide as a backend").
+//! D116, D117, D118, D121 to D133; docs/ROUTER.md, "guide as a backend").
 //!
 //! [`adapt`] turns the board into guide's `pcb::Design` through guide's API (no DSN file in
 //! between): pads with their exact shapes, pad stacks and holes, existing tracks and vias,
@@ -52,7 +52,10 @@
 //! first ([`spoke_rooms`], [`relief_score`], D121, D126). In those two runs the last spoke of a pad is
 //! no room at all for another net (`RouteOptions::kept_spokes`, [`KEPT_SPOKES`], D126). The tracks of
 //! either router are laid no wider than the pads of their net where they meet them ([`neck_at_pads`],
-//! `pcb::neck_at_pads`, D121). What guide's API cannot express is passed the stricter way and named in
+//! `pcb::neck_at_pads`, D121). The tracks are ended where they are inside the pads of their net
+//! ([`pad_ends`], D118, D127), none that joins anything else of its net to the pad, and the report is
+//! of the board that leaves, filled once more after that (D133). What guide's API cannot express is
+//! passed the stricter way and named in
 //! [`RouteResult::notes`](super::RouteResult::notes): custom rules that hold new copper by
 //! kind or containment, rules between two different scopes and `disallow` rules (D61, D96).
 
@@ -120,6 +123,18 @@ fn rounds_for(copper_layers: usize) -> pcb::Rounds {
 /// at 27 s nearly what its two runs had, and the board is the same with either share (465
 /// and 422 over the three orders), so the eleven others decide: 452 with 0.45, 361 with 0.7.
 const FIRST_SHARE: f64 = 0.7;
+
+/// The first run's share where it has the native router's rounds in guide (`Rounds::Native`,
+/// [`rounds_for`]): those rounds, the passes after them and guide's cleanup need more than
+/// [`FIRST_SHARE`] of the minute on tinytapeout-demo, whose first run ended at its deadline in
+/// every order measured, with its cleanup cut or not begun (D132, D133). A board that guide
+/// gives the rounds up on has `FIRST_SHARE` all the same (`RouteOptions::given_up_share`).
+const FIRST_SHARE_ROUNDS: f64 = 0.78;
+
+/// The first run's share of the budget with these rounds asked for.
+fn first_share(rounds: pcb::Rounds) -> f64 {
+    if rounds == pcb::Rounds::Native { FIRST_SHARE_ROUNDS } else { FIRST_SHARE }
+}
 
 /// How many times what the first run needed after it (the verification and the refill) is
 /// kept for after a second run, whose board has more copper.
@@ -1829,6 +1844,9 @@ fn needless(
 const PAD_END_MARGIN: i64 = 1_000;
 /// The least that an end is moved by.
 const PAD_END_LEAST: i64 = 10_000;
+/// How many times the tracks are ended inside their pads and the board filled to see what
+/// that left open: the first, and again without the nets that had more open for it.
+const PAD_END_AGAIN: usize = 3;
 
 /// Whether a disc of radius `r` round `at` is inside the convex ring `ring`, whose signed
 /// area has the sign `turn`.
@@ -1874,9 +1892,14 @@ fn convex_turn(ring: &[polyclip::Point]) -> Option<i128> {
 /// is copper of the pad's net over the pad or within half a track's width of it, so nothing
 /// is nearer another net than it was and the pad is joined as it was. A track with both ends
 /// so inside one pad goes. Not the tracks of `keep` (pairs and nets with a length to keep,
-/// whose lengths are counted along the track), nor in the pads of a net tie. Returns the
-/// length taken off.
-fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
+/// whose lengths are counted along the track), nor in the pads of a net tie. And no track is
+/// cut or taken out that is what joins something else of its net, in `items` (the copper of the
+/// board the tracks are on, its fills among it) or among `tracks`, to the pad: whatever touches
+/// the track as it was touches what is left of it or the pad (D133). Returns the length taken
+/// off.
+fn pad_ends(p: &Project, tracks: &mut Vec<Track>, items: &[CopperItem], keep: &BTreeSet<&str>) -> Nm {
+    use crate::board::prepared::{PREPARE_MIN_SEGMENTS, Prepared, segment_count};
+    use polyclip::Geometry;
     let pads = geo::placed_pads(p);
     let mut by_net: BTreeMap<&str, Vec<&PlacedPad>> = BTreeMap::new();
     for pp in pads.iter().filter(|pp| pp.tie.is_none()) {
@@ -1885,15 +1908,56 @@ fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
         }
     }
     let before = tracks_length(tracks);
+    // The other copper of each net that has tracks to end: what a track may touch besides its
+    // pad. A fill by its index, which is made on the first question asked of it.
+    struct Other<'a> {
+        item: &'a CopperItem,
+        bbox: polyclip::Rect,
+        prepared: std::cell::OnceCell<Option<Prepared<'a>>>,
+    }
+    impl Other<'_> {
+        fn meets(&self, shape: &PolygonSet, bbox: &polyclip::Rect) -> bool {
+            if !self.bbox.intersects(bbox) {
+                return false;
+            }
+            let prepared = self.prepared.get_or_init(|| {
+                (segment_count(&self.item.shape) >= PREPARE_MIN_SEGMENTS).then(|| Prepared::new(&self.item.shape))
+            });
+            match prepared {
+                Some(prep) => prep.intersects(shape),
+                None => polyclip::intersects(&self.item.shape, shape),
+            }
+        }
+    }
+    let nets: BTreeSet<String> =
+        tracks.iter().filter_map(|t| t.net.clone()).filter(|n| !keep.contains(n.as_str())).collect();
+    let mut others: BTreeMap<&str, Vec<Other<'_>>> = BTreeMap::new();
+    for it in items.iter().filter(|it| !matches!(it.item, ItemRef::Track(_))) {
+        let Some(n) = it.net.as_deref().and_then(|n| nets.get(n)) else { continue };
+        let Some(bbox) = it.shape.bbox() else { continue };
+        others.entry(n.as_str()).or_default().push(Other { item: it, bbox, prepared: std::cell::OnceCell::new() });
+    }
+    let mut of_net: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, t) in tracks.iter().enumerate() {
+        if let Some(n) = t.net.as_deref().and_then(|n| nets.get(n)) {
+            of_net.entry(n.as_str()).or_default().push(i);
+        }
+    }
+    let shape_of = |t: &Track| {
+        let shape = geo::track_shape(t);
+        shape.bbox().map(|b| (shape, b))
+    };
     let mut gone = vec![false; tracks.len()];
-    for (i, t) in tracks.iter_mut().enumerate() {
-        let Some(own) = t.net.as_deref().filter(|n| !keep.contains(n)).and_then(|n| by_net.get(n)) else { continue };
-        if t.mid.is_some() {
+    for i in 0..tracks.len() {
+        let Some(net) = tracks[i].net.as_deref().and_then(|n| nets.get(n)).map(String::as_str) else { continue };
+        let Some(own) = by_net.get(net) else { continue };
+        if tracks[i].mid.is_some() {
             continue;
         }
         let r = PAD_END_MARGIN;
-        let half = t.width.0 / 2;
+        let half = tracks[i].width.0 / 2;
         for end in 0..2 {
+            let t = &tracks[i];
             let (e, o) = if end == 0 { (t.start, t.end) } else { (t.end, t.start) };
             let (e, o) = ((e.x.0, e.y.0), (o.x.0, o.y.0));
             // The pad that holds the end, with its shape on the track's layer.
@@ -1901,43 +1965,100 @@ fn pad_ends(p: &Project, tracks: &mut Vec<Track>, keep: &BTreeSet<&str>) -> Nm {
                 let shape = pp.layer_shapes.iter().find(|(l, _, _)| *l == t.layer).map_or(&pp.shape, |(_, _, s)| s);
                 let ring = &shape.outer.0;
                 let turn = convex_turn(ring).filter(|_| shape.holes.is_empty())?;
-                disc_in_ring(ring, turn, e, r).then_some((ring, turn))
+                disc_in_ring(ring, turn, e, r).then_some((shape, turn))
             });
-            let Some((ring, turn)) = found else { continue };
-            if disc_in_ring(ring, turn, o, r) {
-                gone[i] = true;
-                break;
-            }
-            // The furthest point towards the other end whose disc is inside: those that
-            // are make an interval from the end, the pad being convex.
-            const STEPS: i64 = 1 << 12;
-            let at = |k: i64| {
-                let on = |a: i64, b: i64| a + ((i128::from(b - a) * i128::from(k)) / i128::from(STEPS)) as i64;
-                (on(e.0, o.0), on(e.1, o.1))
-            };
-            let (mut lo, mut hi) = (0, STEPS);
-            while hi - lo > 1 {
-                let m = (lo + hi) / 2;
-                if disc_in_ring(ring, turn, at(m), r) {
-                    lo = m;
-                } else {
-                    hi = m;
+            let Some((pad, turn)) = found else { continue };
+            let ring = &pad.outer.0;
+            // What the track is to be: nothing, or the same with this end moved.
+            let to = if disc_in_ring(ring, turn, o, r) {
+                None
+            } else {
+                // The furthest point towards the other end whose disc is inside: those that
+                // are make an interval from the end, the pad being convex.
+                const STEPS: i64 = 1 << 12;
+                let at = |k: i64| {
+                    let on = |a: i64, b: i64| a + ((i128::from(b - a) * i128::from(k)) / i128::from(STEPS)) as i64;
+                    (on(e.0, o.0), on(e.1, o.1))
+                };
+                let (mut lo, mut hi) = (0, STEPS);
+                while hi - lo > 1 {
+                    let m = (lo + hi) / 2;
+                    if disc_in_ring(ring, turn, at(m), r) {
+                        lo = m;
+                    } else {
+                        hi = m;
+                    }
                 }
-            }
-            // And half the track's width back from there: its round end then reaches to where
-            // its middle leaves the pad.
-            let length = ((o.0 - e.0) as f64).hypot((o.1 - e.1) as f64);
-            let back = if length > 0.0 { (half as f64 / length * STEPS as f64).ceil() as i64 } else { STEPS };
-            let to = at((lo - back).max(0));
-            let moved = ((to.0 - e.0) as f64).hypot((to.1 - e.1) as f64);
-            if moved < PAD_END_LEAST as f64 {
+                // And half the track's width back from there: its round end then reaches to where
+                // its middle leaves the pad.
+                let length = ((o.0 - e.0) as f64).hypot((o.1 - e.1) as f64);
+                let back = if length > 0.0 { (half as f64 / length * STEPS as f64).ceil() as i64 } else { STEPS };
+                let to = at((lo - back).max(0));
+                let moved = ((to.0 - e.0) as f64).hypot((to.1 - e.1) as f64);
+                if moved < PAD_END_LEAST as f64 {
+                    continue;
+                }
+                let mut cut = t.clone();
+                let to = Point { x: Nm(to.0), y: Nm(to.1) };
+                if end == 0 {
+                    cut.start = to;
+                } else {
+                    cut.end = to;
+                }
+                Some(cut)
+            };
+            // Nothing of the track's net that the track touches is left apart from it: each
+            // such thing touches what is left of the track, which is on the pad still, or the
+            // pad itself. A track is the only copper between two things more often than its
+            // ends say: two stubs out of two pads side by side whose round ends meet between
+            // them, each with both ends in its pad (lumenpnp-mobo, U5.21 and U5.22), or the
+            // stub from a pad to a via beside it that ends at the via's rim (lumenpnp-ringlight,
+            // C1.2) are that, and went as copper on copper (D133).
+            let Some((was, was_box)) = shape_of(t) else { continue };
+            let pad_set: PolygonSet = vec![pad.clone()];
+            let Some(pad_box) = pad_set.bbox() else { continue };
+            let left = to.as_ref().and_then(&shape_of);
+            if to.is_some() && !left.as_ref().is_some_and(|(s, _)| polyclip::intersects(s, &pad_set)) {
                 continue;
             }
-            let to = Point { x: Nm(to.0), y: Nm(to.1) };
-            if end == 0 {
-                t.start = to;
-            } else {
-                t.end = to;
+            let kept = |shape: &PolygonSet, bbox: &polyclip::Rect| {
+                left.as_ref().is_some_and(|(s, b)| b.intersects(bbox) && polyclip::intersects(s, shape))
+                    || (pad_box.intersects(bbox) && polyclip::intersects(&pad_set, shape))
+            };
+            let safe_others = others.get(net).is_none_or(|list| {
+                list.iter().filter(|x| x.item.layers.contains(&t.layer)).all(|x| {
+                    !x.meets(&was, &was_box)
+                        || left.as_ref().is_some_and(|(s, b)| x.meets(s, b))
+                        || x.meets(&pad_set, &pad_box)
+                })
+            });
+            let safe = safe_others
+                && of_net.get(net).is_none_or(|list| {
+                    list.iter().filter(|&&j| j != i && !gone[j] && tracks[j].layer == t.layer).all(|&j| {
+                        let u = &tracks[j];
+                        // By its box first, of its ends and its width (an arc by its shape).
+                        let reach = u.width.0 / 2 + 1;
+                        let near = u.mid.is_some() || {
+                            let (x0, x1) = (u.start.x.0.min(u.end.x.0) - reach, u.start.x.0.max(u.end.x.0) + reach);
+                            let (y0, y1) = (u.start.y.0.min(u.end.y.0) - reach, u.start.y.0.max(u.end.y.0) + reach);
+                            x0 <= was_box.max.x && x1 >= was_box.min.x && y0 <= was_box.max.y && y1 >= was_box.min.y
+                        };
+                        if !near {
+                            return true;
+                        }
+                        let Some((shape, bbox)) = shape_of(u) else { return true };
+                        !(bbox.intersects(&was_box) && polyclip::intersects(&shape, &was)) || kept(&shape, &bbox)
+                    })
+                });
+            if !safe {
+                continue;
+            }
+            match to {
+                Some(cut) => tracks[i] = cut,
+                None => {
+                    gone[i] = true;
+                    break;
+                }
             }
         }
     }
@@ -2358,6 +2479,21 @@ fn said(r: &pcb::Routed) -> String {
     )
 }
 
+/// The nets that have more connections open in `now` than in `was`, in their order. By the
+/// count: a connection's ends are named by what is at them, and a via's name is its number,
+/// which is another once the copper is laid on the board again.
+fn more_open(was: &[RatLine], now: &[RatLine]) -> Vec<String> {
+    let count = |lines: &[RatLine]| {
+        let mut m: BTreeMap<String, usize> = BTreeMap::new();
+        for l in lines {
+            *m.entry(l.net.clone()).or_default() += 1;
+        }
+        m
+    };
+    let had = count(was);
+    count(now).into_iter().filter(|(n, k)| *k > had.get(n).copied().unwrap_or(0)).map(|(n, _)| n).collect()
+}
+
 /// Whether the first run has said of what is open all that a run that moves routes would
 /// (D123): it ended on its own having taken no net out and moved none aside, `moved_none`,
 /// no run since was stopped, and every net that the board has `open` is one that a run's
@@ -2467,8 +2603,13 @@ pub(crate) fn route(
     }
 
     // The run, under the hooks and the budgets.
-    let deadline = opts.budget.map(|b| start + b.mul_f64(FIRST_SHARE));
     let mut gopts = options(p, opts, &slots);
+    // The first run's share of the budget: more where it has the native router's rounds in
+    // guide, and guide ends a board that it gives those up on where the run without them
+    // would end ([`FIRST_SHARE_ROUNDS`]).
+    let first_share = first_share(gopts.rounds);
+    gopts.given_up_share = FIRST_SHARE / first_share;
+    let deadline = opts.budget.map(|b| start + b.mul_f64(first_share));
     gopts.work_budget = opts.work.left();
     // Whether the board has guide's own rounds: asked for, or because the native router's
     // gave it up.
@@ -3286,8 +3427,6 @@ pub(crate) fn route(
                     break;
                 }
                 let was = open(&fitems, &fisl);
-                let had: BTreeSet<(&str, &str, &str)> =
-                    was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
                 let gone_t: BTreeSet<u64> = rooms.iter().flat_map(|r| r.tracks.iter().copied()).collect();
                 let gone_v: BTreeSet<u64> = rooms.iter().flat_map(|r| r.vias.iter().copied()).collect();
                 let moving: BTreeSet<String> = rooms.iter().flat_map(|r| r.nets.iter().cloned()).collect();
@@ -3383,11 +3522,13 @@ pub(crate) fn route(
                 let items2 = geo::copper_items(&proj2);
                 let isl2 = geo::islands(&items2);
                 let now = open(&items2, &isl2);
-                let mut failed: BTreeSet<String> = now
-                    .iter()
-                    .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
-                    .map(|l| l.net.clone())
-                    .collect();
+                // The nets that did not come back whole: those with more open than they had.
+                // By the count and not by the lines' ends: an end that is a via has its number
+                // for a name, and the copper of a try is numbered anew (D133; tinytapeout-demo,
+                // one order: a try that left no pad without a spoke for one, and the one
+                // connection open that the board had, was not kept for that connection's
+                // via, and the board left with the pad).
+                let mut failed: BTreeSet<String> = more_open(&was, &now).into_iter().collect();
                 failed.extend(reasons.keys().filter(|n| !drc_reason.contains_key(*n)).cloned());
                 let relief2 = reliefs(&proj2, &items2, &poured);
                 let clean = removed == stats.drc_removed && failed.is_empty() && now.len() <= was.len();
@@ -3418,7 +3559,6 @@ pub(crate) fn route(
                     ),
                 );
                 if kept {
-                    drop(had);
                     (tracks, vias, proj, fitems, fisl) = (tracks2, vias2, proj2, items2, isl2);
                     relief = relief2;
                     rooms = rooms_of(&proj, &fitems, &tracks, &vias, &relief);
@@ -3439,6 +3579,76 @@ pub(crate) fn route(
                     break;
                 }
             }
+        }
+    }
+    // The tracks end where they are inside their pads, as the native router's do: before the
+    // report, which is of the board as it leaves, and kept only if that board, filled, has no
+    // net with more open than it had ([`pad_ends`] leaves nothing apart that it can tell of;
+    // the fill round the shorter tracks is another fill). Until D133 this was done after the
+    // report, on the tracks alone: lumenpnp-mobo left with two pads apart in every order and
+    // lumenpnp-ringlight with one, corne-cherry with 5 to 8 connections open more than its
+    // report said, and the report said none of them. With the time of that fill, or the tracks
+    // stay as they are.
+    {
+        let mut keep: BTreeSet<&str> = BTreeSet::new();
+        let nets_of = ad.design.pairs.iter().flat_map(|d| [d.positive, d.negative]);
+        for n in nets_of.chain(ad.design.lengths.iter().flat_map(|l| l.nets.iter().copied())) {
+            if let Some(name) = ad.nets.get(n.index()) {
+                keep.insert(name.as_str());
+            }
+        }
+        let was = open(&fitems, &fisl);
+        // The nets whose tracks stay as they are: none at first, then those that a board with
+        // them shorter has more open of.
+        let mut held: BTreeSet<String> = BTreeSet::new();
+        for _ in 0..PAD_END_AGAIN {
+            let in_time = opts.budget.is_none_or(|b| Instant::now() + fill + REPORT / 2 < start + b);
+            if !in_time {
+                (hooks.progress)(0, None, "guide: no time to end the tracks inside their pads, left as they are");
+                break;
+            }
+            let mut cut = tracks.clone();
+            let mut all = keep.clone();
+            all.extend(held.iter().map(String::as_str));
+            let off = pad_ends(&proj, &mut cut, &fitems, &all);
+            if off.0 == 0 {
+                break;
+            }
+            let mut q = p.clone();
+            for t in &mut cut {
+                t.id = q.alloc_id();
+                q.board_mut().tracks.push(t.clone());
+            }
+            let mut v2 = vias.clone();
+            for v in &mut v2 {
+                v.id = q.alloc_id();
+                q.board_mut().vias.push(v.clone());
+            }
+            let items2 = geo::copper_items(&q);
+            let isl2 = geo::islands(&items2);
+            let worse = more_open(&was, &open(&items2, &isl2));
+            if worse.is_empty() {
+                (tracks, vias, proj, fitems, fisl) = (cut, v2, q, items2, isl2);
+                (hooks.progress)(
+                    0,
+                    None,
+                    &format!(
+                        "guide: {:.1} mm of track inside the pads of its net left out{}",
+                        off.0 as f64 / 1e6,
+                        if held.is_empty() { String::new() } else { format!(", {} net(s) as they were", held.len()) }
+                    ),
+                );
+                break;
+            }
+            (hooks.progress)(
+                0,
+                None,
+                &format!(
+                    "guide: {} net(s) with more open for tracks ended inside their pads, as they were",
+                    worse.len()
+                ),
+            );
+            held.extend(worse);
         }
     }
     // The report, from the board with its zones filled again around the new copper (D80).
@@ -3603,24 +3813,6 @@ pub(crate) fn route(
     } else {
         (stats.routed as f64 * 1000.0 / stats.connections as f64).round() / 10.0
     };
-    // The tracks end where they are inside their pads, as the native router's do.
-    {
-        let mut keep: BTreeSet<&str> = BTreeSet::new();
-        let nets_of = ad.design.pairs.iter().flat_map(|d| [d.positive, d.negative]);
-        for n in nets_of.chain(ad.design.lengths.iter().flat_map(|l| l.nets.iter().copied())) {
-            if let Some(name) = ad.nets.get(n.index()) {
-                keep.insert(name.as_str());
-            }
-        }
-        let off = pad_ends(&proj, &mut tracks, &keep);
-        if off.0 > 0 {
-            (hooks.progress)(
-                0,
-                None,
-                &format!("guide: {:.1} mm of track inside the pads of its net left out", off.0 as f64 / 1e6),
-            );
-        }
-    }
     stats.tracks = tracks.len();
     stats.vias = vias.len();
     stats.length = tracks_length(&tracks);
@@ -3929,7 +4121,7 @@ mod tests {
         assert!(geo::ratsnest(&q).iter().all(|l| l.net != "SIG"));
         // Done again, nothing more comes off; a net that is kept is left as it is.
         let mut again = r.tracks.clone();
-        assert_eq!(pad_ends(&p, &mut again, &BTreeSet::new()), Nm(0));
+        assert_eq!(pad_ends(&p, &mut again, &[], &BTreeSet::new()), Nm(0));
         assert_eq!(again, r.tracks);
         // A track from a pad's centre straight out of it loses what is inside the pad, less
         // its own half width, and one that is kept loses nothing.
@@ -3939,9 +4131,9 @@ mod tests {
         (t.start, t.end, t.mid) = (pp.center, far, None);
         t.layer = pp.layers[0].clone();
         let mut kept = vec![t.clone()];
-        assert_eq!(pad_ends(&p, &mut kept, &BTreeSet::from(["SIG"])), Nm(0));
+        assert_eq!(pad_ends(&p, &mut kept, &[], &BTreeSet::from(["SIG"])), Nm(0));
         let mut cut = vec![t.clone()];
-        let off = pad_ends(&p, &mut cut, &BTreeSet::new());
+        let off = pad_ends(&p, &mut cut, &[], &BTreeSet::new());
         assert!(off.0 > 0 && cut[0].end == far && cut[0].start.y == pp.center.y, "{off:?} {cut:?}");
         assert!(cut[0].start.x.0 > pp.center.x.0 && cut[0].start.x.0 < far.x.0);
         // What is left of it still ends inside the pad.
@@ -3958,13 +4150,138 @@ mod tests {
         (beside.start, beside.end) = (Point { x: pp.center.x, y }, Point { x: far.x, y });
         assert!(!disc_in_ring(ring, turn, (pp.center.x.0, y.0), t.width.0 / 2), "its end is not inside the pad");
         let mut along = vec![beside.clone()];
-        let off = pad_ends(&p, &mut along, &BTreeSet::new());
+        let off = pad_ends(&p, &mut along, &[], &BTreeSet::new());
         assert!(off.0 > 0 && along[0].end == beside.end && along[0].start.y == y, "{off:?} {along:?}");
         assert!(disc_in_ring(ring, turn, (along[0].start.x.0, y.0), PAD_END_MARGIN), "its middle is on the pad");
         assert!(along[0].start.x.0 <= right - t.width.0 / 2 + 2_000, "{along:?} {right}");
         let was = along.clone();
-        assert_eq!(pad_ends(&p, &mut along, &BTreeSet::new()), Nm(0));
+        assert_eq!(pad_ends(&p, &mut along, &[], &BTreeSet::new()), Nm(0));
         assert_eq!(along, was);
+    }
+
+    /// A track that is the only copper between its pad and something else of its net stays as
+    /// it is, though both its ends are inside the pad (D133): a stub whose round end meets that
+    /// of another stub outside the pad, as guide joins two pads side by side (lumenpnp-mobo,
+    /// U5.21 and U5.22), and a stub that ends at the rim of a via beside the pad
+    /// (lumenpnp-ringlight, C1.2). Each went as copper on copper, and the board left with a
+    /// connection open that its report did not have.
+    #[test]
+    fn a_track_that_joins_other_copper_to_its_pad_is_not_cut() {
+        let p = project();
+        let pp = geo::placed_pads(&p).into_iter().find(|pp| pp.refdes == "R1" && pp.number == "1").expect("R1.1");
+        let net = pp.net.clone().expect("a net");
+        let layer = pp.layers[0].clone();
+        let ring = &pp.shape.outer.0;
+        let right = ring.iter().map(|q| q.x).max().expect("a ring");
+        let (cx, cy) = (pp.center.x.0, pp.center.y.0);
+        let w = 200_000;
+        let track = |a: i64, b: i64| Track {
+            id: ObjectId(0),
+            net: Some(net.clone()),
+            layer: layer.clone(),
+            width: Nm(w),
+            start: Point { x: Nm(a), y: Nm(cy) },
+            end: Point { x: Nm(b), y: Nm(cy) },
+            mid: None,
+            locked: false,
+        };
+        // A stub from the pad's middle to just inside its edge: alone, it is copper on copper.
+        let stub = track(cx, right - 2_000);
+        let mut alone = vec![stub.clone()];
+        assert!(pad_ends(&p, &mut alone, &[], &BTreeSet::new()).0 > 0);
+        assert!(alone.is_empty(), "{alone:?}");
+        // With a second stub beyond the pad whose round end meets its own and not the pad, it
+        // is what joins the two.
+        let beyond = track(right - 2_000 + w - 10_000, right + 2_000_000);
+        let pad: PolygonSet = vec![pp.shape.clone()];
+        assert!(!polyclip::intersects(&geo::track_shape(&beyond), &pad), "the second stub is off the pad");
+        assert!(polyclip::intersects(&geo::track_shape(&beyond), &geo::track_shape(&stub)));
+        let mut both = vec![stub.clone(), beyond.clone()];
+        assert_eq!(pad_ends(&p, &mut both, &[], &BTreeSet::new()), Nm(0));
+        assert_eq!(both, vec![stub.clone(), beyond.clone()]);
+        // In either order of the two.
+        let mut both = vec![beyond.clone(), stub.clone()];
+        assert_eq!(pad_ends(&p, &mut both, &[], &BTreeSet::new()), Nm(0));
+        assert_eq!(both.len(), 2);
+        // And with a via of the net at whose rim it ends, told among the board's copper.
+        let mut q = p.clone();
+        let id = q.alloc_id();
+        q.board_mut().vias.push(Via {
+            id,
+            at: Point { x: Nm(right - 2_000 + w / 2 + 300_000 - 10_000), y: Nm(cy) },
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some(net.clone()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        });
+        let items = geo::copper_items(&q);
+        let via = items.iter().find(|it| matches!(it.item, ItemRef::Via(v) if v == id)).expect("the via");
+        assert!(!polyclip::intersects(&via.shape, &pad), "the via is off the pad");
+        let mut one = vec![stub.clone()];
+        assert_eq!(pad_ends(&q, &mut one, &items, &BTreeSet::new()), Nm(0));
+        assert_eq!(one, vec![stub.clone()]);
+        // A via of another net there holds nothing.
+        q.board_mut().vias.last_mut().expect("the via").net = Some("GND".into());
+        let items = geo::copper_items(&q);
+        let mut one = vec![stub];
+        assert!(pad_ends(&q, &mut one, &items, &BTreeSet::new()).0 > 0);
+        assert!(one.is_empty());
+    }
+
+    /// A net has more open than it had by the count of its connections, whatever their ends
+    /// are named (D133): a via's name is its number, which is another on a board laid again.
+    #[test]
+    fn a_net_with_more_open_is_told_by_the_count() {
+        let line = |net: &str, from: &str, to: &str| RatLine {
+            net: net.into(),
+            from: from.into(),
+            from_at: Point::default(),
+            to: to.into(),
+            to_at: Point::default(),
+            length: Nm(0),
+        };
+        let was = [line("GND", "via#5945", "U6.81"), line("A", "R1.1", "R2.1")];
+        // The same connection with its via numbered anew is no more open.
+        assert!(more_open(&was, &[line("GND", "via#6012", "U6.81"), line("A", "R1.1", "R2.1")]).is_empty());
+        // One connection less, and one net with one more.
+        assert!(more_open(&was, &[line("A", "R1.1", "R2.1")]).is_empty());
+        let now = [line("GND", "via#6012", "U6.81"), line("GND", "C1.2", "U6.81"), line("B", "R3.1", "R4.1")];
+        assert_eq!(more_open(&was, &now), ["B".to_string(), "GND".to_string()]);
+    }
+
+    /// The first run has more of the budget where it has the native router's rounds in guide,
+    /// and guide is told what a board that it gives them up on is to have of that (D133).
+    #[test]
+    fn the_first_run_s_share_with_the_native_router_s_rounds() {
+        assert_eq!(first_share(pcb::Rounds::Own), FIRST_SHARE);
+        assert_eq!(first_share(pcb::Rounds::Native), FIRST_SHARE_ROUNDS);
+        // A run with no budget asks for guide's own rounds whatever the board.
+        let g = options(&project(), &RouteOptions::default(), &[0, 1, 2, 3]);
+        assert_eq!(g.rounds, pcb::Rounds::Own);
+        assert_eq!(g.given_up_share, 1.0);
+    }
+
+    /// The report is of the board as it leaves (D133): what it counts open is what the board's
+    /// own count has open with the routes on it, the tracks ended inside their pads among them.
+    #[test]
+    fn the_report_counts_what_the_board_that_leaves_has_open() {
+        let p = project();
+        let r = route(&p, &Scope::All, &RouteOptions::default(), &Hooks::none()).expect("route");
+        let mut q = p.clone();
+        for t in &r.tracks {
+            let mut t = t.clone();
+            t.id = q.alloc_id();
+            q.board_mut().tracks.push(t);
+        }
+        for v in &r.vias {
+            let mut v = v.clone();
+            v.id = q.alloc_id();
+            q.board_mut().vias.push(v);
+        }
+        assert!(!r.tracks.is_empty());
+        assert_eq!(geo::ratsnest(&q).len(), r.stats.failed, "{:?}", r.connections);
     }
 
     /// A track wider than a pad of its net is laid at the pad's shorter side where it meets

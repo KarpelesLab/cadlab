@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,34 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.37* (D133). The report is of the board that leaves: the tracks are ended inside the pads of their
+  net before it is made, not after, the board is filled once more, and a net with more open on it for that has
+  its tracks back as they were. A track is cut or taken out there only if whatever of its net touches it,
+  among the copper of the board and the other tracks, touches what is left of it or the pad (`pad_ends`): two
+  stubs out of two pads side by side whose round ends meet between them, and a stub that ends at the rim of a
+  via beside its pad, went as copper on copper, and lumenpnp-mobo left with two pads apart in every order,
+  lumenpnp-ringlight with one, corne-cherry with 5 to 8 connections open more than its report said. Over 60
+  runs at 60 s and 43 at budgets of nodes the router's count is now the DRC's in every one, and the tables
+  count open by the DRC for both routers. A try of the step that moves routes out of the rooms of spokes is
+  judged by the count of each net's open connections, not by the names of their ends, which are other names
+  once a via is numbered anew (tinytapeout-demo: a pad left with no spoke for it in one run). In guide, a
+  point that stays shared in the stage's rounds costs 2 more in each round that it was, for this router's 0.5
+  (the rounds of tinytapeout-demo reach their end in 119 million nodes in the mean of eight orders for 167,
+  where a run at 60 s has some 150); the stage's pass for fewer vias has three tenths of the time that the run
+  has left where the rounds' share ended them (it saved nothing in six runs of eight, and saves 23 to 51 vias
+  where it runs); the maps that guide's look at the board makes are the stage's where the board is the one
+  looked at (0.72 s on tinytapeout-demo); and the first run has 0.78 of the budget where the stage is asked
+  for, for 0.7 (`FIRST_SHARE_ROUNDS`), a board that guide gives up having what it had
+  (`RouteOptions::given_up_share`). At 60 s in the same minutes tinytapeout-demo has 282.5 vias for 300.5 and
+  3 connections open in eight orders for 10, with 4856 mm of track for 4780 (guide's own rounds 288.5 vias and
+  5045 mm, this router 273 and 4894 mm); buspirate5-rev10 ends in 16 to 17 s for 18 to 25 s. Beside this
+  router in the same minutes, of 72 cells 36 are better, 27 equal and 9 worse, for 34, 27, 1 that overlaps and
+  10 in D132's runs counted the same way: tinytapeout-demo's connections open and buspirate5-rev10's time are
+  a class better, corne-cherry's and lumenpnp-ringlight's connections open are no longer worse, and
+  tinytapeout-demo's track is equal for better and its track outside the pads worse for equal, the price of
+  its vias. Measured and not changed: the time of nrfmicro (one order of four takes 21 s in its first run,
+  closing its last connections) and of corne-cherry (a first run of 26 to 43 s and a run that moves routes
+  after it); two rules for the latter were built and are not in the adapter, one of which lost connections.
 - *guide 0.0.36* (D132), and the adapter asks for that stage in a run with a budget on a board of more than
   two copper layers (`rounds_for`). guide looks at the board before it plans anything for the stage but its
   ways out (`rounds::look`): the connections that have no way on the stage's grid whatever the other nets do,
