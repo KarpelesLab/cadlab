@@ -474,17 +474,20 @@ fn costs(effort: Effort) -> Costs {
 /// Routes the connections in `scope`. The project is not modified. Differential pairs whose
 /// two nets are in scope are routed first, coupled (unless `opts.pairs` is `Some(false)`).
 pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>) -> Result<RouteResult, RouteError> {
-    let mut r = if opts.search == Some(SearchKind::Guide) {
-        guide::route(p, scope, opts, hooks)?
-    } else {
-        let before = opts.work.used();
-        let mut r = route_phases(p, scope, opts, hooks)?;
-        r.stats.work = opts.work.used().saturating_sub(before);
-        r
-    };
-    // A track enters a pad no wider than the pad (D121): either router's, unless a run is asked
-    // for no track under its net's width (`neck: false`).
-    if opts.neck != Some(false) && guide::neck_at_pads(p, &mut r.tracks) > 0 {
+    // The adapter lays its tracks no wider than their pads itself, before its report (D140).
+    if opts.search == Some(SearchKind::Guide) {
+        return guide::route(p, scope, opts, hooks);
+    }
+    let before = opts.work.used();
+    let mut r = route_phases(p, scope, opts, hooks)?;
+    r.stats.work = opts.work.used().saturating_sub(before);
+    // A track enters a pad no wider than the pad (D121), unless a run is asked for no track
+    // under its net's width (`neck: false`). After the run's count of what it joined, and
+    // unable to part any of it: no track is narrowed that then no longer touches a pad, a
+    // via or a track of its net that it touched (`guide::keep_joined`, D140).
+    if opts.neck != Some(false)
+        && guide::neck_at_pads(p, &mut r.tracks, &r.vias, &std::collections::BTreeSet::new()) > 0
+    {
         r.stats.tracks = r.tracks.len();
     }
     Ok(r)

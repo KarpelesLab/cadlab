@@ -419,6 +419,20 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D139 (D140, the same direction, not met): guide 0.0.44, with polyclip 0.0.7. `neck_at_pads` leaves no
+      track narrower that then no longer touches what it touched of its net, and this adapter narrows before its
+      report (a track that reached its pad by its round end alone left 5 µm short of it with a report that had it
+      joined). guide's two things of D139 are released behind options and asked for here: the stairs laid straight
+      in a last run of its own, after every step that moves a route (2 to 6 % of the tracks of the nets both builds
+      complete, the connections and the pads short of two spokes the same in 28 of 28 pairs of runs), and the nets
+      round a pad that the routes shut in laid another way for its stub, the nets that the stub's cheapest way
+      across the routes runs into first (tinytapeout-demo over sixteen orders in six sets: 31 connections open for
+      58, fewer in every set). Beside the native router 36 cells better, 28 equal, none overlapping and 8 worse of
+      72 for master's 35, 30, none and 7 in the same minutes (tinytapeout-demo's vias, at the script's edge, by the
+      runs), and 4 to 10 % fewer tracks than master's on the nets both routers complete. Open: the eight cells
+      (corne-cherry's time; tinytapeout-demo's vias and track outside the pads; the two glasgows' track, and
+      glasgow-revD1's vias, which are the nets that only guide completes); tinytapeout-demo's thirteenth order; the
+      last run on a board whose pours its tracks cut, and its time in stages of guide that have nothing to do.
       Since D138 (D139, the same direction, not met): guide stays 0.0.42. `board::zones` keeps the stages of a zone
       layer's fill from one fill to the next (the zone's area on the board, the pour before its islands are told,
       the empty fills, the parts grown as keep-aways): the fills of a run are 13 to 58 % cheaper by board and the

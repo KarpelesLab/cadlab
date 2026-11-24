@@ -497,9 +497,9 @@ dependencies = [
 
 [[package]]
 name = "guide"
-version = "0.0.42"
+version = "0.0.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e3a08b1fd206222983a0aede214fe8b64b236f9e5f48e72d3b0b70b58849647"
+checksum = "1590b2e610109ead7827100c289ec39fe03ef7b6fc66e9ee71462d4ae12aef03"
 dependencies = [
  "polyclip",
 ]
@@ -777,9 +777,9 @@ dependencies = [
 
 [[package]]
 name = "polyclip"
-version = "0.0.6"
+version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec124e3c6f2ae3d261d3017c988554f89d1df05fcf7cf24a31a0a51cf12ddac3"
+checksum = "fab7eb1e29847957fb43d612db2fc26258b0e0672f5620f244f0efe538a00344"
 dependencies = [
  "libm",
  "rayon",

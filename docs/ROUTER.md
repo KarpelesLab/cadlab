@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -992,7 +992,12 @@ exports and the count all read cadlab's fill). The result is then treated as the
   (the pad's shorter side as `drc.solid_pad` measures it, `zones::short_side`, to the micrometre under it, and
   never under `min_track_width`) is cut where its middle line comes within half its width and 25 µm of the pad,
   and laid at the pad's width from there to its end in the pad, along the same line. The copper laid is inside
-  the copper that was there and the ends are where they were: the same connections, no clearance nearer. The
+  the copper that was there, so no clearance is nearer, and whatever the track touched of its net it touches
+  still (`keep_joined`, D140): a narrower track has a smaller round end, and one that reached a pad, a via or
+  another track by its round end or its side alone has its narrow end made longer by half of what the width
+  lost, inside the copper that was there, or stays as wide as it was. The adapter narrows its tracks before its
+  report, with the step that ends them inside their pads; the native router's are narrowed after its count,
+  which nothing of this can change. The
   25 µm are the 10 µm band in which a pad's joints are read, as much again for what the band and the track are
   drawn outside their true shapes, and 5 µm. Not with `neck: false`, not for arcs, and a pad narrower than the
   minimum track is still met by a track wider than itself.
@@ -1027,7 +1032,31 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
-- *Built in guide and not released* (D139; guide's pull request 85, on 0.0.42, which this crate stays at). Two
+- *guide 0.0.43 and 0.0.44* (D140): D139's two things released behind options, off by default (a run of guide
+  with none asked for is 0.0.42's, 41 of 41 runs at budgets of nodes), with polyclip 0.0.7, and this adapter asks
+  for both.
+  *The last run* (`route`, "The stairs laid straight"): after every step that moves a route, guide has every
+  route back with nothing to route, no right to take a net out and nothing planned, and lays the stairs straight
+  (`straighten`); a net that it cannot take back whole stays as it is (`leave_given`), a track that this
+  router's rounds ended at the first copper of a pad is taken to where guide joins the pad first, and the ends
+  are aimed at the pads' copper again once the stairs are laid (0.0.44: pulled tight they were at the centres,
+  and nrfmicro had a millimetre more outside its pads). No net with a zone is handed over, and nothing that guide
+  returns of a net it did not take back is taken: this run routes nothing. Kept if the
+  check takes nothing out, no net has more open and no pad is worse off for its relief, a pad that a fill newly
+  reaches with no room for a spoke among them; the nets with new tracks near what is worse have their old routes
+  back, three tries at most. Its time (half a second, three times what the first run needed after it and a
+  fill) is kept from every run and step between the first run and it. Seven boards in four orders with it and
+  without: 2 to 6 % of the tracks of the nets both complete, the connections open and the pads short of two
+  spokes the same in 28 of 28 pairs, 2 to 5 s more. Before the steps that take the needless copper out it took
+  more tracks out and cost the step for the spokes a try on three boards; never before the run that moves every
+  route (D139). *The nets round a pad shut in* (`open_shut` in every run): guide's step now takes out first the
+  nets that the stub's cheapest way across the routes runs into; tinytapeout-demo over sixteen orders in six
+  sets side by side with the same build without it has 31 connections open for 58, fewer in every set, and the
+  eleven other boards are as they were. Beside this router in the same minutes: 36 cells better, 28 equal and 8
+  worse of 72, D139's eight, with 4 to 10 % fewer tracks than master's build on the nets both routers complete
+  (glasgow-revC3 7479 for 8274 against this router's 7063, tinytapeout-demo 7021 for 7330 against 7258), no run
+  of 60 with a count other than the DRC's and no pad without a spoke.
+- *Built in guide and not released* (D139; guide's pull request 85, on 0.0.42, which this crate stayed at). Two
   things, each measured behind this adapter. *The nets round a pad shut in* (`pcb::shut`): a pad that the routes cut
   off its fill and that the stubs have no way for among the routes as they are has the nets with copper within
   1.2 mm of it taken out, one and then two together, the stub laid and those nets routed again round it, by a search
