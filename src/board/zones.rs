@@ -1220,8 +1220,8 @@ pub fn fill_zones(p: &Project, base: &[CopperItem]) -> Vec<ZoneFill> {
     fills
 }
 
-/// Forgets the fills and the reliefs kept in process by [`fill_zones`] (benchmarks measure cold
-/// runs with it).
+/// Forgets the fills and the reliefs kept in process by [`fill_zones`], and the parts of offsets
+/// that `geom::poly` keeps (benchmarks measure cold runs with it).
 pub fn clear_fill_cache() {
     if let Ok(mut m) = MEMO.lock() {
         m.clear();
@@ -1236,6 +1236,7 @@ pub fn clear_fill_cache() {
         *m = None;
     }
     super::thermal::clear_joint_cache();
+    crate::geom::poly::offset_memo().clear();
 }
 
 /// [`fill_zones`] for a board that is looked at once and not again (the pours as they would

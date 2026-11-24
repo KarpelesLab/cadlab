@@ -2,7 +2,8 @@
 //!
 //! This module is the single boundary between cadlab and the polygon library (`polyclip`).
 //! The rest of cadlab uses the types here; polygon operations go through [`poly`], which
-//! re-exports `polyclip`. Its integer coordinates are nanometers.
+//! re-exports `polyclip`, with its offsets taken through one memo for the process (D141).
+//! Its integer coordinates are nanometers.
 
 use std::borrow::Cow;
 use std::ops::{Add, Neg, Sub};
@@ -13,7 +14,42 @@ use serde::{Deserialize, Serialize};
 use crate::units::{Angle, Nm};
 
 /// Polygon geometry (booleans, offsets, arcs, queries). Coordinates are nanometers.
-pub use polyclip as poly;
+///
+/// This is `polyclip`, with [`offset`](poly::offset) and [`opening`](poly::opening) taken
+/// through a memo that the process keeps (D141): `polyclip` computes the parts of an offset
+/// that cannot meet each other one by one, and the memo holds what each gave, so that the
+/// pour of a zone filled again after a few tracks moved only has the parts that changed
+/// computed. The polygons returned are those of `polyclip`'s own `offset` and `opening`,
+/// vertex by vertex, whatever the memo holds.
+pub mod poly {
+    pub use polyclip::*;
+
+    use std::sync::LazyLock;
+
+    /// Bytes that the memo of offsets may hold: the openings of a routing run of the three
+    /// largest boards of the corpus keep 25 to 66 MiB of parts, and half of that finds
+    /// nearly as many.
+    const OFFSET_MEMO_BYTES: usize = 64 << 20;
+
+    static OFFSET_MEMO: LazyLock<Memo> = LazyLock::new(|| Memo::new(OFFSET_MEMO_BYTES));
+
+    /// The memo that [`offset`] and [`opening`] keep their parts in: what it holds
+    /// ([`Memo::stats`]), and [`Memo::clear`] to give its memory back.
+    pub fn offset_memo() -> &'static Memo {
+        &OFFSET_MEMO
+    }
+
+    /// `polyclip::offset`: the region grown (or shrunk, for a negative `delta`) by `delta`.
+    pub fn offset(input: &(impl RingSource + ?Sized), delta: i64, join: Join, tol: ArcTol) -> Result<PolygonSet> {
+        OFFSET_MEMO.offset(input, delta, join, tol)
+    }
+
+    /// `polyclip::opening`: the region shrunk by `d`, then grown by `d`, with round joins
+    /// (what is narrower than `2 d` goes).
+    pub fn opening(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Result<PolygonSet> {
+        OFFSET_MEMO.opening(input, d, tol)
+    }
+}
 
 pub mod rtree;
 pub use rtree::RTree;

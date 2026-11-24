@@ -174,7 +174,7 @@ let gerber_regions: Vec<Ring> = fill.polygons().map(fracture).collect();
 if distance_less_than(&track_a, &pad_b, rules.clearance) { /* DRC violation */ }
 ```
 
-## 8. Wishlist from cadlab (measured, D42; done in 0.0.5–0.0.6)
+## 8. Wishlist from cadlab (measured, D42; done in 0.0.5–0.0.6; the opening again in 0.0.7, D141)
 
 **Status:** `polyclip` 0.0.5 and 0.0.6 implemented items 1–4 below. Same reproduction, same machine:
 
@@ -190,6 +190,19 @@ The synthetic board's cold zone fill went from 1.0 s to ~150 ms with cadlab's ou
 a set of overlapping rings in canonical order is offset without being merged first (valid output, but it can
 round a few nanometers differently from offsetting the merged region). cadlab unions its obstacle groups
 before growing them so its fills do not depend on that. Item 5 (incremental `ZoneFill`) remains open.
+
+**0.0.7 (D141):** what was left of a refilled zone layer was `opening` (D139: 8.8 s of cynthion's 19.2 s of
+fills). Its time is the union of the raw offset curves (92 %; the curves themselves 5 %), 5.6 raw edges for a vertex
+of input, because the input carries edges of a few nanometres at most former vertices and the grow goes through the
+vertex at each. 0.0.7 computes less of that union and returns the same polygons: rings are in one cluster when their
+edges come within three units of each other (not their boxes within one; no more unions in one piece for want of
+budget), clusters that are another cluster moved are computed once, and a `Memo` keeps the results of clusters from
+one call to the next. `cadlab::geom::poly::offset` and `opening` go through one memo of 64 MiB for the process. On
+the openings recorded from cynthion's fills (391 calls, 3.3 M vertices): 8.3 s with 0.0.6, 5.7 s with 0.0.7, 3.6 s
+with the memo; the opening of the table above (the pour of `tests/common/bigboard.rs`, one footprint many times
+over), measured on another machine than the table: 614 ms with 0.0.6, 104 ms with 0.0.7. Open, and a change of the output: at a concave vertex the offset edges joined at their intersection
+wherever the trim fits the adjacent edges whole (0.0.6: half of each) takes another 15 % of the opening; and the
+edges of a few nanometres not left in the output at all.
 
 The original measurements and requests follow.
 

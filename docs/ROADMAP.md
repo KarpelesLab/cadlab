@@ -433,6 +433,12 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       (corne-cherry's time; tinytapeout-demo's vias and track outside the pads; the two glasgows' track, and
       glasgow-revD1's vias, which are the nets that only guide completes); tinytapeout-demo's thirteenth order; the
       last run on a board whose pours its tracks cut, and its time in stages of guide that have nothing to do.
+      The fills since D139 (D141): polyclip 0.0.7, whose offsets compute the union of their raw curves only where
+      it is not one already computed (clusters by the distance of their edges, a cluster that is another one moved
+      computed once, a memo of the results of clusters that `geom` holds for the process): the fills of a run 12 to
+      51 % cheaper by board (cynthion 17.4 s for 9.2 s on one thread) and the same to the nanometre on the eleven
+      boards with zones. Open: the edges of a few nanometres that offsets leave, and the trim at concave vertices
+      (another 15 % of an opening, a change of the output).
       Since D138 (D139, the same direction, not met): guide stays 0.0.42. `board::zones` keeps the stages of a zone
       layer's fill from one fill to the next (the zone's area on the board, the pour before its islands are told,
       the empty fills, the parts grown as keep-aways): the fills of a run are 13 to 58 % cheaper by board and the

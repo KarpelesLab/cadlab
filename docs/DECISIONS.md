@@ -11739,3 +11739,100 @@ threads at 60 s; the stub's way across the routes apart from the step it is in; 
 `keep_joined` beside those without. The native router's count is its own search's and not the board's: it is the
 DRC's or more in every one of its 52 runs here (more in 17, as in 16 of D139's 52), never fewer, before the
 narrowing as after.
+
+### D141. polyclip 0.0.7 adopted: the union inside an offset computed where it is not one already computed (clusters by the distance of their edges, a cluster that is another one moved computed once, the results of clusters kept from one call to the next in a memo that `geom` holds); the fills of a run 12 to 51 % cheaper by board and the same to the nanometre (2026-11-25)
+D139 left a refilled zone layer's time in polyclip's offset with round joins: on cynthion, of 19.2 s of fills with
+the layers one after another, 8.8 s were the opening (shrink by half the minimum width, then grow), 391 calls with
+3.29 million vertices of input, 2.7 us a vertex, ten times a boolean of the same size. **polyclip 0.0.7 returns the
+same polygons from less work, and `cadlab::geom::poly` takes `offset` and `opening` through one memo of 64 MiB that
+the process keeps. The fills of a run of guide are 12 to 51 % cheaper by board on one thread (cynthion 17.4 s for
+9.2 s, glasgow-revD1 8.0 s for 6.2 s, tinytapeout-demo 7.8 s for 5.2 s) and the same to the nanometre on the eleven
+boards with zones. Nothing else changes: the routes, the reports and every output are as they were.**
+**Where the time was** (polyclip 0.0.6, one thread, callgrind and timers on the openings recorded from the fills of
+cynthion, glasgow-revD1 and tinytapeout-demo; polyclip's `examples/offset_bench.rs` replays them).
+- The union of the raw offset curves is 92 % of an offset and building the curves 5 % (the arcs of the joins among
+  them). Inside the union nothing stands out: noding 46 %, merging the fragments 13 to 17 %, the sweep 9 to 11 %,
+  assembly 7 %, no function over 10 %.
+- The union is large: 5.6 raw edges for a vertex of input (18.6 million for cynthion's 3.29 million). The fills
+  carry edges of 1 to 8 nm with turns of 0.3 to 1.5 rad at most former vertices, what the union of an earlier offset
+  left of its loops, and a shrink leaves three vertices for one at a round join (the first and the last a nanometre
+  off the line). At each of these the grow goes through the vertex, a loop of two spokes as long as the offset: on
+  one opening of glasgow-revD1, 44 902 of 143 512 vertices, 345 758 raw edges for 128 813 vertices returned.
+- So almost every ring of the grow crosses itself and is noded whole: on cynthion, lone rings noded were 43 % of the
+  raw edges and 49 % of the time (0.48 us an edge), clusters of several rings a third of both, unions in one piece 11 %
+  and 14 % (polyclip's search for clusters out of its budget, the outer ring of a pour compared whole with every
+  hole), lone simple rings passed through 12 % of the edges and nothing of the time.
+- What the brief asked to try was there already in 0.0.6: one union for all the rings of an offset, simple rings
+  passed through without noding, raw curves and clusters on the threads of rayon.
+**What 0.0.7 does** (polyclip's pull requests 7 and 9; no change of a vertex of any result).
+- *Clusters by the distance of their edges.* Rings are in one cluster when some of their edges come within three
+  units of each other (snap rounding relates nothing farther apart than 2.4), not when the boxes of their edges
+  come within one, and they are found by a descent of a tree of boxes over each ring. The unions in one piece for
+  want of budget go from 1.9 million edges to 0.05 million on cynthion's openings. (The first form of it, one box
+  for every sixteen edges, made a board outline of four edges one box over the whole board, and the pour of
+  polyclip's own bench, `tests/common/bigboard.rs`'s, slower than with 0.0.6: 730 ms for 620 ms. A ring of few edges
+  now has a box for each, and that opening takes 110 ms, the pour being one footprint many times over.)
+- *A cluster that is an earlier one of the same union moved is computed once* (the same edges relative to their
+  first vertex, by a hash and then compared): 56 % of the edges of cynthion's lone rings that have to be noded, 49 %
+  on glasgow-revD1, 27 % on tinytapeout-demo (the same pad or via at another place).
+- *`Memo`*: the results of clusters kept from one operation to the next, by their exact edges up to a translation,
+  the winding of the other rings around them, the fill rules and the operation. 80 % of the edges of cynthion's lone
+  noded rings are in a ring that an earlier opening had, 32 % of those of its clusters of several rings.
+**What changes in cadlab**: `Cargo.toml` and `Cargo.lock` (polyclip 0.0.7, one version, guide's being ours), and
+`cadlab::geom::poly`, which is polyclip with `offset` and `opening` taken through one memo for the process
+(`poly::offset_memo`, 64 MiB; the recorded openings of cynthion hold 52 MiB of it, glasgow-revD1's 25, tinytapeout-demo's 38, and
+with 32 MiB cynthion's openings find 11 783 results for 11 799). `board::zones` and the router are not touched:
+they call `poly::offset` and `poly::opening` as before. `zones::clear_fill_cache` does not empty this memo, which
+holds nothing a fill depends on.
+**Measured.** polyclip's bench on the recorded openings, best of 3, the load 6.8 to 8.2 (ms):
+
+| openings of | 0.0.6 | 0.0.7 | 0.0.7 with the memo | 0.0.6, rayon on 4 | 0.0.7, rayon on 4 | with the memo |
+|---|---|---|---|---|---|---|
+| cynthion (391 calls, 3.29 M vertices) | 8267 | 5664 | 3602 | 3512 | 2619 | 1921 |
+| glasgow-revD1 (19, 0.78 M) | 2297 | 1677 | 1230 | 1037 | 646 | 581 |
+| tinytapeout-demo (51, 1.46 M) | 3635 | 3079 | 1742 | 1779 | 1434 | 936 |
+| the GND pour of `tests/common/bigboard.rs` (1, 0.24 M) | 614 | 104 | 104 | 192 | 61 | 66 |
+
+  The fills of a run of guide (40 million nodes, one thread, the build before and the build after side by side, four
+  runs at a time, the load 7.8 to 10.0; the wall time of every `fill_zones` of the run):
+
+| board | fills in the run | before | after | the run before | after |
+|---|---|---|---|---|---|
+| cynthion | 15 | 17.44 s | 9.24 s | 50.8 s | 41.7 s |
+| lumenpnp-mobo | 11 | 10.57 s | 5.99 s | 44.8 s | 39.7 s |
+| glasgow-revD1 | 8 | 8.04 s | 6.22 s | 56.7 s | 54.4 s |
+| tinytapeout-demo | 14 | 7.77 s | 5.16 s | 66.2 s | 62.0 s |
+| buspirate5-rev10 | 13 | 5.13 s | 3.68 s | 21.4 s | 19.3 s |
+| sweep-v2.2 | 12 | 2.44 s | 1.34 s | 39.6 s | 37.5 s |
+| glasgow-revC3 | 8 | 2.14 s | 1.05 s | 55.4 s | 54.2 s |
+| corne-cherry | 8 | 1.24 s | 0.95 s | 36.1 s | 35.1 s |
+| buspirate-flash-sop | 8 | 0.36 s | 0.23 s | 1.0 s | 0.8 s |
+| lumenpnp-ringlight | 16 | 0.33 s | 0.29 s | 0.7 s | 0.7 s |
+| buspirate-rs232 | 4 | 0.32 s | 0.20 s | 0.8 s | 0.7 s |
+
+  (nrfmicro has no zone.) On three threads, one run at a time (the load 7.2 to 10.0): cynthion's fills 7.34 s for
+  4.17 s of a run of 38.8 s for 35.1 s, tinytapeout-demo 3.57 s for 2.45 s, glasgow-revD1 4.07 s for 2.89 s.
+  *The same to the nanometre*: every fill of every one of those runs written out, every vertex in order, from the
+  build before and the build after, and the sha256 of the two compared: identical on the eleven boards with zones on
+  one thread and on the three boards on three threads (the sums are those of D139's runs). In polyclip: the hash of
+  every vertex of every shrink and opening of the recorded calls is unchanged, without rayon and with it on one and
+  four threads, with and without a memo; every result that is reused was also computed and compared on all three
+  boards; its tests compare clusters with the computation in one piece.
+**Tried and not kept.**
+- *The offset edges of a concave vertex joined at their intersection wherever the trim fits the adjacent edges
+  whole* (0.0.6 asks for half of each, which a round join grown back by what it was shrunk by never meets). It
+  changes the output (other vertices within a nanometre or two), so it is not in 0.0.7. Measured on the recorded
+  openings: cynthion 8212 ms for 7056 ms on 0.0.6 (the grow 6375 for 5168), 5641 for 4793 on 0.0.7, 3518 for 2992
+  with the memo; glasgow-revD1 2299 for 1841, 1666 for 1373, 1248 for 1009.
+- *A shortcut for the loops through the vertices* (the ear cut where the curve passes the same point twice): the two
+  ends of a loop are the same point at 3.6 % of the vertices gone through, within 3 nm of each other at 18 % and
+  apart at 79 % (the loops of the edges of a few nanometres); not built.
+- *Integer tables for the arcs, buffers kept between rings*: the raw curves are 5 % of an offset (12 % of what is
+  left with the memo), and their rounding is by the place, so they are not kept either.
+**Open.** What is left of cynthion's openings with the memo (3.5 s): lone rings noded 1.16 s and clusters of several
+rings 1.32 s (rings not seen before), the raw curves 0.42 s, finding the clusters and their windings 0.25 s. The
+edges of a few nanometres that offsets leave in their output are the cost of the next offset; not leaving them is a
+change of every fill (to be decided with the trim above). `board::zones` could give its booleans the same memo.
+*Not measured:* the generated boards; freerouting; KiCad's DRC; cadlab's oracles and its whole test suite (run at
+the merge); the fills at 60 s deadlines; more than three threads. Checked on this commit: formatting, clippy with
+every target and feature, rustdoc, the tests of `geom`, `board::zones`, `zone_refill` and `thermal_relief`.
