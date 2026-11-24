@@ -419,6 +419,21 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D134 (D135, the same direction, not met): guide 0.0.39, speed with no result changed. A profile of the
+      minute put 31 % of glasgow-revD1's processor time in the question whether an end of a connection is walled in,
+      asked of 20 000 nodes in a wandering order, and a quarter of a search of guide's own rounds in its heap; the
+      first is now asked from the nodes nearest a source and the heap has four items under each with a rank and its
+      node as one number: the rounds 1.27 and 1.38 times as fast on corne-cherry and glasgow-revD1, whole runs at
+      budgets of nodes 1 to 8 % (the target was 1.5 times), each of 43 such runs as 0.0.38 has it. Measured and
+      nothing changed for it: guide's track is not longer at its pads (within 2 mm of them as much as the native
+      router's or 6 to 7 % less) but in the open, where the nets that only guide completes cost a part of it
+      (glasgow-revD1: guide on the native router's nets alone -1.8 to +3.9 % of track for +6.5 to +8.4 %); and
+      corne-cherry at a budget of 30 s has 9, 0, 3 and 6 connections open for the native router's 1, 3, 2 and 4, so
+      no end by diminishing returns. Beside the native router 34 cells better, 28 equal, 1 overlapping and 9 worse
+      of 72, for 35, 29, 1 and 7 (35, 29, none and 8 with 0.0.38 in the same minutes): lumenpnp-mobo's two by the
+      native router's own runs, tinytapeout-demo's third order with either release, and its vias at the rule's edge.
+      Open: corne-cherry's time (29 to 54 s for 20 to 32 s), the track in the open of the two glasgows and
+      tinytapeout-demo, the time of guide's passes.
       Since D133 (D134, the same direction, not met): guide 0.0.38, in which a negotiation that ended with
       one point shared is not begun again on other grids (nrfmicro's slowest order 15 s for 21 s, the board
       as it was in the two orders of eight that had such tries), and in the adapter a run that moves routes

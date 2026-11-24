@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1027,6 +1027,28 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.39* (D135). Speed with no result changed, by a profile of where the minute goes (the process's own
+  samples, `perf` not being on the machine; `callgrind` for the lines of one function). In guide's own rounds, whether
+  an end of a connection is walled in by the board's own copper was asked of 20 000 nodes in the order of a stack,
+  which wandered: 31 % of the processor time of glasgow-revD1's minute. The answer does not depend on the order, and
+  the nodes nearest a source are now asked first, 0.14 s for the 2577 answers of its first round. The heap of a search
+  has four items under each and compares a rank and its node as one number. The rounds alone are 1.27 times as fast on
+  corne-cherry and 1.38 times on glasgow-revD1 on one thread; a whole run at a budget of nodes 1 to 8 %, being guide's
+  passes, whose search was not changed; the round's target of 1.5 times is not met. At budgets of nodes each of 43
+  runs has the connections open, the vias, the track and the work of 0.0.38. At 60 s corne-cherry's orders that end on
+  their own end 5 to 6 s sooner with the board they had (29 to 54 s for 34 to 54 s, this router 20 to 32 s), and
+  glasgow-revD1 has 3 % fewer vias (+12 % beside this router for +14 %). Measured and nothing changed for it (D135 has
+  each): where the routes enter their pads, guide having as much track within 2 mm of its pads and outside them as
+  this router on glasgow-revC3 and 6 to 7 % less on tinytapeout-demo, and crossing the pads' outlines on the same
+  sides, so that what it has more of outside the pads is in the open, of which the nets that only guide completes cost
+  a part (guide routing this router's nets alone: glasgow-revD1's track -1.4 %, -1.8 %, +3.0 % and +3.9 % beside this
+  router's for +6.5 to +8.4 % with the whole board); and the board that guide returns at 20, 30 and 40 s, corne-cherry
+  having 9, 0, 3 and 6 connections open at 30 s for this router's 1, 3, 2 and 4, so that no end by diminishing returns
+  is made. Beside this router in the same minutes, of 72 cells 34 are better, 28 equal, 1 overlaps and 9 are worse,
+  for 35, 29, 1 and 7, and 35, 29, none and 8 with 0.0.38's runs of those minutes: lumenpnp-mobo's track and track
+  outside the pads by this router's own runs, guide's being the boards they were; tinytapeout-demo's third order,
+  which ends with none or three connections open with either release; and tinytapeout-demo's vias at the rule's edge,
+  +2.4 % for +1.6 %, 280.1 in the mean of 24 runs for 279.1 with 0.0.38.
 - *guide 0.0.38* (D134). In guide, a negotiation for every net that ended with one point still shared is not
   begun again on finer grids and in other orders (D121's nine tries): one point is one wire, which the passes
   lay again, and on nrfmicro the tries after it took 7 to 8 s of the two slowest orders of eight and left the
