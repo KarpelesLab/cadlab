@@ -419,6 +419,21 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D142 (D143, the same direction, not met): guide 0.0.46, the native router's rounds in guide with less
+      round each search and the same routes to the node (whether two sides can meet told by the first of each, the
+      claims of a piece on a slant made from the rows near it): tinytapeout-demo's rounds 24.1 s for 27.1 s,
+      lumenpnp-mobo's run 27 to 30 s for 30 to 34 s. The check of the last run tells the nets on the old routes of
+      those that go back by their new vias as by their new tracks, at the clearance of the nets' classes, and the
+      nets with teardrops alone are handed to that run (corne-cherry 25 to 45 tracks fewer of 2400). Built and not
+      kept: the nets of a round routed ahead of their turn on the other threads, kept where their searches read
+      nothing that changed; the same routes on one, two, three and eight threads, 29 to 39 s for 27 s. Beside the
+      native router 37 cells better, 28 equal and 7 worse of 72 for master's 36, 28 and 8 in the same minutes (36,
+      29 and 7 in the set before): tinytapeout-demo's vias and glasgow-revC3's time change sides by the runs.
+      tinytapeout-demo's thirteenth order has no connection open in five sets, its first run ended on its own in
+      the three of this build. Open: the seven cells, corne-cherry's time first (a first run of 35 s in its slowest
+      order, of which 11 s are passes on one thread); the threads of a first run (1.7 to 1.8 of three in guide's
+      rounds, one elsewhere); one connection open in three to five of tinytapeout-demo's sixteen orders; the 105
+      of corne-cherry's nets with teardrops that guide leaves as given.
       Since D141 (D142, the same direction, not met): guide 0.0.45, two options for what a last run did for nothing
       that this adapter reads (every connection that guide's own count leaves open explained by a search, 436 on
       glasgow-revD1; a search for fewer vias for the nets handed with their tracks ended short of a pad's centre,

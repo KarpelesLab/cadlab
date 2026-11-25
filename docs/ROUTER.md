@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1032,6 +1032,25 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.46* (D143): the native router's rounds in guide with less round each search, and the same routes to
+  the node: whether the two sides of a connection can meet is told by the first source and the first target of
+  its component (it was by the component of every target, 8400 a search for a net with a pour), and the claims of
+  a piece on a slant are made from the points of each row that can be near it. tinytapeout-demo's rounds take
+  24.1 s for 27.1 s, its routing at 60 s 27.7 s for 30.9 s by the medians of four orders, lumenpnp-mobo ends in
+  27 to 30 s for 30 to 34 s. *The check of the last run*: a net that has its old routes back takes with it the
+  nets whose copper laid anew, vias as tracks (`laid_anew`), is nearer those routes than the larger clearance of
+  the two nets' classes (`back_with_clashes`; it was the tracks at the board's clearance, and one run in 68 to
+  120 had 55 to 110 items taken out by the check in a second try), and a via laid anew between the two pieces of
+  a pour is told as a track is (`pour_cutters`). *The nets with teardrops alone* are handed to the last run
+  (`pour_nets`): a teardrop is copper like a track's and no pour; corne-cherry, the one board of the twelve with
+  teardrops, has 149 or 150 nets in that run for 3, guide takes back 41 to 45 of them (the others' tracks end on
+  the copper of their teardrops) and the board has 25 to 45 tracks fewer of 2400 with what else it had. *Not in
+  it*: the nets of a round of the native router's rounds routed ahead of their turn on the other threads, each
+  against a copy of the claims and kept where its searches read no point that the turns before it changed. Built
+  in guide and measured: the same board and count of nodes on one, two, three and eight threads, and the rounds
+  29 to 39 s for 27 s; 68 % of what is routed ahead stands and the time is in a few long searches. The table's
+  count: 37 cells better, 28 equal and 7 worse of 72 for master's 36, 28 and 8 in the same minutes and 36, 29 and
+  7 in the set before, by tinytapeout-demo's vias and glasgow-revC3's time, which change sides by the runs.
 - *guide 0.0.45* (D142): two options, on by default, with which a run is 0.0.44's, for what a last run did that
   this adapter has no use for. Its report explained every connection that guide's own count leaves open, by a
   search each, and with no plane planned those are every pad of a pour (glasgow-revD1: 436, 0.85 s of 1.84 s):

@@ -1603,6 +1603,91 @@ fn clash_within(old: &[CopperRun<'_>], laid: &[CopperRun<'_>], gap: i64) -> bool
     })
 }
 
+/// A track as a net had it, either way round, and a via as a net had it ([`laid_anew`]).
+type HadTrack<'a> = (Option<&'a str>, &'a str, Point, Point);
+/// See [`HadTrack`].
+type HadVia<'a> = (Option<&'a str>, Point, Nm, &'a str, &'a str);
+
+/// The tracks of the routes handed to a run as they were, either way round, and the vias.
+fn had_copper<'a>(
+    tracks: impl Iterator<Item = &'a Track>,
+    vias: impl Iterator<Item = &'a Via>,
+) -> (BTreeSet<HadTrack<'a>>, BTreeSet<HadVia<'a>>) {
+    let t = tracks
+        .flat_map(|t| {
+            [(t.net.as_deref(), t.layer.as_str(), t.start, t.end), (t.net.as_deref(), t.layer.as_str(), t.end, t.start)]
+        })
+        .collect();
+    let v = vias.map(|v| (v.net.as_deref(), v.at, v.diameter, v.from.as_str(), v.to.as_str())).collect();
+    (t, v)
+}
+
+/// Of the copper that a run handed back, what its nets did not have where it is: the tracks
+/// and the vias laid anew (D143). A via counts as a track does: the last run's search for
+/// fewer vias lays vias where there were none, and a via laid anew stands in the way of an
+/// old route as a track does.
+fn laid_anew<'a>(
+    t: &'a [Track],
+    v: &'a [Via],
+    had: &(BTreeSet<HadTrack<'_>>, BTreeSet<HadVia<'_>>),
+) -> (Vec<&'a Track>, Vec<&'a Via>) {
+    (
+        t.iter().filter(|t| !had.0.contains(&(t.net.as_deref(), t.layer.as_str(), t.start, t.end))).collect(),
+        v.iter()
+            .filter(|v| !had.1.contains(&(v.net.as_deref(), v.at, v.diameter, v.from.as_str(), v.to.as_str())))
+            .collect(),
+    )
+}
+
+/// The nets of `moved` added to `old`, the nets that have their old routes back, until none
+/// of the others has copper laid anew (`laid`, tracks and vias) where the old routes of those
+/// (`was`, the routes handed to the run) are, or nearer than the clearance of the two nets
+/// (`clear`, by net: the larger of the two counts, as in the DRC; [`clash_within`]), and so
+/// on from them: the check would take the new copper out, and what it joined with it. Until
+/// D143 by the new tracks alone and at the board's clearance: a via laid anew on the old
+/// route of a net that went back was left for the check, and so was a track beside the old
+/// route of a net of a class with more clearance than the board's (tinytapeout-demo, whose
+/// classes have 0.24 to 0.3 mm for the board's 0.2: one run of 120 had 110 items taken out
+/// in its second try, and one of 60 had 55 with the vias told).
+fn back_with_clashes(
+    old: &mut BTreeSet<String>,
+    moved: &BTreeSet<&str>,
+    was: (&[&Track], &[&Via]),
+    laid: (&[&Track], &[&Via]),
+    clear: &dyn Fn(&str) -> i64,
+) {
+    loop {
+        // By net that has its old routes back, its clearance and its old copper.
+        let back: Vec<(i64, Vec<CopperRun<'_>>)> = old
+            .iter()
+            .map(|o| {
+                let of = |net: &Option<String>| net.as_deref() == Some(o.as_str());
+                let runs =
+                    runs_of(was.0.iter().copied().filter(|t| of(&t.net)), was.1.iter().copied().filter(|v| of(&v.net)));
+                (clear(o), runs)
+            })
+            .collect();
+        let more: BTreeSet<String> = moved
+            .iter()
+            .filter(|n| !old.contains(**n))
+            .filter(|n| {
+                let mine = |net: &Option<String>| net.as_deref() == Some(**n);
+                let new = runs_of(
+                    laid.0.iter().copied().filter(|t| mine(&t.net)),
+                    laid.1.iter().copied().filter(|v| mine(&v.net)),
+                );
+                let own = clear(n);
+                !new.is_empty() && back.iter().any(|(theirs, runs)| clash_within(runs, &new, own.max(*theirs)))
+            })
+            .map(|n| (*n).to_string())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        old.extend(more);
+    }
+}
+
 /// What the pads in pours of their nets that thermal reliefs join have of their relief, by
 /// pad and layer: the necks that its copper is worth (`Joint::worth`), and how many more it
 /// is to have by the rules' `min_thermal_spokes` and what its footprint leaves room for
@@ -1943,9 +2028,19 @@ fn straight_least(after: Duration, fill: Duration) -> Duration {
     STRAIGHT_MIN + after.mul_f64(AFTER_SHARE) + fill
 }
 
-/// The nets among `laid`, tracks of this run, that part a pour (D142): for each connection of
+/// The nets with a zone that is no teardrop: those that the run which lays the stairs
+/// straight is not handed (`route`, "The stairs laid straight"). A net whose zones are all
+/// teardrops is routed by tracks as any net is.
+fn pour_nets(p: &Project) -> BTreeSet<&str> {
+    let zones = p.board().zones.iter().filter(|z| !geo::thermal::is_teardrop(z));
+    zones.filter_map(|z| z.net.as_deref()).collect()
+}
+
+/// The nets among `laid` and `laid_vias`, tracks and vias of this run, that part a pour (D142,
+/// the vias D143): for each connection of
 /// `lines`, which a pour joined and no longer does, the nets of the tracks that lie, on one
-/// layer, within their half width and `reach` of the fill of both pieces that the
+/// layer, and of the vias that lie, on any, within their half width and `reach` of the fill
+/// of both pieces that the
 /// connection's ends are now on (`items` with their islands `isl`, the board as it is filled
 /// round the new tracks). The fill of a board with a track laid another way is cut where that
 /// track is, which may be anywhere between the two ends; the ends alone tell the nets round
@@ -1955,6 +2050,7 @@ fn pour_cutters(
     isl: &[usize],
     lines: &[&RatLine],
     laid: &[&Track],
+    laid_vias: &[&Via],
     reach: &dyn Fn(&str) -> i64,
 ) -> Vec<BTreeSet<String>> {
     use super::geo::{P, seg_seg_dist};
@@ -1992,13 +2088,14 @@ fn pour_cutters(
             }
         }
         let far = reach(&l.net);
-        for t in laid {
-            let Some([a, b]) = sides.get(t.layer.as_str()) else { continue };
-            if a.is_empty() || b.is_empty() {
-                continue;
-            }
-            let (p, q) = (P::new(t.start.x.0 as f64, t.start.y.0 as f64), P::new(t.end.x.0 as f64, t.end.y.0 as f64));
-            let within = (t.width.0 / 2 + far) as f64;
+        // A track on its layer, a via on every layer of the fill.
+        let runs = laid
+            .iter()
+            .map(|t| (Some(t.layer.as_str()), t.start, t.end, t.width, &t.net))
+            .chain(laid_vias.iter().map(|v| (None, v.at, v.at, v.diameter, &v.net)));
+        for (layer, start, end, width, net) in runs {
+            let (p, q) = (P::new(start.x.0 as f64, start.y.0 as f64), P::new(end.x.0 as f64, end.y.0 as f64));
+            let within = (width.0 / 2 + far) as f64;
             let (x0, x1, y0, y1) =
                 (p.x.min(q.x) - within, p.x.max(q.x) + within, p.y.min(q.y) - within, p.y.max(q.y) + within);
             let by = |edges: &Edges| {
@@ -2010,10 +2107,11 @@ fn pour_cutters(
                         && seg_seg_dist(p, q, *c, *d) <= within
                 })
             };
-            if by(a)
-                && by(b)
-                && let Some(n) = &t.net
-            {
+            let parts = sides
+                .iter()
+                .filter(|(name, _)| layer.is_none_or(|l| l == **name))
+                .any(|(_, [a, b])| !a.is_empty() && !b.is_empty() && by(a) && by(b));
+            if parts && let Some(n) = net {
                 out.insert(n.clone());
             }
         }
@@ -3947,11 +4045,14 @@ pub(crate) fn route(
     // as long as they were, and a stretch comes no nearer a pad of another net in the room of a
     // spoke (D137's rule, in guide). Verified as any run, the board filled, and kept if the
     // check takes nothing out, no net has more open and no pad short of its spokes has fewer
-    // necks than it had; the nets whose new tracks part a pour ([`pour_cutters`], D142) and
-    // those with new copper near what else is worse have their old routes back and the rest
-    // is verified again, [`STRAIGHT_AGAIN`] times at most, each with the time of the one
-    // before. Not the nets of pairs and
-    // with a length to keep, nor after a run that a work budget stopped. A net that guide
+    // necks than it had; the nets whose new tracks or vias part a pour ([`pour_cutters`],
+    // D142) and those with new copper near what else is worse have their old routes back,
+    // with them the nets whose new tracks or vias are nearer those old routes than the
+    // clearance of the two nets ([`back_with_clashes`], D143), and the rest is verified
+    // again, [`STRAIGHT_AGAIN`] times at most, each with the time of the one before. Not
+    // the nets of pairs and with a length to keep, nor the nets with a pour (those with
+    // teardrops alone are handed over, [`pour_nets`], D143), nor after a run that a work
+    // budget stopped. A net that guide
     // cannot take back whole stays as it is (`leave_given`); a track that this router's rounds
     // in guide ended at the first copper of a pad is taken to where guide joins the pad, and
     // the ends are aimed at the pads' copper again once the stairs are laid (guide 0.0.44).
@@ -3975,12 +4076,17 @@ pub(crate) fn route(
             ad.without_unfilled();
         }
         // The routes of a net with a connection open stay where they are, as copper of the
-        // board, and so do those of a net with a zone: guide takes no route of such a net
+        // board, and so do those of a net with a pour: guide takes no route of such a net
         // back, and one that it is handed it has to route, by stubs to a plane that this
         // run does not plan or, with none, by tracks (cynthion, one order: 49 vias and
         // 386 mm of ground laid in a run that was to route nothing).
+        // A net whose zones are all teardrops is handed over as any other (D143): a teardrop
+        // is copper like a track's and no pour ([`geo::thermal::is_teardrop`]), the check
+        // after the run fills each again round the tracks as they then lie, and what the run
+        // makes of such a net is kept by the same rules.
+        let pours = pour_nets(p);
         let whole = |net: &Option<String>| {
-            net.as_deref().is_some_and(|n| !held.contains(n) && !poured.contains(n) && !was.iter().any(|l| l.net == n))
+            net.as_deref().is_some_and(|n| !held.contains(n) && !pours.contains(n) && !was.iter().any(|l| l.net == n))
         };
         let mine: BTreeSet<ObjectId> = tracks
             .iter()
@@ -3996,6 +4102,9 @@ pub(crate) fn route(
         // Nor does guide plan anything for it: no plane to tell, no crossing and no way out,
         // which are most of what a run takes before it routes (glasgow-revD1: 2.4 s, and 0.5 s
         // without).
+        // Nor for the nets with teardrops that are handed over (D143): with the planes
+        // planned guide takes back the same nets of them, to within one, and the board that
+        // leaves is the same in four orders of corne-cherry.
         g.planes = false;
         g.crossings = false;
         // Nor what is in the way of each connection that its own count leaves open: with
@@ -4046,18 +4155,16 @@ pub(crate) fn route(
         let had: BTreeSet<(&str, &str, &str)> =
             was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
         let relief_was = (!poured.is_empty()).then(|| reliefs(&proj, &fitems, &poured));
-        // The tracks as they were, either way round.
-        let had_track: BTreeSet<(Option<&str>, &str, Point, Point)> = tracks
-            .iter()
-            .filter(|t| handed.contains(&t.id))
-            .flat_map(|t| {
-                [
-                    (t.net.as_deref(), t.layer.as_str(), t.start, t.end),
-                    (t.net.as_deref(), t.layer.as_str(), t.end, t.start),
-                ]
-            })
-            .collect();
+        // The routes handed as they were, and of what came back the tracks and the vias
+        // that their nets did not have ([`laid_anew`]).
+        let was_t: Vec<&Track> = tracks.iter().filter(|t| handed.contains(&t.id)).collect();
+        let was_v: Vec<&Via> = vias.iter().filter(|v| handed.contains(&v.id)).collect();
+        let had_copper = had_copper(was_t.iter().copied(), was_v.iter().copied());
+        let (anew_t, anew_v) = laid_anew(&t, &v, &had_copper);
         let gap = p.board().rules.clearance.0.max(0);
+        // By net that guide took back, the clearance of its class where that is more.
+        let clearance_of: BTreeMap<&str, i64> =
+            moved.iter().map(|n| (*n, profile_key(p, Some(n)).clear.0.max(gap))).collect();
         for _ in 0..STRAIGHT_AGAIN {
             let new = |net: &Option<String>| net.as_deref().is_some_and(|n| moved.contains(n) && !old.contains(n));
             let (mut tracks2, mut vias2) = (tracks.clone(), vias.clone());
@@ -4067,11 +4174,7 @@ pub(crate) fn route(
             tracks2.extend(t.iter().filter(|t| new(&t.net)).cloned());
             vias2.extend(v.iter().filter(|v| new(&v.net)).cloned());
             // With no track that its net did not have, nothing was laid another way.
-            if old.is_empty()
-                && !t
-                    .iter()
-                    .any(|t| new(&t.net) && !had_track.contains(&(t.net.as_deref(), t.layer.as_str(), t.start, t.end)))
-            {
+            if old.is_empty() && !anew_t.iter().any(|t| new(&t.net)) && !anew_v.iter().any(|v| new(&v.net)) {
                 (hooks.progress)(0, None, "guide: no stairs to lay straight");
                 break;
             }
@@ -4138,18 +4241,14 @@ pub(crate) fn route(
                 .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
                 .collect();
             let cutters = {
-                let laid: Vec<&Track> = t
-                    .iter()
-                    .filter(|t| {
-                        new(&t.net) && !had_track.contains(&(t.net.as_deref(), t.layer.as_str(), t.start, t.end))
-                    })
-                    .collect();
+                let laid: Vec<&Track> = anew_t.iter().copied().filter(|t| new(&t.net)).collect();
+                let laid_v: Vec<&Via> = anew_v.iter().copied().filter(|v| new(&v.net)).collect();
                 let reach = |net: &str| {
                     let zones = p.board().zones.iter().filter(|z| z.net.as_deref() == Some(net));
                     zones.map(|z| geo::zones::zone_params(p, z).clearance.0).max().unwrap_or(0).max(gap)
                         + POUR_CUT_SLACK
                 };
-                pour_cutters(&items2, &isl2, &parted, &laid, &reach)
+                pour_cutters(&items2, &isl2, &parted, &laid, &laid_v, &reach)
             };
             if !parted.is_empty() {
                 (hooks.progress)(
@@ -4186,15 +4285,14 @@ pub(crate) fn route(
                 ends.iter().any(|e| e.x.0 >= x0 && e.x.0 <= x1 && e.y.0 >= y0 && e.y.0 <= y1)
             };
             let before = old.len();
-            // Of the new routes, the tracks that their nets did not have: a net that goes
-            // by with its tracks where they were is no part of what is worse.
+            // Of the new routes, the tracks and the vias that their nets did not have: a
+            // net that goes by with its copper where it was is no part of what is worse.
             old.extend(
-                t.iter()
-                    .filter(|t| {
-                        new(&t.net) && !had_track.contains(&(t.net.as_deref(), t.layer.as_str(), t.start, t.end))
-                    })
-                    .filter(|t| at(t.start, t.end))
+                anew_t
+                    .iter()
+                    .filter(|t| new(&t.net) && at(t.start, t.end))
                     .filter_map(|t| t.net.clone())
+                    .chain(anew_v.iter().filter(|v| new(&v.net) && at(v.at, v.at)).filter_map(|v| v.net.clone()))
                     .collect::<Vec<_>>(),
             );
             old.extend(lost.into_iter().filter(|n| moved.contains(n.as_str())).collect::<Vec<_>>());
@@ -4209,32 +4307,12 @@ pub(crate) fn route(
             if old.len() == before {
                 break;
             }
-            // And the nets whose new routes stand where the old routes of those are, or
-            // nearer than the board's clearance ([`clash_within`]), and so on from them: the check would
-            // take the new route out, and the nets it joined with it.
-            loop {
-                let of_old = |net: &Option<String>| net.as_deref().is_some_and(|n| old.contains(n));
-                let back = runs_of(
-                    tracks.iter().filter(|t| handed.contains(&t.id) && of_old(&t.net)),
-                    vias.iter().filter(|v| handed.contains(&v.id) && of_old(&v.net)),
-                );
-                let more: BTreeSet<String> = moved
-                    .iter()
-                    .filter(|n| !old.contains(**n))
-                    .filter(|n| {
-                        let mine = |net: &Option<String>| net.as_deref() == Some(**n);
-                        let laid = t.iter().filter(|t| {
-                            mine(&t.net) && !had_track.contains(&(t.net.as_deref(), t.layer.as_str(), t.start, t.end))
-                        });
-                        clash_within(&back, &runs_of(laid, std::iter::empty()), gap)
-                    })
-                    .map(|n| (*n).to_string())
-                    .collect();
-                if more.is_empty() {
-                    break;
-                }
-                old.extend(more);
-            }
+            // And the nets whose new routes, tracks and vias, stand where the old routes of
+            // those are, or nearer than the board's clearance, and so on from them
+            // ([`back_with_clashes`]).
+            back_with_clashes(&mut old, &moved, (&was_t, &was_v), (&anew_t, &anew_v), &|n| {
+                clearance_of.get(n).copied().unwrap_or(gap)
+            });
         }
     }
 
@@ -5541,12 +5619,27 @@ mod tests {
         ];
         let refs: Vec<&Track> = laid.iter().collect();
         let reach = |_: &str| 200_000 + POUR_CUT_SLACK;
-        let told = pour_cutters(&items, &isl, &[&line], &refs, &reach);
+        let told = pour_cutters(&items, &isl, &[&line], &refs, &[], &reach);
         assert_eq!(told, vec![BTreeSet::from(["CUT".to_string()])]);
+        // A via between the pieces parts them as a track does, on whatever layers it is
+        // (D143); one far from both does not.
+        let via = |net: &str, p: (i64, i64)| Via {
+            id: ObjectId(0),
+            at: at(p.0, p.1),
+            drill: Nm(200_000),
+            diameter: Nm(400_000),
+            net: Some(net.into()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        };
+        let vias = [via("VIA", (0, -2 * mm)), via("OFF", (0, 9 * mm))];
+        let told = pour_cutters(&items, &isl, &[&line], &[], &vias.iter().collect::<Vec<_>>(), &reach);
+        assert_eq!(told, vec![BTreeSet::from(["VIA".to_string()])]);
         // A connection with an end on no fill tells nothing here: the nets near its ends
         // are told as they were.
         let bare = [0, 2, 0, 1];
-        assert_eq!(pour_cutters(&items, &bare, &[&line], &refs, &reach), vec![BTreeSet::new()]);
+        assert_eq!(pour_cutters(&items, &bare, &[&line], &refs, &[], &reach), vec![BTreeSet::new()]);
     }
 
     /// What the step for the spokes laid anew is told from the old routes of a net that goes
@@ -5591,6 +5684,82 @@ mod tests {
         assert!(clash(&old, &runs_of([].iter(), [via(600_000)].iter())));
         assert!(!clash(&old, &runs_of([].iter(), [via(800_000)].iter())));
         assert!(!clash(&[], &runs_of([].iter(), [via(0)].iter())));
+    }
+
+    /// In the last run a net that has its old routes back takes with it the nets whose copper
+    /// laid anew stands on those routes, a via as a track, and so on from them; copper that a
+    /// net had where it is is not laid anew (D143).
+    #[test]
+    fn a_via_laid_anew_on_a_route_that_goes_back_takes_its_net_back_too() {
+        let track = |net: &str, a: (i64, i64), b: (i64, i64)| Track {
+            id: ObjectId(0),
+            layer: "F.Cu".to_string(),
+            width: Nm(200_000),
+            net: Some(net.to_string()),
+            start: Point { x: Nm(a.0), y: Nm(a.1) },
+            end: Point { x: Nm(b.0), y: Nm(b.1) },
+            mid: None,
+            locked: false,
+        };
+        let via = |net: &str, at: (i64, i64)| Via {
+            id: ObjectId(0),
+            at: Point { x: Nm(at.0), y: Nm(at.1) },
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some(net.to_string()),
+            from: "F.Cu".to_string(),
+            to: "B.Cu".to_string(),
+            locked: false,
+        };
+        // As they were: a along y = 0, b along y = 2 mm with a via at its end, c far off
+        // with a via, d along y = 4 mm, e along y = 7 mm.
+        let was_t = [
+            track("a", (0, 0), (5_000_000, 0)),
+            track("b", (0, 2_000_000), (5_000_000, 2_000_000)),
+            track("c", (0, 9_000_000), (5_000_000, 9_000_000)),
+            track("d", (0, 4_000_000), (5_000_000, 4_000_000)),
+            track("e", (0, 7_000_000), (3_000_000, 7_000_000)),
+        ];
+        let was_v = [via("b", (5_000_000, 2_000_000)), via("c", (5_000_000, 9_000_000))];
+        // As the run hands them back: a moved up, b with its track where it was (the other
+        // way round) and its via laid anew on a's old route, c as it was, d with a track
+        // laid anew beside b's old one, e with one 0.3 mm of room off c's.
+        let t = [
+            track("a", (0, 1_000_000), (5_000_000, 1_000_000)),
+            track("b", (5_000_000, 2_000_000), (0, 2_000_000)),
+            track("c", (0, 9_000_000), (5_000_000, 9_000_000)),
+            track("d", (0, 2_500_000), (5_000_000, 2_500_000)),
+            track("e", (0, 8_500_000), (3_000_000, 8_500_000)),
+        ];
+        let v = [via("b", (2_000_000, 300_000)), via("c", (5_000_000, 9_000_000))];
+        let had = had_copper(was_t.iter(), was_v.iter());
+        let (anew_t, anew_v) = laid_anew(&t, &v, &had);
+        let nets = |t: &[&Track]| t.iter().filter_map(|t| t.net.clone()).collect::<Vec<_>>();
+        assert_eq!(nets(&anew_t), ["a", "d", "e"]);
+        assert_eq!(anew_v.iter().filter_map(|v| v.net.clone()).collect::<Vec<_>>(), ["b"]);
+        let (was_t, was_v): (Vec<&Track>, Vec<&Via>) = (was_t.iter().collect(), was_v.iter().collect());
+        let moved: BTreeSet<&str> = ["a", "b", "c", "d", "e"].into();
+        // a goes back: b's via stands on its old route, and d's track beside b's old one.
+        let mut old: BTreeSet<String> = ["a".to_string()].into();
+        back_with_clashes(&mut old, &moved, (&was_t, &was_v), (&anew_t, &anew_v), &|_| 200_000);
+        assert_eq!(old.iter().map(String::as_str).collect::<Vec<_>>(), ["a", "b", "d"]);
+        // By the tracks alone, as it was until D143, b stays with its via on a's old route.
+        let mut old: BTreeSet<String> = ["a".to_string()].into();
+        back_with_clashes(&mut old, &moved, (&was_t, &was_v), (&anew_t, &[]), &|_| 200_000);
+        assert_eq!(old.iter().map(String::as_str).collect::<Vec<_>>(), ["a"]);
+        // c goes back: nothing is laid anew near it.
+        let mut old: BTreeSet<String> = ["c".to_string()].into();
+        back_with_clashes(&mut old, &moved, (&was_t, &was_v), (&anew_t, &anew_v), &|_| 200_000);
+        assert_eq!(old.len(), 1);
+        // e's new track has 0.3 mm of room to c's old one: clear of it at the board's 0.2 mm
+        // (above) and not at the 0.35 mm of a class, whichever of the two nets is of it.
+        for wide in ["c", "e"] {
+            let mut old: BTreeSet<String> = ["c".to_string()].into();
+            back_with_clashes(&mut old, &moved, (&was_t, &was_v), (&anew_t, &anew_v), &|n| {
+                if n == wide { 350_000 } else { 200_000 }
+            });
+            assert_eq!(old.iter().map(String::as_str).collect::<Vec<_>>(), ["c", "e"], "{wide}");
+        }
     }
 
     /// No run that moves routes after a first run that moved none and found no way (D123).
@@ -5712,6 +5881,28 @@ mod tests {
         // A run for everything still routes and counts what the board has open.
         let r = route(&p, &Scope::All, &RouteOptions::default(), &Hooks::none()).expect("route");
         assert_eq!(r.stats.failed, 0, "{:?}", r.connections);
+    }
+
+    /// A net whose only zones are teardrops is no net with a pour for the run that lays
+    /// the stairs straight, and one that has a pour beside them is (D143).
+    #[test]
+    fn a_net_with_teardrops_alone_is_handed_to_the_last_run() {
+        let mut p = project();
+        assert_eq!(pour_nets(&p).into_iter().collect::<Vec<_>>(), ["GND"]);
+        let pour = p.board().zones.iter().find(|z| z.net.as_deref() == Some("GND")).expect("the pour").clone();
+        let teardrop = |net: &str, id: u64| {
+            let mut z = pour.clone();
+            z.id = ObjectId(id);
+            z.net = Some(net.to_string());
+            z.name = format!("{}padvia$", geo::thermal::TEARDROP_PREFIX);
+            z
+        };
+        p.board_mut().zones.push(teardrop("SIG", 900_001));
+        p.board_mut().zones.push(teardrop("GND", 900_002));
+        assert_eq!(pour_nets(&p).into_iter().collect::<Vec<_>>(), ["GND"]);
+        // With its pour gone the ground is a net with teardrops alone.
+        p.board_mut().zones.retain(|z| z.id != pour.id);
+        assert!(pour_nets(&p).is_empty());
     }
 
     /// The zones that have no fill on the board are told to guide after the others
