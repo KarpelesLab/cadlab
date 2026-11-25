@@ -216,6 +216,97 @@ fn copper_rules() {
     assert_eq!(drc(&s), d, "deterministic");
 }
 
+/// `drc.neck`: joints that hold by the overlap of two round ends, or by a track's tip on a pad
+/// or a via; by severity, with both items, the net, the place and the widths; not where the
+/// centre lines meet, nor under a pour or a teardrop of the net; waived like any finding.
+#[test]
+fn necks() {
+    let (_d, r, mut s) = routed();
+    let t = |id: u64| format!("track#{id}");
+    // On the back, clear of everything, tracks of 0.25 mm of GND (the minimum is 0.15 mm).
+    // Two that end 0.22 mm apart: a lens of 0.119 mm. Two that end 0.06 mm apart: 0.243 mm.
+    let a = add_track(&mut s, "B.Cu", mm(2.0, 12.0), mm(4.0, 12.0), 0.25, Some("GND"));
+    let b = add_track(&mut s, "B.Cu", mm(4.22, 12.0), mm(6.0, 12.0), 0.25, Some("GND"));
+    let c = add_track(&mut s, "B.Cu", mm(2.0, 13.0), mm(4.0, 13.0), 0.25, Some("GND"));
+    let e = add_track(&mut s, "B.Cu", mm(4.06, 13.0), mm(6.0, 13.0), 0.25, Some("GND"));
+    // A corner whose second track begins 0.06 mm beside the first one's end shares most of a
+    // round end with it: no neck.
+    let corner = add_track(&mut s, "B.Cu", mm(6.06, 12.0), mm(6.06, 11.0), 0.25, Some("GND"));
+    // One that stops 0.1 mm short of a via of 0.6 mm, and one that ends on the via's rim.
+    let via = add_via(&mut s, mm(12.0, 12.0), 0.3, 0.6, Some("GND"));
+    let short = add_track(&mut s, "B.Cu", mm(10.0, 12.0), mm(11.6, 12.0), 0.25, Some("GND"));
+    let rim = add_track(&mut s, "B.Cu", mm(12.3, 12.0), mm(14.0, 12.0), 0.25, Some("GND"));
+    let d = drc(&s);
+    let found: Vec<&Diagnostic> = d.iter().filter(|x| x.code == "drc.neck").collect();
+    assert_eq!(found.len(), 3, "{}", text(&d));
+    let n = find(&d, "drc.neck", &t(a));
+    assert_eq!(n.severity, Severity::Error);
+    assert!(
+        n.subjects.contains(&ObjectRef::parse(&t(b)).unwrap()) && n.subjects.contains(&ObjectRef::Net("GND".into()))
+    );
+    assert!(
+        n.message.contains("joined on B.Cu by copper 0.118") && n.message.contains("minimum track width is 0.15mm"),
+        "{}",
+        n.message
+    );
+    let at = n.location.unwrap();
+    assert!((at.x.0 - 4_110_000).abs() < 5_000 && (at.y.0 - 12_000_000).abs() < 5_000, "{at:?}");
+    assert!(n.hint.as_deref().is_some_and(|h| h.contains("centre line")), "{:?}", n.hint);
+    let n = find(&d, "drc.neck", &t(e));
+    assert_eq!(n.severity, Severity::Warning);
+    assert!(n.subjects.contains(&ObjectRef::parse(&t(c)).unwrap()));
+    assert!(
+        n.message.contains("copper 0.242") && n.message.contains("the narrower of the two is 0.25mm wide"),
+        "{}",
+        n.message
+    );
+    let n = find(&d, "drc.neck", &t(short));
+    assert_eq!(n.severity, Severity::Error);
+    assert!(n.subjects.contains(&ObjectRef::parse(&format!("via#{via}")).unwrap()));
+    assert!(n.message.contains("stops short of it"), "{}", n.message);
+    for sound in [rim, corner] {
+        let it = ObjectRef::parse(&t(sound)).unwrap();
+        assert!(!d.iter().any(|x| x.code == "drc.neck" && x.subjects.contains(&it)), "{}", text(&d));
+    }
+    // Through the command, by code.
+    let o = exec(&r, &mut s, "drc.run", json!({"codes": ["drc.neck"]}));
+    assert_eq!(diag_codes(&o), ["drc.neck", "drc.neck", "drc.neck"], "{o}");
+    // The fab's check has the two under its minimum track as its own findings.
+    let limits = cadlab::drc::check_limits(s.project.as_ref().unwrap(), &s.project.as_ref().unwrap().board().rules);
+    assert_eq!(limits.iter().filter(|x| x.code == "drc.neck").count(), 2);
+    // The router's verification does not rip a track for a neck.
+    assert!(cadlab::drc::check_copper(s.project.as_ref().unwrap()).iter().all(|x| x.code != "drc.neck"));
+    // Waived, as any finding.
+    exec(&r, &mut s, "drc.waive", json!({"code": "drc.neck", "subjects": [t(e)], "reason": "test"}));
+    let o = exec(&r, &mut s, "drc.run", json!({"codes": ["drc.neck"]}));
+    assert_eq!(diag_codes(&o).len(), 2, "{o}");
+    // A pour of the net on the layer covers the joints: none is left.
+    exec(&r, &mut s, "zone.add", json!({"name": "GND", "net": "GND", "layers": ["B.Cu"], "outline": "board"}));
+    let d = drc(&s);
+    assert!(d.iter().all(|x| x.code != "drc.neck"), "{}", text(&d));
+}
+
+/// A teardrop (a zone of the net named as KiCad names them) over the tip of a track that stops
+/// short of its via is the joint: no neck.
+#[test]
+fn a_teardrop_over_a_tip_is_no_neck() {
+    let (_d, r, mut s) = routed();
+    let via = add_via(&mut s, mm(12.0, 12.0), 0.3, 0.6, Some("GND"));
+    let short = add_track(&mut s, "B.Cu", mm(10.0, 12.0), mm(11.6, 12.0), 0.25, Some("GND"));
+    let d = drc(&s);
+    find(&d, "drc.neck", &format!("track#{short}"));
+    exec(
+        &r,
+        &mut s,
+        "zone.add",
+        json!({"name": "$teardrop_padvia$", "net": "GND", "layers": ["B.Cu"], "clearance": "0mm", "min_width": "0mm",
+               "pads": "solid",
+               "outline": [["11.2mm", "11.875mm"], ["12mm", "11.7mm"], ["12mm", "12.3mm"], ["11.2mm", "12.125mm"]]}),
+    );
+    let d = drc(&s);
+    assert!(d.iter().all(|x| x.code != "drc.neck"), "{} (via#{via})", text(&d));
+}
+
 #[test]
 fn net_class_rules() {
     let (_d, r, mut s) = routed();

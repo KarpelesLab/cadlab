@@ -1948,7 +1948,9 @@ fn convert_copper(ad: &Adapted, tracks: &[gdrc::Track], vias: &[gdrc::Via]) -> (
 /// it. Nothing is filled here: the fill is the one that counted the run. No track is told whose
 /// two neighbours would be joined without it by the overlap of their round ends alone (guide
 /// 0.0.47, D144): what touches is still one island by the DRC's count, and a neck of a quarter
-/// of a track's width where the track was.
+/// of a track's width where the track was. Nor the last piece of a route into its pad, for the
+/// round end that the track before it has on the pad's edge (guide 0.0.48, D145): a track is one
+/// with a pad or a fill where its centre line comes to their copper.
 fn needless(
     ad: &Adapted,
     tracks: &[Track],
@@ -2622,6 +2624,16 @@ fn keep_joined(p: &Project, tracks: &[Track], vias: &[Via], pieces: &mut BTreeMa
             pieces.remove(&i);
         }
     }
+}
+
+/// The necks of a board (`drc::neck`), each as its net and its place: `items` are the copper
+/// items of `q`, its fills among them.
+fn necks_of(q: &Project, items: &[CopperItem]) -> Vec<(String, i64, i64)> {
+    let b = q.board();
+    crate::drc::neck::necks(&b.rules, &b.stackup.copper_names(), &b.tracks, &b.vias, items)
+        .into_iter()
+        .filter_map(|n| items[n.a].net.clone().map(|net| (net, n.at.x.0, n.at.y.0)))
+        .collect()
 }
 
 /// How far beyond a pad's outline a track stays no wider than the pad ([`neck_at_pads`]): the
@@ -3569,6 +3581,12 @@ pub(crate) fn route(
             if !(t_all.is_empty() && v_all.is_empty()) {
                 let was = open(&fitems, &fisl);
                 let was_pads = if between { pads_of(&proj, &fitems) } else { BTreeMap::new() };
+                // The necks that the board has: a track told needless on the word of a fill
+                // that holds the track before it and the pad may be all that joined the two
+                // by a track's width once the board is filled without it (the fill keeps its
+                // gap from a pad with a relief, and what is left is the round end of the
+                // track before, D145).
+                let was_necks: BTreeSet<(String, i64, i64)> = necks_of(&proj, &fitems).into_iter().collect();
                 // The board without them, filled.
                 let without = |gt: &BTreeSet<usize>, gv: &BTreeSet<usize>| {
                     let mut q = p.clone();
@@ -3590,34 +3608,43 @@ pub(crate) fn route(
                 };
                 // What is worse on a board, each as its net and the place round it: the pads,
                 // counted, and then the connections that are open now and were not.
-                let worse = |q: &Project, items: &[CopperItem], isl: &[usize]| -> (usize, Vec<(String, [i64; 4])>) {
-                    let mut out: Vec<(String, [i64; 4])> = Vec::new();
-                    if between {
-                        for (key, (at, net, necks, short)) in pads_of(q, items) {
-                            let Some(&(_, _, had, was_short)) = was_pads.get(&key) else { continue };
-                            if (short && !was_short) || (necks < had && necks < 2) {
-                                out.push((
-                                    net,
-                                    [at.x.0 - PAD_NEAR, at.y.0 - PAD_NEAR, at.x.0 + PAD_NEAR, at.y.0 + PAD_NEAR],
-                                ));
+                let worse =
+                    |q: &Project, items: &[CopperItem], isl: &[usize]| -> (usize, usize, Vec<(String, [i64; 4])>) {
+                        let mut out: Vec<(String, [i64; 4])> = Vec::new();
+                        if between {
+                            for (key, (at, net, necks, short)) in pads_of(q, items) {
+                                let Some(&(_, _, had, was_short)) = was_pads.get(&key) else { continue };
+                                if (short && !was_short) || (necks < had && necks < 2) {
+                                    out.push((
+                                        net,
+                                        [at.x.0 - PAD_NEAR, at.y.0 - PAD_NEAR, at.x.0 + PAD_NEAR, at.y.0 + PAD_NEAR],
+                                    ));
+                                }
                             }
                         }
-                    }
-                    let pads = out.len();
-                    let had: BTreeSet<(&str, &str, &str)> =
-                        was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
-                    out.extend(
-                        open(items, isl)
-                            .into_iter()
-                            .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
-                            .map(|l| {
-                                let (x0, x1) = (l.from_at.x.0.min(l.to_at.x.0), l.from_at.x.0.max(l.to_at.x.0));
-                                let (y0, y1) = (l.from_at.y.0.min(l.to_at.y.0), l.from_at.y.0.max(l.to_at.y.0));
-                                (l.net, [x0 - SPARE_NEAR, y0 - SPARE_NEAR, x1 + SPARE_NEAR, y1 + SPARE_NEAR])
-                            }),
-                    );
-                    (pads, out)
-                };
+                        let pads = out.len();
+                        // The new necks are places to put the tracks back at, and no reason to
+                        // leave the step out once that is done: what is left of them is mended.
+                        for (net, x, y) in necks_of(q, items) {
+                            if !was_necks.contains(&(net.clone(), x, y)) {
+                                out.push((net, [x - PAD_NEAR, y - PAD_NEAR, x + PAD_NEAR, y + PAD_NEAR]));
+                            }
+                        }
+                        let necks = out.len() - pads;
+                        let had: BTreeSet<(&str, &str, &str)> =
+                            was.iter().map(|l| (l.net.as_str(), l.from.as_str(), l.to.as_str())).collect();
+                        out.extend(
+                            open(items, isl)
+                                .into_iter()
+                                .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                                .map(|l| {
+                                    let (x0, x1) = (l.from_at.x.0.min(l.to_at.x.0), l.from_at.x.0.max(l.to_at.x.0));
+                                    let (y0, y1) = (l.from_at.y.0.min(l.to_at.y.0), l.from_at.y.0.max(l.to_at.y.0));
+                                    (l.net, [x0 - SPARE_NEAR, y0 - SPARE_NEAR, x1 + SPARE_NEAR, y1 + SPARE_NEAR])
+                                }),
+                        );
+                        (pads, necks, out)
+                    };
                 let (mut gt, mut gv): (BTreeSet<usize>, BTreeSet<usize>) =
                     (t_all.into_iter().collect(), v_all.into_iter().collect());
                 let mut kept = None;
@@ -3626,8 +3653,8 @@ pub(crate) fn route(
                         break;
                     }
                     let less = without(&gt, &gv);
-                    let (pads, bad) = worse(&less.2, &less.3, &less.4);
-                    if pads == 0 && open(&less.3, &less.4).len() <= was.len() {
+                    let (pads, necks, bad) = worse(&less.2, &less.3, &less.4);
+                    if pads == 0 && (necks == 0 || round > 0) && open(&less.3, &less.4).len() <= was.len() {
                         kept = Some(less);
                         break;
                     }
@@ -4412,6 +4439,24 @@ pub(crate) fn route(
         if !done && neck {
             let leave: BTreeSet<&str> = wide.iter().chain(&held).map(String::as_str).collect();
             neck_at_pads(p, &mut tracks, &vias, &leave);
+        }
+    }
+    // No two pieces of a net leave joined by the overlap of two round ends alone (`drc.neck`,
+    // D145): what the steps above left so has a piece of track laid across it
+    // ([`super::necks`]), and the report is of the board with those.
+    {
+        let (mended, left) = super::necks::mend_new(p, &mut tracks, &vias);
+        if mended > 0 {
+            let (q, ids) = super::necks::with_copper(p, &tracks, &vias);
+            for (t, id) in tracks.iter_mut().zip(ids) {
+                t.id = id;
+            }
+            fitems = geo::copper_items(&q);
+            fisl = geo::islands(&fitems);
+            proj = q;
+        }
+        if mended > 0 || left > 0 {
+            (hooks.progress)(0, None, &format!("guide: {}", super::necks::said(mended, left)));
         }
     }
     // The report, from the board with its zones filled again around the new copper (D80).
@@ -6075,6 +6120,53 @@ mod tests {
         let items = geo::copper_items(&q);
         assert_eq!(needless(&ad, &tracks, &vias, &items, false), (vec![], vec![]));
         assert_eq!(needless(&ad, &tracks, &vias, &items, true), (vec![], vec![]));
+    }
+
+    /// What is left joined by two round ends alone has a piece of track laid across it
+    /// (`router::necks`, D145), unless the board's rules have no room for the piece.
+    #[test]
+    fn a_joint_of_two_round_ends_is_mended_where_there_is_room() {
+        let p = project();
+        let pad = geo::placed_pads(&p).into_iter().find(|pp| pp.refdes == "R1" && pp.number == "2").expect("R1.2");
+        let c = pad.center;
+        let at = |dx: i64, dy: i64| Point::new(Nm(c.x.0 + dx), Nm(c.y.0 + dy));
+        let track = |net: &str, a: Point, b: Point| Track {
+            id: ObjectId(0),
+            layer: "F.Cu".into(),
+            width: Nm(250_000),
+            net: Some(net.into()),
+            start: a,
+            end: b,
+            mid: None,
+            locked: false,
+        };
+        // A stub from the pad in two tracks that end 0.2 mm apart: a lens of 0.15 mm.
+        let stub = vec![track("GND", at(0, 0), at(0, -900_000)), track("GND", at(0, -1_100_000), at(0, -2_000_000))];
+        let necks = |tracks: &[Track]| {
+            let (q, _) = super::super::necks::with_copper(&p, tracks, &[]);
+            crate::drc::check(&q).into_iter().filter(|d| d.code == "drc.neck").count()
+        };
+        assert_eq!(necks(&stub), 1);
+        let mut mended = stub.clone();
+        assert_eq!(super::super::necks::mend_new(&p, &mut mended, &[]), (1, 0));
+        assert_eq!(mended.len(), 3);
+        let piece = &mended[2];
+        assert_eq!((piece.start, piece.end), (at(0, -900_000), at(0, -1_100_000)));
+        assert_eq!((piece.width, piece.net.as_deref(), piece.layer.as_str()), (Nm(250_000), Some("GND"), "F.Cu"));
+        assert_eq!(necks(&mended), 0);
+        // Nothing to mend the second time, and nothing on a board without a neck.
+        assert_eq!(super::super::necks::mend_new(&p, &mut mended, &[]), (0, 0));
+        // A track of another net whose round end is at its clearance from both round ends,
+        // in the notch beside their overlap: the piece would be 10 um nearer, and is not laid.
+        let clearance = p.board().rules.clearance.0;
+        let reach = (125_000 + clearance + 125_000 + 1_000) as f64;
+        let x = (reach * reach - 100_000.0 * 100_000.0).sqrt().ceil() as i64;
+        let mut shut = stub.clone();
+        shut.push(track("SIG", at(x, -1_000_000), at(x + 1_000_000, -1_000_000)));
+        let (q, _) = super::super::necks::with_copper(&p, &shut, &[]);
+        assert!(crate::drc::check_copper(&q).iter().all(|d| d.severity != crate::diag::Severity::Error));
+        assert_eq!(super::super::necks::mend_new(&p, &mut shut, &[]), (0, 1));
+        assert_eq!(shut.len(), 3);
     }
 
     /// A heat pad is named to guide as one that vias of its net may be in (D115): the exposed

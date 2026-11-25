@@ -268,6 +268,7 @@ impl Ctx<'_> {
             let (code, hint) = match d.code.as_ref() {
                 "drc.clearance" if q.min_space.is_some() => ("fab.clearance", "move or reroute one of them"),
                 "drc.track_width" if q.min_track.is_some() => ("fab.track_width", "use a wider track"),
+                "drc.neck" if q.min_track.is_some() => ("fab.neck", "join the two at their centre lines"),
                 "drc.hole_to_hole" if q.hole_to_hole.is_some() => ("fab.hole_to_hole", "move the holes apart"),
                 "drc.copper_to_edge" if q.copper_to_edge.is_some() => {
                     ("fab.copper_to_edge", "move the copper away from the board edge")

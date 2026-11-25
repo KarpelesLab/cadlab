@@ -28,7 +28,10 @@
 //! `CADLAB_CORPUS_DIR`, default `target/corpus`; circuits built from the boards, no KiCad needed),
 //! rips every track and via (zones stay), routes again and prints completion, vias, length, time,
 //! work and DRC errors per board, with the failed connections grouped by reason
-//! (`CADLAB_BENCH_VERBOSE=1` lists each one, and each new DRC error). The budget defaults to 60 s here;
+//! (`CADLAB_BENCH_VERBOSE=1` lists each one, and each new DRC error). The necks (`drc.neck`, D145)
+//! are counted apart from the DRC errors of the row, on a line of their own: those under the
+//! minimum track width and those under the width of what they join, each listed with
+//! `CADLAB_BENCH_VERBOSE=1`. The budget defaults to 60 s here;
 //! `CADLAB_BENCH_WORK=<units>` replaces it by a work budget, which gives the same result on any machine,
 //! under any load and with any number of threads, so two builds can be compared exactly (with
 //! `CADLAB_BENCH_SEED=<n>` for the seed, default 1: negotiation is chaotic, so compare several).
@@ -264,6 +267,7 @@ fn corpus(filters: &[String]) {
         // of a re-route (what no router is asked to do better than the designer did).
         if std::env::var_os("CADLAB_BENCH_ORIGINAL").is_some() {
             thermals(&e.name, "original", &p);
+            necks(&e.name, "original", &p, true);
             let open = cadlab::board::ratsnest(&p);
             println!("{}: {} connections open in the original routing", e.name, open.len());
             for l in &open {
@@ -361,6 +365,7 @@ fn corpus(filters: &[String]) {
                 *m = m.saturating_sub(n);
             }
         }
+        by_code.remove("drc.neck");
         by_code.retain(|_, n| *n > 0);
         // What `route.status` sees on the result (the router's own count is per planned connection).
         let unrouted = cadlab::drc::check(&q).iter().filter(|d| d.code == "drc.unrouted").count();
@@ -377,6 +382,7 @@ fn corpus(filters: &[String]) {
             dump(&q, &spec);
         }
         thermals(&e.name, "routed", &q);
+        necks(&e.name, "routed", &q, verbose);
         println!(
             "| {} | {} | {} | {:.1}% | {} | {} | {} | {:.1} mm | {:.1} s | {:.1} M | {} | {}{} |",
             e.name,
@@ -1042,11 +1048,35 @@ fn render(p: &Project, path: &std::path::Path, around: Option<String>) {
     }
 }
 
-/// The DRC errors (other than unrouted connections) as `code: message` lines.
+/// The necks of a board (`drc.neck`, counted apart from the other DRC errors): one line with
+/// those under the minimum track width (errors) and those only under the width of the tracks
+/// they join (warnings), and with `list` each of them.
+fn necks(name: &str, what: &str, p: &Project, list: bool) {
+    let found: Vec<_> = cadlab::drc::check(p).into_iter().filter(|d| d.code == "drc.neck").collect();
+    let errors = found.iter().filter(|d| d.severity == cadlab::Severity::Error).count();
+    eprintln!(
+        "  {name}: necks ({what}): {errors} under the minimum track width, {} under the width of what they join",
+        found.len() - errors
+    );
+    if list {
+        for d in &found {
+            let at = d
+                .location
+                .map_or(String::new(), |a| format!(" at {:.4} {:.4}", a.x.0 as f64 / 1e6, a.y.0 as f64 / 1e6));
+            eprintln!(
+                "  NECK {}: {}{at}",
+                if d.severity == cadlab::Severity::Error { "error" } else { "warning" },
+                d.message
+            );
+        }
+    }
+}
+
+/// The DRC errors (other than unrouted connections and necks) as `code: message` lines.
 fn drc_messages(p: &Project) -> Vec<String> {
     cadlab::drc::check(p)
         .into_iter()
-        .filter(|d| d.severity == cadlab::Severity::Error && d.code != "drc.unrouted")
+        .filter(|d| d.severity == cadlab::Severity::Error && d.code != "drc.unrouted" && d.code != "drc.neck")
         .map(|d| format!("{}: {}", d.code, d.message))
         .collect()
 }
@@ -1054,6 +1084,6 @@ fn drc_messages(p: &Project) -> Vec<String> {
 fn drc_errors(p: &Project) -> usize {
     cadlab::drc::check(p)
         .into_iter()
-        .filter(|d| d.severity == cadlab::Severity::Error && d.code != "drc.unrouted")
+        .filter(|d| d.severity == cadlab::Severity::Error && d.code != "drc.unrouted" && d.code != "drc.neck")
         .count()
 }

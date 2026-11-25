@@ -163,6 +163,11 @@ no `-o`.)
       make solid (the routers' own tracks are laid no wider than the pad where they meet it, D121)
 - [x] DRC: clearance, width, annular ring, drill, hole-to-hole, copper-to-edge, courtyard overlap, unrouted nets,
       silk over pads, keep-outs (`drc.run`, `src/drc.rs`); zone fills are checked like any copper
+- [x] DRC: necks (`drc.neck`, D145): a track joined to another track, a pad or a via of its net by the overlap of
+      round ends alone, where nothing else joins the two soundly (not other copper of the net, not a pour or a
+      teardrop over it); an error under `min_track_width`, a warning under the width of what it joins; `fab.neck`
+      in `fab.check`; `src/drc/neck.rs`, BOARD.md "Necks". The twelve corpus boards as their designers routed them
+      have 2 errors (glasgow-revD1, two pads reached by 52 µm of copper) and 10 warnings
 - [x] Legible silkscreen (D82): `drc.silk_edge` and `drc.silk_overlap` (rules `silk_to_edge`, `silk_clearance`),
       reference designators moved to free positions by `silk.arrange` and `place.auto` (off the board edge,
       pads and other silkscreen; hidden with a warning as a last resort), set by hand with `silk.set`, kept in
@@ -419,6 +424,20 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D144 (D145, the same direction, not met): the DRC has the necks (`drc.neck`), and with it the twelve
+      boards in four orders had 894 on guide's boards with 0.0.47 (678 under the minimum track width; 884 a track
+      that reaches a pad by its tip, which D144's script did not count) and 2 on the native router's. guide 0.0.48
+      tells no last piece of a route into its pad needless for the round end of the piece before it, the
+      adapter's check of that step puts tracks back at new necks, and a last step of either router lays a piece of
+      track across what is left (`router::necks`): no neck in 52 runs of guide and 52 of the native router, for
+      0.01 to 0.4 % more track at budgets of nodes with every run's connections as they were. tinytapeout-demo's
+      tenth order measured in guide: the cheapest way for its connection across other routes crosses 9 to 12
+      nets, and with the nets round its pads taken out first one of them has no way back; not a pin's last
+      escape, nothing kept. Beside the native router 35 cells better, 30 equal and 7 worse of 72, as master's
+      build in the same minutes; tinytapeout-demo over three sets of sixteen orders 11 connections open for 6,
+      by first runs that took their slow way (the same code in both builds; repeated, both have them). Open: the
+      seven cells; the tenth order; which pass of guide lays the stubs that end beside a pad; the track outside
+      the pads of tinytapeout-demo by net, not begun.
       Since D143 (D144, the same direction, not met): guide 0.0.47, no track between pads told needless for what two
       round ends leave of it: the step that takes out the tracks that a pour joins left 122 necks under 0.1 mm on the
       twelve boards (corne-cherry 89, the narrowest 25 um of a track of 0.25 mm; joined by the DRC's count), and

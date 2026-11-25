@@ -1052,6 +1052,7 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.short` | error | copper of different nets touches on a shared layer (also no-net copper touching a net); copper of one net-tie group of a footprint may touch |
 | `drc.clearance` | error | copper of different nets (or no net vs a net) closer than the clearance in effect (custom rule, local clearances, else the larger net clearance; see "Local settings, net ties and custom rules"); pads and copper drawings of one footprint are not checked against each other |
 | `drc.track_width` / `drc.track_width_class` | error / warning | track narrower than `min_track_width` or a custom rule's width / than its net class width |
+| `drc.neck` | error / warning | a track joined to another track, a pad, a via or a copper drawing of its net by copper narrower than `min_track_width` / than the narrower of the two, and by nothing else: see "Necks" |
 | `drc.via_size_class` | warning | via drill or diameter smaller than its net class asks |
 | `drc.netclass_rule` | warning | a net class value below the board minimums (track or diff pair width < `min_track_width`, via drill < `min_drill`, via ring < `min_annular_ring`) |
 | `drc.via_drill`, `drc.pad_drill` | error | via or pad hole below `min_drill` |
@@ -1075,6 +1076,38 @@ the 2 µm (KiCad accepts the same sub-micron deficits).
 | `drc.current_width` | warning | tracks of a net with a `current` narrower than IPC-2152 asks on their layer ([ELECTRICAL.md](ELECTRICAL.md)) |
 | `drc.impedance` | warning | tracks of a net whose class has an `impedance` target more than 10 % off on their layer |
 | `drc.solid_pad`, `drc.thermal_nominal`, `drc.starved_thermal`, `drc.thermal_size`, `drc.current_spokes` | warning | thermal relief of the pads in pours: see "Thermal relief" |
+
+### Necks (`drc.neck`, `src/drc/neck.rs`, D145)
+
+A track is a line with round ends. Two tracks whose centre lines meet are joined by their whole width at any
+angle. Two tracks that end a little apart still touch, by the overlap of their round ends, and what joins them
+is the lens of two discs: 0.15 mm for tracks of 0.25 mm that end 0.2 mm apart, 25 µm in the narrowest a router
+left (D144). A track that stops short of a pad or a via reaches it the same way, by its tip. Connectivity
+counts the copper that touches, clearances are between nets and `drc.track_width` asks each track for its own
+width, so no other rule sees it; a fab etches it as it is drawn.
+
+- **What is measured.** For each two items of one net that touch on a layer, one of them a track: the widest
+  extent of the copper the two share (the chord of the lens for two round ends; the track's width for an end
+  on a pad's edge), never more than the narrower of the two (a via's diameter, a pad's shorter side).
+- **Sound joints** are never findings: a track whose centre line reaches the other's copper (a pad, a via, a
+  copper drawing) or the other track's centre line, to the DRC's 2 µm; and any two that share copper as wide
+  as the narrower of them (a track ending anywhere inside a wider one, a T on a track's edge, two tracks side
+  by side). So a corner, a T, a crossing, a track ended at the first copper of its pad and a track narrowed at
+  its pad (the router's `neck_at_pads`: the narrow piece begins on the wide one's centre line) are all sound.
+- **Only where it is the only way.** A joint that is not sound is a finding unless the two are joined soundly
+  some other way: through other tracks, vias and pads of the net; through a pour or a teardrop of the net that
+  holds both (a track is held where a disc of its width on its centre line is inside the fill, a pad or a via
+  where it touches it); or under a fill that covers the joint itself. The thin joints between the same two
+  pieces of copper are measured together, so a track that ends beside the corner of two others is one finding,
+  or none if it shares enough with the two.
+- **Severity.** An error where the copper across the joint is under `min_track_width` (as a track that narrow
+  is, `drc.track_width`); a warning where it is only under the width of the narrower of the two (as a track
+  under its class's width is, `drc.track_width_class`). A track that is itself under the minimum is the width
+  rule's finding, and its joints are measured against its own width. The message has both items, the layer,
+  the width measured and the one asked; the finding is at the middle of the shared copper.
+- **Where else.** `fab.check` reports the errors against the fab profile's minimum track as `fab.neck`. The
+  router's verification (`drc::check_copper`) does not take them: a neck is mended (ROUTER.md, "Necks"), not
+  ripped. `drc::neck::necks` gives them as data.
 
 **Waivers** (`drc.waive`, D58): a finding whose code a waiver names, and whose subjects (as the finding prints
 them: `J1`, `net:GND`, `graphic#208`) include all of the waiver's, is left out of the errors and warnings and

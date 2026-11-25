@@ -213,6 +213,36 @@ fn clean_board_passes_both_fabs() {
     assert_eq!(f.error.diagnostic.code, "fab.unknown_process");
 }
 
+/// A neck narrower than a fab's minimum track is that fab's error (`fab.neck`, D145): two
+/// tracks of 0.25 mm that end 0.22 mm apart share 0.119 mm of copper, under the generic profile's
+/// 0.15 mm and over the 0.1 mm of the two others.
+#[test]
+fn a_neck_under_the_minimum_track_fails_at_that_fab() {
+    let (_d, r, mut s) = routed();
+    let p = s.project.as_mut().unwrap();
+    for (x0, x1) in [(2_000, 4_000), (4_220, 6_000)] {
+        let id = p.alloc_id();
+        p.board_mut().tracks.push(Track {
+            id,
+            layer: "B.Cu".into(),
+            width: Nm::from_um(250),
+            net: Some("GND".into()),
+            start: Point::new(Nm::from_um(x0), Nm::from_mm(12)),
+            end: Point::new(Nm::from_um(x1), Nm::from_mm(12)),
+            mid: None,
+            locked: false,
+        });
+    }
+    let o = exec(&r, &mut s, "fab.check", json!({"fab": "generic", "parts": false}));
+    assert_eq!(codes(&o, "error"), ["fab.neck"], "{:#}", o["diagnostics"]);
+    let d = o["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "fab.neck").unwrap();
+    assert!(d["message"].as_str().unwrap().contains("minimum track width is 0.15mm"), "{d}");
+    for fab in ["jlcpcb", "pcbway"] {
+        let o = exec(&r, &mut s, "fab.check", json!({"fab": fab, "parts": false}));
+        assert_eq!(o["output"]["errors"], 0, "0.1 mm is {fab}'s minimum: {:#}", o["diagnostics"]);
+    }
+}
+
 #[test]
 fn thin_tracks_fail_where_the_minimum_is_larger() {
     let (_d, r, mut s) = routed();

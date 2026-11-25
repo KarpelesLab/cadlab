@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1032,6 +1032,46 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *No joint by two round ends alone* (`router::necks`, `drc.neck`, D145), in the result of either router, after
+  the tracks are narrowed at their pads. A neck is two pieces of a net joined by less copper than the narrower of
+  them is wide: two tracks that end a little apart and touch by their round ends, or a track that stops short of a
+  pad or a via and reaches it by its tip (BOARD.md, "Necks"). Connectivity counts it joined, so a router's count
+  and the DRC's `drc.unrouted` do not see it; `drc.neck` does. For each neck with a new track on one side the step
+  lays a piece of track of the narrower width from the nearest point of the track's centre line to the other's (a
+  track's nearest point, a via's centre, a point 10 µm inside a pad's copper). The piece lies between two round
+  ends of its net that touch, and adds copper only in the notches beside their overlap; it is kept only if the
+  board's copper rules name it in no error (`drc::check_copper_items` on the board's copper without its fills,
+  which are made around the tracks), and otherwise the neck stays for the DRC to report. The board is looked at
+  without its fills first, and filled only if it has a neck, so that one under a pour of its net is left alone.
+  The step says what it did in the progress (`N joint(s) of round ends alone made whole by a piece of track`, and
+  how many were left). The router's verification (`drc::check_copper`) does not take necks: a wire is not ripped for
+  one. Where the necks came from, and what is left for this step: the next item.
+- *guide 0.0.48* (D145): no track is told needless for the round end that the track before it has on a pad. With
+  the DRC's new check (`drc.neck`) the twelve boards in four orders at 60 s had 894 necks on guide's boards with
+  0.0.47, 678 of them under the board's minimum track width, and 2 on the native router's; 884 were a track that
+  stops short of a pad and reaches it by its tip, which D144's script did not count. They came from the same step
+  as D144's necks, the one that takes out the tracks that a pour joins (`needless`, D116): guide's
+  `pcb::needless_between` took a track for part of every pad and piece of fill that its copper touches, so the last
+  piece of a route, from the lattice into its pad, was told needless on the word of the piece before it, whose
+  round end reaches the pad's edge. guide now tells the groups that a track is part of twice, by what its copper
+  touches and by what its centre line comes to, and nothing is needless that the groups are less joined without by
+  either count. The adapter's check of that step counts the necks that the board did not have (`necks_of`) as
+  places to put tracks back at, beside the pads short of spokes and the connections open. What guide's own output
+  still has (a stub of a pour's net that ends at a place in its fill beside a pad; two such stubs 0.2 mm apart; the
+  ends of a pair at its pads) and what the native router has (a track that passes a pad of its net by the corner
+  and is counted as joining it) is left to the step above. With the three, the twelve boards in four orders
+  (tinytapeout-demo in eight) have no neck in 52 runs of guide and 52 of the native router, where master's build
+  of guide has 711 errors and 216 warnings in the same minutes; the step above laid 20 pieces in 11 of guide's
+  runs and 3 in 3 of the native router's. What it costs is the last pieces that stay: 1 to 26 mm of a board at
+  budgets of nodes (0.01 to 0.4 %), every run with the connections it had (570 and 164 open), and one or two vias
+  more on tinytapeout-demo.
+  *Measured and not kept*: tinytapeout-demo's tenth order, whose one connection (mng6, from the board's edge to a
+  pin of the QFN) every set leaves open. The cheapest way for it across other routes crosses 9 to 12 nets, where a
+  chain of the settling cuts four at most; with the limits raised the chains end on a net with no way back; with
+  the nets round its two pads taken out first (the shut step of D140 made general, built in guide) the connection
+  has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
+  last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
+  master's build in the same minutes; the seven worse are D144's.
 - *guide 0.0.47* (D144): no track is told needless for what two round ends leave of it. The step that takes out the
   tracks between pads that a pour joins (`needless`, D116) acts on guide's `pcb::needless_between`, which counted two
   tracks as one wherever their copper touches: two tracks of 0.25 mm that end 0.2 mm apart touch by their round ends,

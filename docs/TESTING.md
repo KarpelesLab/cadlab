@@ -236,7 +236,8 @@ Allowances, each with its reason, on top of the cross-check's (`drc_compare::ALL
   `kicad_agrees_on_starved_thermals` in `tests/kicad_pcb_oracle.rs`), cadlab's `drc.solid_pad` and
   `drc.thermal_nominal`,
   `copper_sliver`, `nonmirrored_text_on_back_layer`, `npth_inside_courtyard`, `pth_inside_courtyard`;
-  cadlab's `drc.footprint_outside` (KiCad's `hole_clearance` pairs with `drc.hole_clearance` since D56);
+  cadlab's `drc.footprint_outside` (KiCad's `hole_clearance` pairs with `drc.hole_clearance` since D56) and
+  `drc.neck` (D145: KiCad measures no joint against the tracks it joins);
 - KiCad `silk_over_copper` on board texts (cadlab checks silkscreen drawings, not texts);
 - original board only: `drc.track_width_class` (KiCad never checks net class widths; the export adds a
   `.kicad_dru` rule, so the re-export does); cadlab findings of rules the project sets to `ignore` in its

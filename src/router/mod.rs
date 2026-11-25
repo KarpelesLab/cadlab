@@ -61,6 +61,7 @@ mod gridless;
 mod guide;
 mod index;
 mod model;
+mod necks;
 mod pairs;
 mod post;
 mod pours;
@@ -489,6 +490,17 @@ pub fn route(p: &Project, scope: &Scope, opts: &RouteOptions, hooks: &Hooks<'_>)
         && guide::neck_at_pads(p, &mut r.tracks, &r.vias, &std::collections::BTreeSet::new()) > 0
     {
         r.stats.tracks = r.tracks.len();
+    }
+    // And no two pieces of a net are left joined by the overlap of two round ends alone
+    // (`drc.neck`, D145): each such joint has a piece of track laid across it where the
+    // board's rules have room for one.
+    let (mended, left) = necks::mend_new(p, &mut r.tracks, &r.vias);
+    if mended > 0 {
+        r.stats.tracks = r.tracks.len();
+        r.stats.length = tracks_length(&r.tracks);
+    }
+    if mended > 0 || left > 0 {
+        (hooks.progress)(0, None, &necks::said(mended, left));
     }
     Ok(r)
 }

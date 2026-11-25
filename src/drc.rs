@@ -26,6 +26,8 @@ use crate::model::sections::natural_cmp;
 use crate::refs::ObjectRef;
 use crate::units::Nm;
 
+pub mod neck;
+
 /// Measurement tolerance of distance rules: a deficit up to this is accepted, measured on the
 /// exact outlines where items have one ([`geo::exact`]), else on the polygons (two outward arc
 /// approximations of 1 µm). KiCad's own is 0.5 µm (probed with kicad-cli 10.0.7: a clearance
@@ -48,6 +50,7 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
     let pads = geo::placed_pads(p);
     copper_pairs(&ctx, &items, &mut out);
     track_widths(&ctx, &rule_widths(p, &items), &mut out);
+    necks(&ctx, &items, false, &mut out);
     via_sizes(&ctx, &mut out);
     pad_holes(&ctx, &pads, &mut out);
     hole_to_hole(&ctx, &pads, &mut out);
@@ -90,22 +93,29 @@ pub fn check(p: &Project) -> Vec<Diagnostic> {
 /// verification needs (it rips the wires of routed items with errors). The errors with a track
 /// or via among their subjects are exactly those of [`check`], in the same order; pads, silkscreen,
 /// courtyards, connectivity, lengths and electrical checks are left out, since they cannot
-/// name new copper as an error.
+/// name new copper as an error. Nor necks (`drc.neck`): a neck is mended where it is, not
+/// ripped (`router::necks`).
 pub fn check_copper(p: &Project) -> Vec<Diagnostic> {
+    check_copper_items(p, &geo::copper_items(p))
+}
+
+/// [`check_copper`] on the copper items given: those of the board (`board::copper_items`), or
+/// those without its fills (`board::base_copper_items`) where only tracks and vias are asked
+/// about and the fills are made around them anyway (the router's mending of necks).
+pub fn check_copper_items(p: &Project, items: &[CopperItem]) -> Vec<Diagnostic> {
     let ctx = Ctx::new(p);
     let mut out = Vec::new();
-    let items = geo::copper_items(p);
     let pads = geo::placed_pads(p);
-    copper_pairs(&ctx, &items, &mut out);
-    track_widths(&ctx, &rule_widths(p, &items), &mut out);
+    copper_pairs(&ctx, items, &mut out);
+    track_widths(&ctx, &rule_widths(p, items), &mut out);
     via_sizes(&ctx, &mut out);
     hole_to_hole(&ctx, &pads, &mut out);
-    hole_clearance(&ctx, &items, &pads, &mut out);
+    hole_clearance(&ctx, items, &pads, &mut out);
     if let Some(o) = BoardShape::of(p) {
-        board_edges(&ctx, &items, &o, &mut out);
+        board_edges(&ctx, items, &o, &mut out);
     }
     keepouts(&ctx, &courtyards(p), &mut out);
-    disallowed(&ctx, &items, &mut out);
+    disallowed(&ctx, items, &mut out);
     out.sort_by(|a, b| {
         let loc = |d: &Diagnostic| d.location.map(|l| (l.x, l.y));
         (a.code.as_ref(), loc(a), &a.message).cmp(&(b.code.as_ref(), loc(b), &b.message))
@@ -124,6 +134,9 @@ pub fn check_limits(p: &Project, rules: &Rules) -> Vec<Diagnostic> {
     let pads = geo::placed_pads(p);
     copper_pairs(&ctx, &items, &mut out);
     track_widths(&ctx, &BTreeMap::new(), &mut out);
+    if rules.min_track_width > Nm::ZERO {
+        necks(&ctx, &items, true, &mut out);
+    }
     if rules.hole_to_hole > Nm::ZERO {
         hole_to_hole(&ctx, &pads, &mut out);
     }
@@ -517,6 +530,55 @@ fn track_widths(ctx: &Ctx, rule_width: &RuleWidths, out: &mut Vec<Diagnostic>) {
                 .with_hint("re-add the track without a width to use the net class width"),
             ));
         }
+    }
+}
+
+/// Necks ([`neck`]): a track joined to another track, a pad or a via of its net by less copper
+/// than the narrower of the two is wide, and by nothing else. An error where the copper across
+/// the joint is under the minimum track width, as a track that narrow is (`drc.track_width`); a
+/// warning where it is only under the width of what it joins, as a track under its class's
+/// width is (`drc.track_width_class`). `limits_only`: the errors alone.
+fn necks(ctx: &Ctx, items: &[CopperItem], limits_only: bool, out: &mut Vec<Diagnostic>) {
+    let board = ctx.p.board();
+    for n in neck::necks(ctx.rules, &ctx.layers, &board.tracks, &board.vias, items) {
+        let error = n.below_minimum();
+        if limits_only && !error {
+            continue;
+        }
+        let (a, b) = (&items[n.a], &items[n.b]);
+        let (la, lb) = (a.item.to_string(), b.item.to_string());
+        let net = a.net.as_deref().unwrap_or_default();
+        let how = match b.item {
+            geo::ItemRef::Track(_) => "their round ends overlap and their centre lines do not meet",
+            _ => "the track stops short of it and reaches it by the tip of its round end",
+        };
+        let (sev, limit) = if error {
+            (Severity::Error, format!("the minimum track width is {}", n.minimum))
+        } else {
+            (Severity::Warning, format!("the narrower of the two is {} wide", n.nominal))
+        };
+        let fix = match b.item {
+            geo::ItemRef::Track(_) => format!("end {la} on the end or the centre line of {lb}"),
+            _ => format!("extend {la} until its centre line is on the copper of {lb}"),
+        };
+        out.push(
+            Diagnostic::new(
+                sev,
+                "drc.neck",
+                format!(
+                    "net {net}: {la} and {lb} are joined on {} by copper {} wide ({how}); {limit}",
+                    n.layer, n.width
+                ),
+            )
+            .with_subject(item_ref(&la))
+            .with_subject(item_ref(&lb))
+            .with_subject(ObjectRef::Net(net.to_string()))
+            .at(n.at)
+            .with_hint(format!(
+                "{fix} (track.remove, then track.add with the same point for both), or route the net again \
+                 (route.net); a pour of the net over the joint makes it whole too"
+            )),
+        );
     }
 }
 

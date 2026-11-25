@@ -12745,4 +12745,299 @@ threads at 60 s; the count for the threads on a board other than corne-cherry, g
 cleanup's searches other than the one for fewer vias; the signal for the passes on the finer lattice as a build; a
 second set of the eleven other boards with the stages told; the margins round tinytapeout-demo's pin by the rules of
 its classes; the necks one by one.
+### D145. `drc.neck`: a joint that holds by the overlap of two round ends is a finding; guide 0.0.48 adopted, the last piece of a route into its pad no longer told needless; what is left of either router mended by a piece of track: 894 necks in 48 runs for none; tinytapeout-demo's tenth order measured, a pin's escape is not what it lacks; the default unchanged (2026-11-25)
+The direction is D121's to D144's: guide is to end equal to or better than the native router on every measure on every
+board, and cadlab is to be a better tool for it. D144 found a defect that no check saw (a neck: two pieces of a net
+joined by the overlap of two round ends) and counted it with a script over a board dump. This round has four goals in
+order: a DRC check for necks; no neck from either router; the pin that tinytapeout-demo's tenth order leaves shut in;
+tinytapeout-demo's track outside the pads.
 
+**In short.**
+- *The check is `drc.neck`* (`src/drc/neck.rs`, BOARD.md "Necks"): an error where the copper across a joint is under
+  `min_track_width`, a warning where it is only under the width of the narrower of the two items joined. It goes
+  through `drc.run` like every rule, and `fab.check` has the errors as `fab.neck` against the fab profile's minimum.
+- *The script had seen a small part.* On the twelve boards in four orders at 60 s, with master's routers (guide
+  0.0.47), the check finds 894 necks on guide's boards, 678 of them errors, and 2 on the native router's. D144's script
+  counted 21 in 52 runs: it looked for two tracks and took a track's end inside a pad's box for a sound joint. 884 of
+  the 894 are a track that stops short of a pad and reaches it by its tip.
+- *The source is the same step as D144's*, one item further: the step that takes out the tracks that a pour joins
+  (D116) took out, on guide's word, the last piece of a route into its pad, because the round end of the piece before
+  it touches the pad. guide 0.0.48 tells a track one with a pad or a fill only where its centre line comes to their
+  copper. The adapter's check of that step now counts new necks as places to put tracks back, and a last step of
+  either router lays a piece of track across what is still left (`router::necks`).
+- *With the three, the same census has no neck*, on guide's boards or the native router's (52 runs of each at 60 s,
+  where master's build of guide has 711 errors and 216 warnings in the same minutes).
+- *tinytapeout-demo's tenth order is not a matter of a pin's last escape.* Measured in guide: the cheapest way for the
+  connection across other routes crosses 9 to 12 nets, where a chain cuts 4 at most; with the nets round its two pads
+  taken out first the connection has a way that crosses nothing, and one of those nets then has no way back. Nothing
+  of it is kept; the order has its connection open as before (three sets of sixteen orders, in each with this build
+  and with master's).
+- *The fourth goal was not begun.*
+- *The table*: 35 cells better, 30 equal, none overlapping and 7 worse of 72 beside the native router, and the same for
+  master's build in the same minutes; the seven worse are D144's. The necks are a new column beside the 72 cells, which
+  are as they were.
+- *What it costs*: the last pieces that stay, 0.01 to 0.4 % of a board's track at budgets of nodes with every run's
+  connections as they were, and one or two vias on tinytapeout-demo.
+
+`guide = { version = "0.0.48", default-features = false, features = ["pcb"] }`; nothing else in `Cargo.lock` moves.
+The default is unchanged: `router: guide` stays the second opinion and the native router stays the default.
+
+**1. The check** (goal 1).
+- *What a neck is*, and what is measured, is in BOARD.md ("Necks"). In one line: for two items of a net that touch on a
+  layer, one of them a track, the widest extent of the copper they share, never more than the narrower of the two; a
+  finding where that is too little and the two are joined soundly no other way.
+- *Sound without measuring*: a track whose centre line comes to the other's copper (pad, via, drawing) or to the other
+  track's centre line, within the DRC's 2 um. So a corner, a T, a crossing, a track ended at the first copper of its
+  pad, and a track narrowed at its pad (`neck_at_pads`: the narrow piece begins on the wide one's centre line) are no
+  findings. A track that ends anywhere inside a wider one, a T on another track's edge and two tracks side by side
+  share copper as wide as the narrower of them, and are none either.
+- *Only where it is the only way*: the items of a net are grouped by their sound joints (tracks, vias, pads, the
+  shapes of one pad's stack). A thin joint between two items of one group is no finding. The thin joints between the
+  same two groups on a layer are measured together (a track that ends beside the corner of two others shares more
+  with the two than with either). A pour or a teardrop of the net excuses a thin joint where it holds both sides (a
+  track by a disc of its width on its centre line inside the fill, a pad or a via by touching it) or covers the joint
+  itself.
+- *Severity, by what the existing rules do with the same copper.* A track narrower than `min_track_width` is an error
+  (`drc.track_width`): copper under the minimum that the board is to be made with. A track narrower than its class
+  asks is a warning (`drc.track_width_class`): narrower than meant, and makeable. A neck under `min_track_width` is
+  the first, so an error; a neck that is only narrower than what it joins is the second, so a warning. One code,
+  `drc.neck`, with the severity in the finding, as `drc.clearance` has under a custom rule. A track that is itself
+  under the minimum is the width rule's finding, and its joints are measured against its own width. The minimum is the
+  board's `min_track_width`; a net class's width is not asked of a joint, since `neck_at_pads` lays tracks narrower
+  than their class on purpose, down to the pad's side and never under `min_track_width`.
+- *The measure.* The copper shared is the intersection of the two outlines; its widest extent is the largest distance
+  between two of its vertices. The board's outlines have their arcs up to 1 um outside the copper, which moves the tips
+  of a thin lens by several micrometres, so a thin joint is measured again on outlines with arcs to 50 nm: two tracks of
+  0.25 mm that end 0.2 mm apart measure 0.150 mm, the chord of the lens, to half a micrometre (unit test).
+- *Not in the router's verification.* `drc::check_copper` (the errors that rip a wire) leaves necks out: a neck is
+  mended where it is (2). `drc::check_copper_items` is the same check on the items given, for the mending.
+- *Tests.* Unit tests in `drc::neck` for each case: two round ends (error and warning, in line and at an angle); the
+  ordinary joints listed above; a track's tip on a pad and on a via, and the same track ended at the first copper,
+  inside the pad, on the via's rim and at its centre; a track narrowed at its pad; a neck with a way round by sound
+  joints, under a pour, between two tracks that a pour holds beside a hole in it, beside a pour that only one of them
+  is in, and under a teardrop; a track beside the corner of two others reported once; a track under the minimum
+  measured against its own width. Through the commands (`tests/drc.rs`): the three kinds with their subjects, places,
+  widths and severities, `drc.run` by code, `check_limits` with the two errors, `check_copper` without them, a waiver,
+  a pour over all of them, a teardrop zone over a tip.
+- *The corpus as its designers routed it* (`CADLAB_BENCH_ORIGINAL=1`, which now prints the necks): 2 errors and 10
+  warnings on twelve boards. The errors are on glasgow-revD1: U42.4 and U54.4, each reached on B.Cu by the tip of a
+  track that stops short of the pad, 52 um of copper where the board's minimum is 0.09 mm. The warnings:
+  buspirate5-rev10 5 (a track that reaches U301.1 by 0.152 mm of 0.254; two tracks that share 0.196 of 0.203; three
+  tracks that end on a via's rim with 0.2455 of 0.254), lumenpnp-mobo 1 (BZ1.2, 0.230 of 0.25), glasgow-revD1 4
+  (tracks of 0.3 mm that end just outside a via, 0.240 and 0.273). They are real by the geometry, and small; the
+  oracle comparison with KiCad allows the code as a rule that only cadlab has (`tests/corpus.rs`), since KiCad
+  measures no joint against its tracks. No test board of the targets run here has one (below).
+**2. The necks of the two routers** (goal 2).
+- *Before* (master's routers with the check: guide 0.0.47; the twelve boards in four orders at 60 s, guide in the
+  orders none, 2, 3 and 4 and the native router with the seeds 1 to 4, four runs at a time on three threads, the load
+  0.5 at the start and 6.3 at the end, a board dumped and a build of four jobs beside them for part of it). Errors +
+  warnings by order:
+
+  | board | guide 0.0.47 | native |
+  |---|---|---|
+  | corne-cherry | 21+9, 28+8, 32+6, 31+7 | 1+0, 0, 0, 1+0 |
+  | buspirate5-rev10 | 32+15, 32+19, 32+17, 36+17 | 0 |
+  | glasgow-revC3 | 49+0, 42+0, 49+0, 47+0 | 0 |
+  | glasgow-revD1 | 27+0, 25+0, 32+0, 23+0 | 0 |
+  | lumenpnp-mobo | 6+23, 6+23, 6+22, 8+23 | 0 |
+  | cynthion | 8+6, 9+5, 22+7, 18+5 | 0 |
+  | tinytapeout-demo | 13+0, 17+0, 14+0, 9+0 | 0 |
+  | lumenpnp-ringlight | 1+1 in each | 0 |
+  | the four others | 0 | 0 |
+  | 48 runs of each | 678 + 216 | 2 + 0 |
+
+  By kind, guide's: 884 a track and a pad (669 errors), 7 two tracks, 3 a track and a via. The native router's two are
+  one pad of corne-cherry in two orders.
+- *Which pass lays them*, by the count of necks after each step of the adapter (an instrument, not committed, on the
+  board without its fills, which counts those that a pour covers too): guide's own output has none to five, the runs
+  after it add none, and the step that takes out the tracks between pads that a pour joins (D116) adds the rest:
+  tinytapeout-demo has 1 before that step and 13 after it, buspirate5-rev10 0 and 49, lumenpnp-mobo 1 and 32.
+- *Source 1, in guide: `pcb::needless_between` and `pcb::needless`.* A track was part of every pad and piece of fill
+  that its copper touches. A route on a lattice ends at a point beside its pad and goes into the pad by a last piece;
+  the round end of the track before that piece reaches the pad's edge too, so the last piece was told needless
+  wherever a fill joins the net's pads, and the pad was left on the chord that its edge cuts of a round end (0.124 mm
+  of a track of 0.16 mm at a pin of tinytapeout-demo's QFN, 45 um in the narrowest of that board). D144's rule made a
+  pair of tracks, and a track and a via, one by their centre lines; pads and fills were left as they were, and the
+  script did not look at them. *guide 0.0.48* (its pull request 97): the groups that a track is part of are told
+  twice, by what its copper touches and by what its centre line comes to (a pad's copper, a piece of fill, or a fill
+  that holds one of its ends), and nothing is needless that the groups are less joined without by either count.
+  Tested in guide (the last piece into a pad stays for a track that ends 0.1 mm short of the pad; the piece out of a
+  pad goes where the fill holds the track that begins beyond the pad; a piece inside the pad goes) and here.
+- *Source 2, in the adapter: the check of that step.* The step fills the board without the tracks told, and puts back
+  those near what is worse: pads short of spokes and connections open. A fill keeps its gap from a pad with a relief,
+  so a track told needless because a fill holds the track before it and the pad may still be all that joins the two
+  by a track's width on the board filled again. The check now counts the necks that the board did not have as places
+  to put tracks back at (`necks_of`); what is left of them after that is no reason to leave the step out, and is
+  mended.
+- *Source 3, in guide's own output, left as it is*: a stub of a net with a pour that ends at a place in its fill
+  beside a pad (three pads of cynthion's VBUS nets, 67 um of a track of 0.127 mm), two stubs of a pour's net that end
+  0.2 mm apart in the fill (corne-cherry's GND, lumenpnp-mobo's +3.3V), and the ends of a pair at its pads
+  (corne-cherry's D+ and D-, 0.22 to 0.23 of 0.25 mm). The first two are joined by the fill when guide lays them and
+  are necks only where the last fill is another; which pass of guide lays each was not looked for.
+- *Source 4, in the native router, left as it is*: its count of what is joined is by the copper that touches, so a
+  track that passes a pad of its net by the corner on its way to the next pad joins it (corne-cherry's RU1.48, 80 um,
+  in two orders of four), and no connection is planned for the pad.
+- *The mending* (`router::necks`, for either router, after the tracks are narrowed at their pads): for each neck with
+  a new track on one side, a piece of track of the narrower width from the nearest point of the track's centre line
+  to the other's: a track's nearest point, a via's centre, a point 10 um inside a pad's copper. The piece lies between
+  two round ends of its net that touch, so it adds copper only in the notches beside their overlap. It is kept only
+  if `drc::check_copper_items` names it in no error on the board with it (the board's own copper, its fills left out:
+  they are made around the tracks); otherwise the neck stays for the DRC to report. The board is looked at without
+  its fills first, which finds every neck and costs no fill; only a board with one is filled, so that a neck under a
+  pour is left alone. Tested: a joint of two round ends mended, and one left where another net's track stands in the
+  notch at its clearance from both round ends.
+- *After* (the final sets of (4), this commit: twelve boards in four orders and tinytapeout-demo in eight): no neck
+  in 52 runs of guide and none in 52 of the native router. A census of 48 and 48 runs made earlier, with guide's fix
+  and the mending and before the adapter's check, had none either, the mending having laid 34 pieces in guide's 48
+  runs; with the adapter's check the final sets have 20 pieces in 52 runs (4).
+- *What it costs.* At budgets of nodes, guide 0.0.48 by path beside 0.0.47, run for run: the connections of every run
+  are the same (570 open at 40 million nodes over nine boards in three orders, 164 at 150 million over seven boards
+  in two, glasgow-revD1 56 and 75), no run's count is other than the DRC's, the vias are the same but for
+  tinytapeout-demo (1 or 2 more of 258 to 298) and the track is 1 to 26 mm more (corne-cherry 0.3 to 0.4 %,
+  buspirate5-rev10 0.4 %, glasgow-revC3 0.2 to 0.3 %, glasgow-revD1 0.01 %): the last pieces that stay.
+
+**3. tinytapeout-demo's tenth order** (goal 3; guide by path with instruments, one run at 60 s each).
+- *The board that leaves* has mng6 open, from J5.R18 at the board's edge to U6.7, with no track at either pad, as in
+  D144's eleven sets. Round U6.7 it is as D144 has it: RPLED's via 0.85 mm out, +3V3's stub beyond it, mng7 and mng5
+  inside.
+- *What the settling tries, in its own words* (a line for each try): a negotiation for the connection moves 38 nets
+  and is undone; then four chains, each a search for the connection across other routes at 10 mm a route crossed,
+  which finds a way of 350 to 400 steps that crosses 12, 12, 9 and 11 nets (mng7 and five nets of the uio bus among
+  them, by the order of the nets' names). A chain cuts four nets at most, so each ends at once with its first net as
+  the one not to cross the next time. The searches end on their own (60 to 68 thousand nodes of 300 thousand): no way
+  with fewer crossings is cheaper at that price.
+- *With the limits raised* (16 nets cut, 48 moved, by a switch): two chains of 17 and 25 nets, each ended by a net that
+  could not be joined up again. The connection stays open.
+- *With the nets round the two pads taken out first* (built in guide and not kept, `goal3-cleared-chain-not-kept.patch`:
+  the generalisation of the shut step that the round asked for: the nets with copper within 1.5 mm of a pad of the
+  connection that nothing is joined to, the nearest first, taken out whole; the connection routed; those nets routed
+  again from nothing, those with the fewest pads first, each across others if it has to): with two and with four out
+  the connection still crosses 10 to 12 nets; with six out it has a way that crosses nothing (290 steps); five of the
+  six come back, one across a seventh net, and the sixth, a net of three pads or more, comes back one pad short.
+  With eight out, another net ends one pad short. With the net that had no way back left where it is in the next try,
+  a net that one of the returning nets cut cannot be joined up again. Each such try costs one to several million nodes
+  of search, seconds of the first run. None ends with fewer connections open, so none is kept.
+- *What that says*: the pin's last escape is not what the connection lacks. Its whole way, round the chip and
+  through the uio bus to the connector, is taken by the time its turn comes, and making room for it at one end closes
+  another net's at the other. D144's reading (RPLED's via a step further out) was of the copper at the pin alone, and
+  inferred. Preventing a via in a pin's last escape would not open this connection either, by the same count; that
+  was not built.
+- *The sixteen orders in three sets*, this build beside master's (four runs at a time, the load 5.7 to 6.3, nothing
+  built or tested beside them): 4, 5 and 2 connections open with this build, 11 in all; 4, 1 and 1 with master's, 6 in
+  all. The tenth order's mng6 is open in all three sets of both. The rest are what D144 named: in the first set of
+  both builds the order 0's net V, for its time, and the seventh order's U6.64; and pads of +3V3's pour after a first
+  run that took its slow way: the ninth order's C43.1 in the three sets of this build and in one of master's, and in
+  one set of this build the thirteenth order's three pads, after a first run that its deadline ended. guide's first
+  run is the same code in the two builds (0.0.48 differs in what is told needless once the routes are final), so the
+  two were run again side by side: the ninth order four times with each build has its pad open three times with each
+  (its first run ends at 45 to 47 s with 41.5 to 44 million nodes where the pad is open, at 36 to 38 s with 37 to 39
+  million where it is not), and the thirteenth twice with each has its three pads open once with each. The five
+  connections more are therefore taken for the runs and not for the build: an inference, which six more pairs of runs
+  support and do not prove. By the medians of the sixteen orders: 275, 275.5 and 274 vias for 274, 274.5 and 271.5;
+  4842, 4862 and 4862 mm of track for 4839, 4851 and 4856; 23, 21 and 21 pads short of two spokes for 20, 20 and 23.
+  No pad without a spoke, no error but unrouted and no neck in this build's 48 runs; master's 48 have 672 necks.
+- *Against the round's targets*: the tenth order at no connection open: not met. Fewer open over the sixteen orders:
+  not met (11 for 6 in these sets, as above). No board worse: the 72 cells are as they were (4).
+**4. At 60 s, beside the native router measured in the same minutes** (this commit: guide 0.0.48 and polyclip 0.0.7
+from crates.io; the twelve boards in four orders and tinytapeout-demo in eight; this, the native router of this commit
+and master's routers with this commit's DRC side by side, board by board, four runs at a time on three threads each;
+the load 5.2 at the start, a build having just ended, and 6.0 at the end, nothing built or tested beside them; open is
+the DRC's count of unrouted on the board that left, for both; open and the pads short of two spokes by order; medians
+of the vias, the track and the track outside the pads; the fastest and the slowest order). The 72 cells are the six
+columns after the board's name, as in D122; the last column is new and is no cell: the necks by `drc.neck` summed over
+the orders, errors + warnings, on this build's boards, on those of master's build of guide, and on the native
+router's of this commit.
+
+| board | open | vias | track | track outside pads | short of two spokes | time | necks: this, master's build, native |
+|---|---|---|---|---|---|---|---|
+| buspirate-flash-sop | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 4 against 4 | better (-4 %) 440 against 461 | equal (-0 %) 429 against 431 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 1 s against 0 to 0 s) | 0, 0, 0 |
+| buspirate-rs232 | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 282 against 281 | equal (+1 %) 274 against 272 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 0 s against 0 to 0 s) | 0, 0, 0 |
+| lumenpnp-ringlight | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 3 against 3 | better (-7 %) 165 against 177 | equal (-2 %) 157 against 159 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 0 s against 0 to 0 s) | 0, 4+4, 0 |
+| nrfmicro | equal (0/0/0/0 against 0/0/0/0) | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 420 against 414 | equal (0/0/0/0 against 0/0/0/0) | equal (2 to 14 s against 2 to 12 s) | 0, 0, 0 |
+| sweep-v2.2 | equal (3/3/3/3 against 3/3/3/3) | better (-20 %) 20.5 against 25.5 | equal (-2 %) 2122 against 2159 | equal (-1 %) 2110 against 2122 | better (0/0/0/0 against 2/1/2/1) | better (35 to 36 s against 52 to 53 s) | 0, 0, 0 |
+| corne-cherry | better (1/0/0/1 against 1/3/2/4) | better (-7 %) 428.5 against 459 | better (-7 %) 7528 against 8103 | better (-6 %) 7454 against 7915 | better (1/1/1/1 against 3/3/2/2) | worse (26 to 54 s against 20 to 31 s) | 0, 112+30, 0 |
+| tinytapeout-demo | better (0/0/0/0/0/0/0/0 against 19/1/4/5/1/2/2/9) | equal (+1 %) 276.5 against 273 | equal (-0 %) 4874 against 4894 | worse (+3 %) 4813 against 4672 | better (0/1/0/0/1/2/2/2 against 20/12/10/16/16/14/17/19) | equal (38 to 50 s against 33 to 60 s) | 0, 105+0, 0 |
+| buspirate5-rev10 | better (0/0/0/0 against 4/2/4/4) | better (-6 %) 284.5 against 302 | better (-7 %) 2900 against 3129 | better (-4 %) 2801 against 2911 | better (7/9/7/10 against 22/24/30/21) | better (13 to 16 s against 18 to 30 s) | 0, 132+68, 0 |
+| lumenpnp-mobo | better (0/0/0/0 against 8/7/6/15) | better (-6 %) 325.5 against 346 | better (-4 %) 5293 against 5505 | equal (-0 %) 5208 against 5219 | better (0/0/0/0 against 2/2/0/1) | better (28 to 30 s against 61 to 61 s) | 0, 17+91, 0 |
+| cynthion | better (8/8/8/8 against 28/29/30/28) | better (-13 %) 416.5 against 478 | better (-4 %) 3044 against 3184 | equal (-0 %) 2969 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (30 to 33 s against 62 to 62 s) | 0, 57+23, 0 |
+| glasgow-revC3 | better (8/6/9/7 against 35/29/32/30) | better (-5 %) 395.5 against 416 | worse (+4 %) 3608 against 3462 | worse (+10 %) 3519 against 3200 | equal (0/0/0/0 against 0/0/0/0) | equal (58 to 59 s against 60 to 61 s) | 0, 186+0, 0 |
+| glasgow-revD1 | better (11/15/6/12 against 113/143/118/105) | worse (+6 %) 1131 against 1065 | worse (+17 %) 10544 against 9026 | worse (+21 %) 10277 against 8504 | better (10/12/11/11 against 42/44/42/37) | better (54 to 56 s against 61 to 62 s) | 0, 98+0, 0 |
+
+**35 better, 30 equal, none overlapping, 7 worse of 72**, and the same for master's build in those minutes (35, 30, 0
+and 7; no cell differs). The seven worse are D144's: corne-cherry's time; tinytapeout-demo's track outside the pads;
+glasgow-revC3's track and track outside the pads; glasgow-revD1's vias, track and track outside the pads.
+- *The necks*: none on this build's boards in 52 runs of guide and 52 of the native router. Master's build of guide
+  has 711 errors and 216 warnings in its 52 runs (the before census of (2), measured again in these minutes with
+  tinytapeout-demo's four more orders). The mending laid 20 pieces in 11 of guide's 52 runs (corne-cherry in its four
+  orders, lumenpnp-mobo in four, cynthion in two, glasgow-revC3 in one) and 3 in 3 of the native router's
+  (corne-cherry twice, tinytapeout-demo once), and left none.
+- *By the nets that both routers complete* (36 cells: vias, track and track outside the pads on them): 17 better, 13
+  equal and 6 worse, for master's 17, 14 and 5. The cell that differs is tinytapeout-demo's track on those nets, +2.2 %
+  for +1.7 % at the script's 2 %; its vias on them are +6 % for +3 % in this set. tinytapeout-demo's eight runs are not
+  the same runs in the two builds (its order 6 has 303 vias here and 258 there, its order 2 273 and 283), and (3) has
+  them over 48 runs of each.
+- *The router's count beside the DRC's*: guide's is the DRC's in every run of this build and of master's (52 and 52).
+  The native router's is other than the DRC's in 17 of its 52 runs, as it has been (its count is per planned
+  connection).
+- *Thermal relief* (twelve boards in four orders, tinytapeout-demo in eight): no pad of a pour without a spoke, no
+  solder pad made solid by a track, no DRC error other than unrouted, in this build's 52 runs and in master's. The
+  pads short of two spokes by order are in the table: glasgow-revD1 10, 12, 11 and 11 for master's 9, 12, 14 and 11
+  in the same minutes, tinytapeout-demo 8 over its eight orders for 9, the other boards the same pads count for count.
+- *Before the release of guide 0.0.48*: the budgets of nodes (2); corne-cherry at 60 s in four orders, 1, 0, 0 and 1
+  connections open as before; guide's formatting, clippy with every feature and with `pcb` alone, rustdoc and its
+  whole test suite (1290 passed) on the commit of its pull request 97; every job of that pull request and of the
+  release's passed before each was merged (Linux, macOS, Windows, the MSRV, the docs).
+
+**What got worse.**
+- *Track*: the last pieces into pads that are no longer taken out stay. By the medians of the same minutes:
+  glasgow-revD1 10 544 mm for 10 478 (+0.6 %), buspirate5-rev10 2900 for 2890 (+0.3 %), corne-cherry 7528 for 7514,
+  glasgow-revC3 3608 for 3600 (+0.2 %), 1 to 6 mm on five others. At budgets of nodes, run for run, 1 to 26 mm (0.01
+  to 0.4 %).
+- *tinytapeout-demo's vias*: 1 or 2 more of 258 to 298 at budgets of nodes (a via whose only sound joint was a touch
+  stays). At 60 s 276.5 for 274.5 by the medians of eight orders; (3) has sixteen orders three times.
+- *One cell of the table by the common nets* (tinytapeout-demo's track, at the script's edge), above.
+- *tinytapeout-demo's open connections over three sets of sixteen orders*: 11 for master's 6 in the same minutes,
+  taken for the runs and not for the build by the repeats of (3), which is an inference.
+- *A DRC run* now measures every joint of a track: on the synthetic board of `tests/perf.rs` (3040 tracks, 2434 vias,
+  four pours; one thread, best of three) `drc.run` with the fills cached takes 326 ms for 272 ms without the rule, and
+  `drc::check` 764 ms for 762; the board has no neck. A router's result is looked at the same way once (`mend_new`).
+- *The designers' boards*: two errors and ten warnings that `drc.run` did not have (1); a project that is checked
+  with `drc.run` in a script may see its first error from this rule.
+
+**What was tried and not kept.**
+- The generalised shut step for a signal pad, in guide (3): built, measured on the tenth order, kept by no try.
+- Larger chains in the settling, by a switch (3): the chains end on a net with no way back.
+- A warning for every joint whose centre lines miss, however little: the first form of the rule's test put a corner
+  whose second track begins 60 um beside the first one's end among the necks; it shares all but a sliver of a round
+  end, and is no finding (`tests/drc.rs`).
+- Mending without a check of the board's rules: the piece is inside the hull of two round ends that touch, and can
+  still be nearer another net than its clearance in the notch beside them (unit test: 10 um nearer); so each piece
+  is checked and taken back if a rule names it.
+
+**What remains open.**
+1. *The seven cells*, as D144 left them.
+2. *tinytapeout-demo's pads of pours after a first run that takes its slow way* (the ninth order in three runs of
+   four with either build, the thirteenth in one of two): which way the first run takes is decided in its first 35
+   s, by something that the load of the machine moves; not looked for.
+3. *tinytapeout-demo's tenth order*: its connection needs a way that the board no longer has when its turn comes
+   (3). What was not tried: its net routed before those of the uio bus (an order of the first rounds); a whole second
+   run with the nets that ended open first, which a minute has no room for.
+4. *The necks that the routers still lay and the mending makes whole*: 20 pieces in 52 runs of guide, 3 in 52 of the
+   native router. In guide's own output: stubs that end at a place in a fill beside a pad, and the ends of pairs; which
+   pass lays each was not looked for. In the native router: a track that passes a pad of its net by the corner counts
+   as joining it.
+5. *Goal 4*, tinytapeout-demo's track outside the pads by net: not begun.
+6. *`drc.neck` beside KiCad*: KiCad's DRC was not run on these boards here.
+
+**Default: unchanged.** `router: guide` stays the second opinion and the native router stays the default.
+*Checks run*: `cargo fmt --all --check`; clippy with `--all-targets --all-features -- -D warnings`; rustdoc with
+warnings denied; the library's tests of `drc`, `router`, `fab` and `board`; the test targets `drc`, `drc_crosscheck`,
+`fab_profile`, `route`, `thermal_relief`, `agent_session6`, `zone_refill`, `zone`, `zone_relieve`, `agent_session`,
+`agent_session3`, `agent_session4`, `agent_session5`, `agent_ergonomics`, `demo_board`, `diffpair`, `electrical`,
+`kicad_pcb_import`, `local_settings`, `placement`, `session4_followup`, `silk`, `specctra`, `cli`, `mcp`, `board`,
+`keepout_exceptions` and `fab` (29 targets, 340 tests passed, none failed; no snapshot or golden file changed, and no
+board of theirs has a neck after
+routing: `tests/route.rs` asks every routed board for no DRC error but unrouted). *Not run*: cadlab's whole test
+suite and its oracle tests, which are run at the merge (the oracle comparison with KiCad on the corpus allows
+`drc.neck` as a rule of cadlab's alone, untested here); the generated boards; freerouting; guide on more than three
+threads at 60 s; a second set of the 72 cells.

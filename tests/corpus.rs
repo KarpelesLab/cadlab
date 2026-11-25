@@ -145,6 +145,13 @@ const ONE_SIDED_RULES: &[(Side, &str, &str)] = &[
     ),
     (
         Side::Cadlab,
+        "drc.neck",
+        "KiCad has no rule that measures a joint against the tracks it joins: two round ends that overlap, or a \
+         track that reaches a pad or a via by its tip, are joined by its count as by cadlab's connectivity \
+         (docs/BOARD.md \"Necks\"; D145 lists what the corpus boards have as their designers routed them)",
+    ),
+    (
+        Side::Cadlab,
         "drc.thermal_nominal",
         "KiCad has no rule for thermal spokes that cover a pad's outline (docs/BOARD.md \"Thermal relief\")",
     ),
