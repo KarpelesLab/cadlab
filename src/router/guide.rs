@@ -87,6 +87,7 @@ use crate::refs::ObjectRef;
 use crate::units::Nm;
 
 use super::model::profile_key;
+use super::pace;
 use super::{
     ConnStatus, ConnectionReport, Hooks, PairReport, PairStatus, RouteError, RouteOptions, RouteResult, RouteStats,
     Scope, tracks_length,
@@ -157,11 +158,22 @@ const ROUNDS_SHARE: f64 = 0.42;
 /// on `threads` threads, in nodes (`RouteOptions::rounds_nodes`, guide 0.0.49, D146): a count
 /// made from the budget, where guide's clock said which round was the last, and one order of a
 /// board's nets ended as two boards in two runs (tinytapeout-demo: 9 of 16 orders with other
-/// vias and track from one run to the next, the round cut in its middle or a round later). On
-/// a machine too slow for the count, guide's clock ends the stage as it did.
-fn rounds_nodes(first: Duration, threads: usize) -> u64 {
+/// vias and track from one run to the next, the round cut in its middle or a round later).
+/// `pace` is what this machine does beside the machine that [`ROUNDS_NODES_A_SECOND`] was fitted
+/// on ([`pace::pace`], D147): a step of the square root of two, so that the count is the same
+/// from one run to the next. Where the run is slower than its machine's pace says, under load,
+/// guide's clock ends the stage as it did.
+fn rounds_nodes(first: Duration, threads: usize, pace: f64) -> u64 {
     let wide = 1.0 + (threads.max(1) - 1) as f64 * 0.5;
-    (first.as_secs_f64() * ROUNDS_SHARE * ROUNDS_NODES_A_SECOND * wide) as u64
+    (first.as_secs_f64() * ROUNDS_SHARE * ROUNDS_NODES_A_SECOND * wide * pace) as u64
+}
+
+/// Whether `need` from now ends before `until`: every question that the adapter asks the clock
+/// between two of its steps, each with the times of the steps before it as the run measured
+/// them. On the boards whose runs end at their budget some are within a few tenths of a second
+/// of the other answer (D147 has them by board and question).
+fn in_room(need: Duration, until: Instant) -> bool {
+    Instant::now() + need < until
 }
 
 /// How many times what the first run needed after it (the verification and the refill) is
@@ -2960,7 +2972,10 @@ fn first_said_all<'a>(
 /// is left open says so. A run with a budget of either kind is not the run without one: guide
 /// then routes for the most connections soonest. With a time budget alone, the negotiation of
 /// the native router's rounds in guide has its share as a count of nodes made from the budget
-/// ([`rounds_nodes`], D146), so that the clock does not say which of its rounds is the last.
+/// ([`rounds_nodes`], D146) and the machine's pace ([`pace::pace`], D147), so that the clock does
+/// not say which of its rounds is the last. The other stages of a run that reaches its time
+/// budget are ended by the clock, and such a run is not the same board every time (D147: at 60 s
+/// glasgow-revD1 alone of the twelve corpus boards); the work budget is the run that is.
 ///
 /// **The first run's nets** are those of the board's open connections in scope and the nets
 /// with zones in scope ([`first_nets`]): a net that cadlab's fill joins whole is cut by the
@@ -3052,10 +3067,25 @@ pub(crate) fn route(
     let deadline = opts.budget.map(|b| start + b.mul_f64(first_share));
     gopts.work_budget = opts.work.left();
     // The negotiation of the rounds by a count made from the budget, not by the clock.
+    // The count is of this machine: its pace beside the machine that the count was fitted on,
+    // measured once in a process ([`pace::pace`], D147).
     gopts.rounds_nodes = opts
         .budget
-        .filter(|_| gopts.work_budget.is_none())
-        .map(|b| rounds_nodes(b.mul_f64(first_share), gopts.threads));
+        .filter(|_| gopts.work_budget.is_none() && gopts.rounds == pcb::Rounds::Native)
+        .map(|b| {
+            let pace = pace::pace();
+            (hooks.progress)(
+                0,
+                None,
+                &format!(
+                    "guide: this machine's pace, {:.1} million nodes a second of the measuring search, step {} ({:.2} of the count's)",
+                    pace.measured / 1e6,
+                    pace.step,
+                    pace.factor()
+                ),
+            );
+            rounds_nodes(b.mul_f64(first_share), gopts.threads, pace.factor())
+        });
     // Whether the board has guide's own rounds: asked for, or because the native router's
     // gave it up.
     let mut own_rounds = gopts.rounds == pcb::Rounds::Own;
@@ -3195,7 +3225,7 @@ pub(crate) fn route(
         }
         let least = least_run(moves, after);
         let until = second.map(|d| run_until(d, over.get(), moves, after));
-        if stopped == Some(Stopped::WorkBudget) || until.is_some_and(|d| Instant::now() + least >= d) {
+        if stopped == Some(Stopped::WorkBudget) || until.is_some_and(|d| !in_room(least, d)) {
             break;
         }
         let left = open(&fitems, &fisl);
@@ -3374,7 +3404,7 @@ pub(crate) fn route(
         (start + b).checked_sub(after.mul_f64(AFTER_SHARE) + last + REPORT + spoke_need)
     };
     // With the time to get the routes back, to look, and to verify what comes of it.
-    let room = opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| Instant::now() + after + SHORTER_MIN < t));
+    let room = opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| in_room(after + SHORTER_MIN, t)));
     // Not after the native router's rounds in guide: their routes are negotiated at the pitch
     // and have had their own pass for fewer vias, and the run for shorter ways laid them
     // again longer or with more vias in each of the 11 runs measured that got to it
@@ -3479,7 +3509,7 @@ pub(crate) fn route(
                 break;
             }
             let in_time =
-                opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| Instant::now() + after.mul_f64(AFTER_SHARE) < t));
+                opts.budget.is_none_or(|b| reserve(b).is_some_and(|t| in_room(after.mul_f64(AFTER_SHARE), t)));
             if !in_time {
                 break;
             }
@@ -3570,7 +3600,7 @@ pub(crate) fn route(
             let count = joint_took.get().unwrap_or(after / 3);
             // The report's time is in what is kept for the last run, where that is kept.
             let report = if straight_keep.is_zero() { REPORT } else { Duration::ZERO };
-            Instant::now() + fill * fills + count * counts + report < start + b
+            in_room(fill * fills + count * counts + report, start + b)
         })
     };
     // The step for the tracks between pads waits for the one that moves routes out of the rooms
@@ -3599,7 +3629,7 @@ pub(crate) fn route(
             let spokes_after = spoke_need.is_zero()
                 || opts.budget.is_none_or(|b| {
                     let count = joint_took.get().unwrap_or(after / 3);
-                    Instant::now() + fill * 2 + count * 3 + spoke_step(after, fill, count) + REPORT < start + b
+                    in_room(fill * 2 + count * 3 + spoke_step(after, fill, count) + REPORT, start + b)
                 });
             if between && !late && !poured.is_empty() && !spokes_after {
                 waits = true;
@@ -3679,7 +3709,13 @@ pub(crate) fn route(
                 let (mut gt, mut gv): (BTreeSet<usize>, BTreeSet<usize>) =
                     (t_all.into_iter().collect(), v_all.into_iter().collect());
                 let mut kept = None;
-                for round in 0..2 {
+                // Three tries: all that is told; without what of its net is near a place that
+                // is worse for it; and without what of any net is near a place that is still
+                // worse then (D147: two pads of cynthion's CONTROL_VBUS lost a spoke to a track
+                // of another net taken out beside them, whose room another pour took, in two
+                // orders of four, and the board kept its 230 mm of tracks between pads for
+                // those two pads).
+                for round in 0..3 {
                     if (gt.is_empty() && gv.is_empty()) || !((must && round == 0) || time_for(1, u32::from(between))) {
                         break;
                     }
@@ -3689,12 +3725,19 @@ pub(crate) fn route(
                         kept = Some(less);
                         break;
                     }
-                    if round > 0 {
+                    if round > 1 {
                         break;
                     }
                     let near = |net: Option<&str>, x: i64, y: i64| {
-                        bad.iter()
-                            .any(|(n, b)| Some(n.as_str()) == net && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3])
+                        // Any net's, three times as far, in the last try.
+                        let wide = if round > 0 { 2 * PAD_NEAR } else { 0 };
+                        bad.iter().any(|(n, b)| {
+                            (round > 0 || Some(n.as_str()) == net)
+                                && x >= b[0] - wide
+                                && x <= b[2] + wide
+                                && y >= b[1] - wide
+                                && y <= b[3] + wide
+                        })
                     };
                     let before = gt.len() + gv.len();
                     gt.retain(|&i| {
@@ -3738,7 +3781,7 @@ pub(crate) fn route(
                 } else {
                     spoke_step(after, fill, joint_took.get().unwrap_or(after / 3))
                 };
-                Instant::now() + after.mul_f64(PRUNE_SHARE) + REPORT + step < start + b
+                in_room(after.mul_f64(PRUNE_SHARE) + REPORT + step, start + b)
             });
         if prune && !poured.is_empty() {
             let piece = pieces(&tracks, &vias);
@@ -3841,7 +3884,7 @@ pub(crate) fn route(
         // that a work budget stopped, nor for the nets of pairs and with lengths to keep.
         let spokes_room = opts.budget.is_none_or(|b| {
             let count = joint_took.get().unwrap_or(after / 3);
-            Instant::now() + spoke_step(after, fill, count) + REPORT < start + b
+            in_room(spoke_step(after, fill, count) + REPORT, start + b)
         });
         if spokes_room && stopped != Some(Stopped::WorkBudget) && !poured.is_empty() && !tracks.is_empty() {
             let held: BTreeSet<String> = ad
@@ -3887,7 +3930,7 @@ pub(crate) fn route(
             for _ in 0..SPOKE_AGAIN {
                 let in_time = opts.budget.is_none_or(|b| {
                     let count = joint_took.get().unwrap_or(after / 3);
-                    Instant::now() + spoke_step(after, fill, count) + REPORT < start + b
+                    in_room(spoke_step(after, fill, count) + REPORT, start + b)
                 });
                 if rooms.is_empty() || !in_time {
                     break;
@@ -4117,7 +4160,7 @@ pub(crate) fn route(
     // cannot take back whole stays as it is (`leave_given`); a track that this router's rounds
     // in guide ended at the first copper of a pad is taken to where guide joins the pad, and
     // the ends are aimed at the pads' copper again once the stairs are laid (guide 0.0.44).
-    let straight_room = opts.budget.is_none_or(|b| Instant::now() + straight_least(after, fill) + REPORT < began + b);
+    let straight_room = opts.budget.is_none_or(|b| in_room(straight_least(after, fill) + REPORT, began + b));
     if !straight_room && stopped != Some(Stopped::WorkBudget) && !tracks.is_empty() {
         (hooks.progress)(0, None, "guide: no time to lay the stairs straight, left as they are");
     }
@@ -4180,7 +4223,7 @@ pub(crate) fn route(
         // 1.5 s of its last run (glasgow-revD1's corridors 0.3 s).
         g.fewer_vias = opts.budget.is_none_or(|b| {
             let count = joint_took.get().unwrap_or(after / 3);
-            Instant::now() + straight_step(after, fill) + fill + count + REPORT + STRAIGHT_RUN < began + b
+            in_room(straight_step(after, fill) + fill + count + REPORT + STRAIGHT_RUN, began + b)
         });
         g.global = g.fewer_vias;
         g.shorten = false;
@@ -4288,7 +4331,7 @@ pub(crate) fn route(
             // what the first run needed after it and two fills, glasgow-revD1, whose
             // fills no run times, had no second verification 4.8 s before its budget.
             let again = checked.elapsed();
-            let in_time = opts.budget.is_none_or(|b| Instant::now() + again + fill + REPORT < began + b);
+            let in_time = opts.budget.is_none_or(|b| in_room(again + fill + REPORT, began + b));
             if !in_time {
                 break;
             }
@@ -4406,7 +4449,7 @@ pub(crate) fn route(
         let mut wide: BTreeSet<String> = BTreeSet::new();
         let mut done = false;
         for _ in 0..PAD_END_AGAIN {
-            let in_time = opts.budget.is_none_or(|b| Instant::now() + fill + REPORT / 2 < began + b);
+            let in_time = opts.budget.is_none_or(|b| in_room(fill + REPORT / 2, began + b));
             if !in_time {
                 (hooks.progress)(0, None, "guide: no time to end the tracks inside their pads, left as they are");
                 break;

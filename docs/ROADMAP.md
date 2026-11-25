@@ -424,6 +424,18 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D146 (D147, the same direction, not met): guide 0.0.50. The necks are mended where they are made
+      (two stubs that touch by their round ends are two terminals to guide and get their piece; a route that ends
+      on a teardrop or a pour's edge beside its pad goes on into the pad; `drc.neck` counts a fill that joins two
+      pads), and the last step lays no piece of track in 52 runs of guide's (20 in 11) nor in 192 (72 in 32); the
+      native router's 3 in 52 are as they were. The machine's pace is measured in the run (`router::pace`) where
+      D146 had a constant. What a run of 60 s repeats is measured: one board in 22 of 24 board-orders over eight
+      repeats, the two others glasgow-revD1's; the clock's decisions are listed by board with their margins. The
+      deadline asked at marks of the run's own work was built and measured and is not kept (the same count of
+      distinct boards, one board in 19 of 24, glasgow-revD1 at half speed 37 open for 6 to 9). 35 cells better, 30
+      equal and 7 worse of 72, as master's build. Open: the seven cells; the runs that end at their budget are
+      the clock's (a count made before the run needs a second in nodes by stage and board); the native router's
+      track past a pad by its flank; corne-cherry's time and tinytapeout-demo's rounds, not begun.
       Since D145 (D146, the same direction, not met): guide 0.0.49. The clock no longer says which round of the
       native router's rounds in guide is the last: the adapter gives the negotiation's share as a count of nodes
       made from the budget, asked about between two rounds, and tinytapeout-demo's ninth order is one board in

@@ -419,6 +419,10 @@ What a user gets:
   no count means "a minute" on every board.
 - A unit measures the algorithm, not the code: a faster build does the same work in less time and routes the same,
   so `stats.work` shows search savings, and the benchmark's time column shows speedups per unit.
+- *With `router: guide`* the unit is guide's search node, and a time budget repeats where the run ends before it:
+  measured at 60 s on the twelve corpus boards in two orders, eight times each, 22 of 24 board-orders are one board
+  track for track, and the two that are not are of the one board whose rounds the clock ends (D147). For a board
+  that must be the same on every run and machine, give `work_budget`.
 
 **Commands.** `route.all {budget? ("60s") or budget_ms? or work_budget?, layers?, effort?, seed?, fanout?, any_angle?, gridless?, arcs?,
 arc_radius?, router?, neck?}`, `route.nets {nets, ...}` (net or class names, `class:power`), `route.connection {from, to, shove?,
@@ -1072,6 +1076,38 @@ exports and the count all read cadlab's fill). The result is then treated as the
   has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
   last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
   master's build in the same minutes; the seven worse are D144's.
+- *guide 0.0.50* (D147): the joints that hold by a round end alone are mended where they are made, and the last
+  step (`router::necks`) lays no piece of track in 52 runs of guide's (20 in 11 of 52 with 0.0.49) and none in 192
+  (72 in 32). Three sources. Two stubs out of two pads of a net side by side, laid by the rounds' fanout, end a step
+  of the lattice apart (0.2375 mm for tracks of 0.25 mm on lumenpnp-mobo), their round ends overlap, and guide had
+  the two pads as one terminal: a straight track is now one piece with other copper where its middle line comes to
+  that copper, the stubs are two terminals, and the piece between them is routed. A net with a teardrop or a pour
+  has places on the fill where its routes may end, and one beside a pad is a track's end 55 um outside the pad with
+  its round end 70 um into it (corne-cherry's USB connectors, cynthion's CONTROL_VBUS): guide lays a piece from such
+  an end to just inside the pad's copper (`Stats::into_pads`). And `drc.neck` joins two sides through a fill, or
+  fills that lie on each other, that hold something of each side's soundly joined copper: a track past the corner of
+  a pad which teardrops join to the pad the track ends in is no finding. The step for the tracks between pads that a
+  pour joins (D116) has a third try, without what of any net is near a pad that is still worse off.
+  *The machine's pace* (`router::pace`): the count of the rounds' negotiation (D146) is made with what this machine
+  does beside the machine of the benchmarks, measured once in a process by a search that is the same on every run
+  (120 000 nodes of a grid of a million cells, the fastest of seven, some 40 ms) and told as a step of the square
+  root of two: 23.7 to 29.9 million nodes a second in 96 runs four at a time, step 0 in each, so the count is D146's
+  there. The measure is of the processor and not of its load (step 0 with twelve threads on six logical processors):
+  a run slowed by its neighbours has guide's clock as the guard, as before. `CADLAB_PACE_STEP` gives a step in place
+  of the measurement.
+  *What a run of 60 s repeats, measured*: the twelve boards in two orders eight times each are one board in 22 of 24
+  board-orders (29 distinct boards in 192 runs); the two are glasgow-revD1's (five boards in eight runs, and two).
+  The clock ends nothing in guide on nine boards, on tinytapeout-demo's two orders and one of corne-cherry's, and the
+  adapter's questions (`in_room`) have 9 to 36 s to spare there; on the runs that end at their budget
+  (glasgow-revD1, glasgow-revC3, half of corne-cherry's orders) it ends the rounds' share, the passes' share and the
+  cleanup, and some of the adapter's questions are decided by 0.1 to 0.7 s. *Built, measured and not kept*: the
+  deadline asked at marks of the run's own work (a part ended at a count of its nodes, four marks to a doubling, and
+  the clocks of the run and of the adapter put forward by what the part left): glasgow-revD1's first run is the
+  same to the node on every repeat, the 192 runs have 29 distinct boards as before and one board in 19 of 24
+  board-orders for 22, and at half speed glasgow-revD1 has 37 connections open for 6 to 9. `work_budget` is the run
+  that repeats on any machine, as before. Beside the native router 35 cells better, 30 equal and 7 worse of 72, as
+  master's build in the same minutes; the seven are D146's. Not begun: corne-cherry's time by a signal inside the
+  run, tinytapeout-demo's rounds beside the native router's own.
 - *guide 0.0.49* (D146): the negotiation of the native router's rounds in guide, in a run with a time budget, by a
   count of nodes that the adapter makes from the budget (`rounds_nodes`, `RouteOptions::rounds_nodes`): 0.42 of the
   first run's seconds at 2.8 million nodes a second for each thread's worth of the rounds' batches (one thread and
@@ -1081,7 +1117,8 @@ exports and the count all read cadlab's fill). The result is then treated as the
   negotiation inside a round, and one order of tinytapeout-demo's nets ended as several boards: its ninth order
   eight times is one board for five, and its sixteen orders are the same sixteen boards in three sets for 6 of 16
   with 0.0.48. A run with a work budget is as it was (the budget is the count), and so is one with neither. The
-  constant is of the machine of the benchmarks; on a slower one guide's clock ends the stage as it did.
+  constant is of the machine of the benchmarks; on a slower one guide's clock ends the stage as it did (since D147
+  the machine's pace is measured and the count made with it, `router::pace`).
   And the rule that ends a negotiation with few points left shared (one for every 32 connections, at the highest
   price of a shared point) waits three rounds after the fewest: at the first such round tinytapeout-demo's tenth
   order had 12 points shared and lost mng6 to the retry after the rounds, three rounds later it has 2 and the

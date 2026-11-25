@@ -319,6 +319,48 @@ pub fn necks(rules: &Rules, layers: &[String], tracks: &[Track], vias: &[Via], i
                 sets.join(ra, rb);
                 continue;
             }
+            // Or that holds something of each side's soundly joined copper on the layer: a
+            // track that passes the corner of a pad which a teardrop or a pour joins to the
+            // pad that the track ends in is not what joins the two (D147).
+            let mut of_group = |root: usize| -> Vec<usize> {
+                solid
+                    .iter()
+                    .copied()
+                    .filter(|&i| items[i].layers.contains(layer_name) && sets.find(i) == root)
+                    .collect()
+            };
+            let (group_a, group_b) = (of_group(ra), of_group(rb));
+            let reached = |group: &[usize], f: usize| {
+                let Some(fb) = items[f].shape.bbox() else { return false };
+                let near: Vec<usize> = group
+                    .iter()
+                    .copied()
+                    .filter(|&i| items[i].shape.bbox().is_some_and(|b| b.intersects(&fb)))
+                    .collect();
+                held(&near, f)
+            };
+            // Through one fill, or through fills of the net that lie on each other, as the
+            // teardrops of two pads that face each other do.
+            let mut from_a: Vec<usize> = on_layer.iter().copied().filter(|&f| reached(&group_a, f)).collect();
+            let mut joined = false;
+            let mut at = 0;
+            while at < from_a.len() && !joined {
+                let f = from_a[at];
+                at += 1;
+                joined = reached(&group_b, f);
+                for &g in &on_layer {
+                    if !from_a.contains(&g)
+                        && items[f].shape.bbox().zip(items[g].shape.bbox()).is_some_and(|(x, y)| x.intersects(&y))
+                        && polyclip::intersects(&items[f].shape, &items[g].shape)
+                    {
+                        from_a.push(g);
+                    }
+                }
+            }
+            if joined {
+                sets.join(ra, rb);
+                continue;
+            }
             for pg in &shared {
                 let at = middle(pg, first.at);
                 // Or one that covers the joint itself.
@@ -557,6 +599,24 @@ mod tests {
         let q = |x: i64, y: i64| polyclip::Point::new(x * UM, y * UM);
         let teardrop = vec![Polygon::new(vec![q(400, -125), q(1100, -300), q(1100, 300), q(400, 125)], vec![])];
         assert!(short().fill(teardrop).necks().is_empty());
+        // A track that ends in one pad and passes the corner of another by its flank, with
+        // a fill between the two pads that touches both (the teardrops of two pads that face
+        // each other): the pads are joined by the fill, and the corner is not what joins them.
+        let (one, other) = (rect(1000, -150, 1600, 150), rect(-600, -150, 0, 150));
+        let passing = || {
+            Board::default()
+                .track(p(1300, 0), p(300, 0), 250)
+                .track(p(300, 0), p(-300, 600), 250)
+                .pad("1", one.clone())
+                .pad("2", other.clone())
+        };
+        // The flank of the second track is 19 um into the corner of the other pad.
+        assert_eq!(passing().necks().len(), 1, "{:?}", passing().necks());
+        assert!(passing().fill(rect(-100, -150, 1100, 150)).necks().is_empty());
+        // Or by two fills that lie on each other, each on one of the pads.
+        assert!(passing().fill(rect(-100, -150, 500, 150)).fill(rect(450, -150, 1100, 150)).necks().is_empty());
+        // Not by a fill that is on one of them alone.
+        assert_eq!(passing().fill(rect(450, -150, 1100, 150)).necks().len(), 1);
     }
 
     /// A track that ends beside the corner of two others is measured against both at once,

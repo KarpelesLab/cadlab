@@ -62,6 +62,7 @@ mod guide;
 mod index;
 mod model;
 mod necks;
+mod pace;
 mod pairs;
 mod post;
 mod pours;
