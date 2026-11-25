@@ -419,6 +419,23 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D141 (D142, the same direction, not met): guide 0.0.45, two options for what a last run did for nothing
+      that this adapter reads (every connection that guide's own count leaves open explained by a search, 436 on
+      glasgow-revD1; a search for fewer vias for the nets handed with their tracks ended short of a pad's centre,
+      kept where the run has the time, as lumenpnp-mobo's 324 vias for 331 come from it). The nets whose
+      straightened tracks part a pour are told by the fill of the two pieces that the open connection's ends are on
+      and have their old routes back alone, and the last run's time is kept by what it takes. The run is kept in 59
+      of 60 runs for master's 52 in the same minutes, the step for the tracks between pads is made in 8 of 8 runs of
+      the two glasgows for 6 (5 in the set before), glasgow-revD1 has 1.4 % less track for it, and its last run is
+      0.46 s in guide for 1.77 s. Beside the native router 36 cells better, 29 equal and 7 worse of 72 for master's
+      35, 28, 1 overlapping and 8 in the same minutes (37, 27 and 8 for 36, 27, 1 and 8 in the set before):
+      tinytapeout-demo's vias change sides by the runs, and no cell moves by this. Measured and not kept: a net with
+      a long way round laid again with the nets in its shorter way (one try in thirty to a hundred kept, 1 to 14 mm
+      of a board); the native router's ways for the twenty nets with the most excess on glasgow-revD1 (free on
+      guide's board in none of 80, a net that only guide completes in 76); an end for corne-cherry's runs that move
+      routes (its slowest order is a first run of 36 s). Open: the eight cells; tinytapeout-demo's thirteenth order;
+      corne-cherry's last run, which has 3 of its 151 nets (the others have teardrops, zones of their nets); the
+      time that glasgow-revD1 leaves of its minute (4 to 5 s).
       Since D139 (D140, the same direction, not met): guide 0.0.44, with polyclip 0.0.7. `neck_at_pads` leaves no
       track narrower that then no longer touches what it touched of its net, and this adapter narrows before its
       report (a track that reached its pad by its round end alone left 5 µm short of it with a report that had it

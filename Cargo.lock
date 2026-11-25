@@ -497,9 +497,9 @@ dependencies = [
 
 [[package]]
 name = "guide"
-version = "0.0.44"
+version = "0.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1590b2e610109ead7827100c289ec39fe03ef7b6fc66e9ee71462d4ae12aef03"
+checksum = "35d27db849e72f51a71e85191c0ce0da5980d329a20497a4be89575b5280bdf9"
 dependencies = [
  "polyclip",
 ]

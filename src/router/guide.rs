@@ -1908,24 +1908,117 @@ fn needless(
 }
 
 /// The longest that the run which lays the stairs straight may take (`route`, "The stairs
-/// laid straight"): it makes no search, and a board of 23 000 tracks has it in under a second.
+/// laid straight"): a board of 23 000 tracks has its stairs laid in under a second, and the
+/// search for fewer vias that the run makes where it has this long over what is kept for it
+/// is ended with it.
 const STRAIGHT_RUN: Duration = Duration::from_secs(3);
 /// The least time worth that run.
 const STRAIGHT_MIN: Duration = Duration::from_millis(500);
-/// What that run and its verification need, in times what the first run needed after it:
-/// guide makes the board ready and counts what it returns in about as long as a
-/// verification takes, and the routes are verified after it (glasgow-revD1: 0.1 s to hand
-/// the board over, 3.3 s in guide, of which 0.35 s for the stairs, and 1.7 s to verify).
-const STRAIGHT_SHARE: f64 = 3.0;
-/// How many times its routes are verified at most: all of them, then without the nets with
-/// new copper near what was worse for them.
+/// What that run and its verifications need, in times what the first run needed after it
+/// (D142): guide's part, which plans nothing, explains nothing and where the time is short
+/// searches nothing, is 0.4 of it, a verification is as long, and one more with the nets
+/// back that part a pour 0.7 (glasgow-revD1: 0.54 s, 1.53 s and 0.98 s where the first run
+/// needed 1.46 s). It was 3 while guide's part was 1.3 to 2.3 times that.
+const STRAIGHT_SHARE: f64 = 2.0;
+/// How many times its routes are verified at most: all of them, then without the nets whose
+/// new tracks part a pour ([`pour_cutters`]) and those with new copper near what else was
+/// worse for them.
 const STRAIGHT_AGAIN: usize = 3;
+/// How much further than a pour's clearance from a track the pour's fill may be for the
+/// track to be beside it ([`pour_cutters`]).
+const POUR_CUT_SLACK: i64 = 50_000;
 
 /// What the run that lays the stairs straight asks for before it begins, less the fill and
 /// the count of the joints that the steps after it have of their own: the least of its run,
 /// what a run needs after it, and its fill.
 fn straight_step(after: Duration, fill: Duration) -> Duration {
     STRAIGHT_MIN + after.mul_f64(STRAIGHT_SHARE) + fill
+}
+
+/// The least that the run that lays the stairs straight is begun with: the least of its
+/// run, guide's part and one verification ([`AFTER_SHARE`]), and the fill of the step
+/// that ends the tracks inside their pads. What [`straight_step`] keeps more is for a
+/// second verification, which is made only if its time is there.
+fn straight_least(after: Duration, fill: Duration) -> Duration {
+    STRAIGHT_MIN + after.mul_f64(AFTER_SHARE) + fill
+}
+
+/// The nets among `laid`, tracks of this run, that part a pour (D142): for each connection of
+/// `lines`, which a pour joined and no longer does, the nets of the tracks that lie, on one
+/// layer, within their half width and `reach` of the fill of both pieces that the
+/// connection's ends are now on (`items` with their islands `isl`, the board as it is filled
+/// round the new tracks). The fill of a board with a track laid another way is cut where that
+/// track is, which may be anywhere between the two ends; the ends alone tell the nets round
+/// the pads. A connection with an end on no fill tells nothing here.
+fn pour_cutters(
+    items: &[CopperItem],
+    isl: &[usize],
+    lines: &[&RatLine],
+    laid: &[&Track],
+    reach: &dyn Fn(&str) -> i64,
+) -> Vec<BTreeSet<String>> {
+    use super::geo::{P, seg_seg_dist};
+    type Edges = Vec<(P, P)>;
+    let mut all = Vec::new();
+    for l in lines {
+        all.push(BTreeSet::new());
+        let Some(out) = all.last_mut() else { continue };
+        let island = |name: &str, at: Point| {
+            items
+                .iter()
+                .zip(isl)
+                .find(|(it, _)| {
+                    it.anchor == at && it.net.as_deref() == Some(l.net.as_str()) && it.item.to_string() == name
+                })
+                .map(|(_, k)| *k)
+        };
+        let (Some(ia), Some(ib)) = (island(&l.from, l.from_at), island(&l.to, l.to_at)) else { continue };
+        // By layer, the edges of the fill of each of the two pieces.
+        let mut sides: BTreeMap<&str, [Edges; 2]> = BTreeMap::new();
+        for (it, &k) in items.iter().zip(isl) {
+            let ItemRef::Zone(_, layer, _) = &it.item else { continue };
+            if it.net.as_deref() != Some(l.net.as_str()) || (k != ia && k != ib) {
+                continue;
+            }
+            let side = &mut sides.entry(layer.as_str()).or_default()[usize::from(k == ib)];
+            for pg in &it.shape {
+                for ring in std::iter::once(&pg.outer).chain(pg.holes.iter()) {
+                    let n = ring.0.len();
+                    for i in 0..n {
+                        let (a, b) = (ring.0[i], ring.0[(i + 1) % n]);
+                        side.push((P::new(a.x as f64, a.y as f64), P::new(b.x as f64, b.y as f64)));
+                    }
+                }
+            }
+        }
+        let far = reach(&l.net);
+        for t in laid {
+            let Some([a, b]) = sides.get(t.layer.as_str()) else { continue };
+            if a.is_empty() || b.is_empty() {
+                continue;
+            }
+            let (p, q) = (P::new(t.start.x.0 as f64, t.start.y.0 as f64), P::new(t.end.x.0 as f64, t.end.y.0 as f64));
+            let within = (t.width.0 / 2 + far) as f64;
+            let (x0, x1, y0, y1) =
+                (p.x.min(q.x) - within, p.x.max(q.x) + within, p.y.min(q.y) - within, p.y.max(q.y) + within);
+            let by = |edges: &Edges| {
+                edges.iter().any(|(c, d)| {
+                    c.x.max(d.x) >= x0
+                        && c.x.min(d.x) <= x1
+                        && c.y.max(d.y) >= y0
+                        && c.y.min(d.y) <= y1
+                        && seg_seg_dist(p, q, *c, *d) <= within
+                })
+            };
+            if by(a)
+                && by(b)
+                && let Some(n) = &t.net
+            {
+                out.insert(n.clone());
+            }
+        }
+    }
+    all
 }
 
 /// How far inside its pad the middle of a track is at least where it counts as inside
@@ -3331,7 +3424,9 @@ pub(crate) fn route(
     let time_for = |fills: u32, counts: u32| {
         opts.budget.is_none_or(|b| {
             let count = joint_took.get().unwrap_or(after / 3);
-            Instant::now() + fill * fills + count * counts + REPORT < start + b
+            // The report's time is in what is kept for the last run, where that is kept.
+            let report = if straight_keep.is_zero() { REPORT } else { Duration::ZERO };
+            Instant::now() + fill * fills + count * counts + report < start + b
         })
     };
     // The step for the tracks between pads waits for the one that moves routes out of the rooms
@@ -3848,20 +3943,19 @@ pub(crate) fn route(
     // round has moved, 4 to 10 % of the tracks of a board. In the last run alone, when nothing
     // moves a route any more: asked of the runs before it, the run that moves every route for
     // a pad cut off its fill began from routes laid straight and ended with a connection more
-    // open (corne-cherry, one order of four, D139). No search is made, the tracks are as long
-    // as they were, and a stretch comes no nearer a pad of another net in the room of a spoke
-    // (D137's rule, in guide). Verified as any run, the board filled, and kept if the check
-    // takes nothing out, no net has more open and no pad short of its spokes has fewer necks
-    // than it had; the nets with new copper near what is worse have their old routes back and
-    // the rest is verified again, [`STRAIGHT_AGAIN`] times at most. Not the nets of pairs and
+    // open (corne-cherry, one order of four, D139). The stairs take no search, the tracks are
+    // as long as they were, and a stretch comes no nearer a pad of another net in the room of a
+    // spoke (D137's rule, in guide). Verified as any run, the board filled, and kept if the
+    // check takes nothing out, no net has more open and no pad short of its spokes has fewer
+    // necks than it had; the nets whose new tracks part a pour ([`pour_cutters`], D142) and
+    // those with new copper near what else is worse have their old routes back and the rest
+    // is verified again, [`STRAIGHT_AGAIN`] times at most, each with the time of the one
+    // before. Not the nets of pairs and
     // with a length to keep, nor after a run that a work budget stopped. A net that guide
     // cannot take back whole stays as it is (`leave_given`); a track that this router's rounds
     // in guide ended at the first copper of a pad is taken to where guide joins the pad, and
     // the ends are aimed at the pads' copper again once the stairs are laid (guide 0.0.44).
-    let straight_room = opts.budget.is_none_or(|b| {
-        let count = joint_took.get().unwrap_or(after / 3);
-        Instant::now() + straight_step(after, fill) + fill + count + REPORT < began + b
-    });
+    let straight_room = opts.budget.is_none_or(|b| Instant::now() + straight_least(after, fill) + REPORT < began + b);
     if !straight_room && stopped != Some(Stopped::WorkBudget) && !tracks.is_empty() {
         (hooks.progress)(0, None, "guide: no time to lay the stairs straight, left as they are");
     }
@@ -3904,6 +3998,21 @@ pub(crate) fn route(
         // without).
         g.planes = false;
         g.crossings = false;
+        // Nor what is in the way of each connection that its own count leaves open: with
+        // no plane planned those are every pad of a pour (glasgow-revD1: 436 of them,
+        // 0.85 s of a run of 1.84 s; D142).
+        g.explain = false;
+        // The search for fewer vias that guide makes for the nets whose tracks end short
+        // of a pad's centre, which are not as it was given them once they are taken
+        // there, where the run has the time of it over what it needs, and the corridors
+        // of those searches with it: lumenpnp-mobo has 324 vias for 331 by it, in a run
+        // that ends 28 s before its budget, and tinytapeout-demo's took 1.2 s of the
+        // 1.5 s of its last run (glasgow-revD1's corridors 0.3 s).
+        g.fewer_vias = opts.budget.is_none_or(|b| {
+            let count = joint_took.get().unwrap_or(after / 3);
+            Instant::now() + straight_step(after, fill) + fill + count + REPORT + STRAIGHT_RUN < began + b
+        });
+        g.global = g.fewer_vias;
         g.shorten = false;
         g.whole = false;
         g.settle = false;
@@ -3967,6 +4076,7 @@ pub(crate) fn route(
                 break;
             }
             let (mut reasons, mut removed) = (drc_reason.clone(), stats.drc_removed);
+            let checked = Instant::now();
             let proj2 = verify(p, &mut tracks2, &mut vias2, &mut reasons, &mut removed);
             let items2 = geo::copper_items(&proj2);
             let isl2 = geo::islands(&items2);
@@ -4009,16 +4119,64 @@ pub(crate) fn route(
                     removed - stats.drc_removed
                 ),
             );
-            let in_time = opts.budget.is_none_or(|b| {
-                let count = joint_took.get().unwrap_or(after / 3);
-                Instant::now() + after.mul_f64(AFTER_SHARE) + fill * 2 + count + REPORT < began + b
-            });
+            // With the time of another verification, by what this one took, of the fill
+            // of the step that ends the tracks inside their pads, and of the report: by
+            // what the first run needed after it and two fills, glasgow-revD1, whose
+            // fills no run times, had no second verification 4.8 s before its budget.
+            let again = checked.elapsed();
+            let in_time = opts.budget.is_none_or(|b| Instant::now() + again + fill + REPORT < began + b);
             if !in_time {
                 break;
             }
+            // The nets whose new tracks part a pour that joined what is open now, wherever
+            // between the two ends that is ([`pour_cutters`]): tinytapeout-demo had nothing of
+            // this run kept in seven orders of sixteen, the pour cut far from both ends in
+            // each of its tries (D140).
+            let parted: Vec<&RatLine> = now
+                .iter()
+                .filter(|l| poured.contains(l.net.as_str()))
+                .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                .collect();
+            let cutters = {
+                let laid: Vec<&Track> = t
+                    .iter()
+                    .filter(|t| {
+                        new(&t.net) && !had_track.contains(&(t.net.as_deref(), t.layer.as_str(), t.start, t.end))
+                    })
+                    .collect();
+                let reach = |net: &str| {
+                    let zones = p.board().zones.iter().filter(|z| z.net.as_deref() == Some(net));
+                    zones.map(|z| geo::zones::zone_params(p, z).clearance.0).max().unwrap_or(0).max(gap)
+                        + POUR_CUT_SLACK
+                };
+                pour_cutters(&items2, &isl2, &parted, &laid, &reach)
+            };
+            if !parted.is_empty() {
+                (hooks.progress)(
+                    0,
+                    None,
+                    &format!(
+                        "guide: {} connection(s) that a pour joined open, {} told by the tracks between their pieces, of {} net(s)",
+                        parted.len(),
+                        cutters.iter().filter(|c| !c.is_empty()).count(),
+                        cutters.iter().flatten().collect::<BTreeSet<_>>().len()
+                    ),
+                );
+            }
+            // Where no track tells it, and for what else is worse, the nets with new copper
+            // near the ends.
+            let told: BTreeSet<(&str, &str, &str)> = parted
+                .iter()
+                .zip(&cutters)
+                .filter(|(_, c)| !c.is_empty())
+                .map(|(l, _)| (l.net.as_str(), l.from.as_str(), l.to.as_str()))
+                .collect();
             let ends: Vec<Point> = now
                 .iter()
-                .filter(|l| !had.contains(&(l.net.as_str(), l.from.as_str(), l.to.as_str())))
+                .filter(|l| {
+                    let key = (l.net.as_str(), l.from.as_str(), l.to.as_str());
+                    !had.contains(&key) && !told.contains(&key)
+                })
                 .flat_map(|l| [l.from_at, l.to_at])
                 .chain(worse)
                 .collect();
@@ -4047,6 +4205,7 @@ pub(crate) fn route(
                     .cloned()
                     .collect::<Vec<_>>(),
             );
+            old.extend(cutters.into_iter().flatten());
             if old.len() == before {
                 break;
             }
@@ -5295,6 +5454,99 @@ mod tests {
         assert_eq!(least_run(true, Duration::from_millis(300)), MOVE_MIN);
         assert_eq!(least_run(false, Duration::from_secs(2)), Duration::from_secs(4));
         assert_eq!(least_run(true, Duration::from_secs(2)), Duration::from_secs(4));
+    }
+
+    /// What the last run is begun with is less than what is kept for it, by a second
+    /// verification (D142).
+    #[test]
+    fn the_last_run_s_time_kept_and_the_least_it_is_begun_with() {
+        let (after, fill) = (Duration::from_millis(1000), Duration::from_millis(200));
+        assert_eq!(straight_step(after, fill), STRAIGHT_MIN + Duration::from_millis(2000 + 200));
+        assert_eq!(straight_least(after, fill), STRAIGHT_MIN + Duration::from_millis(1500 + 200));
+        assert!(straight_least(after, fill) < straight_step(after, fill));
+    }
+
+    /// The nets whose new tracks part a pour are told by the fill of the two pieces that a
+    /// connection's ends are on, wherever between the ends the track lies (D142).
+    #[test]
+    fn a_track_that_parts_a_pour_is_told_by_the_fill_of_its_two_pieces() {
+        use crate::geom::poly;
+        let at = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
+        let item = |item: ItemRef, net: &str, layer: &str, r: [i64; 4], anchor: Point| CopperItem {
+            item,
+            net: Some(net.into()),
+            layers: vec![layer.into()],
+            shape: vec![poly::Polygon::new(
+                vec![
+                    poly::Point::new(r[0], r[1]),
+                    poly::Point::new(r[2], r[1]),
+                    poly::Point::new(r[2], r[3]),
+                    poly::Point::new(r[0], r[3]),
+                ],
+                vec![],
+            )],
+            anchor,
+            local: geo::ItemLocal::default(),
+        };
+        let mm = 1_000_000;
+        // Two pads of GND 20 mm apart, each on a piece of the pour on F.Cu, the pieces
+        // 0.6 mm apart at x = 0.
+        let (a, b) = (at(-10 * mm, 0), at(10 * mm, 0));
+        let items = vec![
+            item(
+                ItemRef::Pad("R1".into(), "1".into()),
+                "GND",
+                "F.Cu",
+                [-10 * mm - 300_000, -300_000, -10 * mm + 300_000, 300_000],
+                a,
+            ),
+            item(
+                ItemRef::Pad("R2".into(), "1".into()),
+                "GND",
+                "F.Cu",
+                [10 * mm - 300_000, -300_000, 10 * mm + 300_000, 300_000],
+                b,
+            ),
+            item(ItemRef::Zone(ObjectId(7), "F.Cu".into(), 0), "GND", "F.Cu", [-12 * mm, -5 * mm, -300_000, 5 * mm], a),
+            item(ItemRef::Zone(ObjectId(7), "F.Cu".into(), 1), "GND", "F.Cu", [300_000, -5 * mm, 12 * mm, 5 * mm], b),
+        ];
+        let isl = [0, 1, 0, 1];
+        let line = RatLine {
+            net: "GND".into(),
+            from: "R1.1".into(),
+            from_at: a,
+            to: "R2.1".into(),
+            to_at: b,
+            length: Nm(20 * mm),
+        };
+        let track = |net: &str, layer: &str, p: (i64, i64), q: (i64, i64)| Track {
+            id: ObjectId(0),
+            layer: layer.into(),
+            width: Nm(200_000),
+            net: Some(net.into()),
+            start: at(p.0, p.1),
+            end: at(q.0, q.1),
+            mid: None,
+            locked: false,
+        };
+        let laid = [
+            // Between the pieces, far from both pads.
+            track("CUT", "F.Cu", (0, 3 * mm), (0, 4 * mm)),
+            // Beside one piece alone.
+            track("BESIDE", "F.Cu", (-12 * mm - 250_000, 0), (-12 * mm - 250_000, mm)),
+            // Between them on another layer.
+            track("UNDER", "B.Cu", (0, -mm), (0, mm)),
+            // And far from both.
+            track("FAR", "F.Cu", (0, 9 * mm), (mm, 9 * mm)),
+        ];
+        let refs: Vec<&Track> = laid.iter().collect();
+        let reach = |_: &str| 200_000 + POUR_CUT_SLACK;
+        let told = pour_cutters(&items, &isl, &[&line], &refs, &reach);
+        assert_eq!(told, vec![BTreeSet::from(["CUT".to_string()])]);
+        // A connection with an end on no fill tells nothing here: the nets near its ends
+        // are told as they were.
+        let bare = [0, 2, 0, 1];
+        assert_eq!(pour_cutters(&items, &bare, &[&line], &refs, &reach), vec![BTreeSet::new()]);
     }
 
     /// What the step for the spokes laid anew is told from the old routes of a net that goes

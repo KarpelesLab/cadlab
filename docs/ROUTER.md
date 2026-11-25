@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1032,6 +1032,24 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.45* (D142): two options, on by default, with which a run is 0.0.44's, for what a last run did that
+  this adapter has no use for. Its report explained every connection that guide's own count leaves open, by a
+  search each, and with no plane planned those are every pad of a pour (glasgow-revD1: 436, 0.85 s of 1.84 s):
+  `explain` is off in the last run. And a net handed with its tracks ended on a pad's copper, short of the centre,
+  had cleanup's search for fewer vias (tinytapeout-demo: 29 to 31 nets of 134, 1.25 s of 1.5 s), which
+  lumenpnp-mobo's 324 vias for 331 come from: `fewer_vias`, and with it the corridors (`global`), is off where the
+  run has not three seconds over what is kept for it. *The nets that part a pour* (`pour_cutters`): a connection
+  that a pour joined and that the fill of the straightened board leaves open has the two pieces of fill that its
+  ends are on, and the nets with a new track within its half width, the pour's clearance and 50 um of both pieces
+  on a layer have their old routes back; the nets near the ends only where no track tells it. *Its time*: twice
+  what the first run needed after it is kept, with half a second and a fill (`straight_step`), it is begun with
+  one and a half (`straight_least`), a second verification is made if there is the time of the first, and the
+  steps before it do not count the report's time, which is in what is kept. The same build beside master's in the
+  same minutes: the run kept in 59 of 60 runs for 52, the step for the tracks between pads made in 8 of 8 runs of
+  the two glasgows for 6 (5 in the set before), glasgow-revD1's track 1.4 % less for it and its last run 0.46 s in
+  guide for 1.77 s. The table's count is master's: 36 cells better, 29 equal and 7 worse of 72 for 35, 28, 1
+  overlapping and 8, and 37, 27 and 8 for 36, 27, 1 and 8 in the set before, by tinytapeout-demo's vias, which
+  change sides by the runs.
 - *guide 0.0.43 and 0.0.44* (D140): D139's two things released behind options, off by default (a run of guide
   with none asked for is 0.0.42's, 41 of 41 runs at budgets of nodes), with polyclip 0.0.7, and this adapter asks
   for both.
