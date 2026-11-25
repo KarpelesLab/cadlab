@@ -424,6 +424,20 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D147 (D148, the same direction, not met): guide 0.0.51. tinytapeout-demo's track outside the pads is
+      measured to where it is made, in both routers at the same places: half in the rounds (the stubs of the
+      ground's pads to its plane half of that, the price of a spoke's room a quarter) and half after them, where
+      the native router pulls tight and guide's passes add; the buses go with the same causes, not with the order
+      of the nets. Planned on outer pours, with the planes' nets after the others, with no price for a spoke's
+      room: each measured, each with connections open or pads short of spokes, none kept. Kept: the long ways
+      round that the rounds leave laid again a wire at a time, the wires in their way negotiated for again
+      (tinytapeout-demo 0.37 % less track outside the pads over sixteen orders with no connection open and the
+      vias as they were, 3.6 s later; buspirate5-rev10 0.29 % less). The native router plans on soundly joined
+      copper (`board::islands_but`, `drc::neck::thin_joints`): two escapes that touch by their round ends are
+      two islands, and the last step lays one piece in 52 of its runs for three. 35 cells better, 30 equal and 7
+      worse of 72, as master's build. Open: the seven cells; what guide's passes add after the rounds; the wires
+      that have a shorter way and no room; glasgow-revC3's track by net (of no one kind); a pour that joins two
+      pads only when the run is planned; corne-cherry's time, not begun.
       Since D146 (D147, the same direction, not met): guide 0.0.50. The necks are mended where they are made
       (two stubs that touch by their round ends are two terminals to guide and get their piece; a route that ends
       on a teardrop or a pour's edge beside its pad goes on into the pad; `drc.neck` counts a fill that joins two

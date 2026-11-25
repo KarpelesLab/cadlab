@@ -54,7 +54,10 @@ the board), `grid` (grid and static maps), `fanout` (BGA dog bones, fine-pitch e
 geometry kernel). Algorithm modules only; nothing uses the command layer.
 
 **Preprocess.** Copper items and islands come from `crate::board` (zone fills included, so pads joined by a pour
-count as connected). Every net's islands that hold a pad or via are joined by a minimum spanning tree (Prim, closest
+count as connected). A track is one island with other copper of its net where its centre line comes to that
+copper, or where the two share copper as wide as the narrower of them (`board::islands_but` with
+`drc::neck::thin_joints`, D148): two escapes out of two pads of a net side by side end a width apart, their round
+ends touch, and taken as one island the two pads had no connection planned between them. Every net's islands that hold a pad or via are joined by a minimum spanning tree (Prim, closest
 anchor pair, as the ratsnest); already-connected copper is never re-routed and existing tracks stay. Obstacles:
 other-net pads, tracks and vias with the larger of both nets' clearances, board edge and cutouts
 (`copper_to_edge`), keep-outs (`no_tracks` per layer, `no_vias`; not for the nets a keep-out excepts, see
@@ -1076,6 +1079,30 @@ exports and the count all read cadlab's fill). The result is then treated as the
   has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
   last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
   master's build in the same minutes; the seven worse are D144's.
+- *guide 0.0.51* (D148): the long ways round that the native router's rounds in guide leave are laid again, a wire
+  at a time (`relay` in guide's `pcb::rounds`). The two routers were measured at the same places on
+  tinytapeout-demo, by net: on the nets with no zone that both complete guide has 0.4 % more track outside the pads
+  after the first round, 5.2 % more when the negotiation ends, 2.8 % more when the stage ends and 5.6 % more on the
+  board that leaves. In the rounds, half of what they add is the stubs of the ground's pads to its inner plane (124
+  connections planned for the native router's 32: guide plans a net with a plane on its inner fills alone, D131), a
+  quarter the price of a spoke's room, a fifth what is left; after them the native router pulls its routes tight
+  (1.9 % less) where guide's passes and later steps add 0.8 %. The buses go with the same two causes and are equal
+  after the first round. Neither cause is given up: planned on its outer pours the board has connections open and
+  three times the pads short of two spokes, and the nets with planes negotiated for after the others end worse. The
+  step that is kept: after the pass for fewer vias, where the rounds ended by themselves, a wire longer than 1.1
+  times the way between its ends by twenty pitches is laid again at a low price of sharing, the wires that it then
+  shares a point with are negotiated for again at the highest price, it staying where it is, and the move is kept
+  where nothing is shared after three rounds, no more connections fail, and the routes that moved have no more vias
+  and cost less (tinytapeout-demo: a net of two pads 4 mm apart had 92 mm and five vias, round the stub of a
+  capacitor's ground pad). tinytapeout-demo's sixteen orders: no connection open, 0.37 % less track outside the
+  pads (11 orders better, 4 worse), the vias 272.4 in the mean for 272.7, 3.6 s later; buspirate5-rev10 0.29 % less
+  and 1.5 vias fewer; the nine boards with guide's own rounds have no step. The table's count: 35 cells better, 30
+  equal and 7 worse of 72, as master's build in the same minutes; the seven are D147's.
+  *The native router's necks* had their source in its plan: two escapes that touch by their round ends were one
+  island (above, "Preprocess"), and a wire of a later run could begin on a cell inside the round end of an earlier
+  run's track, off its centre line. With the plan on soundly joined copper the last step lays one piece in 52 runs
+  of the native router for three (the one: two pads that a pour joins when the run is planned and not when it
+  ends).
 - *guide 0.0.50* (D147): the joints that hold by a round end alone are mended where they are made, and the last
   step (`router::necks`) lays no piece of track in 52 runs of guide's (20 in 11 of 52 with 0.0.49) and none in 192
   (72 in 32). Three sources. Two stubs out of two pads of a net side by side, laid by the rounds' fanout, end a step

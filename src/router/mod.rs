@@ -1618,7 +1618,13 @@ fn route_run(
     };
     (hooks.progress)(0, None, "board");
     let items = geo_board::copper_items(p);
-    let isl = geo_board::islands(&items);
+    // A track that touches other copper of its net by its round end alone is not one piece
+    // of copper with it (`drc.neck`, D148). Two escapes out of two pads of a net side by side
+    // end a width apart: taken as one island, their pads have no connection planned between
+    // them, and the board holds by whatever else of the net passes by (corne-cherry: a track
+    // past the corner of the pad). The same of the tracks of a run before this one, which
+    // are the board's by now.
+    let isl = geo_board::islands_but(&items, &thin_joints(p, &items));
     let mut rb = RouterBoard::build(p, &items, &isl);
     soften(&mut rb, soft);
     let mut routes = plan(&rb, scope)?;
@@ -2492,6 +2498,13 @@ fn route_run(
         notes: vec![],
     };
     Ok(Run { result, missed, grid_bound })
+}
+
+/// The pairs of copper items of `p`, one of them a track, that touch without being soundly
+/// joined (`drc::neck::thin_joints`): what [`geo_board::islands_but`] is to keep apart.
+fn thin_joints(p: &Project, items: &[geo_board::CopperItem]) -> BTreeSet<(usize, usize)> {
+    let b = p.board();
+    crate::drc::neck::thin_joints(&b.tracks, &b.vias, items, &|i| matches!(items[i].item, geo_board::ItemRef::Track(_)))
 }
 
 /// Via cost of [`minimize_vias`] (grid steps; negotiation uses `Costs::via`).

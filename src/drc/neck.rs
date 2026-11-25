@@ -19,7 +19,7 @@
 //! other way: through other tracks, vias and pads, or through a pour or teardrop of the net
 //! that covers the joint or holds both.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use polyclip::{ArcTol, Circle, EndCap, FillRule, Geometry, Join, Op, Path, Polygon, PolygonSet, Rect, Side};
 
@@ -134,6 +134,78 @@ struct Thin {
     b: usize,
     layer: usize,
     at: Point,
+}
+
+/// The pairs of items of one net (each as the lower index and the higher), one of them a track
+/// that `of` names, that touch on a layer and are joined there neither soundly nor by copper
+/// as wide as the narrower of the two: joints that hold by the overlap of two round ends, or
+/// by their touching within the tolerance alone (two tracks that end exactly a width apart
+/// share no copper at all, and connectivity, which draws copper `COPPER_TOL` outside its
+/// shape, has them joined). Each joint on its own, whatever else joins the two: for a caller
+/// that asks what a track is one piece of copper with (`board::islands_but`, DECISIONS D148).
+/// `items` are the board's copper items, `tracks` and `vias` the board's; fills are not
+/// looked at.
+pub fn thin_joints(
+    tracks: &[Track],
+    vias: &[Via],
+    items: &[CopperItem],
+    of: &dyn Fn(usize) -> bool,
+) -> BTreeSet<(usize, usize)> {
+    let track_of: BTreeMap<ObjectId, &Track> = tracks.iter().map(|t| (t.id, t)).collect();
+    let via_of: BTreeMap<ObjectId, &Via> = vias.iter().map(|v| (v.id, v)).collect();
+    let tol = TOLERANCE.0;
+    let mut out = BTreeSet::new();
+    let boxes: Vec<Option<Rect>> = items.iter().map(|it| it.shape.bbox()).collect();
+    // The copper that is no fill, by net.
+    let mut by_net: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if let Some(net) = it.net.as_deref()
+            && !matches!(it.item, ItemRef::Zone(..))
+        {
+            by_net.entry(net).or_default().push(i);
+        }
+    }
+    for i in (0..items.len()).filter(|&i| of(i)) {
+        let ItemRef::Track(id) = &items[i].item else { continue };
+        let (Some(t), Some(bi), Some(net)) = (track_of.get(id), boxes[i], items[i].net.as_deref()) else { continue };
+        let line = centre_line(t);
+        for &j in by_net.get(net).map_or(&[][..], |v| &v[..]) {
+            let other = &items[j];
+            if j == i
+                || !boxes[j].is_some_and(|bj| bj.intersects(&bi))
+                || !items[i].layers.iter().any(|l| other.layers.contains(l))
+            {
+                continue;
+            }
+            let (sound, width) = match &other.item {
+                ItemRef::Track(u) => match track_of.get(u) {
+                    Some(u) => (polyclip::distance_less_than(&line, &centre_line(u), tol + 1), u.width.0),
+                    None => continue,
+                },
+                solid => {
+                    let width = match solid {
+                        ItemRef::Via(v) => via_of.get(v).map(|v| v.diameter.0),
+                        _ => None,
+                    };
+                    (
+                        polyclip::intersects(&line, &other.shape)
+                            || polyclip::distance_less_than(&line, &other.shape, tol + 1),
+                        width.unwrap_or_else(|| geo::zones::short_side(&other.shape)),
+                    )
+                }
+            };
+            if sound || !polyclip::intersects(&items[i].shape, &other.shape) {
+                continue;
+            }
+            let shared = polyclip::boolean(Op::Intersection, &items[i].shape, &other.shape, FillRule::NonZero)
+                .unwrap_or_default();
+            let widest = shared.iter().map(extent).fold(0.0, f64::max);
+            if widest < (t.width.0.min(width) - tol) as f64 {
+                out.insert((i.min(j), i.max(j)));
+            }
+        }
+    }
+    out
 }
 
 /// The necks of a board's copper, by layer and place. `items` are the board's copper items
@@ -475,11 +547,22 @@ mod tests {
             self.other.push(item(ItemRef::Zone(ObjectId(900), "F.Cu".into(), n), shape, p(0, 0)));
             self
         }
-        fn necks(&self) -> Vec<Neck> {
+        fn items(&self) -> Vec<CopperItem> {
             let mut items: Vec<CopperItem> =
                 self.tracks.iter().map(|t| item(ItemRef::Track(t.id), geo::track_shape(t), t.start)).collect();
             items.extend(self.vias.iter().map(|v| item(ItemRef::Via(v.id), vec![geo::via_shape(v)], v.at)));
             items.extend(self.other.iter().cloned());
+            items
+        }
+        /// The thin joints of every track, and the islands with them apart.
+        fn thin(&self) -> (Vec<(usize, usize)>, Vec<usize>) {
+            let items = self.items();
+            let thin = thin_joints(&self.tracks, &self.vias, &items, &|i| matches!(items[i].item, ItemRef::Track(_)));
+            let islands = geo::islands_but(&items, &thin);
+            (thin.into_iter().collect(), islands)
+        }
+        fn necks(&self) -> Vec<Neck> {
+            let items = self.items();
             let rules = Rules { min_track_width: Nm(200 * UM), ..Rules::default() };
             necks(&rules, &["F.Cu".to_string(), "B.Cu".to_string()], &self.tracks, &self.vias, &items)
         }
@@ -506,6 +589,48 @@ mod tests {
         // At an angle as well: the second track leaves upward from 0.2 mm beyond the end.
         let b = Board::default().track(p(0, 0), p(1000, 0), 250).track(p(1200, 0), p(1200, 900), 250);
         assert_eq!(b.necks().len(), 1);
+    }
+
+    /// What a track is one piece of copper with (`thin_joints`, `board::islands_but`): not
+    /// with a track whose round end overlaps its own, nor with one that ends exactly a width
+    /// away, which connectivity has joined and which shares no copper to measure; with what
+    /// its centre line comes to, and with what other copper joins it to.
+    #[test]
+    fn a_track_is_one_piece_with_what_its_centre_line_comes_to() {
+        let lens = Board::default().track(p(0, 0), p(1000, 0), 250).track(p(1200, 0), p(2000, 0), 250);
+        assert_eq!(lens.thin(), (vec![(0, 1)], vec![0, 1]));
+        // Exactly a width apart: one island to connectivity, no neck to measure, two pieces.
+        let touch = Board::default().track(p(0, 0), p(1000, 0), 250).track(p(1250, 0), p(2000, 0), 250);
+        assert_eq!(geo::islands(&touch.items()), vec![0, 0]);
+        assert!(touch.necks().is_empty());
+        assert_eq!(touch.thin(), (vec![(0, 1)], vec![0, 1]));
+        // Ends that meet, a T, a T that ends at the other's edge, side by side: one piece.
+        for b in [
+            Board::default().track(p(0, 0), p(1000, 0), 250).track(p(1000, 0), p(2000, 0), 250),
+            Board::default().track(p(0, 0), p(2000, 0), 250).track(p(1000, 0), p(1000, 900), 250),
+            Board::default().track(p(0, 0), p(2000, 0), 250).track(p(1000, 125), p(1000, 900), 250),
+            Board::default().track(p(0, 0), p(2000, 0), 250).track(p(500, 200), p(1500, 200), 250),
+        ] {
+            assert_eq!(b.thin(), (vec![], vec![0, 0]));
+        }
+        // A third track from one centre line to the other joins the two all the same.
+        let joined = Board::default().track(p(0, 0), p(1000, 0), 250).track(p(1200, 0), p(2000, 0), 250).track(
+            p(1000, 0),
+            p(1200, 0),
+            250,
+        );
+        assert_eq!(joined.thin(), (vec![(0, 1)], vec![0, 0, 0]));
+        // A pad reached by the tip of a round end is not the track's; one that the centre
+        // line comes to is.
+        let pad = rect(1000, -300, 1600, 300);
+        let tip = Board::default().track(p(0, 0), p(900, 0), 250).pad("1", pad.clone());
+        assert_eq!(tip.thin(), (vec![(0, 1)], vec![0, 1]));
+        let at = Board::default().track(p(0, 0), p(1000, 0), 250).pad("1", pad);
+        assert_eq!(at.thin(), (vec![], vec![0, 0]));
+        // Only the tracks that are asked about.
+        let items = lens.items();
+        assert!(thin_joints(&lens.tracks, &lens.vias, &items, &|_| false).is_empty());
+        assert_eq!(thin_joints(&lens.tracks, &lens.vias, &items, &|i| i == 1).len(), 1);
     }
 
     /// Ordinary joints: ends that meet, a corner, a T on another track's centre line, a

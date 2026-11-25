@@ -1,7 +1,7 @@
 //! Board geometry shared by every consumer (DRC, rendering, outputs, router): absolute pad shapes,
 //! copper items per layer, connectivity and the ratsnest. See `docs/BOARD.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod clearance;
 pub mod exact;
@@ -1117,7 +1117,16 @@ fn layer_masks(items: &[CopperItem]) -> Option<Vec<u128>> {
 /// so each item is tested against the pour's nearby edges only. The result is exactly that of
 /// testing every pair with `polyclip::intersects`.
 pub fn islands(items: &[CopperItem]) -> Vec<usize> {
+    islands_but(items, &BTreeSet::new())
+}
+
+/// As [`islands`], but for the pairs of items in `apart` (each as the lower index and the
+/// higher), which are not joined by their touching: two such items are in one island only if
+/// other copper joins them. For a caller that takes a joint that holds by the overlap of two
+/// round ends alone as no joint (`drc::neck::thin_joints`, DECISIONS D148).
+pub fn islands_but(items: &[CopperItem], apart: &BTreeSet<(usize, usize)>) -> Vec<usize> {
     let n = items.len();
+    let kept = |i: usize, j: usize| apart.is_empty() || !apart.contains(&(i.min(j), i.max(j)));
     let mut sets = MinRootSets::new(n);
     // The items of one pad with a pad stack are joined by its plated hole.
     let mut first_of: BTreeMap<usize, usize> = BTreeMap::new();
@@ -1149,7 +1158,11 @@ pub fn islands(items: &[CopperItem]) -> Vec<usize> {
                 continue;
             }
             let (a, b) = (sets.find(*i), sets.find(*j));
-            if a != b && !tied(&items[*i], &items[*j]) && polyclip::intersects(&items[*i].shape, &items[*j].shape) {
+            if a != b
+                && kept(*i, *j)
+                && !tied(&items[*i], &items[*j])
+                && polyclip::intersects(&items[*i].shape, &items[*j].shape)
+            {
                 sets.join_roots(a, b);
             }
         }
@@ -1163,7 +1176,7 @@ pub fn islands(items: &[CopperItem]) -> Vec<usize> {
                 continue;
             }
             let (x, y) = (sets.find(b), sets.find(j));
-            if x != y && !tied(&items[b], &items[j]) && prep.intersects(&items[j].shape) {
+            if x != y && kept(b, j) && !tied(&items[b], &items[j]) && prep.intersects(&items[j].shape) {
                 sets.join_roots(x, y);
             }
         }
