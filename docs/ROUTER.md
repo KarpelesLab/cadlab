@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1032,6 +1032,25 @@ exports and the count all read cadlab's fill). The result is then treated as the
   joining the first round of both routers connection by connection (D125 has the join and the count of the
   differences by their kind). 0.0.28 had the rule for every row, which cost corne-cherry connections at 60 s;
   0.0.29 has it in such an area alone, and routes the eleven other boards as 0.0.27 did.
+- *guide 0.0.47* (D144): no track is told needless for what two round ends leave of it. The step that takes out the
+  tracks between pads that a pour joins (`needless`, D116) acts on guide's `pcb::needless_between`, which counted two
+  tracks as one wherever their copper touches: two tracks of 0.25 mm that end 0.2 mm apart touch by their round ends,
+  the step between them was told, and the board left with a neck of their overlap where the track was, 0.15 mm and
+  down to 25 um, joined by the DRC's count and by every count of connections. guide now tells each pair that touches
+  sound or not (two tracks whose centre lines meet, a track's centre line on a via's copper, two vias), and nothing is
+  needless that the pads are less joined without by either count. The twelve boards at 60 s in the default order had
+  122 such necks under 0.1 mm and have 4 (corne-cherry 89, 65, 57 and 39 in four orders for 1, 3, 1 and 2; the native
+  router's boards have 2), for 0.4 % more track on corne-cherry, 0.6 % on glasgow-revC3 and 2 to 6 mm on the others.
+  `route_bench` has `CADLAB_BENCH_DUMP=*` for the whole board, which the count is made from, and
+  `CADLAB_BENCH_MANIFEST` for a binary kept after its tree is gone. *Measured and not built*: the passes on more than
+  one thread (an ideal look-ahead, counted from the blocks that each turn read and wrote, has 1.01 to 1.05 times their
+  speed on three threads: the turn after a turn is of the net that it cut); the eights of guide's rounds chosen apart
+  by their nets' boxes (two nets at once for seven, 16.3 s for 13.8 s on corne-cherry with no net routed again); an
+  end for the passes on the finer lattice where pass 0 and its settling made nothing (holds in 48 runs, set from five
+  on two boards, and corne-cherry's cell stays); the nets with teardrops that the last run leaves as given told as
+  joined by their fills (their tracks do not end on them). The table's count: 35 cells better, 30 equal and 7 worse of
+  72 for master's 36, 29 and 7 in the same minutes: the seven worse are D143's, and lumenpnp-ringlight's track outside
+  the pads is equal where master's build has it better, by 0.6 mm of 156 at the script's edge, a step that stays.
 - *guide 0.0.46* (D143): the native router's rounds in guide with less round each search, and the same routes to
   the node: whether the two sides of a connection can meet is told by the first source and the first target of
   its component (it was by the component of every target, 8400 a search for a net with a pour), and the claims of

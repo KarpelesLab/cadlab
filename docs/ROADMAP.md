@@ -419,6 +419,20 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D143 (D144, the same direction, not met): guide 0.0.47, no track between pads told needless for what two
+      round ends leave of it: the step that takes out the tracks that a pour joins left 122 necks under 0.1 mm on the
+      twelve boards (corne-cherry 89, the narrowest 25 um of a track of 0.25 mm; joined by the DRC's count), and
+      leaves 4, for 0.4 % more track on corne-cherry and 0.6 % on glasgow-revC3. Counted before anything was built:
+      the passes on more than one thread (1.01 to 1.05 times on three for an ideal look-ahead, where 1.4 was asked),
+      the eights chosen apart (slower with no net routed again). Measured: what each second of corne-cherry buys (23 s
+      of its slowest order nothing; the signal for the passes on the finer lattice holds in 48 runs and is set from
+      five on two boards), tinytapeout-demo's open connections by what each is (the tenth order's a pin of the QFN
+      shut in by a via's clearance, in eleven sets of eleven; the others pads of pours that come with the load on the
+      first run's share), the nets that the last run leaves as given (in pieces by tracks taken out between theirs,
+      not by their teardrops). Beside the native router 35 cells better, 30 equal and 7 worse of 72 for master's 36,
+      29 and 7 in the same minutes (lumenpnp-ringlight's track outside the pads equal for better, by 0.6 mm of a step
+      that stays). Open: the seven cells; the tenth order's pin; a count of necks in the DRC or in the table, which
+      neither has.
       Since D142 (D143, the same direction, not met): guide 0.0.46, the native router's rounds in guide with less
       round each search and the same routes to the node (whether two sides can meet told by the first of each, the
       claims of a piece on a slant made from the rows near it): tinytapeout-demo's rounds 24.1 s for 27.1 s,

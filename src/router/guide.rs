@@ -1945,7 +1945,10 @@ fn convert_copper(ad: &Adapted, tracks: &[gdrc::Track], vias: &[gdrc::Via]) -> (
 /// needless (`pcb::needless`, guide 0.0.19, D115; with `between`, `pcb::needless_between`, the
 /// tracks from pad to pad that a fill joins as well, guide 0.0.20, D116), by position: `items` are the copper items of
 /// that board, fills included, and `ad` the first run's design, with none of guide's copper in
-/// it. Nothing is filled here: the fill is the one that counted the run.
+/// it. Nothing is filled here: the fill is the one that counted the run. No track is told whose
+/// two neighbours would be joined without it by the overlap of their round ends alone (guide
+/// 0.0.47, D144): what touches is still one island by the DRC's count, and a neck of a quarter
+/// of a track's width where the track was.
 fn needless(
     ad: &Adapted,
     tracks: &[Track],
@@ -6029,6 +6032,49 @@ mod tests {
         // stub that is left is all that joins its pad.
         assert_eq!(told(&[stub(2_000_000), stub(-2_000_000)], true), (vec![0], vec![0]));
         assert_eq!(told(&[stub(-2_000_000)], true), (vec![], vec![]));
+    }
+
+    /// A step of a run of tracks no longer than the tracks are wide is no track that its pad is
+    /// joined without (guide 0.0.47, D144): the two tracks beside it touch each other across it
+    /// by their round ends, and without it the run is a neck of their overlap, 0.15 mm here of a
+    /// track of 0.25 mm. guide 0.0.46 told it.
+    #[test]
+    fn a_step_between_two_tracks_is_not_needless_for_their_round_ends() {
+        let p = project();
+        let ad = adapted(&p, &["GND", "SIG"]);
+        let pad = geo::placed_pads(&p).into_iter().find(|pp| pp.refdes == "R1" && pp.number == "2").expect("R1.2");
+        let c = pad.center;
+        let at = |dy: i64| Point::new(c.x, Nm(c.y.0 + dy));
+        let mut q = p.clone();
+        // The stub to the via in three tracks, the middle one a step of 0.2 mm.
+        let tracks: Vec<Track> = [(0, -900_000), (-900_000, -1_100_000), (-1_100_000, -2_000_000)]
+            .into_iter()
+            .map(|(from, to)| Track {
+                id: q.alloc_id(),
+                layer: "F.Cu".into(),
+                width: Nm(250_000),
+                net: Some("GND".into()),
+                start: at(from),
+                end: at(to),
+                mid: None,
+                locked: false,
+            })
+            .collect();
+        let vias = vec![Via {
+            id: q.alloc_id(),
+            at: at(-2_000_000),
+            drill: Nm(300_000),
+            diameter: Nm(600_000),
+            net: Some("GND".into()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        }];
+        q.board_mut().tracks.extend(tracks.iter().cloned());
+        q.board_mut().vias.extend(vias.iter().cloned());
+        let items = geo::copper_items(&q);
+        assert_eq!(needless(&ad, &tracks, &vias, &items, false), (vec![], vec![]));
+        assert_eq!(needless(&ad, &tracks, &vias, &items, true), (vec![], vec![]));
     }
 
     /// A heat pad is named to guide as one that vias of its net may be in (D115): the exposed

@@ -58,7 +58,7 @@
 //! `CADLAB_BENCH_NETS=a,b` routes only those nets. `CADLAB_BENCH_ORIGINAL=1` lists the connections
 //! the projects' own routing leaves open instead (the reference for residual failures).
 //! For looking at one place: `CADLAB_BENCH_DUMP=<refdes>[.<pad>][,<margin mm>]` lists the pads,
-//! tracks and vias of the result around a component or pad, and `CADLAB_BENCH_FANOUT=only` plans
+//! tracks and vias of the result around a component or pad (`*` for the whole board), and `CADLAB_BENCH_FANOUT=only` plans
 //! the fanout alone (dog bones, crossovers, escapes) and lists that.
 
 #[path = "../tests/common/routebench.rs"]
@@ -222,9 +222,12 @@ fn cpu_seconds() -> Option<f64> {
 fn corpus(filters: &[String]) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = std::env::var_os("CADLAB_CORPUS_DIR").map_or(root.join("target/corpus"), PathBuf::from);
+    // `CADLAB_BENCH_MANIFEST`: the list of the boards from another place than the tree this was
+    // built in, for a binary kept after that tree is gone.
+    let list = std::env::var_os("CADLAB_BENCH_MANIFEST")
+        .map_or_else(|| root.join("tests/corpus/projects.toml"), PathBuf::from);
     let manifest: Manifest =
-        toml::from_str(&std::fs::read_to_string(root.join("tests/corpus/projects.toml")).expect("manifest"))
-            .expect("manifest syntax");
+        toml::from_str(&std::fs::read_to_string(list).expect("manifest")).expect("manifest syntax");
     let budget: u64 = std::env::var("CADLAB_BENCH_BUDGET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000);
     // guide's default is no seed: its nets shortest first.
     let guide = search_kind() == Some(SearchKind::Guide);
@@ -969,7 +972,10 @@ fn dump(p: &Project, spec: &str) {
     let m = (margin.parse::<f64>().unwrap_or(2.0) * 1e6) as i64;
     let (refdes, pad) = what.split_once('.').map_or((what, None), |(r, n)| (r, Some(n)));
     let pads = cadlab::board::placed_pads(p);
-    let mine: Vec<_> = pads.iter().filter(|q| q.refdes == refdes && pad.is_none_or(|n| q.number == n)).collect();
+    // `*`: the whole board.
+    let all = what == "*";
+    let mine: Vec<_> =
+        pads.iter().filter(|q| all || (q.refdes == refdes && pad.is_none_or(|n| q.number == n))).collect();
     if mine.is_empty() {
         eprintln!("dump: no pad matches {what}");
         return;
@@ -978,7 +984,7 @@ fn dump(p: &Project, spec: &str) {
     let ys = || mine.iter().map(|q| q.center.y.0);
     let (x0, x1) = (xs().min().unwrap_or(0) - m, xs().max().unwrap_or(0) + m);
     let (y0, y1) = (ys().min().unwrap_or(0) - m, ys().max().unwrap_or(0) + m);
-    let inside = |q: cadlab::Point| (x0..=x1).contains(&q.x.0) && (y0..=y1).contains(&q.y.0);
+    let inside = |q: cadlab::Point| all || ((x0..=x1).contains(&q.x.0) && (y0..=y1).contains(&q.y.0));
     let mm = |v: i64| v as f64 / 1e6;
     eprintln!("dump {what}: x {:.3}..{:.3} y {:.3}..{:.3}", mm(x0), mm(x1), mm(y0), mm(y1));
     for q in pads.iter().filter(|q| inside(q.center)) {
