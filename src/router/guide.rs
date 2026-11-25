@@ -140,6 +140,30 @@ fn first_share(rounds: pcb::Rounds) -> f64 {
     if rounds == pcb::Rounds::Native { FIRST_SHARE_ROUNDS } else { FIRST_SHARE }
 }
 
+/// The nodes that the negotiation of the native router's rounds in guide visits in a second, for
+/// each thread's worth of its batches (one thread and half of each further one, as guide's look
+/// at the board counts them): 5.5 to 5.7 million a second on three threads on tinytapeout-demo,
+/// 5.9 on buspirate5-rev10 and 6.5 on lumenpnp-mobo, four runs at a time on the machine of the
+/// benchmarks (D146). What the negotiation's share of a time budget is in nodes
+/// ([`rounds_nodes`]).
+const ROUNDS_NODES_A_SECOND: f64 = 2.8e6;
+
+/// The share of the first run's time that the negotiation of the rounds had by the clock: nine
+/// tenths of half of what the run has left when they begin, some 3 s into the 46.8 s of a
+/// minute's first run on tinytapeout-demo.
+const ROUNDS_SHARE: f64 = 0.42;
+
+/// What the negotiation of the native router's rounds in guide has of a first run of `first`
+/// on `threads` threads, in nodes (`RouteOptions::rounds_nodes`, guide 0.0.49, D146): a count
+/// made from the budget, where guide's clock said which round was the last, and one order of a
+/// board's nets ended as two boards in two runs (tinytapeout-demo: 9 of 16 orders with other
+/// vias and track from one run to the next, the round cut in its middle or a round later). On
+/// a machine too slow for the count, guide's clock ends the stage as it did.
+fn rounds_nodes(first: Duration, threads: usize) -> u64 {
+    let wide = 1.0 + (threads.max(1) - 1) as f64 * 0.5;
+    (first.as_secs_f64() * ROUNDS_SHARE * ROUNDS_NODES_A_SECOND * wide) as u64
+}
+
 /// How many times what the first run needed after it (the verification and the refill) is
 /// kept for after a second run, whose board has more copper.
 const AFTER_SHARE: f64 = 1.5;
@@ -2934,7 +2958,9 @@ fn first_said_all<'a>(
 /// for the second at its end less what comes after a run, as measured on the first. Either
 /// way the result is verified and counted as any other, `budget_exhausted` is set, and what
 /// is left open says so. A run with a budget of either kind is not the run without one: guide
-/// then routes for the most connections soonest.
+/// then routes for the most connections soonest. With a time budget alone, the negotiation of
+/// the native router's rounds in guide has its share as a count of nodes made from the budget
+/// ([`rounds_nodes`], D146), so that the clock does not say which of its rounds is the last.
 ///
 /// **The first run's nets** are those of the board's open connections in scope and the nets
 /// with zones in scope ([`first_nets`]): a net that cadlab's fill joins whole is cut by the
@@ -3025,6 +3051,11 @@ pub(crate) fn route(
     gopts.given_up_share = FIRST_SHARE / first_share;
     let deadline = opts.budget.map(|b| start + b.mul_f64(first_share));
     gopts.work_budget = opts.work.left();
+    // The negotiation of the rounds by a count made from the budget, not by the clock.
+    gopts.rounds_nodes = opts
+        .budget
+        .filter(|_| gopts.work_budget.is_none())
+        .map(|b| rounds_nodes(b.mul_f64(first_share), gopts.threads));
     // Whether the board has guide's own rounds: asked for, or because the native router's
     // gave it up.
     let mut own_rounds = gopts.rounds == pcb::Rounds::Own;

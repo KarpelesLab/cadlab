@@ -424,6 +424,16 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D145 (D146, the same direction, not met): guide 0.0.49. The clock no longer says which round of the
+      native router's rounds in guide is the last: the adapter gives the negotiation's share as a count of nodes
+      made from the budget, asked about between two rounds, and tinytapeout-demo's ninth order is one board in
+      eight runs for five, its sixteen orders the same boards in three sets for 6 of 16. The rounds end three
+      rounds after their fewest shared points, not at the first round with few: the tenth order's mng6, open in
+      every set since D143, is routed, and the sixteen orders have no connection open in three sets (7, 2 and 5
+      with 0.0.48 in the same minutes). 35 cells better, 30 equal and 7 worse of 72 (master's build 35, 29, 8).
+      Open: the seven cells; the necks at their source (they are in guide's first run, at a route's end beside
+      its pad; the mending still lays 20 pieces in 52 runs); tinytapeout-demo's track outside the pads, which is
+      in the negotiation's routes; the clock's decisions in the adapter's later runs and in guide's own rounds.
       Since D144 (D145, the same direction, not met): the DRC has the necks (`drc.neck`), and with it the twelve
       boards in four orders had 894 on guide's boards with 0.0.47 (678 under the minimum track width; 884 a track
       that reaches a pad by its tip, which D144's script did not count) and 2 on the native router's. guide 0.0.48

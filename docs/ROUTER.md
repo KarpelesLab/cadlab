@@ -776,7 +776,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145, D146)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1072,6 +1072,29 @@ exports and the count all read cadlab's fill). The result is then treated as the
   has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
   last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
   master's build in the same minutes; the seven worse are D144's.
+- *guide 0.0.49* (D146): the negotiation of the native router's rounds in guide, in a run with a time budget, by a
+  count of nodes that the adapter makes from the budget (`rounds_nodes`, `RouteOptions::rounds_nodes`): 0.42 of the
+  first run's seconds at 2.8 million nodes a second for each thread's worth of the rounds' batches (one thread and
+  half of each further one), 110 million nodes at 60 s on three threads. guide asks about it between two rounds, has
+  1.6 times the count for a negotiation that is near its end there, runs what makes the routes legal and saves vias
+  to its own end, and keeps its clock as a guard at 0.85 of what the run has left. Until now the clock ended the
+  negotiation inside a round, and one order of tinytapeout-demo's nets ended as several boards: its ninth order
+  eight times is one board for five, and its sixteen orders are the same sixteen boards in three sets for 6 of 16
+  with 0.0.48. A run with a work budget is as it was (the budget is the count), and so is one with neither. The
+  constant is of the machine of the benchmarks; on a slower one guide's clock ends the stage as it did.
+  And the rule that ends a negotiation with few points left shared (one for every 32 connections, at the highest
+  price of a shared point) waits three rounds after the fewest: at the first such round tinytapeout-demo's tenth
+  order had 12 points shared and lost mng6 to the retry after the rounds, three rounds later it has 2 and the
+  connection. The sixteen orders have no connection open in three sets, for 7, 2 and 5 with 0.0.48 in the same
+  minutes; at budgets of nodes 569 and 164 open for 570 and 164.
+  *Found and not mended at the source*: the necks that `router::necks` makes whole are in guide's first run as it
+  leaves guide (a route's end at a lattice point beside its pad with no piece into the pad, at corne-cherry's USB-C
+  pads and one pad of cynthion; two stubs 0.24 mm apart on lumenpnp-mobo; a track's end beside a via on
+  glasgow-revC3); the step lays its 20 pieces in 11 of 52 runs as before. *Measured*: tinytapeout-demo's track
+  outside the pads on the nets that both routers complete, 5.1 % more over four orders, is in the routes as the
+  rounds leave them (the uio bus 11 %, the short nets round the RP2350 15 % with 88 vias for 57); the price of a
+  point's history at 1 for 2 leaves 7 connections open in sixteen orders, not kept. Beside the native router 35
+  cells better, 30 equal and 7 worse of 72 (master's build 35, 29 and 8 in the same minutes).
 - *guide 0.0.47* (D144): no track is told needless for what two round ends leave of it. The step that takes out the
   tracks between pads that a pour joins (`needless`, D116) acts on guide's `pcb::needless_between`, which counted two
   tracks as one wherever their copper touches: two tracks of 0.25 mm that end 0.2 mm apart touch by their round ends,

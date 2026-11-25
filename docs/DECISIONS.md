@@ -13041,3 +13041,208 @@ routing: `tests/route.rs` asks every routed board for no DRC error but unrouted)
 suite and its oracle tests, which are run at the merge (the oracle comparison with KiCad on the corpus allows
 `drc.neck` as a rule of cadlab's alone, untested here); the generated boards; freerouting; guide on more than three
 threads at 60 s; a second set of the 72 cells.
+
+### D146. guide 0.0.49 adopted: the negotiation of the native router's rounds in guide ended by a count made from the budget, between two rounds, and three rounds after its fewest shared points; one order of tinytapeout-demo is one board on every run, and its sixteen orders have no connection open; the necks' sources found in guide's first run and not mended there; the track outside the pads by net; the default unchanged (2026-11-25)
+The direction is D121's to D145's: guide is to end equal to or better than the native router on every measure on every
+board. D145 left four things open, and this round took them in that order: tinytapeout-demo's first run has two ways
+to end for one order of its nets; its tenth order leaves one connection open in every set; the last mending step
+still lays pieces; its track outside the pads on the nets that both routers complete is 5 % more.
+
+**In short.**
+- *What decided the first run's way was the clock inside a round.* The negotiation of the native router's rounds in
+  guide (the stage that tinytapeout-demo, lumenpnp-mobo and buspirate5-rev10 have; the other boards have guide's own)
+  ended when nine tenths of its share of the time had passed, in the middle of whichever net's search that was. The
+  connections of that batch were left as failed, and the rounds' nodes part from there: the ninth order four times
+  side by side with 0.0.48 has the same nodes to the twentieth round and two different runs after it.
+- *guide 0.0.49 asks about the share between two rounds, and the adapter gives the share as a count of nodes*
+  (`RouteOptions::rounds_nodes`, `rounds_nodes` in `src/router/guide.rs`): 0.42 of the first run's seconds, at 2.8
+  million nodes a second for each thread's worth of the rounds' batches, which is 110 million at 60 s on three threads
+  and 176 million for a negotiation that is near its end there. What makes the routes legal and saves vias after it
+  runs to its own end, and guide's clock is a guard at 0.85 of what the run has left. On a machine that keeps up with
+  the count nothing of the stage is the clock's to say.
+- *One order is then one board.* The ninth order eight times: one board (no connection open, 264 vias, 4840.6 mm) for
+  five boards in eight runs with 0.0.48, a pad of a pour open in six of them. The sixteen orders three times: 16 of 16
+  the same board in all three sets, for 6 of 16 with master's build in the same minutes. corne-cherry's and
+  glasgow-revC3's first order, which have guide's own rounds, are one board in eight runs with either build.
+- *The tenth order's connection was lost in the rounds, by the rule that ends them early.* guide ended a negotiation
+  at the first round that left one shared point for every 32 connections or fewer, once the price of a shared point
+  was at its most. In the tenth order that round (the seventeenth) has 12 points shared; mng6 is in none of them, and
+  the retry after the rounds gives the way that mng6 shares with another net of two pads to that net. Three rounds
+  later the rounds have 2 points shared and both nets routed. guide 0.0.49 ends such a negotiation three rounds after
+  its fewest shared points have last become fewer. The native router has no such rule; it completes mng6 in eight
+  seeds of eight and leaves 2 to 19 other connections open.
+- *With both, tinytapeout-demo's sixteen orders have no connection open*, in three sets, for 7, 2 and 5 with
+  master's build in the same minutes; their vias 271.5 in the median for 270 to 271, their track 4858 mm for 4855 to
+  4860, pads short of two spokes 23 in each set for 22, 24 and 19.
+- *The necks that the mending makes whole are in guide's first run as it leaves guide*, before any step of the
+  adapter: found, by board and by item, and not mended at their source. The mending step lays what it laid (20 pieces
+  in 11 of 52 runs of guide, 3 in 3 of the native router's). The native router's corner was not begun.
+- *tinytapeout-demo's 5 % is in the routes as the rounds leave them*, not laid by the passes after them: by group of
+  nets below. One change measured (the price of a point's history at 1 for 2) and not kept.
+- *Beside the native router 35 cells better, 30 equal and 7 worse of 72*; master's build in the same minutes 35, 29
+  and 8 (tinytapeout-demo's vias, which change sides by the runs). The seven are D145's.
+
+**1. Why one order was two boards** (goal 1; guide by path with an instrument that prints each round's shared points,
+nodes and time; four runs at a time on three threads, the load 4.5 to 6).
+- *The ninth order four times with 0.0.48*: rounds 0 to 19 the same to the node in the four runs (107.8 million nodes
+  at 18.6 to 19.0 s). At round 20 the share's nine tenths pass inside the round; the stage, near its end by its count
+  (37 points shared of 491 connections), has as much time again, and the round is at 111.1, 113.5 and 112.0 million
+  nodes when that happens. One run ends at round 31 with nothing shared and no pad open; three go on to rounds 37 and
+  38, are ended by the clock inside a round with 17 points shared in the best round, and leave C43.1 open.
+- *Asked between two rounds* (a guard inside a round at 0.95 of the stage): the ninth order four times is one board.
+  The sixteen orders twice: 15 of 16 the same board in both sets, for 7 of 16 with 0.0.48's rule in the same binary
+  and minutes. The one that differs, the eighth order, has the same rounds and another pass for fewer vias, which
+  the stage's end cut at 34 and at 41 vias saved; and the seventh, the same board twice there, has its rounds ended
+  by the clock a round sooner in the next pair of sets, for no connection open where it had five.
+- *By the count*: 16 of 16 the same board in two sets, and in the three final sets below. The seventh order's rounds
+  are ended by the count after their thirty-second (177.8 million nodes; the best round is the twenty-second, with
+  20 shared) and its board is the one with no connection open.
+- *The other decisions that the clock takes in a run of 60 s*, none of them changed. In guide's first run: whether the
+  native rounds are begun at all (`rounds::look`: eight times the seconds of 48 sample searches against half the time
+  left; tinytapeout-demo 0.62 to 0.72 s against 22.4 s, a margin of eight); the stage's share and guard (the count's
+  guard, 0.85); the passes' share of what is left when the rounds end (`Shares::of`, 0.92 or 0.75), asked between
+  nets; whether the settling is begun and each of its tries; the nets routed again where the others are
+  (`whole::again`, begun with 1 s of half the part left, ended between nets); the cleanup's share (0.08) and, with
+  `shorten`, its 0.6; the tries for a pad shut in (1.5 s past the deadline); `join_planes` (three fills' time); every
+  search of the passes, which polls the deadline each 1024 nodes; and, with guide's own rounds (the nine other boards):
+  the first round's sample (`whole.rs`), the rounds' tail and their finer grids, by time or by nodes whichever is
+  first. In the adapter, each between two whole steps and by times measured in the run (the verification, the fill,
+  how late a run came back): the first run's deadline (0.78 or 0.7 of the budget); whether the host's fill is given to
+  a round of guide's (15 % of the run); the deadline of each later run and whether it is begun (`run_until`,
+  `least_run`); the run for shorter ways; each step that takes out needless copper; the step for the spokes and each
+  of its tries (5 s at most); the stairs laid straight (3 s) and whether that run looks for fewer vias; the second
+  verification; the ends at the pads. tinytapeout-demo's fifteenth order is at one of them with the count alone: a
+  third run begun or not, 302 vias and no connection open or 275 and one; with the rule of section 2 its rounds
+  end with less to retry and it is one board.
+
+**2. The tenth order's connection** (goal 2).
+- *Where it is lost*: the rounds end at round 16 with 12 points shared, among +1V1, the plane's net and one net of two
+  pads; mng6 has its route and no point shared. The legalisation takes three wires out; the retry gives the first
+  failed connection (that net of two pads) the room of the wires in its way, mng6's among them, and mng6 has no way
+  back: a move sideways, which the retry keeps four of. mng6 then enters the passes with no route, and what D145
+  measured follows: its whole way is taken.
+- *With the rounds going on* (the rule taken out, one run): 12, 6, 14, 2 points shared at rounds 16 to 19 and 2 until
+  the rounds end twelve rounds later; mng6 and the other net both routed, no connection open.
+- *The rule as released*: ended three rounds after the fewest shared points, if those are one for every 32
+  connections or fewer. Tried first and not kept: the same wait on the round's own count (the rounds then go on for
+  long where the count moves above the mark: one order with a connection open, 274.5 to 275.5 vias in the median);
+  a retry that moves no failure from a net with a fill onto a net with none (not what this is: both nets are signals).
+  Two rounds for three: no connection open either, the fifteenth order at 304 vias.
+- *Against the target*: no connection open in the tenth order, in three sets; no other order with one; the three
+  boards with these rounds at budgets of nodes below. Met.
+
+**3. The necks at their source** (goal 3; an instrument in `router::necks` and in the adapter's steps, never
+committed).
+- *Every piece that the mending lays is at a neck that guide's first run has when its routes are converted.* By board:
+  corne-cherry three or four a run, at the pads of the two USB-C connectors (left/D+, left/D-, right/D+, right/D-:
+  U3.2, U3.4, U3.9, RU3.1, RU3.9, RU3.10): a track that ends at a point of the lattice 55 um outside the pad's edge,
+  on the pad's axis or 40 um beside it, with its round end 70 um into the pad and no piece into the pad. These nets are
+  no pairs to guide (the bench gives none), which D145 took them for. cynthion one (CONTROL_VBUS at D23.1, a track of
+  0.127 mm that ends 50 um below the pad; D25.1 and D26.1 have the same at conversion and lose it to later steps).
+  lumenpnp-mobo one (+3.3V: the tracks of U5.21 and U5.22 end 0.2375 mm apart with nothing between). glasgow-revC3
+  one (+3V3: a track's end and a via 0.359 mm apart under the array). The native router: corne-cherry's +3V3R passes
+  RU1.48 by its flank, and tinytapeout-demo's GND has a track of 67 um beside another's end.
+- *Not found*: which stage of guide's first run leaves each. guide joins a track to a pad only where the track ends at
+  the pad's centre (`NetCopper::pieces`), and the point it routes to is inside the pad; the piece into the pad is
+  absent from the output all the same. Built and never reached on corne-cherry: a piece into the pad for the end of a
+  pair's coupled run.
+- *Against the target* (no piece laid by the mending for guide): not met; 20 pieces in 11 of 52 runs, as D145. No
+  neck leaves either router (52 runs of each, and tinytapeout-demo's 48).
+
+**4. tinytapeout-demo's track outside the pads, by net** (goal 4; four orders, the nets that both routers complete,
+135 or 136 of them; guide's trees as the rounds leave them printed by an instrument).
+- Over the four orders guide has 18953 mm outside the pads for the native router's 18034: 919 mm more, 5.1 %. By
+  group: the nets of neither bus nor power 360 mm more (4.6 %); uio0 to uio7 237 (11.1 %); ui_in 122 (4.9 %); mng 101
+  (7.4 %); the short nets round the RP2350 79 (15 %, with 88 vias for 57); uo_out 16 (0.9 %); the nets with pours 4.
+- The trees that the rounds hand to the passes are 19637 mm in all, inside the pads too, for 19178 mm of the board
+  that leaves: the passes and the steps after them shorten the routes. The excess is in what the negotiation lays.
+- *Measured and not kept*: the price of a point's history at 1 for 2 (the native router has 0.5):
+  7 connections open in sixteen orders for none, 6 runs ended by the budget for 1, 6.4 % more outside the pads for 5.1.
+
+**5. At budgets of nodes** (guide 0.0.49's source by path; the count is the budget's there, and only the rule of section 2
+is in the run): 569 connections open at 40 million nodes over nine boards in three orders for 570 (tinytapeout-demo's
+third order none for 1) and 164 at 150 million over seven boards in two for 164 (glasgow-revD1 56 and 75). 34 of 41
+runs the same board; the seven others are of the three boards with these rounds: lumenpnp-mobo's first order 327 vias
+and 5228 mm for 339 and 5335 at both budgets, buspirate5-rev10 two vias fewer in one order, tinytapeout-demo within 3
+vias and 36 mm either way in four. The router's count is the DRC's in every run.
+
+**6. At 60 s, beside the native router measured in the same minutes** (this commit: guide 0.0.49 and polyclip 0.0.7
+from crates.io; the twelve boards in four orders and tinytapeout-demo in eight; this, the native router of this commit
+and master's build side by side, four runs at a time on three threads, the load 6.3 to 7.5; nothing built or tested
+beside them). By the DRC's count of unrouted for both routers; medians over the orders; necks by `drc.neck`.
+
+| board | open | vias | track | track outside pads | short of two spokes | time | necks |
+|---|---|---|---|---|---|---|---|
+| buspirate-flash-sop | equal (0/0/0/0 against 0/0/0/0) | equal 4 against 4 | better (-4 %) 440 against 461 | equal 429 against 431 | equal | equal | 0 against 0 |
+| buspirate-rs232 | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 282 against 281 | equal (+1 %) 274 against 272 | equal | equal | 0 against 0 |
+| lumenpnp-ringlight | equal (0/0/0/0 against 0/0/0/0) | equal 3 against 3 | better (-7 %) 165 against 177 | equal (-2 %) 157 against 159 | equal | equal | 0 against 0 |
+| nrfmicro | equal (0/0/0/0 against 0/0/0/0) | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 420 against 414 | equal | equal (2 to 14 s against 2 to 12 s) | 0 against 0 |
+| sweep-v2.2 | equal (3/3/3/3 against 3/3/3/3) | better (-20 %) 20.5 against 25.5 | equal (-2 %) 2122 against 2159 | equal (-1 %) 2110 against 2122 | better (0/0/0/0 against 2/1/2/1) | better (35 to 36 s against 53 to 54 s) | 0 against 0 |
+| corne-cherry | better (1/0/0/1 against 1/3/2/4) | better (-7 %) 428.5 against 459 | better (-7 %) 7528 against 8103 | better (-6 %) 7454 against 7915 | better (1/1/1/1 against 3/3/2/2) | worse (25 to 54 s against 20 to 31 s) | 0 against 0 |
+| tinytapeout-demo | better (0/0/0/0/0/0/0/0 against 19/1/4/5/1/2/2/9) | equal (-0 %) 272.5 against 273 | equal (-0 %) 4874 against 4894 | worse (+3 %) 4813 against 4672 | better (1/2/0/0/1/3/2/2 against 20/12/10/16/16/14/17/19) | equal (39 to 52 s against 33 to 61 s) | 0 against 0 |
+| buspirate5-rev10 | better (0/0/0/0 against 4/2/4/4) | better (-6 %) 283.5 against 302 | better (-7 %) 2899 against 3129 | better (-4 %) 2801 against 2911 | better (7/9/7/10 against 22/24/30/21) | better (12 to 17 s against 19 to 32 s) | 0 against 0 |
+| lumenpnp-mobo | better (0/0/0/0 against 8/34/6/13) | better (-5 %) 325 against 341 | better (-5 %) 5249 against 5505 | equal (-1 %) 5164 against 5219 | better (0/0/0/0 against 2/1/0/1) | better (28 to 31 s against 61 s) | 0 against 0 |
+| cynthion | better (8/8/8/8 against 28/29/30/28) | better (-13 %) 416.5 against 478 | better (-4 %) 3044 against 3184 | equal (-0 %) 2969 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (31 to 33 s against 62 s) | 0 against 0 |
+| glasgow-revC3 | better (8/6/9/7 against 35/29/39/30) | better (-5 %) 395.5 against 417.5 | worse (+5 %) 3608 against 3448 | worse (+10 %) 3519 against 3190 | equal (0/0/0/0 against 0/0/0/0) | equal (58 to 59 s against 60 to 62 s) | 0 against 0 |
+| glasgow-revD1 | better (11/16/5/12 against 113/143/109/109) | worse (+6 %) 1130 against 1069 | worse (+16 %) 10479 against 9064 | worse (+20 %) 10223 against 8542 | better (9/12/14/11 against 42/44/43/36) | better (54 to 56 s against 61 s) | 0 against 0 |
+
+**35 better, 30 equal, none overlapping, 7 worse of 72**; master's build in those minutes 35, 29, 0 and 8, the eighth
+tinytapeout-demo's vias (280.5 against 273). The seven: corne-cherry's time; tinytapeout-demo's track outside the
+pads; glasgow-revC3's track and track outside the pads; glasgow-revD1's vias, track and track outside the pads.
+- *On the nets that both routers complete*: 16 cells better, 14 equal and 6 worse of 36 (master's build 16, 15 and
+  5). Worse: tinytapeout-demo's vias (+3 %, 245 against 239; master's build +6 %), track (+2 %, 4783 against 4684) and
+  track outside the pads (+5 %, 4726 against 4499); buspirate5-rev10's track outside the pads (+2 %); glasgow-revD1's
+  track (+6 %) and track outside the pads (+9 %), beside 48.5 nets that only guide completes there.
+- *The mending* laid 20 pieces in 11 of guide's 52 runs and 3 in 3 of the native router's, and left no neck; master's
+  build the same 20 in 11.
+- *The router's count is the DRC's* in all 52 runs of guide, and in the 48 of the sixteen orders; the native router's
+  count is other than the DRC's in 17 of its 52.
+- *Thermal census* (guide's 52 runs and tinytapeout-demo's 48): no pad without a spoke, no pad made solid by a track,
+  no DRC error but unrouted, no `drc.neck`. Pads short of two spokes on tinytapeout-demo: 11 over the eight orders of
+  this set for master's 6, and 23, 23 and 23 over the sixteen orders of the three sets after it for master's 22, 24
+  and 19: within what master's own sets differ by. The other boards pad for pad as master's where the routes are the
+  same (lumenpnp-mobo's first order two pads fewer with one spoke).
+- *tinytapeout-demo's sixteen orders, three sets, this build beside master's* (the load 5.3 to 7.7): 0, 0 and 0
+  connections open for 7, 2 and 5 (master's: the tenth order's mng6 and the ninth's C43.1 in all three, the
+  thirteenth's pads in two, the seventh's in two, orders 0 and 2 once each); 16 of 16 orders the same board in the
+  three sets for 6 of 16; vias 271.5 in the median in each for 271, 270 and 270.5, 254 to 297 for 256 to 328; track
+  4857.6 mm for 4860, 4856 and 4855; the time 43 s in the median for 46 to 47, one run ended by its budget for one
+  or two.
+- *The repeats*: tinytapeout-demo's ninth order eight times, one board for five (0.0.48: 262 to 283 vias, 4788 to
+  4904 mm, C43.1 open in six); corne-cherry's first order eight times one board with either build (1 open, 419 vias,
+  7514.8 mm); glasgow-revC3's the same (8 open, 407 vias, 3577.6 mm).
+
+**What got worse.** Nothing by the cells. tinytapeout-demo's pads short of two spokes are 11 for 6 in the eight orders
+of the table's set and equal over the three sets of sixteen (above). At budgets of nodes tinytapeout-demo has 1 to 3
+vias and 32 to 36 mm more in two runs of five and less in two. A run on a machine slower than the count was made for
+has its rounds ended by guide's clock, as before, and later by the guard's 0.85 of the run than by half of it: not
+measured.
+
+**What was tried and not kept.**
+- The stage given the whole of the run once its negotiation is near its end, with no count (1): the seventh order's
+  rounds go on to their own end at 38 s and the first run has no time left (3 connections open).
+- The wait of three rounds on the round's own count of shared points (2): one order with a connection open, more vias.
+- The retry's sideways moves kept from a net with no fill (2): not what the tenth order is.
+- A piece into the pad for the end of a pair's coupled run (3): never reached.
+- The history's price at 1 (4): 7 connections open in sixteen orders.
+
+**What remains open.**
+1. *The seven cells*, as D145 left them.
+2. *The necks at their source* (3): which stage of guide's first run leaves a route's end beside its pad with no piece
+   into it, on the four boards named; the native router's track past a pad by its flank.
+3. *tinytapeout-demo's track outside the pads*: in the negotiation's routes (4); the uio bus and the short nets round
+   the RP2350, with 31 vias more than the native router's, are where to look first.
+4. *The clock's other decisions* (1): the adapter's later runs and steps are begun or not by times measured in the
+   run, and a run that ends near its budget can still be two boards (tinytapeout-demo's fifteenth order was, before
+   the rule of section 2). The count is made for the machine of the benchmarks: 2.8 million nodes a second is a constant of
+   the adapter, not measured in the run.
+5. *The boards with guide's own rounds* have the clock in their rounds still; corne-cherry's and glasgow-revC3's first
+   order were one board in eight runs, the others were not repeated.
+
+**Default: unchanged.** `router: guide` stays the second opinion and the native router stays the default.
+*Checks run*: `cargo fmt --all --check`; clippy with `--all-targets --all-features -- -D warnings`; rustdoc with
+warnings denied; the library's tests of `router` and `drc`; the test targets `route`, `drc`, `thermal_relief`,
+`agent_session6` and `zone_refill`. guide: fmt, clippy with all features and with `pcb` alone, rustdoc, its whole
+suite, and its CI on Linux, macOS, Windows, the MSRV and the docs for both pull requests. *Not run*: cadlab's whole
+test suite and its oracle tests; the generated boards; freerouting; guide on more than three threads at 60 s; a
+second set of the 72 cells; a machine slower than the count.
