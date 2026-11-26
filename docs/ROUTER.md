@@ -783,7 +783,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145, D146, D147, D148, D149)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145, D146, D147, D148, D149, D150)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1079,6 +1079,32 @@ exports and the count all read cadlab's fill). The result is then treated as the
   has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
   last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
   master's build in the same minutes; the seven worse are D144's.
+- *Measured, nothing kept* (D150; guide stays at 0.0.52). The two boards with guide's own rounds whose track is
+  worse, measured in both routers after every round and every step on the nets with no zone that both complete:
+  glasgow-revD1's track outside the pads is made in its rounds (2.9 % more than the native router after the first
+  round, 9.3 % more when the rounds end, 9.0 % more on the board that leaves), on a grid of twice the pitch, and for
+  53 % of the difference in rounds 10 to 40, which the native router's minute does not get to (8 or 9 iterations,
+  116 to 125 connections failed for 6 to 17). The prices are the same in steps of the grid; a cheaper via is more
+  vias and connections and no less track; on the native router's grid the same rounds grow the routes by 10.7 % for
+  14.9 %, at four times the time; 80 rounds for 40 leave 24 connections open for 46 over four orders, for 1.8 %
+  more track.
+  glasgow-revC3 is level as its first run ends and falls behind after it, by the 2.2 % that the native router takes
+  off after its stage. Built and not kept: each net laid again among the others with the time for its three sweeps
+  in a first run that its deadline ends (glasgow-revD1 0.5 to 1.1 % less track and 8 to 10 vias fewer, and 137 to
+  141 connections open in 12 runs for 133: the first run ends later and the run for the nets open on the filled
+  board has no room); every net pulled tight before that step (a pad short of two spokes on sweep-v2.2); the nets
+  laid narrower for a row of pads taken back by the later runs (133 of glasgow-revD1's nets stay copper of the
+  board in its last run: with them the same track); D144's gate of the passes on the finer lattice (the same boards
+  at 60 s; in a run that moves routes nrfmicro's last connection at 40 million nodes; kept to a first run no second
+  sooner on corne-cherry, whose later runs take the time); no second run that moves routes after one that was not
+  kept (the same boards at 60 s, corne-cherry 5 to 8 s and sweep-v2.2 12 to 13 s sooner with the other gate;
+  glasgow-revC3's fourth such run after three not kept makes a connection at 150 million nodes). What the pass adds
+  after the native router's rounds on lumenpnp-mobo is eight connections to pads behind the pours of the stepper
+  drivers' outputs, which guide holds to be copper of their nets (`POUR_PADS`) and the native router routes
+  through, and no nets moved; with those pours as planes the signals are 70 mm shorter a board and the nets with
+  zones as much longer. The last run's check takes no item out for clearance: a net goes back for a connection that
+  a pour had joined or a pad with fewer necks, told on the fill after the run. The table's count, measured twice:
+  35 cells better, 31 equal and 6 worse of 72, the six D149's.
 - *guide 0.0.52* (D149): each run of tracks laid round the corners of what is beside it as a run's cleanup ends,
   off the lattice (`RouteOptions::round_corners` in guide, its port of this router's `gridless` pass, which it had
   in its run for shorter ways alone), and the nets that the last run left as they were taken back. The two routers

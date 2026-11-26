@@ -424,6 +424,22 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D149 (D150, the same direction, not met): nothing kept, guide stays at 0.0.52. The two glasgows are
+      measured round by round and step by step in both routers: glasgow-revD1's track is made in its rounds
+      (2.9 % more than the native router after the first round, 9.3 % as they end), on a grid of twice the pitch
+      and, for half of it, in the rounds past the ninth, which the native router's minute does not reach; the
+      prices are the same, a cheaper via buys no track, the native router's grid is four times the time, and
+      more rounds buy connections with track. glasgow-revC3 is level as its first run ends and loses 2 % to the
+      native router's steps after its stage. What the pass adds on lumenpnp-mobo is eight connections behind
+      pours that guide holds to be copper, not nets moved. Five changes built and not kept: each net again with
+      the time for its three sweeps (track for connections), every net pulled tight before it (a pad short of
+      spokes), the narrowed nets taken back by the later runs (no track), D144's gate of the finer passes (no
+      second sooner once it loses no connection) and no second run that moves routes after one not kept (a
+      connection at 150 million nodes). 35 cells better, 31 equal and 6 worse of 72 in two sets. Open: the six
+      cells; guide's rounds on the pitch within the minute, or a step that lays their routes again on it several
+      nets at a time; the runs that move routes for one connection, which are corne-cherry's time; the pours of
+      a few pads that the native router routes through; the last run's check, which is the fill's and not a
+      clearance.
       Since D148 (D149, the same direction, not met): guide 0.0.52. What each router does to its routes after
       its rounds is measured step by step in both, on the three boards with the native router's rounds in guide:
       guide's pass is the only step that adds track, and what it adds closes connections (tinytapeout-demo 384 mm
