@@ -424,6 +424,22 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D150 (D151, the same direction, not met): nothing kept, guide stays at 0.0.52. corne-cherry's slowest
+      minute is 27 s of passes for one connection, two million nodes a pass on one thread; a patience by what is
+      open makes the passes cheaper and the adapter has one more run of them, the same board in the same seconds,
+      and with nothing done for the connection the order would still take 31 s, by its rounds. Each net laid again
+      among the others with its searches made ahead on the run's threads and kept from one time through the nets to
+      the next is built in guide, with the routes of one thread to the track: its speed lays 27 to 106 nets again
+      in glasgow-revD1's first run for 12 to 16 (0.3 to 0.8 % less track), and each is 9 ms of the joining of the
+      pads to their fills that follows, in a run with half a second to spare, so that the adapter's next run is
+      lost; held to what one thread would have done, it is the same boards 2 s sooner on corne-cherry and an order
+      of tinytapeout-demo that is no longer one board. glasgow-revC3 lacks no step after its first run: its run for
+      shorter ways takes 1.8 % off where it has 3 s, and the run before it, which makes connections in one order
+      of four, has the time; a second kept for the one is a connection of the other. 35 cells better, 31 equal and
+      6 worse of 72 in two sets. Open: the six cells; the joining of the pads to their fills made ahead or before
+      the step, which is what the branch waits for; the last run's check, which turns two tracks into seven vias
+      on tinytapeout-demo's seventh order; the passes' search on more than one thread; guide's rounds on
+      corne-cherry, 19 s in two orders for 14 to 16; the choice between glasgow-revC3's connections and its track.
       Since D149 (D150, the same direction, not met): nothing kept, guide stays at 0.0.52. The two glasgows are
       measured round by round and step by step in both routers: glasgow-revD1's track is made in its rounds
       (2.9 % more than the native router after the first round, 9.3 % as they end), on a grid of twice the pitch

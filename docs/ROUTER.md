@@ -783,7 +783,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145, D146, D147, D148, D149, D150)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145, D146, D147, D148, D149, D150, D151)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1079,6 +1079,27 @@ exports and the count all read cadlab's fill). The result is then treated as the
   has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
   last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
   master's build in the same minutes; the seven worse are D144's.
+- *Measured, nothing kept* (D151; guide stays at 0.0.52). Where a run that moves routes spends its time:
+  corne-cherry's slowest order has 26.7 s of its 54.3 for one connection of a net of two pads, in passes that each
+  end two million nodes after their last connection, by a search that does 0.5 to 0.8 million nodes a second on one
+  thread; the set-up, the fills and the counts for the whole board are 2.2 s of such a run's 8.7. A pass's patience
+  by what is open as it begins (600 thousand nodes a connection) is the same boards at budgets of nodes and at
+  60 s, where the adapter has one more such run in the same seconds; with 300 thousand lumenpnp-mobo loses its last
+  connection in one order. Built in guide and not kept (a branch, `feat-29`): each net laid again among the others
+  (`whole::again`, D123) with the first search of its turn made ahead on the run's other threads and kept from one
+  time through the nets to the next, each for as long as no net has other copper where the search looked: the
+  routes of one thread, to the track (a test; 16 runs of 16 on eight boards; the 41 runs at budgets of nodes), in
+  1.0 and 0.7 s for 1.9 and 1.8 s on corne-cherry. Ended by its time itself the step lays 27 to 106 nets again in
+  glasgow-revD1's first run for 12 to 16, with 0.3 to 0.8 % less track outside the pads over three sets, and the
+  joining of the pads to their fills that follows takes 9 ms longer for each: the run ends up to 0.8 s past its
+  deadline and the adapter's run after it is made in 40 runs of 48 for 47. Ended when one thread would have had its
+  time, 43 of 48 board-orders are the boards of 0.0.52, corne-cherry 1.6 to 2.4 s sooner in three orders of four,
+  and tinytapeout-demo's seventh order, whose first run the clock ends in cleanup, has 279 vias for 272 in two sets
+  of three, its last run not kept. glasgow-revC3 lacks no step after its first run: its run for shorter ways takes
+  1.7 to 1.9 % off in the two orders of four where it has 2.8 s, and the 11 to 16 s before it are a run that moves
+  routes, which makes connections in one order of four; with 3 s of that run kept for the other the board has 0.6 %
+  less track and 62 connections open in eight runs for 60. The table's count, measured twice: 35 cells better, 31
+  equal and 6 worse of 72, the six D150's.
 - *Measured, nothing kept* (D150; guide stays at 0.0.52). The two boards with guide's own rounds whose track is
   worse, measured in both routers after every round and every step on the nets with no zone that both complete:
   glasgow-revD1's track outside the pads is made in its rounds (2.9 % more than the native router after the first

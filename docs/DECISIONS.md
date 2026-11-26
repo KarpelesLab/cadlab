@@ -14461,3 +14461,341 @@ macOS, Windows, the MSRV and the docs), and nothing of it is released.
 *Not run*: cadlab's whole test suite and its oracle tests; the generated boards; freerouting; guide on more than
 three threads at 60 s; the builds on the way beside each other in one table; the repeats and the sixteen orders with
 anything but master's build, since nothing is kept.
+
+### D151. guide stays at 0.0.52: where a run that moves routes spends its time (the nodes of its passes, two million a pass after its last connection, on one thread); a pass's patience by what is open; each net laid again among the others with its searches made ahead on the run's threads and kept from one time through the nets to the next (the same routes to the track, sooner: 0.3 to 0.8 % less track on glasgow-revD1 with the step ended by its time and the adapter's second run lost, the same boards 2 s sooner on corne-cherry with it ended as one thread's would be and an order of tinytapeout-demo no longer one board); glasgow-revC3 after its first run and time kept for its run for shorter ways; four changes built, measured and not kept; the default unchanged (2026-11-26)
+
+The direction is D121's to D150's: guide is to end equal to or better than the native router on every measure on every
+board. D150 left six cells worse of 72 (corne-cherry's time, glasgow-revC3's track and track outside the pads,
+glasgow-revD1's vias, track and track outside the pads) and three questions: whether the run that moves routes for one
+connection can be made cheap where it cannot be told from one that makes it, whether the step that lays each net
+again can have its three times through the nets in glasgow-revD1's first run without that run ending later, and
+which step of the native router's glasgow-revC3 lacks after its first run. This round measured the three and built
+four changes for them. None is kept: there is no release of guide and no change of code in this commit. It is the
+measurements, what they rule out, and a branch of guide that lays the same routes sooner and waits for the step
+after it.
+
+**In short.**
+- *A run that moves routes is the nodes of its passes* (section 1). corne-cherry's slowest order spends 26.7 s of
+  its 54.3 on one connection of a net of two pads: every pass that looks for it ends two million nodes after its
+  last connection, which is none, and the search of the passes does 0.5 to 0.8 million nodes a second on one thread.
+  The set-up, the fills and the counts that such a run pays for the whole board are 2.2 s of 8.7.
+- *A pass's patience by what is open is the same boards and no second sooner* (section 2): with 600 thousand nodes
+  for each connection open the 41 runs at budgets of nodes are the boards they were and corne-cherry's four orders
+  at 60 s the same boards in the same seconds, the adapter having one more run that moves routes; with 300 thousand
+  lumenpnp-mobo loses a connection. Not kept. With nothing at all done for the open connection the slowest order
+  would take 31 s, by its rounds: the time cell is not the tries alone.
+- *Each net laid again with its searches made ahead on the run's threads and kept from one time through the nets
+  to the next is the same routes, to the track* (section 3): by a test, by 16 runs of 16 on eight boards and by the
+  41 runs at budgets of nodes. corne-cherry's step is 1.0 and 0.7 s for 1.9 and 1.8 s.
+- *Ended by its time itself the step lays more nets again in glasgow-revD1's first run, and costs the run after it*
+  (section 3): 0.3 to 0.8 % less track outside the pads over three sets, and the adapter's second run made in 40
+  runs of 48 for 47, by the joining of the pads to their fills that follows the step, 9 ms for each net laid again
+  in a run with half a second to spare. Not kept.
+- *Ended when one thread would have had its time, it is the same boards sooner and one order that is no longer one
+  board* (section 3): 43 of 48 board-orders the boards of 0.0.52, corne-cherry 1.6 to 2.4 s sooner in three orders of
+  four, and tinytapeout-demo's seventh order, whose first run the clock ends in cleanup, with 279 vias for 272 in two
+  sets of three. Not kept: two seconds of a cell that stays worse, for an order that master's build has the same in
+  every set.
+- *glasgow-revC3 lacks no step* (section 4): its run for shorter ways takes 1.7 to 1.9 % off in the two orders of
+  four where it has 2.8 s, and the 11 to 16 s before it are a run that moves routes, which makes connections in one
+  order of four. With 3 s of it kept for the run for shorter ways the board has 0.6 % less track and two
+  connections more open in eight runs. Not kept.
+- *The 72 cells, measured twice with master's build and the native router in the same minutes* (section 6): 35
+  better, 31 equal and 6 worse in both sets, the six as D150 has them.
+
+**1. corne-cherry's time: where a run that moves routes spends it** (goal 1; guide 0.0.52, 60 s on three threads, the
+orders none, 2, 3 and 4; prints in guide that are in no release, and one run under a sampler, gdb stopping the process
+eight times a second, since the machine has no `perf`).
+
+| corne-cherry, seconds | order none | 2 | 3 | 4 |
+|---|---|---|---|---|
+| guide's rounds end | 19.1 (151 rounds) | 13.9 (99) | 15.7 (107) | 18.8 (137) |
+| its first pass, the settling, the passes on the finer lattice | 12.6 | 0.05 | 0.05 | 4.5 |
+| cleanup, the report | 3.5 | 3.3 | 4.3 | 3.0 |
+| the first run ends | 35.2 | 17.3 | 20.0 | 26.2 |
+| the run for the nets open on the filled board, with its fill | 1.2 | 0.9 | 1.0 | 0.9 |
+| the runs that move routes | 15.6 (two, nothing made) | none | 2.9 (the connection) | 8.3 (not kept: 78 open) |
+| the run for shorter ways | none (no time) | 5.3 | 5.1 | 4.2 |
+| the steps after the runs | 2.3 | 1.8 | 2.1 | 1.9 |
+| the board leaves | 54.3 | 25.3 | 31.1 | 41.6 |
+
+The native router's four runs take 23 to 27 s.
+- *One connection is 26.7 s of the slowest order's 54.3.* What is open after its rounds is one connection of a net of
+  two pads. The first pass has 2.0 million nodes and 2.7 s for it, with 204 rip-ups; the negotiation for
+  it 1.6 million and 1.9 s, undone; the two passes on the finer lattice 2.0 million each, 3.9 and 4.0 s; four chains
+  41 thousand nodes: 12.6 s of the first run. The first run that moves routes has the same again in another order of
+  the nets (2.7 million and 3.3 s, 1.4 million and 1.7 s, 2.1 and 2.3 million and 2.6 and 2.9 s: 10.6 s), the second
+  its first pass (2.7 million, 3.2 s) and its deadline. Every one of these passes ends at guide's `STALL_NODES`: two
+  million nodes after the last connection that it made, which here is none.
+- *The time is search, on one thread.* Of the samples of the first run's passes and settling 81 % are in the search
+  of the passes (`detail`'s, on exact geometry, 0.5 to 0.8 million nodes a second) and one thread of the process's
+  four is at work; of the run that moves routes, 8.7 s under the sampler: its set-up 0.6 s, which is the fill of the
+  planes; its first pass 3.4 s, of which 41 % search and 48 % the host's fill of the board around the routes it was
+  handed, the joints of the pads counted on that fill and the pieces of the planned planes, about 1.6 s as the pass
+  begins; its settling and finer passes 4.6 s, 76 % search. So the set-up, the fills and the counts that a run for one
+  connection pays for the whole board are 2.2 s of 8.7, the verification and the fill between two runs 0.2 to
+  0.4 s, and the rest is the nodes of the passes.
+- *Where the passes of 41 runs at budgets of nodes make their connections* (0.0.52 with the prints; 569 and 164
+  connections open): 139 passes of 0.2 million nodes or more or with a connection made; 75 of them of 1.9 million
+  nodes or more, and 50 of those made nothing: 135 million nodes of the 409 million that the passes have. Of 18 passes
+  on the finer lattice begun with three nets or fewer, 7 make their connection: lumenpnp-mobo's last, in the five
+  runs that it has at the two budgets, 0.30, 0.34 and 0.64 million nodes into the pass, and nrfmicro's in two orders
+  0.09 and 0.02 million nodes into a pass that follows one of 2.0 to 2.7 million that made nothing (the second is
+  D150's connection by the finer pass of a run that moves routes).
+
+**2. A pass's patience by what is open as it begins: built, measured, not kept** (a switch in the instrument build).
+The least that a pass goes on for after its last connection, two million nodes, made the less of that and 300 or 600
+thousand nodes for each connection open as the pass begins.
+- *At budgets of nodes*: with 300 thousand, 570 connections open at 40 million for 569 (lumenpnp-mobo's third order
+  has one open: its last connection is the one made 0.64 million nodes into a pass with one connection open) and 164
+  at 150 million. With 600 thousand, 569 and 164 and every one of the 41 runs the same board to the connection, the
+  via and 0.1 mm; nrfmicro's two orders that end early are done after 8.5 and 20.1 million nodes for 10.0 and 22.9
+  (5.5 and 8.8 s for 7.1 and 11.9 s). lumenpnp-mobo's connection at 0.64 million is within one search of that limit.
+- *At 60 s* (corne-cherry's four orders, with and without, side by side): the same four boards, in 54.0, 26.7, 31.3
+  and 42.0 s for 54.8, 26.5, 31.2 and 41.7 s. The slowest order's first run ends at 29.6 s for 36.2 s, and the
+  adapter has three runs that move routes where it had two, none of which makes the connection: a run that moves
+  routes is another for as long as there is time and something open (D108), and a net with a pour counts the pads
+  that its pour joins as open when such a run begins (23 for 1), so that its first pass has its two million nodes
+  either way.
+- *The floor*: with nothing at all done for the connection after the rounds, the slowest order is its rounds, its
+  cleanup, the run on the filled board, the run for shorter ways and the last steps, 19.1 + 3.5 + 1.2 + about 5 +
+  2.3 = 31 s, and the fourth order 18.8 + 3.0 + 0.9 + 4.2 + 1.9 = 29 s, where the cell is equal at 29 s for every
+  order or at 31 s for the slowest with the fastest at 25 s. What is over that is the rounds of two orders, 19 s for
+  14 to 16 s, and the tries for a connection that the native router leaves open as well (2, 1, 2 and 4 open in its
+  four runs for 1, 0, 0 and 1). Making the tries cheap does not shorten the minute, since the adapter has more of
+  them, and ending them is D150's two gates, which lose a connection each at a budget of nodes. Not kept; the cell is
+  as it was.
+
+**3. Each net laid again among the others with its searches made ahead on the run's threads and kept from one time
+through the nets to the next: built, the same routes to the track, measured in two forms, not kept** (goal 2, idea b;
+guide's `whole::again`, D123, which is the first step of cleanup in a run with a budget and has half of cleanup's
+time; a branch of guide, `feat-29`, in no release, its pull request 113 closed).
+- *Where the step's time is* (the prints): 0.38 s of glasgow-revD1's 1.8 s is the grid's set-up, 0.27 s of it the
+  places where routes may end at the pads; the rest is the searches (1.2 to 1.3 s for 0.1 s of everything else), and
+  the searches are few and long: 3.8 million nodes in 369 searches, 1.7 million of them in ten. Its first time
+  through the nets, for fewer vias alone, is 1.7 s of the 1.8 s, 12 to 16 nets kept of 346; the second begins with
+  the same nets with vias and the same search for each.
+- *Built* (in a run with no budget of nodes). (a) The first search of each net's turn is made ahead of the turn on
+  the run's other threads, for the next eight nets at any time, each against the claims as they are with the net's
+  own left out of its count (the rounds' `route_task`; the places where a net's routes may end did not leave its
+  own claims out and do on the branch). At its turn it stands if no net that had its turn since it was asked for has
+  claims that changed in a block of eight cells where the search expanded a node, or beside one, and is made again
+  there and then if one has; the claims change only at the points where a net's new copper is not its old. (b) A
+  net's search stands from one time through the nets to the next by the same rule. (c) The places where routes may
+  end at the pads are asked of the board by net on the run's threads. In a run with a budget of nodes, where what a
+  search may expand is what the searches before it left, the step is as it was.
+- *The same routes.* A test of eleven nets on one, two and four threads; on eight boards in two orders at a budget
+  of nodes that does not bind, with the searches ahead and kept beside a search at every turn, the step's own counts
+  and the whole board are the same in 16 runs of 16 (of 6 to 877 searches made ahead a run, none to 96 made again at
+  their turn); and at the two budgets of nodes the 41 runs are the boards of 0.0.52 (section 5).
+- *What it gives the step*: corne-cherry's 1.9 s and 1.8 s in its first run and its run for shorter ways are 1.0
+  and 0.7 s on three threads (52 to 159 searches of 327 to 331 kept from the time before); cynthion's 0.36 and
+  0.94 s are 0.27 and 0.66 s; glasgow-revD1's first time through the nets ends after 0.8 to 0.9 s of searches for
+  1.2 s.
+- *First form: the step ended by its time itself*, which in glasgow-revD1's first run lays 27 to 106 nets again of
+  385 to 700 looked at where a search at every turn lays 12 to 16 of 347 to 351 (19 to 26 vias and 24 to 146 mm
+  less a board for 17 to 21 vias and 7 to 24 mm more; in one order of four the three times through the nets end:
+  154 kept of 1122). Four orders side by side with 0.0.52 in the same minutes, three sets:
+
+| glasgow-revD1 | runs each | connections open | vias, mean | track outside the pads, mean | pads short of two spokes | the adapter's second run made |
+|---|---|---|---|---|---|---|
+| a search at each turn, the same build | 12 | 136 | 1136.4 | 10233 mm | 129 | 11 of 12 |
+| ahead and kept, ended by the time | 12 | 137 | 1132.8 | 10154 (-0.77 %) | 141 | 12 of 12 |
+| 0.0.52 | 12 | 134 | 1137.6 | 10228 | 137 | 12 of 12 |
+| the branch | 12 | 136 | 1134.8 | 10158 (-0.69 %) | 142 | 8 of 12 |
+| 0.0.52 | 24 | 269 | 1140.0 | 10201 | 271 | 24 of 24 |
+| the branch, its time ending the searches on every thread | 24 | 270 | 1134.5 | 10168 (-0.33 %) | 281 | 20 of 24 |
+
+  0.33 to 0.77 % less track outside the pads and 3 to 6 vias fewer a board, 543 connections open in the 48 runs for
+  539, and the adapter's second run, for the nets open on the filled board, made in 40 runs of 48 for 47.
+  *Why*: what follows the step in a first run is the joining of the pads that the routes cut off their fills, stubs
+  by `detail`'s search, a pad at a time, which may run past the run's deadline (D138). glasgow-revD1's first run has
+  3.2 s for cleanup in its default order; the step has half, and the joining 1.0 to 1.1 s with 11 to 16 nets laid
+  again and 1.10 to 1.32 s with 26 to 38, about 9 ms for each net more. With 65 to 106 it has no room (an inference
+  from that slope; the runs that ended late had no prints): cleanup is not begun and the run is back at 42.7 to
+  43.0 s for 42.2 s, in 3 of the branch's 36 runs and 3 of 8 with prints, and in none of 36 of 0.0.52. The adapter's
+  second run is begun with a few tenths of a second to spare (D147, D150) and is the run that makes a connection in
+  three orders of four. It is D150's finding for the same step with a larger share, by the step's speed for its
+  share. Not kept.
+- *Second form: the step ended when one thread would have had its time*, by what each search and each turn took,
+  wherever and whenever the search was made: in the same minute and order the branch has 779 nets looked at and 141
+  kept where a search at every turn has 699 and 108, 0.24 s sooner, and 368 and 21 for 348 and 12 to 16 in the
+  default order, where the joining then leaves 0.9 s of cleanup's 3.5 s and the run is back at 42.2 s.
+  glasgow-revD1 in four orders six times, side by side under a load of 7 to 52: 274 connections open for 274,
+  1140.5 vias for 1142.6, 0.35 % less track outside the pads, 274 pads short of two spokes for 265, the adapter's
+  second run made in 20 runs of 24 for 21, the first run back at 42.2 to 42.5 s with both but for one run of the
+  branch as the load was 30 to 52 (43.5 s; its routing ended late). In the set of the 72 cells (section 6): 43 of
+  48 board-orders the boards of 0.0.52 to the connection, the via and 0.1 mm of track, corne-cherry after 54.2, 23.4,
+  28.6 and 39.3 s for 54.2, 25.0, 30.6 and 41.7 s, cynthion after 29.0 to 32.4 s for 29.5 to 33.8, sweep-v2.2 after
+  33.8 to 34.9 s for 34.7 to 35.6; the five others are glasgow-revD1's four, the clock's, and glasgow-revC3's first,
+  which has two boards with either build (D149). *And tinytapeout-demo's sixteen orders three times* (section 6):
+  no connection open in the 48 runs of either; 14 of 16 orders the same in the three sets for master's 15; the
+  seventh order has 279 vias in two sets and 272 in one, where master's build has 272 in the three. Its first run
+  is ended by the clock in cleanup, 8.3 s after cleanup began; with the step sooner the searches after it get 2.4
+  million nodes further in the same time, the board that goes on differs by two tracks between pads, and the last
+  run is then not kept: its check finds a connection that a pour joined open and no track to tell the net by
+  (D150's item 8). *Not kept*: what it gives is two seconds on a cell that stays worse and a second on boards that
+  are better already, and what it costs is an order that is one board on every run with master's build. A step
+  made faster in a run that the clock ends moves that run's board, and the adapter's later steps are not indifferent
+  to which board they are handed.
+
+**4. glasgow-revC3 after its first run** (goal 3; 0.0.52 at 60 s, four orders three times, the same in the three but
+for the seconds).
+
+| glasgow-revC3, seconds | order none | 2 | 3 | 4 |
+|---|---|---|---|---|
+| the board looked at, the escapes | 5.4 | 5.4 | 5.3 | 5.1 |
+| guide's rounds and its first pass end | 16.0 | 14.0 | 14.7 | 14.2 |
+| the negotiations of the settling, to the end of routing's share | 17.8 | 19.9 | 19.0 | 19.4 |
+| cleanup, the report | 3.2 | 3.8 | 4.1 | 4.0 |
+| the first run ends | 37.0 | 37.7 | 37.8 | 37.6 |
+| the run for the nets open on the filled board | 0.5 | 1.7 | 2.9 | 7.1 |
+| the run that moves routes, which its deadline ends | 15.6 | 15.1 | 12.9 | 11.0 |
+| nets open before it, connections open on the board that leaves | 12, 8 | 6, 6 | 8, 9 | 7, 7 |
+| the run for shorter ways: its searches, what it takes off | 2.9 s: 60.1 mm, 7 vias | 1.4 s: nothing kept | 2.8 s: 69.7 mm, 4 vias | none |
+| the last run, stairs and corners | 7.3 mm | 10.5 mm | 4.4 mm | 46.3 mm |
+
+- *No step of the native router's is missing on this board.* What the native router takes off after its stage, 2.2 %,
+  is its pull-tight and its gridless pass, on every net in every run (D150). guide's first run has every net laid
+  again and pulled tight before it ends (317 and 106 mm over four orders in D150's table) and is level there; what
+  it has after that is the run for shorter ways, which takes 60 to 70 mm and 4 to 7 vias off, 1.7 to 1.9 % of the
+  board's track, in the two orders where it has 2.8 to 2.9 s for its searches, keeps nothing in the order where it
+  has 1.4 s and is not begun in the fourth; and the last run's stairs and corners, 4 to 46 mm. The step is there
+  and has no time.
+- *The time is a run for connections that makes them in one order of four.* The run that moves routes is 11 to
+  16 s, is ended by its deadline in every order, and makes at least four connections in the first order (12 nets
+  open before it, 8 connections on the board that leaves) and none in the three others. In the first order, by
+  the prints: its set-up 2.4 s, its first pass 2.0 million nodes and 3.9 s, of which the connections are made in
+  the first 3440 nodes; ten negotiations 5.4 s, three kept; and a pass on the finer lattice that the deadline ends
+  after 3.5 s with nothing.
+- *Measured and not kept: time kept for the run for shorter ways out of the run that moves routes* (a switch in a
+  trial build of the adapter, on a board with guide's own rounds; glasgow-revC3's four orders twice, side by side):
+  with 3 s kept the eight runs have 62 connections open for 60 (the fourth order 8 for 7, twice) and 0.6 % less
+  track and track outside the pads (3581 and 3492 mm in the mean for 3603 and 3514); with 5 s, 70 for 60 and 1.2 %
+  less (3561 and 3472 mm). It is D116's finding with other numbers: on a board that the minute does not finish, the
+  seconds of the run for shorter ways are a connection's. A connection is not a price for track (D150), and the
+  choice between the two measures is not made here.
+
+**5. At budgets of nodes** (one thread; 40 million nodes over nine boards in three orders and 150 million over seven in
+two): 569 and 164 connections open with 0.0.52 (glasgow-revD1 56 and 75 at 150 million). With the branch of section
+3 by path, in both its forms: every one of the 41 runs is the same board, to the connection, the via, 0.1 mm of track
+and the nodes spent: the step is as it was in a run with a budget of nodes, and what the branch changes for every run
+(a net routed with its claims in place may end on its own pads, which the rounds never asked of it) moves nothing.
+The pass's patience of section 2 at 600 thousand nodes a connection: the 41 runs the same boards; at 300 thousand,
+570 and 164. The step ended by its time and the time kept for the run for shorter ways are of the clock and have
+nothing to say at a budget of nodes. The router's count is the DRC's in every run.
+
+**6. At 60 s, beside the native router measured in the same minutes** (master's build, guide 0.0.52 from crates.io,
+which is this commit's; the twelve boards in four orders and tinytapeout-demo in eight; guide, the native router and
+a build on the way side by side, four runs at a time on three threads; measured twice, the load 2.6 as the first set
+began and 9.5 as it ended, a build of this round among the causes, and 5.9 and 7.6 for the second, with two single
+runs of this round beside it; the table is the second set). By the DRC's count of unrouted for both routers; medians
+over the orders; necks by `drc.neck`.
+
+| board | open | vias | track | track outside pads | short of two spokes | time | necks |
+|---|---|---|---|---|---|---|---|
+| buspirate-flash-sop | equal (0/0/0/0 against 0/0/0/0) | equal 4 against 4 | better (-4 %) 440 against 461 | equal (-0 %) 429 against 431 | equal | equal | 0 against 0 |
+| buspirate-rs232 | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 282 against 281 | equal (+1 %) 274 against 272 | equal | equal | 0 against 0 |
+| lumenpnp-ringlight | equal (0/0/0/0 against 0/0/0/0) | equal 3 against 3 | better (-7 %) 165 against 177 | equal (-2 %) 157 against 159 | equal | equal | 0 against 0 |
+| nrfmicro | equal (0/0/0/0 against 0/0/0/0) | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | equal | equal (2 to 14 s against 2 to 12 s) | 0 against 0 |
+| sweep-v2.2 | equal (3/3/3/3 against 3/3/3/3) | better (-20 %) 20.5 against 25.5 | equal (-2 %) 2122 against 2159 | equal (-1 %) 2110 against 2122 | better (0/0/0/0 against 2/1/2/1) | better (35 to 36 s against 52 to 53 s) | 0 against 0 |
+| corne-cherry | better (1/0/0/1 against 2/1/2/4) | better (-8 %) 427.5 against 465 | better (-8 %) 7514 against 8201 | better (-7 %) 7438 against 8012 | better (1/1/1/1 against 2/3/2/2) | worse (25 to 54 s against 22 to 25 s) | 0 against 0 |
+| tinytapeout-demo | better (0/0/0/0/0/0/0/0 against 19/1/4/5/1/2/2/9) | equal (+0 %) 273.5 against 273 | equal (-2 %) 4818 against 4894 | equal (+2 %) 4753 against 4672 | better (0/2/0/0/1/2/2/2 against 20/12/10/16/16/14/17/19) | equal (40 to 53 s against 32 to 61 s) | 0 against 0 |
+| buspirate5-rev10 | better (0/0/0/0 against 4/2/4/4) | better (-8 %) 278.5 against 302 | better (-8 %) 2870 against 3129 | better (-5 %) 2770 against 2911 | better (7/7/8/10 against 22/24/30/21) | better (15 to 18 s against 19 to 30 s) | 0 against 0 |
+| lumenpnp-mobo | better (0/0/0/0 against 8/8/6/4) | better (-7 %) 321 against 343.5 | better (-4 %) 5220 against 5462 | equal (-1 %) 5129 against 5177 | better (0/0/0/0 against 2/4/0/0) | better (29 to 32 s against 60 to 61 s) | 0 against 0 |
+| cynthion | better (8/8/8/8 against 28/29/29/28) | better (-13 %) 416.5 against 478 | better (-5 %) 3039 against 3184 | equal (-1 %) 2964 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (30 to 34 s against 61 to 62 s) | 0 against 0 |
+| glasgow-revC3 | better (8/6/9/7 against 35/29/33/30) | better (-5 %) 395.5 against 418.5 | worse (+3 %) 3597 against 3478 | worse (+9 %) 3508 against 3216 | equal | equal (58 to 59 s against 60 to 61 s) | 0 against 0 |
+| glasgow-revD1 | better (11/16/5/12 against 113/109/83/89) | worse (+4 %) 1130 against 1083 | worse (+15 %) 10407 against 9052 | worse (+19 %) 10149 against 8525 | better (9/12/14/11 against 42/31/35/32) | better (56 to 58 s against 61 to 63 s) | 0 against 0 |
+
+**35 better, 31 equal, none overlapping, 6 worse of 72**, in both sets: corne-cherry's time; glasgow-revC3's track and
+track outside the pads; glasgow-revD1's vias, track and track outside the pads. The first set has the same classes in
+every cell (glasgow-revD1's track +16 % and track outside the pads +20 %, its vias +5 %; corne-cherry 26 to 54 s
+against 23 to 27 s).
+- *On the nets that both routers complete*: 18 cells better, 14 equal and 4 worse of 36 in the second set and 17, 14
+  and 5 in the first, by the native router's own runs, which differ from one set to the other, and with them the
+  nets that both complete (lumenpnp-mobo's vias are better in the second, -2 %, and worse in the first, +4 %: 7 to
+  19 connections open in the native router's four runs of the first set and 4 to 8 in the second). Worse in both:
+  tinytapeout-demo's vias (+2 %, 244 against 239) and track outside the pads (+4 %, 4683 against 4499);
+  glasgow-revD1's track (+6 % and +7 %) and track outside the pads (+10 %), beside 47 to 49 nets that only guide
+  completes there. glasgow-revC3's track is better on those nets (-4 %) and its track outside the pads equal (+1 %):
+  what its totals are over is the 18.5 nets that only guide completes, 888 to 898 mm.
+- *The mending* laid no piece in guide's 52 runs of either set and one in one of the native router's in each
+  (lumenpnp-mobo, D148), and left no neck.
+- *The router's count is the DRC's* in all 104 runs of guide; the native router's count is other than the DRC's in
+  17 and 16 of its 52.
+- *Thermal census* (guide's 104 runs and tinytapeout-demo's 48 below): no pad without a spoke, no pad made solid by
+  a track, no DRC error but unrouted, no `drc.neck`. Pads short of two spokes by order, the two sets:
+  tinytapeout-demo 0/2/0/0/1/2/2/2 in both, buspirate5-rev10 7/7/8/10 in both, corne-cherry 1/1/1/1, cynthion
+  1/1/1/1, glasgow-revD1 10/12/14/11 and 9/12/14/11, the seven other boards none: as D150 has them.
+- *tinytapeout-demo's sixteen orders, three sets* (master's build beside the branch of section 3, the load 5.4 to
+  8.1): no connection open in any of the 48 runs. Vias 271.2 in the mean and 273.5 in the median in each set, 251 to
+  295; track 4809 mm in the mean; track outside the pads 4747 mm; pads short of two spokes 20 in each set; 46 to
+  48 s in the median, one run ended by its budget in each set. 15 of 16 orders have the same vias and track in the
+  three sets (the third has 276 vias in each and 4822.9, 4822.9 and 4821.1 mm). As D150 has them, with one order
+  more the same.
+- *The repeats* (the twelve boards in two orders, eight times each, the whole board compared; master's build; the
+  load 6.0 as they began and 6.2 as they ended, and 12 to 21 for three minutes of them, as this commit's checks ran
+  beside corne-cherry's and buspirate5-rev10's runs): one board in 21 of 24 board-orders and 32 distinct boards in
+  192 runs (D150: 20 and 29). The three are glasgow-revD1's two orders, whose runs end at their budget (five boards
+  in the first: 11 connections open in all eight, 1113 to 1117 vias, 10316 to 10506 mm of track; four in the second:
+  15 to 17 open, 1125 to 1127 vias), and glasgow-revC3's second (seven runs with 3640 mm and one with 3666, 6 open
+  and 389 vias in all); glasgow-revC3's first is one board in the eight (407 vias, 3578 mm), where D150 had two.
+  The ten other boards are one board in each order, corne-cherry's 54 s among them. No piece mended in the 192 runs
+  and the router's count the DRC's in all; glasgow-revD1 has 9 or 10 pads short of two spokes in its first order
+  and 12 in its second.
+
+**What got worse.** Nothing: no code changed. The cells are D150's.
+
+**What was tried and not kept.** Built in guide (a branch, `feat-29`, with the test; its pull request 113 closed):
+each net laid again among the others with its searches made ahead on the run's threads and kept from one time
+through the nets to the next, the same routes to the track; with the step ended by its time itself (0.3 to 0.8 %
+less track outside the pads on glasgow-revD1 over three sets and the adapter's second run made in 40 runs of 48 for
+47, 543 connections open for 539), and with it ended when one thread would have had its time (the same boards in 43
+of 48 board-orders, corne-cherry 1.6 to 2.4 s sooner in three orders of four, tinytapeout-demo's seventh order 279
+vias for 272 in two sets of three). On switches of the instrument build: a pass's patience by what is open as it
+begins (600 thousand nodes a connection: the same boards at budgets of nodes and at 60 s, with one more run that
+moves routes in corne-cherry's slowest minute; 300 thousand: lumenpnp-mobo's last connection in one order at 40
+million nodes); the searches ahead a wave of nets at a time, each wave waited for (1.2 s of searches made 0.8 to
+0.9 s, as the window that moves with the turns, once a search that its limit ended stood as one); where a search
+looked told by the box it was kept to (95 searches of 347 made again for 14 nets kept, with 32 ahead) for the
+blocks where it expanded a node (70); 4, 16 and 64 nets ahead for 8 (0.99, 0.83 and 0.97 s of searches for 0.79 s).
+In a trial build of the adapter: time kept for the run for shorter ways out of the run that moves routes on a
+board with guide's own rounds (glasgow-revC3: 3 s, 0.6 % less track and 62 connections open in eight runs for 60;
+5 s, 1.2 % and 70).
+
+**What remains open.**
+1. *The six cells.* corne-cherry's time; glasgow-revC3's track and track outside the pads; glasgow-revD1's vias,
+   track and track outside the pads.
+2. *The joining of the pads to their fills in a run that its deadline ends* (3): glasgow-revD1's first run has 1.0 s
+   of it on one thread, a search a pad at a time, and 9 ms more for each net that the step before it lays again;
+   after it the search for fewer vias of the board's largest net has 0.2 to 1.4 s, is ended by the deadline in
+   every run and gives nothing. The step's speed is worth 27 to 106 nets laid again there for 12 to 16 (0.3 to
+   0.8 % of the board's track outside the pads) once the joining is made ahead as the step's searches are, or
+   before the step with a second one for what the step cuts. The branch is that half of it.
+3. *A step made faster in a run that the clock ends moves its board* (3): tinytapeout-demo's seventh order with the
+   branch. The last run's check, which does not keep the run where it cannot tell the net of a connection that a
+   pour joined (D150's item 8), is what turns two tracks into seven vias there.
+4. *The search of the passes on one thread* (1): 0.5 to 0.8 million nodes a second, and every second of a run that
+   moves routes for one connection. The passes take a net at a time and change the board between two searches.
+5. *corne-cherry's time* (1, 2): 19 s of rounds in two orders of four for 14 to 16 s, and the tries for a connection
+   that the native router leaves open; with nothing done for it the slowest order would take 31 s. A patience by
+   what is open is built and gives the adapter one more try in the same time; with what counts as open for a net
+   with a pour (23 for 1) the first pass of such a run keeps its two million nodes either way.
+6. *glasgow-revC3's minute after its first run* (4): 11 to 16 s of a run that moves routes, which makes connections
+   in one order of four, and none to 2.9 s of the run for shorter ways, which takes 1.7 to 1.9 % off where it is
+   kept. A choice between two measures, as D150's 80 rounds are; not made here.
+7. *D150's items 2, 4, 7, 8 and 9* (guide's rounds on the pitch, the nets laid narrower for a row of pads, the pours
+   of a few pads, the last run's check, the nets moved by the pass on tinytapeout-demo): not begun.
+
+**Default: unchanged.** `router: guide` stays the second opinion and the native router stays the default; no code of
+either router is changed by this commit, which is documentation.
+*Checks run*: `cargo fmt --all --check`; clippy with `--all-targets --all-features -- -D warnings`; rustdoc with
+warnings denied; the library's tests of `router` and `drc`; the test targets `route`, `drc`, `thermal_relief`,
+`agent_session6` and `zone_refill` (153 tests), with no snapshot and no golden file changed (the code is master's).
+guide: for the branch, fmt, clippy with all features and with `pcb` alone, rustdoc, its whole suite on its first
+commit and its tests of `whole` on its last, and its CI on Linux, macOS, Windows, the MSRV and the docs on its last
+(its pull request 113, closed unmerged); its record of this round is a section of its `docs/benchmarks.md` (its pull
+request 114, with its CI on the same five), and nothing of it is released.
+*Not run*: cadlab's whole test suite and its oracle tests; the generated boards; freerouting; guide on more than
+three threads at 60 s; the repeats with anything but master's build, since nothing is kept; the branch's second
+form at 60 s on a quiet machine (glasgow-revD1's six times four orders were run under a load of 7 to 52).
