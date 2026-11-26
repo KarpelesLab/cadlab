@@ -783,7 +783,7 @@ rules. What that costs an external router on real boards is measured under "free
 - Diff pairs routed as coupled pairs. Length matching via meander insertion (with M8). *Done:* `route.diffpair`,
   `route.tune` (above, D38).
 
-## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145, D146)
+## guide as a backend (`router: guide`, D85, D88, D91, D93, D95, D96, D97, D101, D104, D106, D108, D110, D113, D114, D115, D116, D117, D118, D121, D122, D123, D124, D125, D126, D127, D128, D129, D130, D131, D132, D133, D134, D135, D136, D137, D138, D139, D140, D142, D143, D144, D145, D146, D147, D148, D149)
 
 [guide](https://crates.io/crates/guide) (MIT, the same owner as cadlab, a standalone placement and routing engine
 in its own repository, as polyclip is for polygons) has a PCB router, `guide::pcb::route`. `router: guide` on
@@ -1079,6 +1079,30 @@ exports and the count all read cadlab's fill). The result is then treated as the
   has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
   last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
   master's build in the same minutes; the seven worse are D144's.
+- *guide 0.0.52* (D149): each run of tracks laid round the corners of what is beside it as a run's cleanup ends,
+  off the lattice (`RouteOptions::round_corners` in guide, its port of this router's `gridless` pass, which it had
+  in its run for shorter ways alone), and the nets that the last run left as they were taken back. The two routers
+  were measured after every step that changes the board, on the three boards with the native router's rounds in
+  guide, on the nets with no zone that both complete: what guide's steps add after those rounds is the pass that
+  closes what the rounds leave open (tinytapeout-demo: 384 mm and 62 vias over four orders, 188 mm of them the six
+  nets completed and 196 the 52 moved for them and for the pads left off their pours); every other step takes track
+  off; and of what the native router takes off after its rounds (2.0 %, 2.4 % and 1.2 % on the three boards) its
+  `gridless` pass is 1.1 %, 1.1 % and 0.2 %, which a run of guide after these rounds did not have. The adapter
+  asks for the step from the first run on where the board has the native router's rounds, and in the last run on
+  every board: a run laid so has no room left to give, and corne-cherry with it in its first run ended the run
+  that takes every route back with seven connections open for none (guide leaves it out itself in a run that gives
+  those rounds up). No way is laid nearer a pad of another net in the room of a spoke than the run was (D137), nor
+  with more of it outside the pads of its net. And the last run (`leave_given`) looks for the ends short of their
+  pads' centres on what it is given, before it drops the copper with no terminal in it: a route between two such
+  ends was all of it dropped and its net left (37 nets of 134 on tinytapeout-demo, whole buses among them); such
+  a net has the run's search for fewer vias. tinytapeout-demo's sixteen orders, three sets: no connection open,
+  0.66 to 0.67 % less track outside the pads (15 orders better, one worse), 271.1 vias in the mean for 272.2, 20
+  pads short of two spokes a set for 23, 1 to 2 s later; lumenpnp-mobo 0.77 % less and 4.25 vias fewer,
+  buspirate5-rev10 0.65 % and 2.75; the boards with guide's own rounds 0 to 0.5 % less. tinytapeout-demo's board
+  leaves 38 mm over what its stage ends with on the nets that both complete, for 143. The table's count: 35 cells
+  better, 31 equal and 6 worse of 72, where master's build in the same minutes has 34, 30, one overlapping and 7:
+  tinytapeout-demo's track outside the pads is equal (+1.7 % for +2.9 %); the six are corne-cherry's time and the
+  two glasgows' track.
 - *guide 0.0.51* (D148): the long ways round that the native router's rounds in guide leave are laid again, a wire
   at a time (`relay` in guide's `pcb::rounds`). The two routers were measured at the same places on
   tinytapeout-demo, by net: on the nets with no zone that both complete guide has 0.4 % more track outside the pads

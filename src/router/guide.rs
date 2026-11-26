@@ -3092,6 +3092,16 @@ pub(crate) fn route(
     if own_rounds {
         ad.without_unfilled();
     }
+    // Each run of tracks laid round the corners of what is beside it as a run's cleanup ends,
+    // off the lattice, as the native router's routes are once they are final (`gridless`; guide
+    // 0.0.52, `RouteOptions::round_corners`, D149). On a board with that router's rounds in
+    // guide, which has no run for shorter ways to do it (D132), from the first run on. On a
+    // board with guide's own rounds in the last run alone: a run laid so is as near what is
+    // beside it as the rules allow and has no room left to give, and such a board's later runs
+    // move its routes (corne-cherry, one order: the run that takes every route back ended with
+    // seven connections open for none). A run that gives the native router's rounds up has none
+    // of it in guide either, and the runs after it are told so below.
+    gopts.round_corners = !own_rounds;
     let short = opts.budget.map_or(Duration::MAX, |b| b.mul_f64(SHORT_FILL));
     let over = Cell::new(Duration::ZERO);
     let first = Host { base: p, took: &fill_took, over: &over };
@@ -3102,6 +3112,7 @@ pub(crate) fn route(
     if routed.stats.rounds_given_up {
         gopts.rounds = pcb::Rounds::Own;
         own_rounds = true;
+        gopts.round_corners = false;
         ad.without_unfilled();
     }
     opts.work.charge(routed.stats.work);
@@ -4202,6 +4213,9 @@ pub(crate) fn route(
         let mut g = gopts;
         g.straighten = true;
         g.leave_given = true;
+        // And each run round the corners beside it once the stairs are laid: nothing moves
+        // a route after this run (guide 0.0.52, D149).
+        g.round_corners = true;
         g.pour_cuts = false;
         // Nor does guide plan anything for it: no plane to tell, no crossing and no way out,
         // which are most of what a run takes before it routes (glasgow-revD1: 2.4 s, and 0.5 s

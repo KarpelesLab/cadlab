@@ -424,6 +424,23 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D148 (D149, the same direction, not met): guide 0.0.52. What each router does to its routes after
+      its rounds is measured step by step in both, on the three boards with the native router's rounds in guide:
+      guide's pass is the only step that adds track, and what it adds closes connections (tinytapeout-demo 384 mm
+      over four orders, half the nets completed and half the nets moved for them); the native router has one step
+      there that guide's runs after these rounds did not, its `gridless` pass (1.1 % of the 2.0 % that it takes
+      off). Kept: each run laid round the corners of what is beside it as a run's cleanup ends
+      (`RouteOptions::round_corners`, guide's port of that pass, no nearer a spoke and with no more outside the
+      pads), from the first run on with the native router's rounds and in the last run on every board (in the
+      first run of a board with guide's own rounds the later runs have no room: corne-cherry seven connections
+      open for none); and the nets that the last run left as they were, a route between two ends short of their
+      pads, taken back with their search for fewer vias. tinytapeout-demo 0.66 % less track outside the pads over
+      three times sixteen orders with no connection open and 1.1 vias fewer, lumenpnp-mobo 0.77 %,
+      buspirate5-rev10 0.65 %, the boards with guide's own rounds 0 to 0.5 %. 35 cells better, 31 equal and 6
+      worse of 72 (master's build 34, 30, 1 and 7): tinytapeout-demo's track outside the pads is equal, the
+      first of the seven cells to move since D143. Open: the six cells (corne-cherry's time, the two glasgows'
+      track); what the pass adds to close connections (131 mm of the nets it moves on tinytapeout-demo); the step
+      in the first run of a board with guide's own rounds; the wires with a shorter way and no room, not begun.
       Since D147 (D148, the same direction, not met): guide 0.0.51. tinytapeout-demo's track outside the pads is
       measured to where it is made, in both routers at the same places: half in the rounds (the stubs of the
       ground's pads to its plane half of that, the price of a spoke's room a quarter) and half after them, where
