@@ -424,6 +424,21 @@ close to it; what is open is pads cut off from pours (all 25 of tinytapeout-demo
       after it tinytapeout-demo has 5 % fewer vias and 6 % less track and four to seven connections open
       for none or one, buspirate5-rev10 as much less in half as much time again and lumenpnp-mobo more of
       both, so it is left off; open: the pads that the stage's routes shut in, and its time.
+      Since D151 (D152, the same direction, not met): guide 0.0.53, which lays the same routes. The joining of
+      the pads to their fills is measured: a plan that asked every pad of the net for each place (now an index,
+      0.04 to 0.08 s for 0.09 to 0.43 s on glasgow-revD1) and a search for the stubs that is the pads hard to
+      reach. With the plan cheap, the step that lays each net again ended by its time no longer ends the first
+      run late, and gains no connection in any order (309 open in 24 runs for 274): closed. The long ways round
+      are few on the boards with guide's own rounds (0.3 % of glasgow-revC3's track, one and two connections
+      more at budgets of nodes): closed. corne-cherry's connection is one of two nets for one passage, which the
+      native router leaves the other of. Kept in the adapter: the last run's check looks for the tracks beside a
+      pour as far as the fill keeps from them (`pour_reach`), where a pour in a class of more clearance than its
+      zone told no net, and tells the nets beside a piece cut off where no one track is beside both pieces
+      (`pour_beside`): two sources of a last run dropped whole on tinytapeout-demo, which keeps it in 48 runs of
+      48 for 43. Measured on a machine with other work (a load of 25 to 35 for the table): 35 cells better, 30
+      equal and 7 worse with this build and with master's in the same minutes, D151's six and tinytapeout-demo's
+      track outside the pads. Open: the stubs' search, the rounds for the pads cut off their pours on
+      corne-cherry, the table on a quiet machine.
       Since D150 (D151, the same direction, not met): nothing kept, guide stays at 0.0.52. corne-cherry's slowest
       minute is 27 s of passes for one connection, two million nodes a pass on one thread; a patience by what is
       open makes the passes cheaper and the adapter has one more run of them, the same board in the same seconds,

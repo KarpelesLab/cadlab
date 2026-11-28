@@ -2051,8 +2051,25 @@ const STRAIGHT_SHARE: f64 = 2.0;
 /// worse for them.
 const STRAIGHT_AGAIN: usize = 3;
 /// How much further than a pour's clearance from a track the pour's fill may be for the
-/// track to be beside it ([`pour_cutters`]).
+/// track to be beside it ([`pour_cutters`], [`pour_reach`]).
 const POUR_CUT_SLACK: i64 = 50_000;
+
+/// As far from a track as the fill of the pours of `net` may be for the track to be beside it
+/// ([`pour_cutters`]): what the fill keeps from the track (`board::zones`), which is the most
+/// of the clearance of the net's zones, of the net's own class, of the board, `gap`, and of the
+/// track, `own`, and [`POUR_CUT_SLACK`] more.
+///
+/// Until D152 it was the zones' and the board's alone: a pour whose net has a class with more
+/// clearance than its zone asks for stands that much from every track, 10 nm further than the
+/// tracks beside it were looked for, and a track that parted it told no net (tinytapeout-demo's
+/// `+3V3`, a zone of 0.2 mm in a class of 0.25: nothing of the last run kept in two orders of
+/// sixteen at 60 s, every time, and in one of three at 40 million nodes).
+fn pour_reach(p: &Project, net: &str, own: i64, gap: i64) -> i64 {
+    let zones = p.board().zones.iter().filter(|z| z.net.as_deref() == Some(net));
+    let zone = zones.map(|z| geo::zones::zone_params(p, z).clearance.0).max().unwrap_or(0);
+    let class = geo::zones::class_clearance(p, Some(net)).map_or(0, |c| c.0);
+    zone.max(class).max(gap).max(own) + POUR_CUT_SLACK
+}
 
 /// What the run that lays the stairs straight asks for before it begins, less the fill and
 /// the count of the joints that the steps after it have of their own: the least of its run,
@@ -2077,11 +2094,119 @@ fn pour_nets(p: &Project) -> BTreeSet<&str> {
     zones.filter_map(|z| z.net.as_deref()).collect()
 }
 
+/// The edges of a piece of fill.
+type PourEdges = Vec<(super::geo::P, super::geo::P)>;
+
+/// By layer, the edges of the fill of each of the two pieces that the ends of `l` are on
+/// (`items` with their islands `isl`): of its first end's and of its second's. `None` if an
+/// end is on no item.
+fn pour_sides<'a>(items: &'a [CopperItem], isl: &[usize], l: &RatLine) -> Option<BTreeMap<&'a str, [PourEdges; 2]>> {
+    use super::geo::P;
+    let island = |name: &str, at: Point| {
+        items
+            .iter()
+            .zip(isl)
+            .find(|(it, _)| it.anchor == at && it.net.as_deref() == Some(l.net.as_str()) && it.item.to_string() == name)
+            .map(|(_, k)| *k)
+    };
+    let (ia, ib) = (island(&l.from, l.from_at)?, island(&l.to, l.to_at)?);
+    let mut sides: BTreeMap<&str, [PourEdges; 2]> = BTreeMap::new();
+    for (it, &k) in items.iter().zip(isl) {
+        let ItemRef::Zone(_, layer, _) = &it.item else { continue };
+        if it.net.as_deref() != Some(l.net.as_str()) || (k != ia && k != ib) {
+            continue;
+        }
+        let side = &mut sides.entry(layer.as_str()).or_default()[usize::from(k == ib)];
+        for pg in &it.shape {
+            for ring in std::iter::once(&pg.outer).chain(pg.holes.iter()) {
+                let n = ring.0.len();
+                for i in 0..n {
+                    let (a, b) = (ring.0[i], ring.0[(i + 1) % n]);
+                    side.push((P::new(a.x as f64, a.y as f64), P::new(b.x as f64, b.y as f64)));
+                }
+            }
+        }
+    }
+    Some(sides)
+}
+
+/// How many times the outline of the smaller of two pieces of a pour goes into the larger's
+/// at least for the smaller to be a piece cut off ([`pour_beside`]), and not one half of a
+/// pour parted in two.
+const CUT_OFF_PIECE: f64 = 4.0;
+
+/// The nets among `laid` and `laid_vias` that lie beside a piece cut off a pour (D152): for
+/// each connection of `lines`, which a pour joined and no longer does, where one of the two
+/// pieces that its ends are on is a small one beside the other ([`CUT_OFF_PIECE`], by the
+/// length of their outlines), the nets of the tracks that lie, on one layer, and of the vias
+/// that lie, on any, within their half width and `reach` ([`pour_reach`]) of the fill of that
+/// piece.
+///
+/// For the connections that [`pour_cutters`] tells no net for: a track laid beside one that
+/// was there shuts the passage of a pour between the two, and is beside the fill of the piece
+/// cut off alone, the other track between it and the rest of the pour (tinytapeout-demo, two
+/// orders of sixteen at 60 s, every time: a connection open in the second try of the check
+/// and in the third, the net of the track told by none, and nothing of the last run kept).
+fn pour_beside(
+    items: &[CopperItem],
+    isl: &[usize],
+    lines: &[&RatLine],
+    laid: &[&Track],
+    laid_vias: &[&Via],
+    reach: &dyn Fn(&str, Option<&str>) -> i64,
+) -> Vec<BTreeSet<String>> {
+    use super::geo::{P, seg_seg_dist};
+    let mut all = Vec::new();
+    for l in lines {
+        all.push(BTreeSet::new());
+        let Some(out) = all.last_mut() else { continue };
+        let Some(sides) = pour_sides(items, isl, l) else { continue };
+        let outline = |k: usize| -> f64 {
+            sides
+                .values()
+                .flat_map(|s| s[k].iter())
+                .map(|(c, d)| ((d.x - c.x).powi(2) + (d.y - c.y).powi(2)).sqrt())
+                .sum()
+        };
+        let (a, b) = (outline(0), outline(1));
+        let small = if a > 0.0 && a * CUT_OFF_PIECE <= b {
+            0
+        } else if b > 0.0 && b * CUT_OFF_PIECE <= a {
+            1
+        } else {
+            continue;
+        };
+        let runs = laid
+            .iter()
+            .map(|t| (Some(t.layer.as_str()), t.start, t.end, t.width, &t.net))
+            .chain(laid_vias.iter().map(|v| (None, v.at, v.at, v.diameter, &v.net)));
+        for (layer, start, end, width, net) in runs {
+            let (p, q) = (P::new(start.x.0 as f64, start.y.0 as f64), P::new(end.x.0 as f64, end.y.0 as f64));
+            let within = (width.0 / 2 + reach(&l.net, net.as_deref())) as f64;
+            let (x0, x1, y0, y1) =
+                (p.x.min(q.x) - within, p.x.max(q.x) + within, p.y.min(q.y) - within, p.y.max(q.y) + within);
+            let beside = sides.iter().filter(|(name, _)| layer.is_none_or(|l| l == **name)).any(|(_, s)| {
+                s[small].iter().any(|(c, d)| {
+                    c.x.max(d.x) >= x0
+                        && c.x.min(d.x) <= x1
+                        && c.y.max(d.y) >= y0
+                        && c.y.min(d.y) <= y1
+                        && seg_seg_dist(p, q, *c, *d) <= within
+                })
+            });
+            if beside && let Some(n) = net {
+                out.insert(n.clone());
+            }
+        }
+    }
+    all
+}
+
 /// The nets among `laid` and `laid_vias`, tracks and vias of this run, that part a pour (D142,
 /// the vias D143): for each connection of
 /// `lines`, which a pour joined and no longer does, the nets of the tracks that lie, on one
-/// layer, and of the vias that lie, on any, within their half width and `reach` of the fill
-/// of both pieces that the
+/// layer, and of the vias that lie, on any, within their half width and `reach` (of the
+/// pour's net and the track's, [`pour_reach`]) of the fill of both pieces that the
 /// connection's ends are now on (`items` with their islands `isl`, the board as it is filled
 /// round the new tracks). The fill of a board with a track laid another way is cut where that
 /// track is, which may be anywhere between the two ends; the ends alone tell the nets round
@@ -2092,43 +2217,14 @@ fn pour_cutters(
     lines: &[&RatLine],
     laid: &[&Track],
     laid_vias: &[&Via],
-    reach: &dyn Fn(&str) -> i64,
+    reach: &dyn Fn(&str, Option<&str>) -> i64,
 ) -> Vec<BTreeSet<String>> {
     use super::geo::{P, seg_seg_dist};
-    type Edges = Vec<(P, P)>;
     let mut all = Vec::new();
     for l in lines {
         all.push(BTreeSet::new());
         let Some(out) = all.last_mut() else { continue };
-        let island = |name: &str, at: Point| {
-            items
-                .iter()
-                .zip(isl)
-                .find(|(it, _)| {
-                    it.anchor == at && it.net.as_deref() == Some(l.net.as_str()) && it.item.to_string() == name
-                })
-                .map(|(_, k)| *k)
-        };
-        let (Some(ia), Some(ib)) = (island(&l.from, l.from_at), island(&l.to, l.to_at)) else { continue };
-        // By layer, the edges of the fill of each of the two pieces.
-        let mut sides: BTreeMap<&str, [Edges; 2]> = BTreeMap::new();
-        for (it, &k) in items.iter().zip(isl) {
-            let ItemRef::Zone(_, layer, _) = &it.item else { continue };
-            if it.net.as_deref() != Some(l.net.as_str()) || (k != ia && k != ib) {
-                continue;
-            }
-            let side = &mut sides.entry(layer.as_str()).or_default()[usize::from(k == ib)];
-            for pg in &it.shape {
-                for ring in std::iter::once(&pg.outer).chain(pg.holes.iter()) {
-                    let n = ring.0.len();
-                    for i in 0..n {
-                        let (a, b) = (ring.0[i], ring.0[(i + 1) % n]);
-                        side.push((P::new(a.x as f64, a.y as f64), P::new(b.x as f64, b.y as f64)));
-                    }
-                }
-            }
-        }
-        let far = reach(&l.net);
+        let Some(sides) = pour_sides(items, isl, l) else { continue };
         // A track on its layer, a via on every layer of the fill.
         let runs = laid
             .iter()
@@ -2136,10 +2232,10 @@ fn pour_cutters(
             .chain(laid_vias.iter().map(|v| (None, v.at, v.at, v.diameter, &v.net)));
         for (layer, start, end, width, net) in runs {
             let (p, q) = (P::new(start.x.0 as f64, start.y.0 as f64), P::new(end.x.0 as f64, end.y.0 as f64));
-            let within = (width.0 / 2 + far) as f64;
+            let within = (width.0 / 2 + reach(&l.net, net.as_deref())) as f64;
             let (x0, x1, y0, y1) =
                 (p.x.min(q.x) - within, p.x.max(q.x) + within, p.y.min(q.y) - within, p.y.max(q.y) + within);
-            let by = |edges: &Edges| {
+            let by = |edges: &PourEdges| {
                 edges.iter().any(|(c, d)| {
                     c.x.max(d.x) >= x0
                         && c.x.min(d.x) <= x1
@@ -4361,22 +4457,30 @@ pub(crate) fn route(
             let cutters = {
                 let laid: Vec<&Track> = anew_t.iter().copied().filter(|t| new(&t.net)).collect();
                 let laid_v: Vec<&Via> = anew_v.iter().copied().filter(|v| new(&v.net)).collect();
-                let reach = |net: &str| {
-                    let zones = p.board().zones.iter().filter(|z| z.net.as_deref() == Some(net));
-                    zones.map(|z| geo::zones::zone_params(p, z).clearance.0).max().unwrap_or(0).max(gap)
-                        + POUR_CUT_SLACK
+                let reach = |net: &str, by: Option<&str>| {
+                    pour_reach(p, net, by.and_then(|n| clearance_of.get(n).copied()).unwrap_or(gap), gap)
                 };
-                pour_cutters(&items2, &isl2, &parted, &laid, &laid_v, &reach)
+                let cutters = pour_cutters(&items2, &isl2, &parted, &laid, &laid_v, &reach);
+                // Where no one track is beside both pieces, the nets beside the piece
+                // cut off, if it is one ([`pour_beside`]): with those near the ends, which
+                // such a connection has as before.
+                let untold: Vec<&RatLine> =
+                    parted.iter().zip(&cutters).filter(|(_, c)| c.is_empty()).map(|(l, _)| *l).collect();
+                let beside: BTreeSet<String> =
+                    pour_beside(&items2, &isl2, &untold, &laid, &laid_v, &reach).into_iter().flatten().collect();
+                (cutters, beside)
             };
+            let (cutters, beside) = cutters;
             if !parted.is_empty() {
                 (hooks.progress)(
                     0,
                     None,
                     &format!(
-                        "guide: {} connection(s) that a pour joined open, {} told by the tracks between their pieces, of {} net(s)",
+                        "guide: {} connection(s) that a pour joined open, {} told by the tracks between their pieces, of {} net(s), and {} net(s) beside a piece cut off",
                         parted.len(),
                         cutters.iter().filter(|c| !c.is_empty()).count(),
-                        cutters.iter().flatten().collect::<BTreeSet<_>>().len()
+                        cutters.iter().flatten().collect::<BTreeSet<_>>().len(),
+                        beside.len()
                     ),
                 );
             }
@@ -4422,6 +4526,7 @@ pub(crate) fn route(
                     .collect::<Vec<_>>(),
             );
             old.extend(cutters.into_iter().flatten());
+            old.extend(beside);
             if old.len() == before {
                 break;
             }
@@ -5754,7 +5859,7 @@ mod tests {
             track("FAR", "F.Cu", (0, 9 * mm), (mm, 9 * mm)),
         ];
         let refs: Vec<&Track> = laid.iter().collect();
-        let reach = |_: &str| 200_000 + POUR_CUT_SLACK;
+        let reach = |_: &str, _: Option<&str>| 200_000 + POUR_CUT_SLACK;
         let told = pour_cutters(&items, &isl, &[&line], &refs, &[], &reach);
         assert_eq!(told, vec![BTreeSet::from(["CUT".to_string()])]);
         // A via between the pieces parts them as a track does, on whatever layers it is
@@ -5776,6 +5881,120 @@ mod tests {
         // are told as they were.
         let bare = [0, 2, 0, 1];
         assert_eq!(pour_cutters(&items, &bare, &[&line], &refs, &[], &reach), vec![BTreeSet::new()]);
+    }
+
+    /// A connection that no one track tells the net of has the nets beside the piece cut
+    /// off, where one of its two pieces is small beside the other (D152).
+    #[test]
+    fn a_piece_cut_off_a_pour_tells_the_nets_beside_it() {
+        use crate::geom::poly;
+        let at = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
+        let item = |item: ItemRef, r: [i64; 4], anchor: Point| CopperItem {
+            item,
+            net: Some("GND".into()),
+            layers: vec!["F.Cu".into()],
+            shape: vec![poly::Polygon::new(
+                vec![
+                    poly::Point::new(r[0], r[1]),
+                    poly::Point::new(r[2], r[1]),
+                    poly::Point::new(r[2], r[3]),
+                    poly::Point::new(r[0], r[3]),
+                ],
+                vec![],
+            )],
+            anchor,
+            local: geo::ItemLocal::default(),
+        };
+        let mm = 1_000_000;
+        // A pad on the pour and one on a piece of it 1 mm by 1, 1.2 mm from the rest:
+        // room for the track that was there and the one laid beside it.
+        let (a, b) = (at(-10 * mm, 0), at(2 * mm, 0));
+        let items = vec![
+            item(ItemRef::Pad("R1".into(), "1".into()), [-10 * mm - 300_000, -300_000, -10 * mm + 300_000, 300_000], a),
+            item(ItemRef::Pad("R2".into(), "1".into()), [2 * mm - 300_000, -300_000, 2 * mm + 300_000, 300_000], b),
+            item(ItemRef::Zone(ObjectId(7), "F.Cu".into(), 0), [-12 * mm, -5 * mm, 300_000, 5 * mm], a),
+            item(ItemRef::Zone(ObjectId(7), "F.Cu".into(), 1), [1_500_000, -500_000, 2_500_000, 500_000], b),
+        ];
+        let isl = [0, 1, 0, 1];
+        let line = RatLine {
+            net: "GND".into(),
+            from: "R1.1".into(),
+            from_at: a,
+            to: "R2.1".into(),
+            to_at: b,
+            length: Nm(12 * mm),
+        };
+        let track = |net: &str, layer: &str, p: (i64, i64), q: (i64, i64)| Track {
+            id: ObjectId(0),
+            layer: layer.into(),
+            width: Nm(200_000),
+            net: Some(net.into()),
+            start: at(p.0, p.1),
+            end: at(q.0, q.1),
+            mid: None,
+            locked: false,
+        };
+        let laid = [
+            // Beside the piece cut off, the track that was there between it and the pour.
+            track("NEW", "F.Cu", (1_200_000, -mm), (1_200_000, mm)),
+            // Beside the pour alone, far from the piece.
+            track("EDGE", "F.Cu", (-12 * mm - 250_000, 0), (-12 * mm - 250_000, mm)),
+            // Under the piece, on another layer.
+            track("UNDER", "B.Cu", (2 * mm, -mm), (2 * mm, mm)),
+        ];
+        let refs: Vec<&Track> = laid.iter().collect();
+        let reach = |_: &str, _: Option<&str>| 200_000 + POUR_CUT_SLACK;
+        // No one track is beside both pieces.
+        assert_eq!(pour_cutters(&items, &isl, &[&line], &refs, &[], &reach), vec![BTreeSet::new()]);
+        assert_eq!(pour_beside(&items, &isl, &[&line], &refs, &[], &reach), vec![BTreeSet::from(["NEW".to_string()])]);
+        // A via beside it as a track, on whatever layers it is.
+        let via = Via {
+            id: ObjectId(0),
+            at: at(2 * mm, 900_000),
+            drill: Nm(200_000),
+            diameter: Nm(400_000),
+            net: Some("VIA".into()),
+            from: "F.Cu".into(),
+            to: "B.Cu".into(),
+            locked: false,
+        };
+        assert_eq!(
+            pour_beside(&items, &isl, &[&line], &[], &[&via], &reach),
+            vec![BTreeSet::from(["VIA".to_string()])]
+        );
+        // Two halves of a pour are neither of them a piece cut off.
+        let halves = vec![
+            items[0].clone(),
+            items[1].clone(),
+            item(ItemRef::Zone(ObjectId(7), "F.Cu".into(), 0), [-12 * mm, -5 * mm, 300_000, 5 * mm], a),
+            item(ItemRef::Zone(ObjectId(7), "F.Cu".into(), 1), [1_500_000, -5 * mm, 12 * mm, 5 * mm], b),
+        ];
+        assert_eq!(pour_beside(&halves, &isl, &[&line], &refs, &[], &reach), vec![BTreeSet::new()]);
+    }
+
+    /// A track is beside a pour as far from its fill as the fill keeps from it: by the
+    /// clearance of the pour's own class and of the track's too, where either is more than
+    /// the zone's and the board's (D152).
+    #[test]
+    fn a_track_is_beside_a_pour_by_the_clearance_of_the_pours_class_too() {
+        let mut p = project();
+        let gap = p.board().rules.clearance.0;
+        assert!(!p.board().zones.is_empty());
+        for z in &mut p.board_mut().zones {
+            z.net = Some("GND".into());
+            z.clearance = Some(Nm(gap));
+        }
+        assert_eq!(pour_reach(&p, "GND", gap, gap), gap + POUR_CUT_SLACK);
+        // The class of the pour's net.
+        p.circuit_mut()
+            .netclasses
+            .insert("power".into(), ModelClass { clearance: Some(Nm(gap + 50_000)), ..Default::default() });
+        p.circuit_mut().nets.get_mut("GND").expect("net").class = Some("power".into());
+        assert_eq!(pour_reach(&p, "GND", gap, gap), gap + 50_000 + POUR_CUT_SLACK);
+        // The track's own clearance, where that is the most.
+        assert_eq!(pour_reach(&p, "GND", gap + 80_000, gap), gap + 80_000 + POUR_CUT_SLACK);
+        // A net with no zone: the board's.
+        assert_eq!(pour_reach(&p, "SIG", gap, gap), gap + POUR_CUT_SLACK);
     }
 
     /// What the step for the spokes laid anew is told from the old routes of a net that goes

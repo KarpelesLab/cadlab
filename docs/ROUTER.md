@@ -1079,6 +1079,31 @@ exports and the count all read cadlab's fill). The result is then treated as the
   has a way that crosses nothing once six nets are out, and one of the six then comes back a pad short. A pin's
   last escape is not what it lacks. The table's count: 35 cells better, 30 equal and 7 worse of 72, as
   master's build in the same minutes; the seven worse are D144's.
+- *guide 0.0.53* (D152): the pads cut off a fill planned again by an index, and the reach of the last run's check.
+  The joining of the pads to their fills as a run's routing ends is, on glasgow-revD1, one net: the ground, 13 to 15
+  thousand places where its routes may end, planned again from the pads cut off (0.09 to 0.43 s) and one search for
+  the stubs (0.4 to 2.1 s). The plan asked every pad of the net for each cell near a pad cut off, 0.2 s of 0.27;
+  guide 0.0.53 has the pads by their centres and the places by a set, the same plan in 0.04 to 0.08 s, and the 41
+  runs at budgets of nodes are the boards of 0.0.52. The adapter's check of its last run looks for the tracks beside
+  a pour as far as the fill keeps from them (`pour_reach`: the clearance of the pour's zones, of its net's class, of
+  the board and of the track's net, and 50 um): with the zones' alone a pour whose net is in a class of more
+  clearance than its zone was 10 nm out of reach of every track, a track that parted it told no net, and nothing of
+  the last run was kept (tinytapeout-demo's `+3V3`: one order of three at 40 million nodes, 292 vias for 295 with
+  it). And for a connection that no one track tells, the nets beside the piece cut off go back too, where one of its
+  two pieces is small beside the other (`pour_beside`): a track laid next to one that was there shuts the pour's
+  passage between the two and is beside that piece alone (tinytapeout-demo's orders 4 and 10 at 60 s, which dropped
+  their last run in every set). *Built, measured and not kept*: the stubs searched for apart on the run's threads
+  (more nodes for less wall time in one pair of runs and none in another); the step that lays each net again ended
+  by its time itself, with the plan made cheap (glasgow-revD1's first run ends when it did, 0.5 % less track outside
+  the pads and 309 connections open in 24 runs for 274); the long ways round after guide's own rounds
+  (glasgow-revC3: 0.3 % less track, 570 and 166 connections open at the budgets of nodes for 569 and 164) and within
+  the step that lays each net again (47 of 339 tries kept in 41 runs, 0.1 % less track for 123 vias more).
+  corne-cherry's open connection is one of two nets for one passage at a pad of its flash, of which the native
+  router leaves the other; the rounds of its two slow orders are the rounds for the pads cut off their pours, 7 s
+  for 1.5 s. All of it measured on a machine with other work, at a load of 25 to 35 for the table: 35 cells better,
+  30 equal and 7 worse of 72 with this build and with master's in the same minutes, cell for cell (D151's six and
+  tinytapeout-demo's track outside the pads, +2.3 % for +1.7 % on a quieter machine); tinytapeout-demo's last run
+  kept in 48 runs of 48 over its sixteen orders three times, for 43 with master's build.
 - *Measured, nothing kept* (D151; guide stays at 0.0.52). Where a run that moves routes spends its time:
   corne-cherry's slowest order has 26.7 s of its 54.3 for one connection of a net of two pads, in passes that each
   end two million nodes after their last connection, by a search that does 0.5 to 0.8 million nodes a second on one
